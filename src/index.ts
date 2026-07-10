@@ -1,17 +1,7 @@
 import { Hono } from "hono"
+import type { Env } from "./types"
 
-export interface Env {
-  PIPELINE_WORKFLOW: Workflow
-  TELEGRAM_BOT_TOKEN: string
-  TELEGRAM_WEBHOOK_SECRET: string
-  LINKEDIN_ACCESS_TOKEN: string
-  LINKEDIN_REFRESH_TOKEN: string
-  LLM_API_KEY: string
-  LLM_PROVIDER: string
-  GITHUB_PAT: string
-  DATA_REPO_OWNER: string
-  DATA_REPO_NAME: string
-}
+export { PipelineWorkflow } from "./workflow"
 
 const app = new Hono<{ Bindings: Env }>()
 

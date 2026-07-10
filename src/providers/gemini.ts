@@ -13,10 +13,17 @@ export function createGeminiGenerator(apiKey: string) {
     })
 
     const response = result.response
+
+    if (!response.candidates?.length) {
+      const reason = response.promptFeedback?.blockReason
+      throw new Error(`Gemini returned no candidates${reason ? ` (blocked: ${reason})` : ""}`)
+    }
+
+    const text = response.text()
     const usage = response.usageMetadata
 
     return {
-      text: response.text(),
+      text,
       usage: {
         inputTokens: usage?.promptTokenCount ?? 0,
         outputTokens: usage?.candidatesTokenCount ?? 0,

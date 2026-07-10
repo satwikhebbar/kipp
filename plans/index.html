@@ -182,7 +182,7 @@
     <div class="meta">
       <span>Status: <strong>Not Started</strong></span> &middot;
       <span>Last updated: 2026-07-10</span> &middot;
-      <span>Plan: 13 phases, ~30 files</span>
+      <span>Plan: 15 phases, ~30 files</span>
     </div>
   </header>
 
@@ -206,15 +206,15 @@
     <p>An automated LinkedIn posting pipeline running on <strong>Cloudflare Workers + Workflows</strong> (<span class="tag platform">TypeScript</span> <span class="tag platform">pnpm</span>). Orchestrates a draft-critique-revise loop using an LLM, waits for Telegram-based feedback via <code>step.waitForEvent()</code>, and creates a LinkedIn <code>DRAFT</code> post — never publishing automatically.</p>
 
     <div class="status-bar">
-      <div class="status-card"><div class="number">4</div><div class="label">Triggers</div></div>
-      <div class="status-card"><div class="number">13</div><div class="label">Phases</div></div>
+      <div class="status-card"><div class="number">3+1</div><div class="label">Triggers</div></div>
+      <div class="status-card"><div class="number">15</div><div class="label">Phases</div></div>
       <div class="status-card"><div class="number">~30</div><div class="label">Source Files</div></div>
-      <div class="status-card"><div class="number">8</div><div class="label">Secrets</div></div>
+      <div class="status-card"><div class="number">6+10</div><div class="label">Secrets &amp; Config</div></div>
     </div>
 
     <h3>Key Architectural Decisions</h3>
     <ul>
-      <li><strong>Cloudflare Workflows</strong> for durable multi-step execution — <code>step.do()</code> for each pipeline stage, <code>step.waitForEvent()</code> to pause indefinitely at zero cost while waiting for Telegram replies</li>
+      <li><strong>Cloudflare Workflows</strong> for durable multi-step execution — <code>step.do()</code> for each pipeline stage, <code>step.waitForEvent()</code> to pause for a configurable window (default 12 hours) while waiting for Telegram replies; idle waits don't incur CPU, timeout → <code>awaiting-feedback-expired</code></li>
       <li><strong>Two-repo model</strong> (public template + private data repo) so the template is open-source-ready and deployer-specific data/credentials stay private</li>
       <li><strong>Provider-agnostic LLM layer</strong> — Gemini Flash for draft/critique/classify by default, DeepSeek as a configurable budget alternative</li>
       <li><strong>State of record</strong> is <code>ideas.md</code>/<code>archive.md</code> in the private data repo, synced at each workflow state transition</li>
@@ -281,7 +281,7 @@
     ├── triggers/
     │   ├── rss.ts          # Substack RSS poll + idea generator
     │   ├── cadence.ts      # Weekly quiet-period check
-    │   └── telegram-webhook.ts  # 3-intent router (capture, /generate, reply)
+    │   └── telegram-webhook.ts  # message + callback_query router
     ├── agent/
     │   ├── draft.ts        # Draft generation (single LLM call)
     │   ├── critique.ts     # Structured checklist evaluation
@@ -328,12 +328,7 @@
           <td>Yes — as <code>raw</code> entry</td>
           <td>No</td>
         </tr>
-        <tr>
-          <td><strong>Telegram <code>/generate</code></strong></td>
-          <td>On-demand</td>
-          <td>No</td>
-          <td>Yes — oldest <code>raw</code> idea</td>
-        </tr>
+        <!-- /generate is an optional extension — not core to the base spec -->
         <tr>
           <td><strong>Cadence Check</strong></td>
           <td>Weekly (Monday 9:00)</td>
@@ -358,9 +353,10 @@
           <td><strong>Quick-Capture</strong></td>
           <td>Append text as new <code>raw</code> idea to <code>ideas.md</code></td>
         </tr>
+        <!-- /generate is an optional extension, documented below -->
         <tr>
           <td>Message text is <code>/generate</code></td>
-          <td><strong>Generate Command</strong></td>
+          <td><strong>Generate Command <em>(extension)</em></strong></td>
           <td>Start workflow on oldest <code>raw</code> idea (or reply "no raw ideas")</td>
         </tr>
         <tr>
@@ -375,7 +371,7 @@
   <!-- Implementation Phases -->
   <section id="phases">
     <h2>Implementation Phases</h2>
-    <p>13 phases, ordered for sequential implementation and testing.</p>
+    <p>15 phases, ordered for sequential implementation and testing.</p>
 
     <!-- Phase 1 -->
     <h3>Phase 1 — Project Scaffold</h3>
@@ -387,35 +383,65 @@
       <li><strong>.gitignore</strong> — node_modules, dist, .wrangler, .env, logs</li>
       <li><strong>example/style-prompt.md</strong> — Generic placeholder system prompt</li>
       <li><strong>example/ideas-template.md</strong> — Empty ideas.md structure with format comments</li>
-      <li><strong>src/types.ts</strong> — Idea, IdeaStatus, ArchivedIdea, LLMResponse, ChecklistItem, ClassificationResult, WorkflowParams, WorkflowEvent</li>
+      <li><strong>src/types.ts</strong> — Idea, IdeaStatus (raw|drafted|awaiting-feedback|awaiting-feedback-expired|finalized), ArchivedIdea, LLMResponse, ChecklistItem, ClassificationResult, WorkflowParams, WorkflowEvent</li>
       <li><strong>README.md</strong> — Fork → clone → data repo → BotFather → LinkedIn app → secrets → deploy</li>
     </ol>
 
     <!-- Phase 2 -->
     <h3>Phase 2 — LLM Provider Layer</h3>
-    <p><span class="tag phase">5 files</span> Provider-agnostic interface, Gemini and DeepSeek clients, config resolver.</p>
+    <p><span class="tag phase">4 files</span> Provider-agnostic interface, Gemini and DeepSeek clients, factory.</p>
     <ol>
-      <li><strong>providers/llm.ts</strong> — <code>generate(prompt, context) → { text, usage: { input, output, reasoning? } }</code></li>
-      <li><strong>providers/gemini.ts</strong> — Gemini Flash via @google/generative-ai, map token counts to usage breakdown</li>
+      <li><strong>providers/llm.ts</strong> — <code>GenerateOptions</code> + <code>GenerateFn</code> type: <code>(opts: { system?, prompt }) → Promise&lt;LLMResponse&gt;</code></li>
+      <li><strong>providers/gemini.ts</strong> — Gemini Flash via @google/generative-ai, map usage metadata</li>
       <li><strong>providers/deepseek.ts</strong> — DeepSeek via OpenAI-compatible fetch, map native token fields</li>
-      <li><strong>providers/config.ts</strong> — Resolve provider/model from env vars, fallback to Gemini Flash 2.0</li>
-      <li><strong>providers/index.ts</strong> — Factory: single export <code>generate()</code> delegating to resolved provider</li>
+      <li><strong>providers/index.ts</strong> — Factory: <code>createGenerator(apiKey, provider) → GenerateFn</code>. Config resolution inlined (ternary, no separate file)</li>
     </ol>
 
     <!-- Phase 3 -->
     <h3>Phase 3 — GitHub Data Repo Integration</h3>
-    <p><span class="tag phase">1 file</span> GitHub Contents API read/write for the private data repo.</p>
+    <p><span class="tag phase">1 file</span> GitHub Contents API read/write for the private data repo, with SHA-based conflict handling.</p>
     <ol>
-      <li><code>integrations/github.ts</code> — <code>readFile(path)</code>, <code>writeFile(path, content, sha?)</code>, <code>getFileSha(path)</code>, error handling (404, 409, 401 → Telegram alert)</li>
+      <li><code>integrations/github.ts</code> —
+        <code>readFile(path) → { content, sha }</code>,
+        <code>writeFile(path, content, sha)</code> — SHA-based CAS PUT.
+        Writes are mutation functions: read → parse → mutate → serialize → write.
+        On 409: re-read SHA → re-parse → re-apply mutation → serialize → retry (max 3).
+        <code>moveToArchive(idea)</code> — read ideas.md → remove idea entry → read archive.md → append entry → write both (idempotent: check archive for duplicate before append; if one write succeeds and the other 409s, the successful write is committed and the failed one retries independently).
+        Error handling: 404, 401, 409 (after retries) → Telegram alert.
+      </li>
     </ol>
 
     <!-- Phase 4 -->
     <h3>Phase 4 — Idea Backlog Parsing &amp; Management</h3>
-    <p><span class="tag phase">4 files</span> ideas.md/archive.md parsing, state management, ID generation.</p>
+    <p><span class="tag phase">4 files + golden tests</span> ideas.md/archive.md parsing with explicit markdown schema, state management, ID generation.</p>
+    <p>Predictable markdown schema — one fenced block per idea:</p>
+    <pre><code>---
+id: 17
+status: drafted
+source: substack
+created: 2026-07-03T09:00:00Z
+correlation:
+  telegram_chat_id: "123456789"
+  bot_message_id: 42
+  workflow_instance_id: "wf_abc123"
+---
+# Idea 17
+
+[freeform idea text]
+
+## Draft
+
+[multiline draft]
+
+## Critique
+
+- [ ] Clarity: ...
+- [ ] Hook: ...
+- [ ] Call to action: ...</code></pre>
     <ol>
-      <li><strong>backlog/parser.ts</strong> — Markdown → Idea[], Idea[] → Markdown</li>
+      <li><strong>backlog/parser.ts</strong> — Parse frontmatter + body sections → typed <code>Idea</code> objects; serialize back to markdown. Parser golden tests for all statuses including <code>awaiting-feedback-expired</code> included in this phase, not deferred to Phase 12.</li>
       <li><strong>backlog/archive.ts</strong> — Archive append, read all for duplicate-angle check</li>
-      <li><strong>backlog/manager.ts</strong> — getNextIdea(), getIdeasByStatus(), updateIdeaStatus(), moveToArchive()</li>
+      <li><strong>backlog/manager.ts</strong> — getNextIdea(), getIdeasByStatus() (excludes <code>awaiting-feedback-expired</code> from raw picks), updateIdeaStatus(), moveToArchive()</li>
       <li><strong>backlog/id-generator.ts</strong> — Monotonically increasing IDs from current max</li>
     </ol>
 
@@ -430,15 +456,15 @@
     <h3>Phase 6 — Cadence Trigger</h3>
     <p><span class="tag phase">1 file</span> Weekly fallback for quiet periods.</p>
     <ol>
-      <li><code>triggers/cadence.ts</code> — Check most recent finalized date; if >7 days ago and raw idea exists → start workflow on oldest raw. Skip if already awaiting-feedback.</li>
+      <li><code>triggers/cadence.ts</code> — Check most recent finalized date; if >7 days ago and raw idea exists → start workflow on oldest raw. Skip if already awaiting-feedback or awaiting-feedback-expired.</li>
     </ol>
 
     <!-- Phase 7 -->
     <h3>Phase 7 — Telegram Integration</h3>
-    <p><span class="tag phase">2 files</span> Bot API client + webhook handler with 3-intent routing.</p>
+    <p><span class="tag phase">2 files</span> Bot API client + webhook handler with message and callback_query routing.</p>
     <ol>
-      <li><strong>integrations/telegram.ts</strong> — sendMessage(), sendDraftNotification(), sendStatusUpdate()</li>
-      <li><strong>triggers/telegram-webhook.ts</strong> — Webhook handler: verify secret, route by intent (quick-capture → append to ideas.md, /generate → start workflow, reply-to-bot → deliver event to workflow instance)</li>
+      <li><strong>integrations/telegram.ts</strong> — sendMessage(), sendDraftNotification(), sendStatusUpdate(), answerCallbackQuery()</li>
+      <li><strong>triggers/telegram-webhook.ts</strong> — Webhook handler: verify secret, route by update type. <strong>callback_query</strong>: verify callback from allowed chat/user, call <code>answerCallbackQuery</code>, map callback data to workflow instance, send <code>confirmation</code> event via <code>instance.sendEvent({ type: "confirmation", payload })</code>. <strong>message</strong> routing: quick-capture → append to ideas.md; /generate → start workflow <em>(extension)</em>; reply-to-bot → extract <code>reply_to_message.message_id</code> → look up correlation in ideas.md frontmatter → deliver event via <code>instance.sendEvent({ type: "telegram-reply", payload })</code>.</li>
     </ol>
 
     <!-- Phase 8 -->
@@ -452,43 +478,58 @@
     </ol>
 
     <!-- Phase 9 -->
-    <h3>Phase 9 — Workflow Orchestration</h3>
-    <p><span class="tag phase">1 file</span> The Cloudflare Workflow definition wiring the agent steps together.</p>
+    <h3>Phase 9 — LinkedIn Auth &amp; Basic Client</h3>
+    <p><span class="tag phase">1 file</span> LinkedIn OAuth setup and basic Posts API client for DRAFT creation.</p>
     <ol>
-      <li><code>src/workflow.ts</code> — step.do("draft") → loop (step.do("critique") + step.do("revise"), max 4, early exit if all checks pass) → step.do("sync+notify") → step.waitForEvent("telegram-reply") → step.do("classify") → if feedback: loop back to draft preserving satisfied checks; if approve: step.do("linkedin-publish") + step.do("archive") + Telegram notification</li>
+      <li><strong>integrations/linkedin.ts</strong> — POST /rest/posts with lifecycleState: DRAFT, parse response for URN</li>
     </ol>
 
     <!-- Phase 10 -->
-    <h3>Phase 10 — LinkedIn Integration</h3>
-    <p><span class="tag phase">2 files</span> LinkedIn Posts API + OAuth token lifecycle management.</p>
-    <ol>
-      <li><strong>integrations/linkedin.ts</strong> — POST /rest/posts with lifecycleState: DRAFT, parse response for URN</li>
-      <li><strong>triggers/token-check.ts</strong> — Weekly cron: check access token expiry, attempt refresh, Telegram alert if manual reauth needed</li>
+    <h3>Phase 10 — LinkedIn DRAFT Smoke Test</h3>
+    <p><span class="tag phase">1 spike</span> Verify DRAFT lifecycle state before wiring the workflow.</p>
+    <ol style="list-style-type: lower-roman;">
+      <li>Once Phase 9 is done (auth + client in hand), hardcode a test draft and POST with <code>lifecycleState: DRAFT</code></li>
+      <li>Manually verify the draft appears in the LinkedIn compose UI (not just in developer API responses)</li>
+      <li>If DRAFT does not surface in the compose UI → the architecture needs a different final handoff (e.g. store final draft text and notify user to paste manually)</li>
+      <li>If DRAFT works → proceed with confidence; Phase 11 (Workflow Orchestration) depends on this behavior</li>
     </ol>
 
     <!-- Phase 11 -->
-    <h3>Phase 11 — Worker Entry Point</h3>
-    <p><span class="tag phase">1 file</span> hono routes wiring triggers to handlers.</p>
+    <h3>Phase 11 — Workflow Orchestration</h3>
+    <p><span class="tag phase">1 file</span> The Cloudflare Workflow definition wiring the agent steps together.</p>
     <ol>
-      <li><code>src/index.ts</code> — Hono app: POST /webhook/telegram, cron /rss, cron /cadence, cron /token-check. Route → trigger handler → start/resume workflow. Event delivery for Telegram reply routing (match reply to instanceId via message metadata).</li>
+      <li><code>src/workflow.ts</code> — step.do("draft") → loop (step.do("critique") + step.do("revise"), max 4, early exit if all checks pass) → step.do("sync+notify") → <strong>try/catch</strong> on step.waitForEvent("telegram-reply", timeout: WAIT_FOR_FEEDBACK_HOURS) → on TimeoutError: mark idea <code>awaiting-feedback-expired</code>, notify Telegram, exit → step.do("classify") → if feedback: loop back to draft preserving satisfied checks; <strong>if approve: send Telegram inline buttons [Approve → LinkedIn DRAFT] / [Revise More] → step.waitForEvent("confirmation", timeout: 7 days) → only on explicit [Approve] tap: step.do("linkedin-publish") + step.do("archive") + Telegram notification</strong></li>
     </ol>
 
     <!-- Phase 12 -->
-    <h3>Phase 12 — Testing</h3>
-    <p><span class="tag phase">~5 files</span> Unit + integration tests with mocked external services.</p>
+    <h3>Phase 12 — LinkedIn Token Lifecycle</h3>
+    <p><span class="tag phase">1 file</span> Token refresh monitoring and expiry alerts (the LinkedIn client itself was built in Phase 9).</p>
     <ol>
-      <li>Unit tests for agent/* (mocked LLM provider)</li>
-      <li>Unit tests for backlog/* (parser, manager, ID generator)</li>
-      <li>Unit tests for triggers/* (mocked GitHub API, mocked RSS)</li>
-      <li>Integration test: full workflow run with mocked externals</li>
-      <li>Manual smoke test: one real LinkedIn DRAFT post to confirm compose UI behavior</li>
+      <li><strong>triggers/token-check.ts</strong> — Weekly cron: check access token expiry, attempt refresh, Telegram alert if manual reauth needed</li>
     </ol>
 
     <!-- Phase 13 -->
-    <h3>Phase 13 — Deployment &amp; Go-Live</h3>
+    <h3>Phase 13 — Worker Entry Point</h3>
+    <p><span class="tag phase">1 file</span> hono routes wiring triggers to handlers.</p>
+    <ol>
+      <li><code>src/index.ts</code> — Hono app: POST /webhook/telegram (handles both <code>message</code> and <code>callback_query</code> update types), cron /rss, cron /cadence, cron /token-check. Route → trigger handler → start/resume workflow. Event delivery via <code>instance.sendEvent</code>.</li>
+    </ol>
+
+    <!-- Phase 14 -->
+    <h3>Phase 14 — Testing</h3>
+    <p><span class="tag phase">~5 files</span> Unit + integration tests with mocked external services.</p>
+    <ol>
+      <li>Unit tests for agent/* (mocked LLM provider)</li>
+      <li>Unit tests for backlog/* (parser, manager, ID generator, including <code>awaiting-feedback-expired</code> status handling)</li>
+      <li>Unit tests for triggers/* (mocked GitHub API, mocked RSS)</li>
+      <li>Integration test: full workflow run with mocked externals</li>
+    </ol>
+
+    <!-- Phase 15 -->
+    <h3>Phase 15 — Deployment &amp; Go-Live</h3>
     <p><span class="tag phase">~5 steps</span> Secrets, deploy, webhook registration, verification.</p>
     <ol>
-      <li>wrangler secrets put — all 8 secrets</li>
+      <li>wrangler secrets put — 6 secrets (5 if LINKEDIN_REFRESH_TOKEN unavailable)</li>
       <li>wrangler deploy</li>
       <li>Register Telegram webhook (setWebhook)</li>
       <li>Verify cron triggers active in Cloudflare dashboard</li>
@@ -520,10 +561,12 @@
     <p>DeepSeek uses OpenAI-compatible <code>fetch</code> — no SDK needed. Telegram Bot API uses <code>fetch</code>. GitHub Contents API uses <code>fetch</code>. LinkedIn Posts API uses <code>fetch</code>.</p>
   </section>
 
-  <!-- Secrets -->
+  <!-- Secrets & Config -->
   <section id="secrets">
     <h2>Secrets &amp; Configuration</h2>
-    <p>8 Cloudflare Worker secrets, set via <code>wrangler secrets put</code>. Never committed anywhere.</p>
+
+    <h3>Secrets (6)</h3>
+    <p>Set via <code>wrangler secrets put</code>. Never committed anywhere.</p>
     <table>
       <thead>
         <tr>
@@ -537,10 +580,7 @@
         <tr><td><code>LINKEDIN_ACCESS_TOKEN</code></td><td>OAuth 2.0 access token (60-day TTL)</td></tr>
         <tr><td><code>LINKEDIN_REFRESH_TOKEN</code></td><td>OAuth refresh token (365-day TTL, if available)</td></tr>
         <tr><td><code>LLM_API_KEY</code></td><td>Gemini/DeepSeek API key</td></tr>
-        <tr><td><code>LLM_PROVIDER</code></td><td>Select provider: <code>gemini</code> or <code>deepseek</code></td></tr>
         <tr><td><code>GITHUB_PAT</code></td><td>Personal access token scoped to private data repo only</td></tr>
-        <tr><td><code>DATA_REPO_OWNER</code></td><td>GitHub owner of the private data repo</td></tr>
-        <tr><td><code>DATA_REPO_NAME</code></td><td>GitHub repo name of the private data repo</td></tr>
       </tbody>
     </table>
     <div class="note info">
@@ -548,6 +588,30 @@
       Fallback: manual reauthorization every ~60 days with Telegram alert before expiry. The token-check
       weekly cron handles proactive expiry monitoring.
     </div>
+
+    <h3>Configuration (10)</h3>
+    <p>Set via <code>wrangler.toml</code> <code>[vars]</code>, not as secrets. Customizable per deployer.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Variable</th>
+          <th>Default</th>
+          <th>Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>LLM_PROVIDER</code></td><td><code>gemini</code></td><td><code>gemini</code> or <code>deepseek</code></td></tr>
+        <tr><td><code>LLM_MODEL</code></td><td><code>gemini-2.0-flash</code></td><td>Model name per provider</td></tr>
+        <tr><td><code>DATA_REPO_OWNER</code></td><td>—</td><td>GitHub owner of the private data repo</td></tr>
+        <tr><td><code>DATA_REPO_NAME</code></td><td>—</td><td>GitHub repo name of the private data repo</td></tr>
+        <tr><td><code>DATA_REPO_BRANCH</code></td><td><code>main</code></td><td>Branch for reads/writes</td></tr>
+        <tr><td><code>SUBSTACK_RSS_URL</code></td><td>—</td><td>RSS feed URL to poll</td></tr>
+        <tr><td><code>POSTING_CADENCE_DAYS</code></td><td><code>7</code></td><td>Max quiet days before cadence fallback fires</td></tr>
+        <tr><td><code>LINKEDIN_AUTHOR_URN</code></td><td>—</td><td>LinkedIn person URN for the author field</td></tr>
+        <tr><td><code>TIMEZONE</code></td><td><code>UTC</code></td><td>Cron scheduling timezone</td></tr>
+        <tr><td><code>WAIT_FOR_FEEDBACK_HOURS</code></td><td><code>12</code></td><td>Max hours to wait for Telegram reply before marking expired</td></tr>
+      </tbody>
+    </table>
   </section>
 
   <!-- Risks -->
@@ -568,9 +632,11 @@
       Expect adjustments after seeing real output from the chosen LLM.
     </div>
     <div class="note">
-      <strong>R4 — Reply classification accuracy.</strong> A misclassified "approve" would push an unwanted
-      draft to LinkedIn. Classify reply early with spot-checks; consider adding a confirmation step
-      ("Send this draft to LinkedIn?") before the finalize action.
+      <strong>R4 — Reply classification accuracy + confirmation requirement.</strong> A misclassified "approve" must
+      never push an unwanted draft to LinkedIn. After classification returns "approve", the workflow sends a Telegram
+      message with inline buttons: <code>[Approve → LinkedIn DRAFT]</code> and <code>[Revise More]</code>.
+      Only on explicit button tap does the workflow proceed to create the LinkedIn draft. A false positive cannot
+      call LinkedIn — a human must explicitly confirm.
     </div>
     <div class="note">
       <strong>R5 — Substack RSS interval.</strong> Daily polling is a starting guess. Adjust based on how

@@ -1,6 +1,25 @@
-export type IdeaStatus = "raw" | "drafting" | "awaiting-feedback" | "finalized" | "skipped"
+export interface Env {
+  PIPELINE_WORKFLOW: Workflow
+  TELEGRAM_BOT_TOKEN: string
+  TELEGRAM_WEBHOOK_SECRET: string
+  LINKEDIN_ACCESS_TOKEN: string
+  LINKEDIN_REFRESH_TOKEN: string
+  LLM_API_KEY: string
+  LLM_PROVIDER: string
+  GITHUB_PAT: string
+  DATA_REPO_OWNER: string
+  DATA_REPO_NAME: string
+}
+
+export type IdeaStatus = "raw" | "drafted" | "awaiting-feedback" | "awaiting-feedback-expired" | "finalized" | "skipped"
 
 export type Source = "substack" | "telegram" | "manual"
+
+export interface Correlation {
+  telegramChatId?: string
+  botMessageId?: number
+  workflowInstanceId?: string
+}
 
 export interface Idea {
   id: string
@@ -11,6 +30,10 @@ export interface Idea {
   substackUrl?: string
   teaser?: string
   body: string
+  draft?: string
+  critique?: string
+  reviewCount?: number
+  correlation?: Correlation
 }
 
 export interface ArchivedIdea {
