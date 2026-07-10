@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Implementation Plan — LinkedIn Posting Pipeline</title>
+  <style>
+    :root {
+      --bg: #f8f9fa;
+      --fg: #1a1a2e;
+      --accent: #4361ee;
+      --accent-light: #eef1ff;
+      --border: #dde1e7;
+      --muted: #6b7280;
+      --success: #059669;
+      --warning: #d97706;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+
+    /* Header */
+    header { margin-bottom: 2.5rem; }
+    header h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; }
+    header .subtitle {
+      color: var(--muted);
+      font-size: 1.05rem;
+      margin-top: 0.5rem;
+      border-left: 3px solid var(--accent);
+      padding-left: 1rem;
+    }
+    header .meta { margin-top: 1rem; font-size: 0.85rem; color: var(--muted); }
+
+    /* TOC */
+    nav.toc {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem 2rem;
+      margin-bottom: 2rem;
+    }
+    nav.toc h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.75rem; }
+    nav.toc ol { list-style: none; counter-reset: toc-counter; }
+    nav.toc ol li { counter-increment: toc-counter; margin-bottom: 0.3rem; }
+    nav.toc ol li a {
+      text-decoration: none;
+      color: var(--accent);
+      font-weight: 500;
+    }
+    nav.toc ol li::before {
+      content: counter(toc-counter) ". ";
+      color: var(--muted);
+      font-weight: 400;
+    }
+    nav.toc ol li a:hover { text-decoration: underline; }
+
+    /* Sections */
+    section {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.75rem 2rem;
+      margin-bottom: 1.5rem;
+    }
+    section h2 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid var(--accent-light);
+    }
+    section h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-top: 1.25rem;
+      margin-bottom: 0.5rem;
+    }
+    section p, section li { margin-bottom: 0.5rem; }
+    section ul, section ol { padding-left: 1.5rem; }
+    section ul li { list-style: disc; }
+    section ol li { list-style: decimal; }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.925rem;
+    }
+    th, td {
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      text-align: left;
+    }
+    th { background: var(--accent-light); font-weight: 600; }
+    td { background: white; }
+
+    /* Code */
+    code {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85em;
+      background: #f1f3f5;
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: #1a1a2e;
+      color: #e4e4ef;
+      padding: 1rem 1.25rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.875rem;
+      line-height: 1.5;
+      margin: 1rem 0;
+    }
+    pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+
+    /* Tags */
+    .tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.15rem 0.55rem;
+      border-radius: 4px;
+      margin-right: 0.3rem;
+    }
+    .tag.phase { background: var(--accent-light); color: var(--accent); }
+    .tag.platform { background: #fef3c7; color: #92400e; }
+
+    /* Status */
+    .status-bar {
+      display: flex; gap: 1rem; flex-wrap: wrap;
+      margin: 1.5rem 0;
+    }
+    .status-card {
+      flex: 1; min-width: 140px;
+      background: var(--accent-light);
+      border-radius: 8px;
+      padding: 1rem;
+      text-align: center;
+    }
+    .status-card .number { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+    .status-card .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+    /* Notes */
+    .note {
+      background: #fef9ec;
+      border-left: 3px solid var(--warning);
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      margin: 1rem 0;
+    }
+    .note.success { background: #ecfdf5; border-left-color: var(--success); }
+    .note.info { background: var(--accent-light); border-left-color: var(--accent); }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-top: 2.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <header>
+    <h1>LinkedIn Posting Pipeline</h1>
+    <div class="subtitle">Implementation Plan — Cloudflare Workflows + TypeScript</div>
+    <div class="meta">
+      <span>Status: <strong>Not Started</strong></span> &middot;
+      <span>Last updated: 2026-07-10</span> &middot;
+      <span>Plan: 13 phases, ~30 files</span>
+    </div>
+  </header>
+
+  <!-- TOC -->
+  <nav class="toc">
+    <h2>Table of Contents</h2>
+    <ol>
+      <li><a href="#overview">Architecture Overview</a></li>
+      <li><a href="#project-structure">Project Structure</a></li>
+      <li><a href="#triggers">Trigger Routing</a></li>
+      <li><a href="#phases">Implementation Phases</a></li>
+      <li><a href="#dependencies">Dependencies</a></li>
+      <li><a href="#secrets">Secrets &amp; Configuration</a></li>
+      <li><a href="#risks">Open Questions &amp; Risks</a></li>
+    </ol>
+  </nav>
+
+  <!-- Overview -->
+  <section id="overview">
+    <h2>Architecture Overview</h2>
+    <p>An automated LinkedIn posting pipeline running on <strong>Cloudflare Workers + Workflows</strong> (<span class="tag platform">TypeScript</span> <span class="tag platform">pnpm</span>). Orchestrates a draft-critique-revise loop using an LLM, waits for Telegram-based feedback via <code>step.waitForEvent()</code>, and creates a LinkedIn <code>DRAFT</code> post — never publishing automatically.</p>
+
+    <div class="status-bar">
+      <div class="status-card"><div class="number">4</div><div class="label">Triggers</div></div>
+      <div class="status-card"><div class="number">13</div><div class="label">Phases</div></div>
+      <div class="status-card"><div class="number">~30</div><div class="label">Source Files</div></div>
+      <div class="status-card"><div class="number">8</div><div class="label">Secrets</div></div>
+    </div>
+
+    <h3>Key Architectural Decisions</h3>
+    <ul>
+      <li><strong>Cloudflare Workflows</strong> for durable multi-step execution — <code>step.do()</code> for each pipeline stage, <code>step.waitForEvent()</code> to pause indefinitely at zero cost while waiting for Telegram replies</li>
+      <li><strong>Two-repo model</strong> (public template + private data repo) so the template is open-source-ready and deployer-specific data/credentials stay private</li>
+      <li><strong>Provider-agnostic LLM layer</strong> — Gemini Flash for draft/critique/classify by default, DeepSeek as a configurable budget alternative</li>
+      <li><strong>State of record</strong> is <code>ideas.md</code>/<code>archive.md</code> in the private data repo, synced at each workflow state transition</li>
+    </ul>
+
+    <h3>High-Level Flow</h3>
+    <pre><code>                         ┌─────────────────────┐
+                         │  Substack RSS Poll   │  daily cron
+                         │   (create ideas +    │
+                         │   auto-kickoff)      │
+                         └─────────┬───────────┘
+                                   │
+  ┌────────────────────┐           │
+  │  Telegram Quick-    │          │
+  │  Capture (backlog)  │──────────┼──→ ideas.md (private data repo)
+  └────────────────────┘          │
+                                   │
+  ┌────────────────────┐           │
+  │  Telegram /generate │          │
+  │  command            │──────────┘
+  └────────────────────┘
+                                   │
+  ┌────────────────────┐           │
+  │  Cadence Check     │───────────┘
+  │  (weekly fallback) │
+  └────────────────────┘
+                                   ▼
+                     ┌───────────────────────────┐
+                     │  Cloudflare Workflow       │
+                     │  (one instance per idea)   │
+                     │                             │
+                     │  step.do("draft")           │
+                     │  step.do("critique")        │── loop (max 4×)
+                     │  step.do("revise")          │
+                     │  step.do("sync+notify")     │
+                     │  step.waitForEvent("reply") │← Telegram feedback
+                     │  step.do("classify")        │
+                     │  step.do("publish+archive") │
+                     └───────────┬───────────────┘
+                                 │
+                                 ▼
+                     ┌─────────────────────┐
+                     │  LinkedIn DRAFT Post │
+                     │  + archive.md entry  │
+                     └─────────────────────┘</code></pre>
+  </section>
+
+  <!-- Project Structure -->
+  <section id="project-structure">
+    <h2>Project Structure</h2>
+    <pre><code>linkedin-pipeline/
+├── wrangler.toml           # Worker + Workflow config, crons, secrets
+├── package.json
+├── tsconfig.json
+├── .gitignore
+├── README.md               # Full setup guide
+├── example/
+│   ├── style-prompt.md     # Placeholder system prompt
+│   └── ideas-template.md   # Starting structure for private data repo
+└── src/
+    ├── index.ts            # Worker entry — hono routes + webhook dispatch
+    ├── workflow.ts         # Cloudflare Workflow definition
+    ├── types.ts            # Shared types/interfaces
+    ├── triggers/
+    │   ├── rss.ts          # Substack RSS poll + idea generator
+    │   ├── cadence.ts      # Weekly quiet-period check
+    │   └── telegram-webhook.ts  # 3-intent router (capture, /generate, reply)
+    ├── agent/
+    │   ├── draft.ts        # Draft generation (single LLM call)
+    │   ├── critique.ts     # Structured checklist evaluation
+    │   ├── revise.ts       # Apply feedback + failed checks → revision
+    │   └── classify.ts     # Cheap LLM call: approve vs. feedback
+    ├── providers/
+    │   ├── index.ts        # Factory — resolve provider from config
+    │   ├── llm.ts          # Interface: generate() → { text, usage }
+    │   ├── gemini.ts       # Gemini Flash client
+    │   └── deepseek.ts     # DeepSeek client
+    ├── integrations/
+    │   ├── github.ts       # GitHub Contents API (read/write data repo)
+    │   ├── linkedin.ts     # LinkedIn Posts API (DRAFT only)
+    │   └── telegram.ts     # Telegram Bot API (sendMessage, etc.)
+    └── backlog/
+        ├── parser.ts       # Markdown ↔ typed Idea objects
+        ├── archive.ts      # Archive append + read for duplicate detection
+        ├── manager.ts      # getNextIdea, updateStatus, moveToArchive
+        └── id-generator.ts # Monotonically increasing idea IDs</code></pre>
+  </section>
+
+  <!-- Trigger Routing -->
+  <section id="triggers">
+    <h2>Trigger Routing</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Trigger</th>
+          <th>Frequency</th>
+          <th>Creates Ideas?</th>
+          <th>Starts Workflow?</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Substack RSS Poll</strong></td>
+          <td>Daily (9:00)</td>
+          <td>Yes — 1 teaser + 2–4 sub-ideas</td>
+          <td>Yes — on one generated idea</td>
+        </tr>
+        <tr>
+          <td><strong>Telegram Quick-Capture</strong></td>
+          <td>On-demand</td>
+          <td>Yes — as <code>raw</code> entry</td>
+          <td>No</td>
+        </tr>
+        <tr>
+          <td><strong>Telegram <code>/generate</code></strong></td>
+          <td>On-demand</td>
+          <td>No</td>
+          <td>Yes — oldest <code>raw</code> idea</td>
+        </tr>
+        <tr>
+          <td><strong>Cadence Check</strong></td>
+          <td>Weekly (Monday 9:00)</td>
+          <td>No</td>
+          <td>Yes — fallback if nothing finalized in 7 days</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Telegram Webhook Intent Routing</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Message Pattern</th>
+          <th>Intent</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Fresh message, not a reply to bot</td>
+          <td><strong>Quick-Capture</strong></td>
+          <td>Append text as new <code>raw</code> idea to <code>ideas.md</code></td>
+        </tr>
+        <tr>
+          <td>Message text is <code>/generate</code></td>
+          <td><strong>Generate Command</strong></td>
+          <td>Start workflow on oldest <code>raw</code> idea (or reply "no raw ideas")</td>
+        </tr>
+        <tr>
+          <td>Reply to one of the bot's own messages</td>
+          <td><strong>Feedback / Approval</strong></td>
+          <td>Deliver event to matching workflow instance via <code>waitForEvent</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Implementation Phases -->
+  <section id="phases">
+    <h2>Implementation Phases</h2>
+    <p>13 phases, ordered for sequential implementation and testing.</p>
+
+    <!-- Phase 1 -->
+    <h3>Phase 1 — Project Scaffold</h3>
+    <p><span class="tag phase">8 files</span> Project skeleton, config, types, examples, README.</p>
+    <ol>
+      <li><strong>package.json</strong> — wrangler, typescript, vitest, hono, @google/generative-ai, @cloudflare/workers-types, @cloudflare/vitest-pool-workers</li>
+      <li><strong>wrangler.toml</strong> — Worker config, Workflow binding, 2 cron triggers (rss daily, cadence weekly), secrets declarations</li>
+      <li><strong>tsconfig.json</strong> — ESNext target, bundler module resolution, strict, Workers types</li>
+      <li><strong>.gitignore</strong> — node_modules, dist, .wrangler, .env, logs</li>
+      <li><strong>example/style-prompt.md</strong> — Generic placeholder system prompt</li>
+      <li><strong>example/ideas-template.md</strong> — Empty ideas.md structure with format comments</li>
+      <li><strong>src/types.ts</strong> — Idea, IdeaStatus, ArchivedIdea, LLMResponse, ChecklistItem, ClassificationResult, WorkflowParams, WorkflowEvent</li>
+      <li><strong>README.md</strong> — Fork → clone → data repo → BotFather → LinkedIn app → secrets → deploy</li>
+    </ol>
+
+    <!-- Phase 2 -->
+    <h3>Phase 2 — LLM Provider Layer</h3>
+    <p><span class="tag phase">5 files</span> Provider-agnostic interface, Gemini and DeepSeek clients, config resolver.</p>
+    <ol>
+      <li><strong>providers/llm.ts</strong> — <code>generate(prompt, context) → { text, usage: { input, output, reasoning? } }</code></li>
+      <li><strong>providers/gemini.ts</strong> — Gemini Flash via @google/generative-ai, map token counts to usage breakdown</li>
+      <li><strong>providers/deepseek.ts</strong> — DeepSeek via OpenAI-compatible fetch, map native token fields</li>
+      <li><strong>providers/config.ts</strong> — Resolve provider/model from env vars, fallback to Gemini Flash 2.0</li>
+      <li><strong>providers/index.ts</strong> — Factory: single export <code>generate()</code> delegating to resolved provider</li>
+    </ol>
+
+    <!-- Phase 3 -->
+    <h3>Phase 3 — GitHub Data Repo Integration</h3>
+    <p><span class="tag phase">1 file</span> GitHub Contents API read/write for the private data repo.</p>
+    <ol>
+      <li><code>integrations/github.ts</code> — <code>readFile(path)</code>, <code>writeFile(path, content, sha?)</code>, <code>getFileSha(path)</code>, error handling (404, 409, 401 → Telegram alert)</li>
+    </ol>
+
+    <!-- Phase 4 -->
+    <h3>Phase 4 — Idea Backlog Parsing &amp; Management</h3>
+    <p><span class="tag phase">4 files</span> ideas.md/archive.md parsing, state management, ID generation.</p>
+    <ol>
+      <li><strong>backlog/parser.ts</strong> — Markdown → Idea[], Idea[] → Markdown</li>
+      <li><strong>backlog/archive.ts</strong> — Archive append, read all for duplicate-angle check</li>
+      <li><strong>backlog/manager.ts</strong> — getNextIdea(), getIdeasByStatus(), updateIdeaStatus(), moveToArchive()</li>
+      <li><strong>backlog/id-generator.ts</strong> — Monotonically increasing IDs from current max</li>
+    </ol>
+
+    <!-- Phase 5 -->
+    <h3>Phase 5 — Substack RSS Trigger</h3>
+    <p><span class="tag phase">1 file</span> RSS fetch/parse, duplicate detection, idea generation via LLM.</p>
+    <ol>
+      <li><code>triggers/rss.ts</code> — Fetch + parse Substack RSS → check GUID against existing → LLM call to extract 1 teaser + 2-4 sub-ideas → write to ideas.md → kickoff workflow on one</li>
+    </ol>
+
+    <!-- Phase 6 -->
+    <h3>Phase 6 — Cadence Trigger</h3>
+    <p><span class="tag phase">1 file</span> Weekly fallback for quiet periods.</p>
+    <ol>
+      <li><code>triggers/cadence.ts</code> — Check most recent finalized date; if >7 days ago and raw idea exists → start workflow on oldest raw. Skip if already awaiting-feedback.</li>
+    </ol>
+
+    <!-- Phase 7 -->
+    <h3>Phase 7 — Telegram Integration</h3>
+    <p><span class="tag phase">2 files</span> Bot API client + webhook handler with 3-intent routing.</p>
+    <ol>
+      <li><strong>integrations/telegram.ts</strong> — sendMessage(), sendDraftNotification(), sendStatusUpdate()</li>
+      <li><strong>triggers/telegram-webhook.ts</strong> — Webhook handler: verify secret, route by intent (quick-capture → append to ideas.md, /generate → start workflow, reply-to-bot → deliver event to workflow instance)</li>
+    </ol>
+
+    <!-- Phase 8 -->
+    <h3>Phase 8 — Draft Agent (Core LLM Logic)</h3>
+    <p><span class="tag phase">4 files</span> Individual LLM-driven steps called by the workflow.</p>
+    <ol>
+      <li><strong>agent/draft.ts</strong> — Build prompt from style-prompt + idea content (+ Substack body if linked). Single LLM call → draft text.</li>
+      <li><strong>agent/critique.ts</strong> — Hardcoded checklist. LLM evaluates each: <code>{ check, passed, feedback? }[]</code>. Feedback only on failures, with specific actionable notes.</li>
+      <li><strong>agent/revise.ts</strong> — Current draft + failed checklist items + human feedback → revised draft. Called inside the loop (max 4 iterations).</li>
+      <li><strong>agent/classify.ts</strong> — Cheap LLM call: Telegram reply text → <code>{ action: "approve" | "feedback", feedbackText? }</code>. No keywords/regex — natural language intent classification.</li>
+    </ol>
+
+    <!-- Phase 9 -->
+    <h3>Phase 9 — Workflow Orchestration</h3>
+    <p><span class="tag phase">1 file</span> The Cloudflare Workflow definition wiring the agent steps together.</p>
+    <ol>
+      <li><code>src/workflow.ts</code> — step.do("draft") → loop (step.do("critique") + step.do("revise"), max 4, early exit if all checks pass) → step.do("sync+notify") → step.waitForEvent("telegram-reply") → step.do("classify") → if feedback: loop back to draft preserving satisfied checks; if approve: step.do("linkedin-publish") + step.do("archive") + Telegram notification</li>
+    </ol>
+
+    <!-- Phase 10 -->
+    <h3>Phase 10 — LinkedIn Integration</h3>
+    <p><span class="tag phase">2 files</span> LinkedIn Posts API + OAuth token lifecycle management.</p>
+    <ol>
+      <li><strong>integrations/linkedin.ts</strong> — POST /rest/posts with lifecycleState: DRAFT, parse response for URN</li>
+      <li><strong>triggers/token-check.ts</strong> — Weekly cron: check access token expiry, attempt refresh, Telegram alert if manual reauth needed</li>
+    </ol>
+
+    <!-- Phase 11 -->
+    <h3>Phase 11 — Worker Entry Point</h3>
+    <p><span class="tag phase">1 file</span> hono routes wiring triggers to handlers.</p>
+    <ol>
+      <li><code>src/index.ts</code> — Hono app: POST /webhook/telegram, cron /rss, cron /cadence, cron /token-check. Route → trigger handler → start/resume workflow. Event delivery for Telegram reply routing (match reply to instanceId via message metadata).</li>
+    </ol>
+
+    <!-- Phase 12 -->
+    <h3>Phase 12 — Testing</h3>
+    <p><span class="tag phase">~5 files</span> Unit + integration tests with mocked external services.</p>
+    <ol>
+      <li>Unit tests for agent/* (mocked LLM provider)</li>
+      <li>Unit tests for backlog/* (parser, manager, ID generator)</li>
+      <li>Unit tests for triggers/* (mocked GitHub API, mocked RSS)</li>
+      <li>Integration test: full workflow run with mocked externals</li>
+      <li>Manual smoke test: one real LinkedIn DRAFT post to confirm compose UI behavior</li>
+    </ol>
+
+    <!-- Phase 13 -->
+    <h3>Phase 13 — Deployment &amp; Go-Live</h3>
+    <p><span class="tag phase">~5 steps</span> Secrets, deploy, webhook registration, verification.</p>
+    <ol>
+      <li>wrangler secrets put — all 8 secrets</li>
+      <li>wrangler deploy</li>
+      <li>Register Telegram webhook (setWebhook)</li>
+      <li>Verify cron triggers active in Cloudflare dashboard</li>
+      <li>End-to-end manual test with a real idea captured via Telegram</li>
+    </ol>
+  </section>
+
+  <!-- Dependencies -->
+  <section id="dependencies">
+    <h2>Dependencies</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Package</th>
+          <th>Purpose</th>
+          <th>Category</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>wrangler</code></td><td>Cloudflare Workers CLI (dev server, deploy, secrets)</td><td>dev</td></tr>
+        <tr><td><code>typescript</code></td><td>TypeScript compiler</td><td>dev</td></tr>
+        <tr><td><code>vitest</code></td><td>Test runner</td><td>dev</td></tr>
+        <tr><td><code>@cloudflare/workers-types</code></td><td>Worker runtime type definitions</td><td>dev</td></tr>
+        <tr><td><code>@cloudflare/vitest-pool-workers</code></td><td>Vitest pool for running tests in Workers sandbox</td><td>dev</td></tr>
+        <tr><td><code>hono</code></td><td>HTTP routing framework for Workers</td><td>runtime</td></tr>
+        <tr><td><code>@google/generative-ai</code></td><td>Gemini API client</td><td>runtime</td></tr>
+      </tbody>
+    </table>
+    <p>DeepSeek uses OpenAI-compatible <code>fetch</code> — no SDK needed. Telegram Bot API uses <code>fetch</code>. GitHub Contents API uses <code>fetch</code>. LinkedIn Posts API uses <code>fetch</code>.</p>
+  </section>
+
+  <!-- Secrets -->
+  <section id="secrets">
+    <h2>Secrets &amp; Configuration</h2>
+    <p>8 Cloudflare Worker secrets, set via <code>wrangler secrets put</code>. Never committed anywhere.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Secret</th>
+          <th>Purpose</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td><code>TELEGRAM_BOT_TOKEN</code></td><td>Bot API auth — from BotFather</td></tr>
+        <tr><td><code>TELEGRAM_WEBHOOK_SECRET</code></td><td>Verify incoming Telegram webhook requests</td></tr>
+        <tr><td><code>LINKEDIN_ACCESS_TOKEN</code></td><td>OAuth 2.0 access token (60-day TTL)</td></tr>
+        <tr><td><code>LINKEDIN_REFRESH_TOKEN</code></td><td>OAuth refresh token (365-day TTL, if available)</td></tr>
+        <tr><td><code>LLM_API_KEY</code></td><td>Gemini/DeepSeek API key</td></tr>
+        <tr><td><code>LLM_PROVIDER</code></td><td>Select provider: <code>gemini</code> or <code>deepseek</code></td></tr>
+        <tr><td><code>GITHUB_PAT</code></td><td>Personal access token scoped to private data repo only</td></tr>
+        <tr><td><code>DATA_REPO_OWNER</code></td><td>GitHub owner of the private data repo</td></tr>
+        <tr><td><code>DATA_REPO_NAME</code></td><td>GitHub repo name of the private data repo</td></tr>
+      </tbody>
+    </table>
+    <div class="note info">
+      <strong>Note:</strong> LinkedIn programmatic refresh tokens are not guaranteed for Consumer-tier apps.
+      Fallback: manual reauthorization every ~60 days with Telegram alert before expiry. The token-check
+      weekly cron handles proactive expiry monitoring.
+    </div>
+  </section>
+
+  <!-- Risks -->
+  <section id="risks">
+    <h2>Open Questions &amp; Risks</h2>
+    <div class="note">
+      <strong>R1 — LinkedIn DRAFT lifecycle state.</strong> Does POST with <code>lifecycleState: "DRAFT"</code> actually
+      surface as a usable draft in the LinkedIn compose UI? Needs one live test. If it doesn't work,
+      fallback: store final draft text and open a browser-based data-uri approach, or skip to manual paste.
+    </div>
+    <div class="note">
+      <strong>R2 — Refresh token availability.</strong> Is the programmatic refresh token feature enabled
+      for Consumer-tier LinkedIn apps? If not, fallback to manual 60-day reauthorization with Telegram
+      alerts. Confirm during app registration.
+    </div>
+    <div class="note">
+      <strong>R3 — Style checklist refinement.</strong> The critique checklist in Phase 8 is a first draft.
+      Expect adjustments after seeing real output from the chosen LLM.
+    </div>
+    <div class="note">
+      <strong>R4 — Reply classification accuracy.</strong> A misclassified "approve" would push an unwanted
+      draft to LinkedIn. Classify reply early with spot-checks; consider adding a confirmation step
+      ("Send this draft to LinkedIn?") before the finalize action.
+    </div>
+    <div class="note">
+      <strong>R5 — Substack RSS interval.</strong> Daily polling is a starting guess. Adjust based on how
+      frequently the target Substack publishes.
+    </div>
+    <div class="note">
+      <strong>R6 — Concurrent workflow runs.</strong> The spec explicitly avoids multi-user concurrency
+      (single deployer). For v1, ensure the cadence check doesn't start a second workflow if one is
+      already in <code>awaiting-feedback</code> state.
+    </div>
+  </section>
+
+  <footer>
+    LinkedIn Posting Pipeline — Implementation Plan<br>
+    Cloudflare Workflows + TypeScript &bull; pnpm &bull; vitest &bull; hono
+  </footer>
+
+</div>
+</body>
+</html>

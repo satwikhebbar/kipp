@@ -1,0 +1,26 @@
+name = "linkedin-pipeline"
+main = "src/index.ts"
+compatibility_date = "2025-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare Workflow binding
+[[workflows]]
+binding = "PIPELINE_WORKFLOW"
+name = "linkedin-pipeline"
+class_name = "PipelineWorkflow"
+
+# Substack RSS poll — daily at 9:00 UTC
+# Cadence check — Monday 9:00 UTC
+[triggers]
+crons = ["0 9 * * *", "0 9 * * 1"]
+
+# --- Secrets (set via `wrangler secrets put`) ---
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_WEBHOOK_SECRET
+# LINKEDIN_ACCESS_TOKEN
+# LINKEDIN_REFRESH_TOKEN
+# LLM_API_KEY
+# LLM_PROVIDER
+# GITHUB_PAT
+# DATA_REPO_OWNER
+# DATA_REPO_NAME

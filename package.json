@@ -1,0 +1,31 @@
+{
+  "name": "linkedin-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --write src/",
+    "lint:ci": "biome ci src/",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^5.20250710.1",
+    "lefthook": "^2.1.10",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0",
+    "wrangler": "^4.10.0"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.0",
+    "hono": "^4.7.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}
