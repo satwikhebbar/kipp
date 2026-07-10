@@ -27,7 +27,6 @@ export interface ArchivedIdea {
 export interface LLMUsage {
   inputTokens: number
   outputTokens: number
-  reasoningTokens?: number
 }
 
 export interface LLMResponse {
@@ -60,17 +59,9 @@ export interface WorkflowEvent {
 }
 
 export interface TelegramUpdate {
-  updateId: number
-  message: {
-    messageId: number
-    text?: string
-    chat: { id: number }
-    from: { id: number; username?: string; firstName?: string }
-    replyToMessage?: {
-      messageId: number
-      text?: string
-    }
-  }
+  userId: number
+  text: string
+  messageId: number
 }
 
 export interface GithubFile {
