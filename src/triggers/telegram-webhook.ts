@@ -56,13 +56,13 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       const workflowId = cq.data.slice("confirm:".length)
       if (workflowId) {
         const instance = await env.PIPELINE_WORKFLOW.get(workflowId)
-        await instance.sendEvent({ type: "confirmation", payload: { userId: cq.from.id } })
+        await instance.sendEvent({ type: "telegram-reply", payload: { userId: cq.from.id, text: "__approve__" } })
       }
     } else if (cq.data?.startsWith("revise:") && cq.message) {
       const workflowId = cq.data.slice("revise:".length)
       if (workflowId) {
         const instance = await env.PIPELINE_WORKFLOW.get(workflowId)
-        await instance.sendEvent({ type: "revision", payload: { userId: cq.from.id } })
+        await instance.sendEvent({ type: "telegram-reply", payload: { userId: cq.from.id, text: "__revise__" } })
       }
     }
 

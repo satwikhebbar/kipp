@@ -5,6 +5,7 @@ export interface Env {
   TELEGRAM_ALLOWED_USER_ID: string
   LINKEDIN_ACCESS_TOKEN: string
   LINKEDIN_REFRESH_TOKEN: string
+  LINKEDIN_AUTHOR_URN: string
   LLM_API_KEY: string
   LLM_PROVIDER: string
   GITHUB_PAT: string
@@ -80,7 +81,7 @@ export interface WorkflowParams {
 }
 
 export interface WorkflowEvent {
-  type: "telegram-reply" | "confirmation" | "revision"
+  type: "telegram-reply"
   userId: number
   text?: string
 }

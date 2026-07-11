@@ -16,7 +16,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.3",
-    "@cloudflare/vitest-pool-workers": "^0.8.0",
     "@cloudflare/workers-types": "^5.20250710.1",
     "lefthook": "^2.1.10",
     "typescript": "^5.8.0",

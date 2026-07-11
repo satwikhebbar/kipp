@@ -21,6 +21,9 @@ function mockEnv() {
     TELEGRAM_BOT_TOKEN: "bot:token",
     TELEGRAM_WEBHOOK_SECRET: "my-secret",
     TELEGRAM_ALLOWED_USER_ID: "",
+    LINKEDIN_ACCESS_TOKEN: "",
+    LINKEDIN_REFRESH_TOKEN: "",
+    LINKEDIN_AUTHOR_URN: "",
     PIPELINE_WORKFLOW: { create: vi.fn(), get: vi.fn() },
   }
 }
@@ -101,7 +104,7 @@ describe("handleTelegramWebhook", () => {
     const res = await handleTelegramWebhook(callbackRequest(callbackBody("confirm:wf-abc")), env as never)
     expect(res.status).toBe(200)
     expect(get).toHaveBeenCalledWith("wf-abc")
-    expect(sendEvent).toHaveBeenCalledWith({ type: "confirmation", payload: { userId: 42 } })
+    expect(sendEvent).toHaveBeenCalledWith({ type: "telegram-reply", payload: { userId: 42, text: "__approve__" } })
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("answerCallbackQuery"), expect.any(Object))
   })
 
@@ -112,7 +115,7 @@ describe("handleTelegramWebhook", () => {
     const res = await handleTelegramWebhook(callbackRequest(callbackBody("revise:wf-xyz")), env as never)
     expect(res.status).toBe(200)
     expect(get).toHaveBeenCalledWith("wf-xyz")
-    expect(sendEvent).toHaveBeenCalledWith({ type: "revision", payload: { userId: 42 } })
+    expect(sendEvent).toHaveBeenCalledWith({ type: "telegram-reply", payload: { userId: 42, text: "__revise__" } })
   })
 
   it("ignores callback_query with unknown prefix", async () => {

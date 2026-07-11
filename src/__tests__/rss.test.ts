@@ -107,6 +107,13 @@ describe("handleRssCron", () => {
       SUBSTACK_RSS_URL: "https://test.substack.com/feed",
       LLM_API_KEY: "key",
       LLM_PROVIDER: "gemini",
+      POSTING_CADENCE_DAYS: "7",
+      TELEGRAM_BOT_TOKEN: "",
+      TELEGRAM_WEBHOOK_SECRET: "",
+      TELEGRAM_ALLOWED_USER_ID: "",
+      LINKEDIN_ACCESS_TOKEN: "",
+      LINKEDIN_REFRESH_TOKEN: "",
+      LINKEDIN_AUTHOR_URN: "",
       PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
     }
   }

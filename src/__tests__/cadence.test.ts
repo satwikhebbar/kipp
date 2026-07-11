@@ -23,6 +23,9 @@ function mockEnv() {
     TELEGRAM_BOT_TOKEN: "",
     TELEGRAM_WEBHOOK_SECRET: "",
     TELEGRAM_ALLOWED_USER_ID: "",
+    LINKEDIN_ACCESS_TOKEN: "",
+    LINKEDIN_REFRESH_TOKEN: "",
+    LINKEDIN_AUTHOR_URN: "",
     PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
   }
 }
