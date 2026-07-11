@@ -9,6 +9,7 @@ export interface Env {
   GITHUB_PAT: string
   DATA_REPO_OWNER: string
   DATA_REPO_NAME: string
+  SUBSTACK_RSS_URL: string
 }
 
 export type IdeaStatus = "raw" | "drafted" | "awaiting-feedback" | "awaiting-feedback-expired" | "finalized" | "skipped"

@@ -22,7 +22,10 @@ export interface GithubClient {
 }
 
 function b64encode(s: string): string {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(s)))
+  const bytes = new TextEncoder().encode(s)
+  let binary = ""
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
 }
 
 function b64decode(s: string): string {

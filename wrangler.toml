@@ -14,6 +14,16 @@ class_name = "PipelineWorkflow"
 [triggers]
 crons = ["0 9 * * *", "0 9 * * 1"]
 
+# --- Vars (set via wrangler.toml [vars] or dashboard) ---
+# [vars]
+# SUBSTACK_RSS_URL = "https://your-substack.substack.com/feed"
+# LLM_MODEL = "gemini-2.0-flash"
+# DATA_REPO_BRANCH = "main"
+# POSTING_CADENCE_DAYS = "7"
+# LINKEDIN_AUTHOR_URN = "urn:li:person:..."
+# TIMEZONE = "UTC"
+# WAIT_FOR_FEEDBACK_HOURS = "12"
+
 # --- Secrets (set via `wrangler secrets put`) ---
 # TELEGRAM_BOT_TOKEN
 # TELEGRAM_WEBHOOK_SECRET
