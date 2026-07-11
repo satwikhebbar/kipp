@@ -5,7 +5,7 @@ import { parseIdeas, serializeIdea } from "./parser"
 export async function appendToArchive(client: GithubClient, idea: Idea): Promise<void> {
   await client.mutateFile("archive.md", (content) => {
     if (parseIdeas(content).some((e) => e.id === idea.id)) return content
-    const archived = { ...idea, status: "finalized" as const }
+    const archived = { ...idea, status: "finalized" as const, finalized: new Date().toISOString() }
     return `${content.trim()}\n\n${serializeIdea(archived)}`
   })
 }

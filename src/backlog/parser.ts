@@ -93,6 +93,7 @@ export function parseIdea(text: string): Idea {
   if (fm.substackUrl) idea.substackUrl = String(fm.substackUrl)
   if (fm.teaser) idea.teaser = String(fm.teaser)
   if (fm.reviewCount) idea.reviewCount = Number(fm.reviewCount)
+  if (fm.finalized) idea.finalized = String(fm.finalized)
 
   return idea
 }
@@ -115,6 +116,7 @@ export function serializeIdea(idea: Idea): string {
   if (idea.substackUrl) fm.substackUrl = idea.substackUrl
   if (idea.teaser) fm.teaser = idea.teaser
   if (idea.reviewCount) fm.reviewCount = String(idea.reviewCount)
+  if (idea.finalized) fm.finalized = idea.finalized
 
   if (idea.correlation) {
     const c: Record<string, string> = {}

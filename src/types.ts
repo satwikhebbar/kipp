@@ -37,6 +37,7 @@ export interface Idea {
   critique?: string
   reviewCount?: number
   correlation?: Correlation
+  finalized?: string
 }
 
 export interface ArchivedIdea {
@@ -79,9 +80,9 @@ export interface WorkflowParams {
 }
 
 export interface WorkflowEvent {
-  type: "telegram-reply"
+  type: "telegram-reply" | "confirmation" | "revision"
   userId: number
-  text: string
+  text?: string
 }
 
 export interface TelegramUpdate {

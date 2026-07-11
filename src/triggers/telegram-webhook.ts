@@ -52,10 +52,18 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
     await tg.answerCallbackQuery(cq.id)
 
-    const workflowId = cq.data?.replace(/^confirm:/, "")
-    if (workflowId && cq.message) {
-      const instance = await env.PIPELINE_WORKFLOW.get(workflowId)
-      await instance.sendEvent({ type: "confirmation", payload: { userId: cq.from.id } })
+    if (cq.data?.startsWith("confirm:") && cq.message) {
+      const workflowId = cq.data.slice("confirm:".length)
+      if (workflowId) {
+        const instance = await env.PIPELINE_WORKFLOW.get(workflowId)
+        await instance.sendEvent({ type: "confirmation", payload: { userId: cq.from.id } })
+      }
+    } else if (cq.data?.startsWith("revise:") && cq.message) {
+      const workflowId = cq.data.slice("revise:".length)
+      if (workflowId) {
+        const instance = await env.PIPELINE_WORKFLOW.get(workflowId)
+        await instance.sendEvent({ type: "revision", payload: { userId: cq.from.id } })
+      }
     }
 
     return new Response("OK")
@@ -106,18 +114,22 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
 
   {
     const client = createGitHubClient(env)
-    const content = (await client.readFile("ideas.md")).content
-    const existing = parseIdeas(content)
-    const idea: Idea = {
-      id: String(nextId(existing)),
-      title: msg.text.slice(0, 80),
-      status: "raw" as const,
-      created: new Date().toISOString(),
-      source: "telegram" as const,
-      body: msg.text,
-    }
-    await client.mutateFile("ideas.md", (c) => serializeIdeas([...parseIdeas(c), idea]))
-    await tg.sendMessage(msg.chat.id, `Saved as idea #${idea.id}.`)
+    const text = msg.text
+    let savedId = ""
+    await client.mutateFile("ideas.md", (c) => {
+      const ideas = parseIdeas(c)
+      savedId = String(nextId(ideas))
+      const idea: Idea = {
+        id: savedId,
+        title: text.slice(0, 80),
+        status: "raw" as const,
+        created: new Date().toISOString(),
+        source: "telegram" as const,
+        body: text,
+      }
+      return serializeIdeas([...ideas, idea])
+    })
+    await tg.sendMessage(msg.chat.id, `Saved as idea #${savedId}.`)
     return new Response("OK")
   }
 }

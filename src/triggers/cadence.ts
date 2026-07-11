@@ -15,7 +15,7 @@ export async function handleCadenceCron(env: Env): Promise<{ started: boolean; i
   const archived = parseIdeas(archiveContent)
   let latestFinalized = 0
   for (const a of archived) {
-    const t = new Date(a.created).getTime()
+    const t = new Date(a.finalized ?? a.created).getTime()
     if (t > latestFinalized) latestFinalized = t
   }
 

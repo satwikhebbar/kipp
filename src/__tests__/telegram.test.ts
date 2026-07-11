@@ -71,39 +71,67 @@ describe("handleTelegramWebhook", () => {
     expect(res.status).toBe(401)
   })
 
-  it("handles callback_query", async () => {
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
-    const env = mockEnv()
-    const getMock = vi.fn().mockResolvedValue({ sendEvent: vi.fn() })
-    env.PIPELINE_WORKFLOW.get = getMock
-
-    const body = JSON.stringify({
+  function callbackBody(data: string) {
+    return JSON.stringify({
       update_id: 1,
-      callback_query: {
-        id: "cq-1",
-        from: { id: 42 },
-        message: { message_id: 10, chat: { id: 100 } },
-        data: "confirm:wf-abc",
-      },
+      callback_query: { id: "cq-1", from: { id: 42 }, message: { message_id: 10, chat: { id: 100 } }, data },
     })
-    const res = await handleTelegramWebhook(
-      new Request("http://localhost", {
-        method: "POST",
-        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
-        body,
-      }),
-      env as never,
-    )
+  }
+
+  function callbackRequest(body: string) {
+    return new Request("http://localhost", {
+      method: "POST",
+      headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+      body,
+    })
+  }
+
+  function callbackEnv() {
+    const sendEvent = vi.fn()
+    const get = vi.fn().mockResolvedValue({ sendEvent })
+    const env = mockEnv()
+    env.PIPELINE_WORKFLOW.get = get
+    return { env, sendEvent, get }
+  }
+
+  it("handles confirm callback_query", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+    const { env, sendEvent, get } = callbackEnv()
+
+    const res = await handleTelegramWebhook(callbackRequest(callbackBody("confirm:wf-abc")), env as never)
     expect(res.status).toBe(200)
-    expect(getMock).toHaveBeenCalledWith("wf-abc")
+    expect(get).toHaveBeenCalledWith("wf-abc")
+    expect(sendEvent).toHaveBeenCalledWith({ type: "confirmation", payload: { userId: 42 } })
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("answerCallbackQuery"), expect.any(Object))
   })
 
+  it("handles revise callback_query", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+    const { env, sendEvent, get } = callbackEnv()
+
+    const res = await handleTelegramWebhook(callbackRequest(callbackBody("revise:wf-xyz")), env as never)
+    expect(res.status).toBe(200)
+    expect(get).toHaveBeenCalledWith("wf-xyz")
+    expect(sendEvent).toHaveBeenCalledWith({ type: "revision", payload: { userId: 42 } })
+  })
+
+  it("ignores callback_query with unknown prefix", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+    const { env, sendEvent, get } = callbackEnv()
+
+    const res = await handleTelegramWebhook(callbackRequest(callbackBody("bad-data")), env as never)
+    expect(res.status).toBe(200)
+    expect(get).not.toHaveBeenCalled()
+    expect(sendEvent).not.toHaveBeenCalled()
+  })
+
   it("handles quick-capture message", async () => {
-    let callCount = 0
+    const putBodies: string[] = []
     mockFetch.mockImplementation(async (_url: string, opts?: RequestInit) => {
-      callCount++
-      if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+      if (opts?.method === "PUT") {
+        putBodies.push(opts.body as string)
+        return { ok: true, json: () => Promise.resolve({}) }
+      }
       return { ok: true, json: () => Promise.resolve({ content: b64(""), sha: "s1" }) }
     })
 
@@ -125,7 +153,10 @@ describe("handleTelegramWebhook", () => {
       mockEnv() as never,
     )
     expect(res.status).toBe(200)
-    expect(callCount).toBeGreaterThanOrEqual(2)
+    expect(putBodies.length).toBeGreaterThanOrEqual(1)
+    const decoded = atob(JSON.parse(putBodies[0]).content)
+    expect(decoded).toContain("id: 1")
+    expect(decoded).toContain("Quick idea here")
   })
 
   it("handles /generate command", async () => {

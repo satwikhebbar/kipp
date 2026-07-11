@@ -1,5 +1,5 @@
 ---
-name: review-handoff
+name: handoff-review
 description: >
   Process file-based review handoffs from .agent-handoff/inbox/. Moves handoffs
   through an inbox → in-progress → done/archive pipeline. Reads YAML frontmatter
@@ -18,7 +18,7 @@ This repo uses `.agent-handoff/` as a file-based queue for review feedback betwe
 |------|---------|
 | `.agent-handoff/inbox/` | New handoff files waiting to be processed |
 | `.agent-handoff/in-progress/` | Files claimed by the implementation agent |
-| `.agent-handoff/done/` | Result files written after work is applied |
+| `.agent-handoff/done/` | Result files written after work is applied, optionally with a sibling `.response.md` |
 | `.agent-handoff/archive/` | Processed original handoff files kept for audit history |
 
 Queue contents are gitignored, except `.gitkeep` files and `.agent-handoff/README.md`.
@@ -31,7 +31,8 @@ Queue contents are gitignored, except `.gitkeep` files and `.agent-handoff/READM
 4. Apply the requested changes to the target files.
 5. Verify the acceptance criteria.
 6. Write a result file to `.agent-handoff/done/`.
-7. Move the original handoff to `.agent-handoff/archive/`, unless its `cleanup` field says `delete`.
+7. Optionally write a **response sidecar** (see Response Shape below) to communicate back to the reviewer.
+8. Move the original handoff to `.agent-handoff/archive/`, unless its `cleanup` field says `delete`. If a response sidecar was written, move it alongside the original.
 
 Do **not** process a handoff in `inbox/` whose `id` field duplicates a file already in `in-progress/`, `done/`, or `archive/` — it's a retry or duplicate.
 
@@ -89,6 +90,45 @@ completed_by: opencode
 Blockers, follow-ups, or anything left unresolved.
 ```
 
+## Response Shape
+
+An optional sidecar file written alongside the result when Opencode needs to communicate back to the reviewer (Codex). Named after the original handoff id: `YYYY-MM-DD-short-topic.response.md`.
+
+```markdown
+---
+id: YYYY-MM-DD-short-topic-response
+type: implementation-response
+status: done
+created_by: opencode
+responds_to: YYYY-MM-DD-short-topic
+target:
+  - path/or/topic
+cleanup: archive|delete   # matches the original handoff's cleanup value
+---
+
+## Summary
+
+Short note on what changed.
+
+## Changes Made
+
+- Concrete change.
+
+## Not Done
+
+- Anything intentionally skipped, with reason.
+
+## Verification
+
+- Commands or checks run.
+
+## Questions For Codex
+
+- Optional follow-up questions or areas to re-review.
+```
+
+Codex reads response files when `responds_to` or `target` overlaps with its current review scope.
+
 ## Behavior Rules
 
 - Process one handoff at a time per session.
@@ -96,5 +136,6 @@ Blockers, follow-ups, or anything left unresolved.
 - Treat `Acceptance Criteria` as the definition of done.
 - Preserve unrelated user changes — only touch files listed in `target`.
 - If blocked or acceptance criteria can't be met, write a `done/` result with `status: blocked` and explain why in `Notes`.
-- Archive or delete the original handoff according to `cleanup` field.
+- Archive or delete the original handoff according to `cleanup` field. If a response sidecar exists, treat it with the same `cleanup` value.
 - Write the result file to `done/` before moving/archiving the original.
+- Write a response sidecar when: changes were intentionally skipped, acceptance criteria weren't fully met, or you have questions for the reviewer. Skip it when the work was straightforward and all criteria were met.

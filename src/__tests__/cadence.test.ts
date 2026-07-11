@@ -20,6 +20,9 @@ function mockEnv() {
     LLM_API_KEY: "key",
     LLM_PROVIDER: "gemini",
     POSTING_CADENCE_DAYS: "7",
+    TELEGRAM_BOT_TOKEN: "",
+    TELEGRAM_WEBHOOK_SECRET: "",
+    TELEGRAM_ALLOWED_USER_ID: "",
     PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
   }
 }
@@ -62,6 +65,18 @@ status: finalized
 created: 2026-06-20T12:00:00Z
 source: manual
 body: Old content
+---
+
+Final content`
+
+const RECENTLY_FINALIZED = `---
+id: 11
+title: Recently finalized
+status: finalized
+created: 2026-06-01T12:00:00Z
+finalized: 2026-07-10T12:00:00Z
+source: manual
+body: Finalized yesterday
 ---
 
 Final content`
@@ -130,6 +145,17 @@ describe("handleCadenceCron", () => {
     setupMockedFetch([
       { content: "", sha: "s1" },
       { content: STALE_ARCHIVE, sha: "s2" },
+    ])
+    const env = mockEnv()
+    const result = await handleCadenceCron(env as never)
+    expect(result.started).toBe(false)
+    expect(env.PIPELINE_WORKFLOW.create).not.toHaveBeenCalled()
+  })
+
+  it("uses finalized date over created for cadence check", async () => {
+    setupMockedFetch([
+      { content: RAW_IDEA, sha: "s1" },
+      { content: RECENTLY_FINALIZED, sha: "s2" },
     ])
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
