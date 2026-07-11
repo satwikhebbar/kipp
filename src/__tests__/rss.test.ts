@@ -1,5 +1,21 @@
-import { describe, expect, it } from "vitest"
-import { parseRssFeed } from "../triggers/rss"
+import { beforeEach, describe, expect, it, vi } from "vitest"
+
+const mockGen = vi.hoisted(() => vi.fn())
+vi.mock("../providers/index", () => ({
+  createGenerator: vi.fn(() => mockGen),
+}))
+
+import { handleRssCron, parseRssFeed } from "../triggers/rss"
+
+const mockFetch = vi.hoisted(() => vi.fn())
+vi.stubGlobal("fetch", mockFetch)
+
+function b64(s: string): string {
+  const bytes = new TextEncoder().encode(s)
+  let bin = ""
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
+}
 
 const SAMPLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
@@ -21,6 +37,36 @@ const SAMPLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
   </item>
 </channel>
 </rss>`
+
+const EMPTY_IDEAS = ""
+const LINK_KNOWN = `---
+id: 1
+title: First Post
+status: raw
+source: substack
+created: 2026-07-01T12:00:00Z
+substackUrl: https://test.substack.com/p/first
+---
+
+Already known`
+
+const SINGLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <item>
+    <title>First Post</title>
+    <link>https://test.substack.com/p/first</link>
+    <guid>first-guid</guid>
+    <pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate>
+    <description>Known item</description>
+  </item>
+</channel>
+</rss>`
+
+const LLM_JSON = JSON.stringify({
+  teaser: "A great hook about testing",
+  subIdeas: ["Idea 1", "Idea 2", "Idea 3"],
+})
 
 describe("parseRssFeed", () => {
   it("extracts items from RSS XML", () => {
@@ -49,5 +95,69 @@ describe("parseRssFeed", () => {
   it("returns empty array for feed with no items", () => {
     const empty = parseRssFeed("<rss><channel><title>Empty</title></channel></rss>")
     expect(empty).toHaveLength(0)
+  })
+})
+
+describe("handleRssCron", () => {
+  function mockEnv() {
+    return {
+      GITHUB_PAT: "pat",
+      DATA_REPO_OWNER: "o",
+      DATA_REPO_NAME: "r",
+      SUBSTACK_RSS_URL: "https://test.substack.com/feed",
+      LLM_API_KEY: "key",
+      LLM_PROVIDER: "gemini",
+      PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
+    }
+  }
+
+  beforeEach(() => {
+    mockFetch.mockReset()
+    mockGen.mockReset()
+  })
+
+  it("starts workflow for a new RSS item", async () => {
+    let callIdx = 0
+    mockFetch.mockImplementation(async (_url: string, opts?: RequestInit) => {
+      callIdx++
+      if (callIdx === 1) return { ok: true, text: () => Promise.resolve(SAMPLE_RSS) }
+      if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+      return { ok: true, json: () => Promise.resolve({ content: b64(EMPTY_IDEAS), sha: "s1" }) }
+    })
+    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
+
+    const env = mockEnv()
+    const result = await handleRssCron(env as never)
+    expect(result.started).toBe(true)
+    expect(result.ideaId).toBeDefined()
+    expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not re-add already-known items", async () => {
+    let callIdx = 0
+    mockFetch.mockImplementation(async (_url: string) => {
+      callIdx++
+      if (callIdx === 1) return { ok: true, text: () => Promise.resolve(SINGLE_RSS) }
+      return { ok: true, json: () => Promise.resolve({ content: b64(LINK_KNOWN), sha: "s1" }) }
+    })
+
+    const env = mockEnv()
+    const result = await handleRssCron(env as never)
+    expect(result.started).toBe(false)
+    expect(mockGen).not.toHaveBeenCalled()
+  })
+
+  it("returns started:false when RSS feed is empty", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve("<rss><channel><title>Empty</title></channel></rss>"),
+    })
+    const result = await handleRssCron(mockEnv() as never)
+    expect(result.started).toBe(false)
+  })
+
+  it("throws on RSS fetch error", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve("fail") })
+    await expect(handleRssCron(mockEnv() as never)).rejects.toThrow("RSS fetch error 500")
   })
 })

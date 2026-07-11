@@ -39,8 +39,8 @@ export function createBacklogManager(client: GithubClient) {
   async function moveToArchive(idea: Idea): Promise<void> {
     try {
       await updateIdea(idea.id, { status: "finalized" })
-    } catch {
-      // ponytail: already removed, proceed with archive append
+    } catch (err) {
+      if (!(err instanceof Error && err.message === `Idea ${idea.id} not found`)) throw err
     }
     await appendToArchive(client, idea)
     await client.mutateFile("ideas.md", (content) => {

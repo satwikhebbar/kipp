@@ -2,6 +2,7 @@ export interface Env {
   PIPELINE_WORKFLOW: Workflow
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_WEBHOOK_SECRET: string
+  TELEGRAM_ALLOWED_USER_ID: string
   LINKEDIN_ACCESS_TOKEN: string
   LINKEDIN_REFRESH_TOKEN: string
   LLM_API_KEY: string
@@ -10,6 +11,7 @@ export interface Env {
   DATA_REPO_OWNER: string
   DATA_REPO_NAME: string
   SUBSTACK_RSS_URL: string
+  POSTING_CADENCE_DAYS: string
 }
 
 export type IdeaStatus = "raw" | "drafted" | "awaiting-feedback" | "awaiting-feedback-expired" | "finalized" | "skipped"

@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createBacklogManager } from "../backlog/manager"
-import type { GithubFile } from "../integrations/github"
+import type { GithubClient, GithubFile } from "../integrations/github"
 
 const RAW_IDEA = `---
 id: 1
@@ -29,27 +29,26 @@ Already archived.`
 function mockClient() {
   const files = new Map<string, { content: string; sha: string }>()
 
-  function readFile(path: string): Promise<GithubFile> {
-    const f = files.get(path)
-    if (!f) return Promise.reject(Object.assign(new Error("Not found"), { status: 404 }))
-    return Promise.resolve(f)
-  }
-
-  function writeFile(path: string, content: string, _sha: string): Promise<void> {
-    files.set(path, { content, sha: `sha${Math.random()}` })
-    return Promise.resolve()
-  }
-
-  async function mutateFile(path: string, mutate: (c: string) => string): Promise<void> {
-    const { content } = await readFile(path)
-    const newContent = mutate(content)
-    if (newContent !== content) {
-      await writeFile(path, newContent, "")
-    }
+  const client: GithubClient = {
+    async readFile(path: string): Promise<GithubFile> {
+      const f = files.get(path)
+      if (!f) return Promise.reject(Object.assign(new Error("Not found"), { status: 404 }))
+      return Promise.resolve(f)
+    },
+    async writeFile(path: string, content: string, _sha: string): Promise<void> {
+      files.set(path, { content, sha: `sha${Math.random()}` })
+    },
+    async mutateFile(path: string, mutate: (c: string) => string): Promise<void> {
+      const { content } = await client.readFile(path)
+      const newContent = mutate(content)
+      if (newContent !== content) {
+        await client.writeFile(path, newContent, "")
+      }
+    },
   }
 
   return {
-    client: { readFile, writeFile, mutateFile },
+    client,
     files,
     setIdeas(content: string) {
       files.set("ideas.md", { content, sha: "s1" })
@@ -131,6 +130,27 @@ describe("createBacklogManager", () => {
       expect(archived.content).toContain("source: telegram")
       expect(archived.content).toContain("# Idea 1")
       expect(archived.content).toContain("This is a raw idea")
+    })
+
+    it("rethrows non-not-found errors from updateIdea", async () => {
+      const m = mockClient()
+      m.setIdeas(RAW_IDEA)
+      m.setArchive("")
+      const mgr = createBacklogManager(m.client)
+      // replace writeFile to inject a 409 after status update
+      const origWrite = m.client.writeFile
+      m.client.writeFile = vi.fn().mockImplementation(async (path, content, sha) => {
+        if (content.includes("finalized")) {
+          const err: Error & { status?: number } = new Error("Conflict")
+          err.status = 409
+          throw err
+        }
+        return origWrite(path, content, sha)
+      }) as typeof m.client.writeFile
+
+      const raw = await mgr.getNextIdea()
+      if (!raw) throw new Error("Expected an idea")
+      await expect(mgr.moveToArchive(raw)).rejects.toThrow("Conflict")
     })
 
     it("does not duplicate existing archive entries", async () => {

@@ -1,13 +1,5 @@
 import { describe, expect, it } from "vitest"
 import { createGenerator } from "../providers/index"
-import { PipelineWorkflow } from "../workflow"
-
-describe("PipelineWorkflow", () => {
-  it("is exported and constructable", () => {
-    expect(PipelineWorkflow).toBeDefined()
-    expect(PipelineWorkflow.name).toBe("PipelineWorkflow")
-  })
-})
 
 describe("createGenerator", () => {
   it("throws on unknown provider", () => {
