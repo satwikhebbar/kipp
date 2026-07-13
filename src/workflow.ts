@@ -4,6 +4,7 @@ import { createDraftAgent } from "./agent/draft"
 import { createReviseAgent } from "./agent/revise"
 import { createBacklogManager } from "./backlog/manager"
 import { createGitHubClient } from "./integrations/github"
+import { createLinkedInClient } from "./integrations/linkedin"
 import { createTelegramClient } from "./integrations/telegram"
 import { createGenerator } from "./providers"
 import type { Env, WorkflowParams } from "./types"
@@ -81,13 +82,25 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       const text = reply.payload?.text ?? ""
       if (text === "__approve__") {
-        await step.do("finalize", async () => {
+        if (this.env.LINKEDIN_ACCESS_TOKEN && this.env.LINKEDIN_AUTHOR_URN) {
+          await step.do("linkedin-publish", async () => {
+            const li = createLinkedInClient(this.env.LINKEDIN_ACCESS_TOKEN)
+            await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
+          })
+        }
+        await step.do("archive", async () => {
           const client = createGitHubClient(this.env)
           const manager = createBacklogManager(client)
           const ideas = await manager.readIdeas()
           const idea = ideas.find((i) => i.id === ideaId)
           if (idea) await manager.moveToArchive(idea)
         })
+        if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
+          await step.do("notify-published", async () => {
+            const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+            await tg.sendMessage(state.chatId, "✅ Draft posted to LinkedIn!")
+          })
+        }
         return
       }
 

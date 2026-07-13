@@ -21,7 +21,6 @@ export function createLinkedInClient(accessToken: string): LinkedinClient {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
-        "LinkedIn-Version": "202501",
       },
       body: body ? JSON.stringify(body) : undefined,
     })
@@ -33,15 +32,19 @@ export function createLinkedInClient(accessToken: string): LinkedinClient {
   }
 
   async function createDraftPost(authorUrn: string, text: string): Promise<{ urn: string }> {
-    const res = await request("POST", "/rest/posts", {
+    const res = await request("POST", "/v2/ugcPosts", {
       author: authorUrn,
-      commentary: text,
-      visibility: "PUBLIC",
       lifecycleState: "DRAFT",
-      distribution: { feedDistribution: "MAIN_FEED" },
+      specificContent: {
+        "com.linkedin.ugc.ShareContent": {
+          shareCommentary: { text },
+          shareMediaCategory: "NONE",
+        },
+      },
+      visibility: { "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC" },
     })
-    const urn = res.headers.get("x-restli-id") ?? ""
-    return { urn }
+    const data = (await res.json()) as { id?: string }
+    return { urn: data.id ?? "" }
   }
 
   return { createDraftPost }

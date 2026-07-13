@@ -479,9 +479,11 @@ correlation:
 
     <!-- Phase 9 -->
     <h3>Phase 9 — LinkedIn Auth &amp; Basic Client</h3>
-    <p><span class="tag phase">1 file</span> LinkedIn OAuth setup and basic Posts API client for DRAFT creation.</p>
+    <p><span class="tag phase">3 files</span> LinkedIn OAuth flow (redirect + callback), token persistence, and Posts API client for DRAFT creation.</p>
     <ol>
-      <li><strong>integrations/linkedin.ts</strong> — POST /rest/posts with lifecycleState: DRAFT, parse response for URN</li>
+      <li><strong>integrations/linkedin.ts</strong> — POST /v2/ugcPosts with lifecycleState: DRAFT, parse response body for URN</li>
+      <li><strong>triggers/linkedin-oauth.ts</strong> — Hono routes: <code>GET /auth/linkedin</code> (redirect to LinkedIn OAuth consent with <code>client_id</code>/<code>scope</code>/<code>redirect_uri</code>), <code>GET /auth/linkedin/callback</code> (exchange <code>code</code> for access+refresh tokens, store in data repo as <code>.linkedin-tokens.json</code>, return success page)</li>
+      <li><strong>src/index.ts</strong> (Phase 13 update) — Mount OAuth routes</li>
     </ol>
 
     <!-- Phase 10 -->
@@ -495,11 +497,28 @@ correlation:
     </ol>
 
     <!-- Phase 11 -->
-    <h3>Phase 11 — Workflow Orchestration</h3>
-    <p><span class="tag phase">1 file</span> The Cloudflare Workflow definition wiring the agent steps together.</p>
+    <h3>Phase 11 — Workflow Orchestration <span class="tag done">done</span></h3>
+    <p><span class="tag phase">1 file</span> (<code>src/workflow.ts</code>) The Cloudflare Workflow definition wiring the agent steps together.</p>
     <ol>
-      <li><code>src/workflow.ts</code> — step.do("draft") → loop (step.do("critique") + step.do("revise"), max 4, early exit if all checks pass) → step.do("sync+notify") → <strong>try/catch</strong> on step.waitForEvent("telegram-reply", timeout: WAIT_FOR_FEEDBACK_HOURS) → on TimeoutError: mark idea <code>awaiting-feedback-expired</code>, notify Telegram, exit → step.do("classify") → if feedback: loop back to draft preserving satisfied checks; <strong>if approve: send Telegram inline buttons [Approve → LinkedIn DRAFT] / [Revise More] → step.waitForEvent("confirmation", timeout: 7 days) → only on explicit [Approve] tap: step.do("linkedin-publish") + step.do("archive") + Telegram notification</strong></li>
+      <li><code>generate</code> — step.do: draft → critique/revise loop (max 4, early exit) → save to backlog as <code>awaiting-feedback</code></li>
+      <li><code>notify</code> — step.do: Send draft preview via Telegram with [Approve ✓] / [Revise More] inline buttons</li>
+      <li><strong>Wait loop</strong> (max 4): step.waitForEvent("telegram-reply", timeout: 7 days)
+        <ul>
+          <li><strong>Timeout</strong> → mark idea <code>awaiting-feedback-expired</code>, return</li>
+          <li><strong>Approve</strong> (<code>__approve__</code>) → <code>linkedin-publish</code> step.do (DRAFT via <code>POST /v2/ugcPosts</code>, guarded by <code>LINKEDIN_ACCESS_TOKEN</code> / <code>LINKEDIN_AUTHOR_URN</code>), then <code>archive</code> step.do (move idea to archive.md), then <code>notify-published</code> step.do (Telegram confirmation), return</li>
+          <li><strong>Revise</strong> (<code>__revise__</code> or custom text) → revise draft via LLM, update backlog, loop</li>
+        </ul>
+      </li>
     </ol>
+    <div class="note">
+      <strong>Caveat — LinkedIn single-draft slot.</strong> LinkedIn only supports one DRAFT post at a time (7-day expiry).
+      Creating a new LinkedIn draft via <code>step.do("linkedin-publish")</code> will silently overwrite any existing
+      LinkedIn draft from a prior workflow run. The final draft text is always preserved in <code>archive.md</code>
+      (Git history), so nothing is permanently lost, but the unpublished draft on LinkedIn can be replaced.
+      Decision: this is acceptable for a single-user pipeline — only one workflow can be active at a time, and
+      the user is expected to publish or clear the LinkedIn draft before the next approval completes.
+      LinkedIn publish step is skipped if <code>LINKEDIN_ACCESS_TOKEN</code> or <code>LINKEDIN_AUTHOR_URN</code> are not set.
+    </div>
 
     <!-- Phase 12 -->
     <h3>Phase 12 — LinkedIn Token Lifecycle</h3>
@@ -565,7 +584,7 @@ correlation:
   <section id="secrets">
     <h2>Secrets &amp; Configuration</h2>
 
-    <h3>Secrets (6)</h3>
+    <h3>Secrets (8)</h3>
     <p>Set via <code>wrangler secrets put</code>. Never committed anywhere.</p>
     <table>
       <thead>
@@ -577,8 +596,10 @@ correlation:
       <tbody>
         <tr><td><code>TELEGRAM_BOT_TOKEN</code></td><td>Bot API auth — from BotFather</td></tr>
         <tr><td><code>TELEGRAM_WEBHOOK_SECRET</code></td><td>Verify incoming Telegram webhook requests</td></tr>
-        <tr><td><code>LINKEDIN_ACCESS_TOKEN</code></td><td>OAuth 2.0 access token (60-day TTL)</td></tr>
-        <tr><td><code>LINKEDIN_REFRESH_TOKEN</code></td><td>OAuth refresh token (365-day TTL, if available)</td></tr>
+        <tr><td><code>LINKEDIN_CLIENT_ID</code></td><td>LinkedIn OAuth 2.0 client ID from app credentials</td></tr>
+        <tr><td><code>LINKEDIN_CLIENT_SECRET</code></td><td>LinkedIn OAuth 2.0 client secret from app credentials</td></tr>
+        <tr><td><code>LINKEDIN_ACCESS_TOKEN</code></td><td>OAuth 2.0 access token (60-day TTL, set by callback)</td></tr>
+        <tr><td><code>LINKEDIN_REFRESH_TOKEN</code></td><td>OAuth refresh token (365-day TTL, if available, set by callback)</td></tr>
         <tr><td><code>LLM_API_KEY</code></td><td>Gemini/DeepSeek API key</td></tr>
         <tr><td><code>GITHUB_PAT</code></td><td>Personal access token scoped to private data repo only</td></tr>
       </tbody>

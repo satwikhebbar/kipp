@@ -111,6 +111,8 @@ describe("handleRssCron", () => {
       TELEGRAM_BOT_TOKEN: "",
       TELEGRAM_WEBHOOK_SECRET: "",
       TELEGRAM_ALLOWED_USER_ID: "",
+      LINKEDIN_CLIENT_ID: "",
+      LINKEDIN_CLIENT_SECRET: "",
       LINKEDIN_ACCESS_TOKEN: "",
       LINKEDIN_REFRESH_TOKEN: "",
       LINKEDIN_AUTHOR_URN: "",

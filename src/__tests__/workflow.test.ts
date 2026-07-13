@@ -35,6 +35,8 @@ function mockEnv(): Env {
     TELEGRAM_BOT_TOKEN: "bot:token",
     TELEGRAM_WEBHOOK_SECRET: "secret",
     TELEGRAM_ALLOWED_USER_ID: "42",
+    LINKEDIN_CLIENT_ID: "",
+    LINKEDIN_CLIENT_SECRET: "",
     LINKEDIN_ACCESS_TOKEN: "",
     LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
@@ -110,7 +112,8 @@ describe("PipelineWorkflow", () => {
 
     expect(stepDo).toHaveBeenCalledWith("generate", expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify", expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("finalize", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("archive", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("notify-published", expect.any(Function))
   })
 
   it("revises on feedback and finalizes on second approval", async () => {
@@ -150,6 +153,7 @@ describe("PipelineWorkflow", () => {
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
     expect(stepDo).toHaveBeenCalledWith(expect.stringContaining("revise-"), expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("finalize", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("archive", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("notify-published", expect.any(Function))
   })
 })
