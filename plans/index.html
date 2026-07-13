@@ -521,10 +521,12 @@ correlation:
     </div>
 
     <!-- Phase 12 -->
-    <h3>Phase 12 — LinkedIn Token Lifecycle</h3>
-    <p><span class="tag phase">1 file</span> Token refresh monitoring and expiry alerts (the LinkedIn client itself was built in Phase 9).</p>
+    <h3>Phase 12 — LinkedIn Token Lifecycle <span class="tag done">done</span></h3>
+    <p><span class="tag phase">2 files + test</span> Token refresh monitoring and expiry alerts (the LinkedIn client itself was built in Phase 9).</p>
     <ol>
-      <li><strong>triggers/token-check.ts</strong> — Weekly cron: check access token expiry, attempt refresh, Telegram alert if manual reauth needed</li>
+      <li><strong>triggers/token-check.ts</strong> — Weekly cron (Monday 8:00): read <code>.linkedin-tokens.json</code> from data repo, check expiry, attempt refresh via OAuth, Telegram alert if manual reauth needed. Gracefully skips if no token file exists yet.</li>
+      <li><strong>src/types.ts</strong> — <code>LinkedInTokens</code> interface for token file schema</li>
+      <li><strong>src/__tests__/token-check.test.ts</strong> — 4 tests: no file, still valid, refresh flow, no-refresh alert</li>
     </ol>
 
     <!-- Phase 13 -->

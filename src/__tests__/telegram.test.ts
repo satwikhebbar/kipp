@@ -33,10 +33,11 @@ function mockEnv() {
 describe("createTelegramClient", () => {
   beforeEach(() => mockFetch.mockReset())
 
-  it("sendMessage calls the Telegram API", async () => {
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+  it("sendMessage calls the Telegram API and returns message_id", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 42 } }) })
     const tg = createTelegramClient("bot:token")
-    await tg.sendMessage(123, "Hello")
+    const result = await tg.sendMessage(123, "Hello")
+    expect(result.messageId).toBe(42)
     expect(mockFetch).toHaveBeenCalledWith(
       "https://api.telegram.org/botbot:token/sendMessage",
       expect.objectContaining({
@@ -61,7 +62,7 @@ describe("createTelegramClient", () => {
   it("throws on API error", async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 400, text: () => Promise.resolve("bad") })
     const tg = createTelegramClient("bot:token")
-    await expect(tg.sendMessage(1, "x")).rejects.toThrow("Telegram API error 400")
+    await expect(tg.sendMessage(1, "x")).rejects.toThrow("Telegram API error 400 on sendMessage")
   })
 })
 
@@ -132,11 +133,12 @@ describe("handleTelegramWebhook", () => {
 
   it("handles quick-capture message", async () => {
     const putBodies: string[] = []
-    mockFetch.mockImplementation(async (_url: string, opts?: RequestInit) => {
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
       if (opts?.method === "PUT") {
         putBodies.push(opts.body as string)
         return { ok: true, json: () => Promise.resolve({}) }
       }
+      if (url?.includes?.("api.telegram.org")) return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
       return { ok: true, json: () => Promise.resolve({ content: b64(""), sha: "s1" }) }
     })
 
@@ -175,8 +177,9 @@ source: manual
 
 Body text`
 
-    mockFetch.mockImplementation(async (_url: string, opts?: RequestInit) => {
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
       if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+      if (url?.includes?.("api.telegram.org")) return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
       return { ok: true, json: () => Promise.resolve({ content: b64(RAW), sha: "s1" }) }
     })
 

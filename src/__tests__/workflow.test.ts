@@ -40,6 +40,7 @@ function mockEnv(): Env {
     LINKEDIN_ACCESS_TOKEN: "",
     LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
+    WAIT_FOR_FEEDBACK_HOURS: "168",
     PIPELINE_WORKFLOW: {} as never,
   }
 }
@@ -98,6 +99,7 @@ describe("PipelineWorkflow", () => {
       "fetch",
       vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
         if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        if (url?.includes?.("api.telegram.org")) return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
         const path = url.split("/contents/")[1]
         const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
         return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
@@ -112,11 +114,10 @@ describe("PipelineWorkflow", () => {
 
     expect(stepDo).toHaveBeenCalledWith("generate", expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify", expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("archive", expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("notify-published", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("notify-not-configured", expect.any(Function))
   })
 
-  it("revises on feedback and finalizes on second approval", async () => {
+  it("revises on feedback and notifies on second approval without LinkedIn", async () => {
     const responses = [
       { text: "First draft", usage: { inputTokens: 5, outputTokens: 3 } },
       {
@@ -138,6 +139,7 @@ describe("PipelineWorkflow", () => {
       "fetch",
       vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
         if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        if (url?.includes?.("api.telegram.org")) return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
         const path = url.split("/contents/")[1]
         const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
         return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
@@ -153,7 +155,6 @@ describe("PipelineWorkflow", () => {
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
     expect(stepDo).toHaveBeenCalledWith(expect.stringContaining("revise-"), expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("archive", expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("notify-published", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("notify-not-configured", expect.any(Function))
   })
 })

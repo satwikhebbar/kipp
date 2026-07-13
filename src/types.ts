@@ -15,6 +15,7 @@ export interface Env {
   DATA_REPO_NAME: string
   SUBSTACK_RSS_URL: string
   POSTING_CADENCE_DAYS: string
+  WAIT_FOR_FEEDBACK_HOURS: string
 }
 
 export type IdeaStatus = "raw" | "drafted" | "awaiting-feedback" | "awaiting-feedback-expired" | "finalized" | "skipped"
@@ -98,4 +99,13 @@ export interface GithubFile {
   content: string
   sha: string
   path: string
+}
+
+export interface LinkedInTokens {
+  access_token: string
+  expires_in: number
+  created_at: string
+  refresh_token?: string
+  refresh_token_expires_in?: number
+  scope?: string
 }

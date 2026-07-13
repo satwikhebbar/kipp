@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { handleCadenceCron } from "./triggers/cadence"
 import { handleRssCron } from "./triggers/rss"
 import { handleTelegramWebhook } from "./triggers/telegram-webhook"
+import { handleTokenCheckCron } from "./triggers/token-check"
 import type { Env } from "./types"
 
 export { PipelineWorkflow } from "./workflow"
@@ -18,6 +19,9 @@ export default {
     switch (controller.cron) {
       case "0 9 * * *":
         await handleRssCron(env)
+        break
+      case "0 8 * * 1":
+        await handleTokenCheckCron(env)
         break
       case "0 9 * * 1":
         await handleCadenceCron(env)

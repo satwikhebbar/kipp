@@ -131,6 +131,7 @@ Codex reads response files when `responds_to` or `target` overlaps with its curr
 
 ## Behavior Rules
 
+- Handoff files in `.agent-handoff/*/` are gitignored. Use `bash find` or direct file paths — glob tools respect `.gitignore` and will not find them.
 - Process one handoff at a time per session.
 - Treat `Requested Changes` as the work queue.
 - Treat `Acceptance Criteria` as the definition of done.

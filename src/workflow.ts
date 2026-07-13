@@ -48,7 +48,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       await step.do("notify", async () => {
         const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
         const preview = state.draft.slice(0, 200)
-        await tg.sendMessage(
+        const result = await tg.sendMessage(
           state.chatId,
           `*Draft for idea #${ideaId}*\n\n${preview}...\n\nReply with feedback or tap below.`,
           {
@@ -62,14 +62,24 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             },
           },
         )
+        const client = createGitHubClient(this.env)
+        const manager = createBacklogManager(client)
+        const ideas = await manager.readIdeas()
+        const idea = ideas.find((i) => i.id === ideaId)
+        if (idea) {
+          await manager.updateIdea(ideaId, {
+            correlation: { ...idea.correlation, botMessageId: result.messageId },
+          })
+        }
       })
     }
 
     let currentDraft = state.draft
     for (let i = 0; i < 4; i++) {
+      const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || "168"
       const reply = await step.waitForEvent<{ text?: string }>(`feedback-${i}`, {
         type: "telegram-reply",
-        timeout: "7 days",
+        timeout: `${timeoutHours} hours` as any,
       })
       if (reply.type === "timeout") {
         await step.do(`timeout-${i}`, async () => {
@@ -83,10 +93,28 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const text = reply.payload?.text ?? ""
       if (text === "__approve__") {
         if (this.env.LINKEDIN_ACCESS_TOKEN && this.env.LINKEDIN_AUTHOR_URN) {
-          await step.do("linkedin-publish", async () => {
-            const li = createLinkedInClient(this.env.LINKEDIN_ACCESS_TOKEN)
-            await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
-          })
+          try {
+            await step.do("linkedin-publish", async () => {
+              const li = createLinkedInClient(this.env.LINKEDIN_ACCESS_TOKEN)
+              await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
+            })
+          } catch (err) {
+            if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
+              await step.do("notify-publish-failed", async () => {
+                const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+                await tg.sendMessage(state.chatId, `❌ LinkedIn publish failed: ${err}`)
+              })
+            }
+            return
+          }
+        } else {
+          if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
+            await step.do("notify-not-configured", async () => {
+              const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+              await tg.sendMessage(state.chatId, "❌ Cannot publish: LinkedIn not configured. Configure credentials and re-approve.")
+            })
+          }
+          return
         }
         await step.do("archive", async () => {
           const client = createGitHubClient(this.env)
