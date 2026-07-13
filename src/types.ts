@@ -10,6 +10,8 @@ export interface Env {
   LINKEDIN_AUTHOR_URN: string
   LLM_API_KEY: string
   LLM_PROVIDER: string
+  LLM_MODEL?: string
+  LLM_MAX_RETRIES?: string
   GITHUB_PAT: string
   DATA_REPO_OWNER: string
   DATA_REPO_NAME: string
@@ -26,11 +28,12 @@ export interface Correlation {
   telegramChatId?: string
   botMessageId?: number
   workflowInstanceId?: string
+  pendingRevision?: string
 }
 
 export interface Idea {
   id: string
-  title: string
+  title?: string
   status: IdeaStatus
   created: string
   source: Source
@@ -78,7 +81,7 @@ export interface ClassificationResult {
 
 export interface WorkflowParams {
   ideaId: string
-  ideaTitle: string
+  ideaTitle?: string
   ideaBody: string
   substackBody?: string
 }

@@ -53,7 +53,7 @@ function extractSections(body: string): { preamble: string; draft?: string; crit
   let draft: string | undefined
   let critique: string | undefined
 
-  const cleaned = body.replace(/^## (Draft|Critique)\n\n([\s\S]*?)(?=\n## |\n*$)/gm, (_, section, content) => {
+  const cleaned = body.replace(/(?:^|\n)## (Draft|Critique)\n\n([\s\S]*?)(?=\n## |$)/g, (_, section, content) => {
     if (section === "Draft") draft = content.trim()
     if (section === "Critique") critique = content.trim()
     return ""
@@ -72,7 +72,7 @@ export function parseIdea(text: string): Idea {
 
   const idea: Idea = {
     id: String(fm.id ?? ""),
-    title: String(fm.title ?? ""),
+    title: fm.title ? String(fm.title) : undefined,
     status: (fm.status as IdeaStatus) ?? "raw",
     created: String(fm.created ?? ""),
     source: (fm.source as Source) ?? "manual",
@@ -87,6 +87,7 @@ export function parseIdea(text: string): Idea {
       telegramChatId: c.telegramChatId,
       botMessageId: c.botMessageId ? Number(c.botMessageId) : undefined,
       workflowInstanceId: c.workflowInstanceId,
+      pendingRevision: c.pendingRevision,
     }
   }
 
@@ -108,11 +109,11 @@ function buildBody(idea: Idea): string {
 export function serializeIdea(idea: Idea): string {
   const fm: FM = {
     id: idea.id,
-    title: idea.title,
     status: idea.status,
     created: idea.created,
     source: idea.source,
   }
+  if (idea.title) fm.title = idea.title
   if (idea.substackUrl) fm.substackUrl = idea.substackUrl
   if (idea.teaser) fm.teaser = idea.teaser
   if (idea.reviewCount) fm.reviewCount = String(idea.reviewCount)
@@ -123,6 +124,7 @@ export function serializeIdea(idea: Idea): string {
     if (idea.correlation.telegramChatId) c.telegramChatId = idea.correlation.telegramChatId
     if (idea.correlation.botMessageId) c.botMessageId = String(idea.correlation.botMessageId)
     if (idea.correlation.workflowInstanceId) c.workflowInstanceId = idea.correlation.workflowInstanceId
+    if (idea.correlation.pendingRevision) c.pendingRevision = idea.correlation.pendingRevision
     if (Object.keys(c).length > 0) fm.correlation = c
   }
 

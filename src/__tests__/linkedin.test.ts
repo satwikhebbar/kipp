@@ -1,9 +1,65 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-const mockFetch = vi.hoisted(() => vi.fn())
-vi.stubGlobal("fetch", mockFetch)
+const mockFetch = vi.hoisted(() => {
+  const fn = vi.fn()
+  globalThis.fetch = fn
+  return fn
+})
 
-import { createLinkedInClient } from "../integrations/linkedin"
+import { createLinkedInClient, getLinkedInToken } from "../integrations/linkedin"
+
+interface MockClient {
+  readFile(path: string): Promise<{ content: string; sha: string }>
+  writeFile: (...args: unknown[]) => unknown
+  mutateFile: (...args: unknown[]) => unknown
+}
+
+function mockClient(content?: string): MockClient {
+  return {
+    async readFile(path: string) {
+      if (path === ".linkedin-tokens.json" && content !== undefined) return { content, sha: "s1" }
+      throw Object.assign(new Error("Not found"), { status: 404 })
+    },
+    writeFile: vi.fn(),
+    mutateFile: vi.fn(),
+  }
+}
+
+describe("getLinkedInToken", () => {
+  it("reads from .linkedin-tokens.json when available", async () => {
+    const gh = mockClient(JSON.stringify({ access_token: "file-token" }))
+    const token = await getLinkedInToken({} as never, gh as never)
+    expect(token).toBe("file-token")
+  })
+
+  it("falls back to LINKEDIN_ACCESS_TOKEN when file is missing", async () => {
+    const gh = mockClient()
+    const token = await getLinkedInToken({ LINKEDIN_ACCESS_TOKEN: "env-token" } as never, gh as never)
+    expect(token).toBe("env-token")
+  })
+
+  it("falls through when file lacks access_token key", async () => {
+    const gh = mockClient(JSON.stringify({}))
+    const token = await getLinkedInToken({ LINKEDIN_ACCESS_TOKEN: "env-token" } as never, gh as never)
+    expect(token).toBe("env-token")
+  })
+
+  it("falls through on file read error", async () => {
+    const gh = {
+      readFile: vi.fn().mockRejectedValue(new Error("network error")),
+      writeFile: vi.fn(),
+      mutateFile: vi.fn(),
+    }
+    const token = await getLinkedInToken({ LINKEDIN_ACCESS_TOKEN: "env-token" } as never, gh as never)
+    expect(token).toBe("env-token")
+  })
+
+  it("returns empty string when neither source has a token", async () => {
+    const gh = mockClient()
+    const token = await getLinkedInToken({} as never, gh as never)
+    expect(token).toBe("")
+  })
+})
 
 describe("createLinkedInClient", () => {
   beforeEach(() => mockFetch.mockReset())

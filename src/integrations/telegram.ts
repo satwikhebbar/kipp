@@ -7,7 +7,7 @@ export function createTelegramClient(token: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     })
-    if (!res.ok) throw new Error(`Telegram API error ${res.status} on ${method}`)
+    if (!res.ok) throw new Error(`Telegram API error ${res.status} on ${method}: ${await res.text()}`)
     return (await res.json()) as T
   }
 

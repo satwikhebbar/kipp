@@ -1,3 +1,7 @@
+import type { Env, LinkedInTokens } from "../types"
+import type { GithubClient } from "./github"
+import { createGitHubClient } from "./github"
+
 const LINKEDIN_API = "https://api.linkedin.com"
 
 export class LinkedInError extends Error {
@@ -12,6 +16,19 @@ export class LinkedInError extends Error {
 
 export interface LinkedinClient {
   createDraftPost(authorUrn: string, text: string): Promise<{ urn: string }>
+}
+
+export async function getLinkedInToken(env: Env, gh?: GithubClient): Promise<string> {
+  try {
+    const client = gh ?? createGitHubClient(env)
+    const file = await client.readFile(".linkedin-tokens.json")
+    const tokens = JSON.parse(file.content) as LinkedInTokens
+    if (tokens.access_token) return tokens.access_token
+  } catch {
+    /* fall through */
+  }
+  if (env.LINKEDIN_ACCESS_TOKEN) return env.LINKEDIN_ACCESS_TOKEN
+  return ""
 }
 
 export function createLinkedInClient(accessToken: string): LinkedinClient {

@@ -113,6 +113,54 @@ describe("handleTokenCheckCron", () => {
     expect(writtenContent).toContain("rt-new")
   })
 
+  it("alerts when refresh API returns error", async () => {
+    let sentMessage = ""
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url?.includes?.("api.github.com")) {
+        return {
+          ok: true,
+          json: () => Promise.resolve({ content: b64(JSON.stringify(EXPIRING_TOKENS)), sha: "s1" }),
+        }
+      }
+      if (url?.includes?.("linkedin.com/oauth")) {
+        return { ok: false, status: 400, text: () => Promise.resolve("bad request") }
+      }
+      if (url?.includes?.("api.telegram.org/bot")) {
+        const body = JSON.parse(opts?.body as string) as { text?: string }
+        sentMessage = body.text ?? ""
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 1 } }) }
+      }
+      return { ok: true, json: () => Promise.resolve({}) }
+    })
+    const result = await handleTokenCheckCron(mockEnv() as never)
+    expect(result).toEqual({ alerted: true, refreshed: false })
+    expect(sentMessage).toContain("expires")
+  })
+
+  it("alerts when refresh throws (network error)", async () => {
+    let sentMessage = ""
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url?.includes?.("api.github.com")) {
+        return {
+          ok: true,
+          json: () => Promise.resolve({ content: b64(JSON.stringify(EXPIRING_TOKENS)), sha: "s1" }),
+        }
+      }
+      if (url?.includes?.("linkedin.com/oauth")) {
+        throw new Error("network timeout")
+      }
+      if (url?.includes?.("api.telegram.org/bot")) {
+        const body = JSON.parse(opts?.body as string) as { text?: string }
+        sentMessage = body.text ?? ""
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 1 } }) }
+      }
+      return { ok: true, json: () => Promise.resolve({}) }
+    })
+    const result = await handleTokenCheckCron(mockEnv() as never)
+    expect(result).toEqual({ alerted: true, refreshed: false })
+    expect(sentMessage).toContain("expires")
+  })
+
   it("alerts when near expiry and no refresh token", async () => {
     let sentMessage = ""
     mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {

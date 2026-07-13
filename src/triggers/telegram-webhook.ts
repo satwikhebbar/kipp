@@ -2,7 +2,7 @@ import { nextId } from "../backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../backlog/parser"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
-import type { Env, Idea } from "../types"
+import type { Env } from "../types"
 
 interface TelegramUser {
   id: number
@@ -61,8 +61,16 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     } else if (cq.data?.startsWith("revise:") && cq.message) {
       const workflowId = cq.data.slice("revise:".length)
       if (workflowId) {
-        const instance = await env.PIPELINE_WORKFLOW.get(workflowId)
-        await instance.sendEvent({ type: "telegram-reply", payload: { userId: cq.from.id, text: "__revise__" } })
+        const client = createGitHubClient(env)
+        await client.mutateFile("ideas.md", (c) => {
+          const all = parseIdeas(c)
+          const idx = all.findIndex((i) => i.correlation?.workflowInstanceId === workflowId)
+          if (idx !== -1) {
+            all[idx] = { ...all[idx], correlation: { ...all[idx].correlation, pendingRevision: workflowId } }
+          }
+          return serializeIdeas(all)
+        })
+        await tg.sendMessage(cq.message.chat.id, "Type your revision feedback.")
       }
     }
 
@@ -108,28 +116,59 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     await env.PIPELINE_WORKFLOW.create({
       params: { ideaId: raw.id, ideaTitle: raw.title, ideaBody: raw.body },
     })
-    await tg.sendMessage(msg.chat.id, `Started workflow for idea #${raw.id}: ${raw.title}`)
+    const label = raw.title ?? raw.body.slice(0, 80)
+    await tg.sendMessage(msg.chat.id, `Started workflow for idea #${raw.id}: ${label}`)
     return new Response("OK")
   }
 
   {
     const client = createGitHubClient(env)
     const text = msg.text
-    let savedId = ""
-    await client.mutateFile("ideas.md", (c) => {
-      const ideas = parseIdeas(c)
-      savedId = String(nextId(ideas))
-      const idea: Idea = {
-        id: savedId,
-        title: text.slice(0, 80),
-        status: "raw" as const,
-        created: new Date().toISOString(),
-        source: "telegram" as const,
-        body: text,
-      }
-      return serializeIdeas([...ideas, idea])
-    })
-    await tg.sendMessage(msg.chat.id, `Saved as idea #${savedId}.`)
+
+    if (text.startsWith("/add")) {
+      let savedId = ""
+      await client.mutateFile("ideas.md", (c) => {
+        const items = parseIdeas(c)
+        savedId = String(nextId(items))
+        items.push({
+          id: savedId,
+          status: "raw" as const,
+          created: new Date().toISOString(),
+          source: "telegram" as const,
+          body: text.slice(5).trim(),
+        })
+        return serializeIdeas(items)
+      })
+      await tg.sendMessage(msg.chat.id, `Saved as idea #${savedId}.`)
+      return new Response("OK")
+    }
+
+    if (text.startsWith("/")) {
+      await tg.sendMessage(msg.chat.id, "Unknown command. Use /add <text>, /generate, or tap inline buttons.")
+      return new Response("OK")
+    }
+
+    const all = parseIdeas((await client.readFile("ideas.md")).content)
+    const pendingIdea = all.find((i) => i.correlation?.pendingRevision)
+
+    if (pendingIdea?.correlation?.workflowInstanceId) {
+      const instance = await env.PIPELINE_WORKFLOW.get(pendingIdea.correlation.workflowInstanceId)
+      await instance.sendEvent({ type: "telegram-reply", payload: { userId: msg.from.id, text } })
+      const ideaId = pendingIdea.id
+      await client.mutateFile("ideas.md", (c) => {
+        const items = parseIdeas(c)
+        const idx = items.findIndex((i) => i.id === ideaId)
+        if (idx !== -1) {
+          const corr = items[idx].correlation
+          const { pendingRevision: _, ...rest } = corr || {}
+          items[idx] = { ...items[idx], correlation: rest }
+        }
+        return serializeIdeas(items)
+      })
+      return new Response("OK")
+    }
+
+    await tg.sendMessage(msg.chat.id, "Unknown command. Use /add <text>, /generate, or tap inline buttons.")
     return new Response("OK")
   }
 }

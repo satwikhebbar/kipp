@@ -61,7 +61,7 @@ export async function handleTokenCheckCron(env: Env): Promise<{ alerted: boolean
     const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
     await tg.sendMessage(
       Number(env.TELEGRAM_ALLOWED_USER_ID),
-      `⚠️ LinkedIn access token expires in ${Math.ceil(daysUntilExpiry)} days.\nVisit your worker URL /auth/linkedin to reauthorize.`,
+      `⚠️ LinkedIn access token expires in ${Math.ceil(daysUntilExpiry)} days.\nRun \`wrangler secrets put LINKEDIN_ACCESS_TOKEN <new-token>\` to update it.`,
     )
   }
 

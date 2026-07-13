@@ -1,4 +1,4 @@
-import type { GenerateFn } from "../providers/llm"
+import { type GenerateFn, parseLLMJson } from "../providers/llm"
 import type { ClassificationResult } from "../types"
 
 const SYSTEM_PROMPT = `Given a reply from the author of a LinkedIn post draft, classify their intent.
@@ -14,6 +14,6 @@ export type ClassifyFn = (replyText: string) => Promise<ClassificationResult>
 export function createClassifyAgent(generate: GenerateFn): ClassifyFn {
   return async (replyText) => {
     const res = await generate({ system: SYSTEM_PROMPT, prompt: `Author's reply: ${replyText}` })
-    return JSON.parse(res.text) as ClassificationResult
+    return parseLLMJson<ClassificationResult>(res.text)
   }
 }

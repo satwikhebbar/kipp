@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mockGen = vi.hoisted(() => vi.fn())
-vi.mock("../providers/index", () => ({
+vi.mock("../providers/index", async () => ({
   createGenerator: vi.fn(() => mockGen),
+  parseLLMJson: (await vi.importActual("../providers/llm")).parseLLMJson,
 }))
 
 import { handleRssCron, parseRssFeed } from "../triggers/rss"

@@ -15,25 +15,17 @@ class_name = "PipelineWorkflow"
 [triggers]
 crons = ["0 9 * * *", "0 8 * * 1", "0 9 * * 1"]
 
-# --- Vars (set via wrangler.toml [vars] or dashboard) ---
-# [vars]
-# SUBSTACK_RSS_URL = "https://your-substack.substack.com/feed"
-# LLM_MODEL = "gemini-2.0-flash"
-# DATA_REPO_BRANCH = "main"
-# POSTING_CADENCE_DAYS = "7"
-# LINKEDIN_AUTHOR_URN = "urn:li:person:..."
-# TIMEZONE = "UTC"
-# WAIT_FOR_FEEDBACK_HOURS = "12"
+# --- Vars (non-sensitive config; for dashboard deploy set these in the dashboard) ---
+[vars]
+SUBSTACK_RSS_URL = "https://your-name.substack.com/feed"
+# LLM_MODEL = "gemini-3-flash-preview"
+LLM_MODEL = "deepseek-v4-flash"
+DATA_REPO_BRANCH = "main"
+POSTING_CADENCE_DAYS = "7"
+LINKEDIN_AUTHOR_URN = "urn:li:person:your-linkedin-person-urn"
+TIMEZONE = "UTC"
+WAIT_FOR_FEEDBACK_HOURS = "12"
+LLM_PROVIDER = "deepseek"
+LLM_MAX_RETRIES = "3"
 
-# --- Secrets (set via `wrangler secrets put`) ---
-# TELEGRAM_BOT_TOKEN
-# TELEGRAM_WEBHOOK_SECRET
-# LINKEDIN_CLIENT_ID
-# LINKEDIN_CLIENT_SECRET
-# LINKEDIN_ACCESS_TOKEN
-# LINKEDIN_REFRESH_TOKEN
-# LLM_API_KEY
-# LLM_PROVIDER
-# GITHUB_PAT
-# DATA_REPO_OWNER
-# DATA_REPO_NAME
+# --- Secrets (set via `wrangler secrets put`; for local dev set in .dev.vars) ---

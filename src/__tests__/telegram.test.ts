@@ -111,14 +111,36 @@ describe("handleTelegramWebhook", () => {
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("answerCallbackQuery"), expect.any(Object))
   })
 
-  it("handles revise callback_query", async () => {
-    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
+  it("handles revise callback_query by setting pendingRevision", async () => {
+    const REVISE_IDEAS = `---
+id: 1
+title: Test
+status: awaiting-feedback
+correlation:
+  workflowInstanceId: wf-xyz
+---
+
+Body`
+
+    let putBody = ""
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (opts?.method === "PUT") {
+        putBody = opts.body as string
+        return { ok: true, json: () => Promise.resolve({}) }
+      }
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 200 } }) }
+      return { ok: true, json: () => Promise.resolve({ content: b64(REVISE_IDEAS), sha: "s1" }) }
+    })
     const { env, sendEvent, get } = callbackEnv()
 
     const res = await handleTelegramWebhook(callbackRequest(callbackBody("revise:wf-xyz")), env as never)
     expect(res.status).toBe(200)
-    expect(get).toHaveBeenCalledWith("wf-xyz")
-    expect(sendEvent).toHaveBeenCalledWith({ type: "telegram-reply", payload: { userId: 42, text: "__revise__" } })
+    expect(get).not.toHaveBeenCalled()
+    expect(sendEvent).not.toHaveBeenCalled()
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("sendMessage"), expect.any(Object))
+    const updated = JSON.parse(putBody)
+    expect(atob(updated.content)).toContain("pendingRevision: wf-xyz")
   })
 
   it("ignores callback_query with unknown prefix", async () => {
@@ -138,7 +160,8 @@ describe("handleTelegramWebhook", () => {
         putBodies.push(opts.body as string)
         return { ok: true, json: () => Promise.resolve({}) }
       }
-      if (url?.includes?.("api.telegram.org")) return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
       return { ok: true, json: () => Promise.resolve({ content: b64(""), sha: "s1" }) }
     })
 
@@ -148,7 +171,7 @@ describe("handleTelegramWebhook", () => {
         message_id: 5,
         from: { id: 42, is_bot: false, first_name: "Test" },
         chat: { id: 100, type: "private" },
-        text: "Quick idea here",
+        text: "/add Quick idea here",
       },
     })
     const res = await handleTelegramWebhook(
@@ -179,7 +202,8 @@ Body text`
 
     mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
       if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-      if (url?.includes?.("api.telegram.org")) return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
       return { ok: true, json: () => Promise.resolve({ content: b64(RAW), sha: "s1" }) }
     })
 

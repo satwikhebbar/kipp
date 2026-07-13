@@ -1,7 +1,7 @@
 import { nextId } from "../backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../backlog/parser"
 import { createGitHubClient, type GithubClient } from "../integrations/github"
-import { createGenerator, type GenerateFn } from "../providers"
+import { createGenerator, type GenerateFn, parseLLMJson } from "../providers"
 import type { Env, Idea } from "../types"
 
 interface RssItem {
@@ -59,7 +59,7 @@ async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<Extracte
   const text = stripHtml(item.contentHtml).slice(0, 6000)
   const prompt = `Newsletter: "${item.title}"\nURL: ${item.link}\n\nContent:\n${text}`
   const res = await gen({ system: SYSTEM_PROMPT, prompt })
-  const parsed = JSON.parse(res.text) as ExtractedIdeas
+  const parsed = parseLLMJson<ExtractedIdeas>(res.text)
   if (!parsed.teaser || !Array.isArray(parsed.subIdeas)) {
     throw new Error("LLM returned malformed idea extraction")
   }
@@ -114,7 +114,12 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
   const newItem = items.find((item) => !knownLinks.has(item.link))
   if (!newItem) return { started: false }
 
-  const gen = createGenerator(env.LLM_API_KEY, env.LLM_PROVIDER || "gemini")
+  const gen = createGenerator(
+    env.LLM_API_KEY,
+    env.LLM_PROVIDER || "gemini",
+    env.LLM_MODEL,
+    Number(env.LLM_MAX_RETRIES ?? 3),
+  )
   const extracted = await llmExtractIdeas(gen, newItem)
 
   const { main, side } = buildIdeas(newItem, extracted, existing)

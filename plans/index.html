@@ -180,9 +180,9 @@
     <h1>LinkedIn Posting Pipeline</h1>
     <div class="subtitle">Implementation Plan — Cloudflare Workflows + TypeScript</div>
     <div class="meta">
-      <span>Status: <strong>Not Started</strong></span> &middot;
-      <span>Last updated: 2026-07-10</span> &middot;
-      <span>Plan: 15 phases, ~30 files</span>
+    <span>Status: <strong>Not Started</strong></span> &middot;
+    <span>Last updated: 2026-07-13</span> &middot;
+    <span>Plan: 16 phases, ~30 files</span>
     </div>
   </header>
 
@@ -207,7 +207,7 @@
 
     <div class="status-bar">
       <div class="status-card"><div class="number">3+1</div><div class="label">Triggers</div></div>
-      <div class="status-card"><div class="number">15</div><div class="label">Phases</div></div>
+      <div class="status-card"><div class="number">16</div><div class="label">Phases</div></div>
       <div class="status-card"><div class="number">~30</div><div class="label">Source Files</div></div>
       <div class="status-card"><div class="number">6+10</div><div class="label">Secrets &amp; Config</div></div>
     </div>
@@ -544,6 +544,33 @@ correlation:
       <li>Unit tests for backlog/* (parser, manager, ID generator, including <code>awaiting-feedback-expired</code> status handling)</li>
       <li>Unit tests for triggers/* (mocked GitHub API, mocked RSS)</li>
       <li>Integration test: full workflow run with mocked externals</li>
+    </ol>
+
+    <!-- Phase 14a -->
+    <h3 id="phase-14a">Phase 14a — Local Testing</h3>
+    <p><span class="tag phase">1 file</span> Run the full pipeline locally with real external APIs using <code>wrangler dev</code>'s built-in Workflows emulation.</p>
+    <ol>
+      <li><strong><code>.dev.vars</code></strong> — Place real API tokens here for local dev (Telegram bot token, GitHub PAT, LLM key, LinkedIn credentials, etc.). Never committed.</li>
+      <li><strong><code>wrangler dev</code></strong> — Starts a local HTTP server (default <code>:8787</code>) with an emulated Workflows runtime. All bindings (<code>PIPELINE_WORKFLOW</code>, <code>step.do</code>, <code>step.waitForEvent</code>) work locally. Press <code>e</code> to open Local Explorer for worklow instance management.</li>
+      <li><strong>Trigger via curl</strong> — Simulate a Telegram <code>/generate</code> command:
+        <pre><code>curl -X POST http://localhost:8787/webhook/telegram \
+  -H "X-Telegram-Bot-Api-Secret-Token: $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"update_id":1,"message":{"message_id":1,"from":{"id":42},"chat":{"id":42,"type":"private"},"text":"/generate"}}'</code></pre>
+      </li>
+      <li><strong>Send feedback via curl</strong> — Simulate approval or revision text to a running workflow instance:
+        <pre><code>curl -X POST http://localhost:8787/webhook/telegram \
+  -H "X-Telegram-Bot-Api-Secret-Token: $SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"update_id":2,"message":{"message_id":2,"from":{"id":42},"chat":{"id":42,"type":"private"},"text":"__approve__","reply_to_message":{"message_id":100,"from":{"is_bot":true}}}}'</code></pre>
+      </li>
+      <li><strong>Local Explorer</strong> — Browser UI at <code>http://localhost:8787/cdn-cgi/explorer</code> to view instances, inspect step history, and send mock events.</li>
+      <li><strong><code>wrangler workflows</code> CLI</strong> — Manage instances from the terminal:
+        <pre><code>wrangler workflows trigger linkedin-pipeline --local
+wrangler workflows list --local
+wrangler workflows instances describe linkedin-pipeline &lt;INSTANCE_ID&gt; --local</code></pre>
+      </li>
+      <li><strong>Automated e2e test</strong> — <code>pnpm test:e2e</code> runs the full pipeline with mocked externals (no internet needed). Set <code>FEEDBACK_TEXT=__approve__</code> for non-interactive mode.</li>
     </ol>
 
     <!-- Phase 15 -->

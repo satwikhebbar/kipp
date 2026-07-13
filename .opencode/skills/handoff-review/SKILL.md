@@ -25,8 +25,8 @@ Queue contents are gitignored, except `.gitkeep` files and `.agent-handoff/READM
 
 ## Processing Flow
 
-1. Look for Markdown files in `.agent-handoff/inbox/`.
-2. Claim one by moving it to `.agent-handoff/in-progress/`.
+1. **List inbox files using `bash` (NOT `glob`):** run `bash ls -la .agent-handoff/inbox/`. The `.agent-handoff/` tree is gitignored, so glob tools will silently find nothing — you must use bash.
+2. Claim one by moving it to `.agent-handoff/in-progress/` via `bash mv`.
 3. Read the YAML frontmatter and requested changes.
 4. Apply the requested changes to the target files.
 5. Verify the acceptance criteria.

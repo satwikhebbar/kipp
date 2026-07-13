@@ -40,14 +40,22 @@ export function createGitHubClient(env: {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${env.GITHUB_PAT}`,
     Accept: "application/vnd.github.v3+json",
+    "User-Agent": "agent-harness-workflow",
   }
 
   function url(path: string) {
     return `${GITHUB_API}/repos/${env.DATA_REPO_OWNER}/${env.DATA_REPO_NAME}/contents/${path}`
   }
 
+  async function fetchWithRetry(req: () => Promise<Response>, retries = 2): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      const res = await req()
+      if (res.ok || attempt >= retries || res.status < 500) return res
+    }
+  }
+
   async function readFile(path: string): Promise<GithubFile> {
-    const res = await fetch(url(path), { headers })
+    const res = await fetchWithRetry(() => fetch(url(path), { headers }))
     if (!res.ok) {
       const body = await res.text()
       throw new GithubError(res.status, `GitHub read ${path} error ${res.status}: ${body}`)
@@ -58,11 +66,13 @@ export function createGitHubClient(env: {
 
   async function writeFile(path: string, content: string, sha: string): Promise<void> {
     const body = { message: `update ${path}`, content: b64encode(content), sha }
-    const res = await fetch(url(path), {
-      method: "PUT",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
+    const res = await fetchWithRetry(() =>
+      fetch(url(path), {
+        method: "PUT",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    )
     if (!res.ok) {
       const text = await res.text()
       throw new GithubError(res.status, `GitHub write ${path} error ${res.status}: ${text}`)

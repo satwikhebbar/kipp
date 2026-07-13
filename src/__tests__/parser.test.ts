@@ -137,8 +137,34 @@ describe("parseIdea", () => {
   })
 })
 
+const MULTILINE_DRAFT_IDEA = `---
+id: 8
+title: Multiline draft
+status: awaiting-feedback
+source: telegram
+created: 2026-07-13T12:00:00Z
+---
+
+Original body text here.
+
+## Draft
+
+First paragraph of draft.
+
+Second paragraph of draft.
+
+Third paragraph.`
+
 describe("serializeIdea roundtrip", () => {
-  const cases = [RAW_IDEA, DRAFTED_IDEA, AWAITING_FEEDBACK_IDEA, EXPIRED_IDEA, FINALIZED_IDEA, SKIPPED_IDEA]
+  const cases = [
+    RAW_IDEA,
+    DRAFTED_IDEA,
+    AWAITING_FEEDBACK_IDEA,
+    EXPIRED_IDEA,
+    FINALIZED_IDEA,
+    SKIPPED_IDEA,
+    MULTILINE_DRAFT_IDEA,
+  ]
 
   for (const input of cases) {
     it(`roundtrips idea ${parseIdea(input).id}`, () => {
@@ -148,6 +174,13 @@ describe("serializeIdea roundtrip", () => {
       expect(reparsed).toEqual(idea)
     })
   }
+})
+
+it("correctly extracts multiline draft from body", () => {
+  const idea = parseIdea(MULTILINE_DRAFT_IDEA)
+  expect(idea.body).toBe("Original body text here.")
+  expect(idea.draft).toBe("First paragraph of draft.\n\nSecond paragraph of draft.\n\nThird paragraph.")
+  expect(idea.body).not.toContain("First paragraph")
 })
 
 describe("parseIdeas / serializeIdeas", () => {
@@ -163,6 +196,23 @@ describe("parseIdeas / serializeIdeas", () => {
     const serialized = serializeIdeas(ideas)
     const reparsed = parseIdeas(serialized)
     expect(reparsed).toEqual(ideas)
+  })
+})
+
+describe("duplicate ID handling", () => {
+  it("parseIdeas returns both entries when IDs are duplicated", () => {
+    const dup = `${RAW_IDEA}\n${RAW_IDEA}`
+    const ideas = parseIdeas(dup)
+    expect(ideas).toHaveLength(2)
+    expect(ideas[0].id).toBe("1")
+    expect(ideas[1].id).toBe("1")
+  })
+
+  it("serializeIdeas preserves duplicate IDs", () => {
+    const ideas = parseIdeas(`${RAW_IDEA}\n${RAW_IDEA}`)
+    const serialized = serializeIdeas(ideas)
+    const reparsed = parseIdeas(serialized)
+    expect(reparsed).toHaveLength(2)
   })
 })
 
