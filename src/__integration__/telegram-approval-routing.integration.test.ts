@@ -206,6 +206,44 @@ Body`,
     expect(state.githubFiles.get("ideas.md")).toContain("pendingRevision: 100")
   })
 
+  it("routes /add while pendingRevision is active as a new idea, not revision feedback", async () => {
+    harness = createFakeNetwork({
+      githubFiles: {
+        "ideas.md": `---
+id: 1
+status: awaiting-feedback
+correlation:
+  workflowInstanceId: wf-one
+  pendingRevision: 100
+---
+Body text`,
+      },
+    })
+    vi.stubGlobal("fetch", harness.fetch)
+    const env = baseEnv({ TELEGRAM_ALLOWED_USER_ID: "42", PIPELINE_WORKFLOW: binding as never })
+
+    const res = await handleTelegramWebhook(
+      telegramMessageRequest({
+        update_id: 5,
+        message: {
+          message_id: 22,
+          from: { id: 42, is_bot: false },
+          chat: { id: 100, type: "private" },
+          text: "/add A new idea",
+        },
+      }),
+      env,
+    )
+    expect(res.status).toBe(200)
+
+    const state = harness.getState()
+    const ideasMd = state.githubFiles.get("ideas.md")
+    expect(ideasMd).toContain("A new idea")
+    expect(ideasMd).toContain("pendingRevision: 100")
+
+    expect(binding.getReceivedEvents().length).toBe(0)
+  })
+
   it("routes reply-to-bot-message to the correct workflow", async () => {
     harness = createFakeNetwork({
       githubFiles: {

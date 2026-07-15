@@ -4,6 +4,7 @@ export interface FakeState {
   githubFiles: Map<string, string>
   telegramMessages: Array<{ chatId: number | string; text: string; replyMarkup?: Record<string, unknown> }>
   linkedinDrafts: Array<{ authorUrn: string; text: string }>
+  linkedinUrls: string[]
   nextMessageId: number
 }
 
@@ -42,6 +43,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
     githubFiles: new Map(Object.entries(config?.githubFiles ?? {})),
     telegramMessages: [],
     linkedinDrafts: [],
+    linkedinUrls: [],
     nextMessageId: 100,
   }
   const llmResponses = config?.llmResponses ?? []
@@ -87,6 +89,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
     }
 
     if (urlStr.includes("api.linkedin.com")) {
+      state.linkedinUrls.push(urlStr)
       const parsed = opts?.body ? (JSON.parse(opts.body as string) as Record<string, unknown>) : {}
       const authorUrn = (parsed.author as string) ?? ""
       const text =

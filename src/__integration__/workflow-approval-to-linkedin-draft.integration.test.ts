@@ -106,8 +106,13 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(state.linkedinDrafts[0].text).toBe("My draft content")
     expect(state.linkedinDrafts[0].authorUrn).toBe("urn:li:person:123")
 
-    expect(state.githubFiles.get("archive.md")).toContain("id: 1")
-    expect(state.githubFiles.get("archive.md")).toContain("status: finalized")
+    expect(state.linkedinUrls).toHaveLength(1)
+    expect(state.linkedinUrls[0]).toContain("/v2/ugcPosts")
+
+    const archive = state.githubFiles.get("archive.md")
+    expect(archive).toContain("id: 1")
+    expect(archive).toContain("status: finalized")
+    expect(archive).toContain("workflowInstanceId: wf-1")
     expect(state.githubFiles.get("ideas.md")).not.toContain("id: 1")
   })
 
