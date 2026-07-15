@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Integration Testing Engineering Plan</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #f8fafc;
+            --accent-color: #3b82f6;
+            --secondary-bg: #1e293b;
+            --border-color: #334155;
+            --code-bg: #0b1120;
+            --heading-color: #cbd5e1;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background-color: var(--bg-color);
+            max-width: 850px;
+            margin: 0 auto;
+            padding: 2.5rem;
+        }
+
+        h1, h2, h3 {
+            color: var(--heading-color);
+            margin-top: 2.5rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 0.75rem;
+            color: #fff;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            color: var(--accent-color);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.5rem;
+        }
+
+        h3 {
+            font-size: 1.25rem;
+            color: #e2e8f0;
+        }
+
+        p {
+            margin-bottom: 1.25rem;
+        }
+
+        .highlight-box {
+            background-color: rgba(59, 130, 246, 0.1);
+            border-left: 4px solid var(--accent-color);
+            padding: 1.25rem;
+            margin: 1.5rem 0;
+            border-radius: 0 0.5rem 0.5rem 0;
+        }
+
+        .success-box {
+            background-color: rgba(16, 185, 129, 0.1);
+            border-left: 4px solid var(--success-color);
+            padding: 1.25rem;
+            margin: 1.5rem 0;
+            border-radius: 0 0.5rem 0.5rem 0;
+        }
+
+        code {
+            font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            background-color: var(--code-bg);
+            padding: 0.2rem 0.4rem;
+            border-radius: 0.25rem;
+            font-size: 0.9em;
+            color: #93c5fd;
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            padding: 1.25rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            border: 1px solid var(--border-color);
+            margin: 1.5rem 0;
+        }
+
+        pre code {
+            background-color: transparent;
+            padding: 0;
+            color: #e2e8f0;
+        }
+
+        ul, ol {
+            padding-left: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        li {
+            margin-bottom: 0.5rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+        }
+
+        th, td {
+            border: 1px solid var(--border-color);
+            padding: 0.75rem;
+            text-align: left;
+        }
+
+        th {
+            background-color: var(--secondary-bg);
+            color: var(--heading-color);
+        }
+
+        .keyword { color: #c678dd; }
+        .function { color: #61afef; }
+        .string { color: #98c379; }
+        .comment { color: #5c6370; font-style: italic; }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Integration Testing Engineering Plan</h1>
+
+    <div class="success-box">
+        <strong>Core Principle:</strong> Integration tests exercise real application wiring (handlers, orchestrators, parsers) with deterministic, <em>stateful</em> local fakes. They should <strong>never</strong> make real network calls to Telegram, GitHub, LinkedIn, or LLM APIs.
+    </div>
+
+    <div class="highlight-box">
+        <strong>Integration boundary:</strong> Real app modules wired together; only platform/runtime edges (Cloudflare bindings, <code>step.do</code>, <code>waitForEvent</code>) and external HTTP (<code>fetch</code>) are faked. Neighboring app modules (providers, clients, parsers, archive logic, backlog managers) are <strong>not</strong> mocked.
+    </div>
+
+    <h2>1. Scope & Strategy</h2>
+    <p>This plan introduces a contract-style integration testing suite bridging the gap between isolated unit tests and full manual End-to-End (E2E) tests. To minimize sprawl and setup complexity, we start by extracting existing mocking patterns into a reusable stateful harness, prioritizing the highest-value flows and security boundaries.</p>
+
+    <h2>2. Phase 1: Reusable Stateful Fake Harness</h2>
+    <p>Instead of building a completely new fake system from scratch, we extract the shared <code>vi.stubGlobal("fetch", ...)</code> patterns currently used in <code>src/__tests__/telegram.test.ts</code> and <code>src/__tests__/workflow.test.ts</code>.</p>
+    <p>We create <code>src/__integration__/setup.ts</code> which exposes a unified fake fetcher that maintains <strong>state</strong> across API calls. This stateful approach is critical because we need to assert data progression (e.g., an idea transitioning from raw to awaiting-feedback to archived) rather than simply asserting "fetch was called".</p>
+
+    <h3>Public API</h3>
+    <pre><code><span class="function">createFakeNetwork</span>(overrides?: {
+  githubFiles?: <span class="keyword">Map</span>&lt;string, string&gt;
+  llmResponse?: <span class="keyword">Record</span>&lt;string, <span class="keyword">any</span>&gt;
+  rssFeedXml?: string
+}): {
+  fetch: <span class="keyword">typeof</span> globalThis.fetch
+  getState: () => FakeState
+}
+
+<span class="keyword">interface</span> FakeState {
+  githubFiles: <span class="keyword">Map</span>&lt;string, string&gt;
+  telegramMessages: Message[]
+  linkedinDrafts: Draft[]
+  llmResponses: <span class="keyword">Record</span>&lt;string, <span class="keyword">any</span>&gt;
+}
+
+<span class="comment">// Additional helpers for Workflow tests</span>
+<span class="function">createFakeStep</span>(): {
+  do: <span class="keyword">typeof</span> WorkflowStep.do
+  waitForEvent: <span class="keyword">typeof</span> WorkflowStep.waitForEvent
+  getCalledSteps: () => string[]
+}
+
+<span class="function">createFakeWorkflowBinding</span>(): {
+  create: <span class="keyword">typeof</span> Env.PIPELINE_WORKFLOW.create
+  get: <span class="keyword">typeof</span> Env.PIPELINE_WORKFLOW.get
+  getCreated: () => Array&lt;{ id: string; params: WorkflowParams }&gt;
+  getReceivedEvents: () => Array&lt;{ instanceId: string; event: <span class="keyword">any</span> }&gt;
+}</code></pre>
+
+    <p>The <code>fetch</code> handler routes by URL path for GitHub API, Telegram API, LinkedIn API, RSS feed URLs, and LLM providers. <code>githubFiles</code> is pre-populated with <code>style-prompt.md</code> and any provided overrides. State is updated on each call (GitHub PUT, Telegram sent messages, LinkedIn draft creation).</p>
+
+    <p class="highlight-box"><strong>Future improvement:</strong> As more stateful endpoints are added, make which state shape comes back configurable per endpoint. Not optimized for now.</p>
+
+    <h3>Acceptance Criteria</h3>
+    <ul>
+        <li><code>setup.ts</code> maintains an in-memory representation of GitHub <code>ideas.md</code> that can be updated via mock PUT requests and read via mock GET requests.</li>
+        <li><code>setup.ts</code> captures outbound Telegram messages and exposes them for assertion.</li>
+        <li><code>setup.ts</code> intercepts LinkedIn API requests and captures DRAFT creation payloads.</li>
+        <li>LLM responses are configurable to return deterministic JSON structures mimicking valid outputs.</li>
+        <li>RSS feed requests return configurable XML.</li>
+        <li>Fake <code>step</code> and fake Workflow binding allow testing WorkflowEntrypoint subclasses and handlers that call <code>env.PIPELINE_WORKFLOW.*</code>.</li>
+    </ul>
+
+    <h2>3. Phase 2: High-Value Integration Tests</h2>
+
+    <h3>1. <code>security-boundaries.integration.test.ts</code> (Highest Priority)</h3>
+    <p>Validates that edge protections and failure modes are secure.</p>
+
+    <table>
+        <tr><th>Test</th><th>Scenario</th></tr>
+        <tr><td>Invalid webhook secret</td><td>Wrong <code>X-Telegram-Bot-Api-Secret-Token</code> header → 401 response</td></tr>
+        <tr><td>Disallowed user /add</td><td><code>TELEGRAM_ALLOWED_USER_ID</code> mismatch on message → 403</td></tr>
+        <tr><td>Disallowed user /approve callback</td><td>Forbidden user sends <code>confirm:</code> callback → 403</td></tr>
+        <tr><td>Disallowed user /revise callback</td><td>Forbidden user sends <code>revise:</code> callback → 403</td></tr>
+        <tr><td>Token leak prevention</td><td>LinkedIn 401 → Telegram error message contains <code>HTTP 401</code> but NOT the raw response body with the token</td></tr>
+        <tr><td>Token refresh isolation</td><td>Refresh writes only to <code>.linkedin-tokens.json</code>; no token leakage into logs or messages</td></tr>
+    </table>
+
+    <h3>2. <code>telegram-to-backlog.integration.test.ts</code></h3>
+    <p>Validates the inbound idea capture flow.</p>
+
+    <table>
+        <tr><th>Test</th><th>Scenario</th></tr>
+        <tr><td>/add creates idea</td><td>Simulate <code>/add My post idea</code> → <code>ideas.md</code> gets new entry with <code>id</code>, <code>status: raw</code>, <code>source: telegram</code>, correct <code>body</code></td></tr>
+        <tr><td>/add with empty body</td><td><code>/add</code> with only whitespace → saved with empty body (or handled gracefully)</td></tr>
+        <tr><td>/generate starts workflow</td><td><code>/generate</code> with raw ideas → <code>PIPELINE_WORKFLOW.create()</code> called with correct params, Telegram "Started workflow" message sent</td></tr>
+        <tr><td>/generate with no raw ideas</td><td>Empty backlog → "No raw ideas to generate from" message, no workflow created</td></tr>
+        <tr><td>/generate picks oldest raw</td><td>Multiple raw ideas → lowest <code>id</code> (oldest) selected for workflow</td></tr>
+        <tr><td>Unknown command fallback</td><td>Non-<code>/add</code> non-<code>/generate</code> text → "Unknown command" help message</td></tr>
+    </table>
+
+    <h3>3. <code>rss-to-backlog.integration.test.ts</code></h3>
+    <p>Validates the RSS trigger → LLM extraction → backlog pipeline.</p>
+
+    <table>
+        <tr><th>Test</th><th>Scenario</th></tr>
+        <tr><td>New RSS item adds ideas</td><td>Fake RSS XML with one new item → <code>ideas.md</code> gets <code>1 + N</code> ideas (<code>status: raw</code>, <code>source: substack</code>, <code>substackUrl</code>, <code>teaser</code>). Workflow created for main idea</td></tr>
+        <tr><td>RSS dedup skips known links</td><td>Pre-populated <code>ideas.md</code> with known <code>substackUrl</code> → no new ideas added, no workflow created</td></tr>
+        <tr><td>Empty RSS feed</td><td>Valid XML with zero <code>&lt;item&gt;</code> elements → <code>{ started: false }</code></td></tr>
+        <tr><td>Malformed LLM response</td><td>LLM returns invalid/missing JSON → error propagates, no partial state written</td></tr>
+        <tr><td>RSS feed fetch error</td><td>RSS URL returns 500 → error propagates</td></tr>
+    </table>
+
+    <h3>4. <code>telegram-approval-routing.integration.test.ts</code></h3>
+    <p>Validates callback query routing and pending revision flow without involving the Workflow runtime.</p>
+
+    <table>
+        <tr><th>Test</th><th>Scenario</th></tr>
+        <tr><td><code>confirm:</code> sends approval event</td><td>Callback <code>data:"confirm:&lt;id&gt;"</code> → <code>sendEvent({ type: "telegram-reply", payload: { text: "__approve__" } })</code> called on correct instance</td></tr>
+        <tr><td><code>revise:</code> sets pendingRevision</td><td>Callback <code>data:"revise:&lt;id&gt;"</code>, <code>chat.id: 123</code> → idea gets <code>correlation.pendingRevision: "123"</code>, "Type your revision" message sent</td></tr>
+        <tr><td>Pending text routes to workflow</td><td>Idea has <code>pendingRevision: "123"</code> + <code>workflowInstanceId</code> → msg from chat 123 → <code>sendEvent({ type: "telegram-reply" })</code> called, <code>pendingRevision</code> cleared</td></tr>
+        <tr><td>Wrong chat ignored</td><td>Idea has <code>pendingRevision: "123"</code> → msg from chat 999 → <code>sendEvent</code> NOT called, <code>pendingRevision</code> preserved, "Unknown command" sent</td></tr>
+        <tr><td>Reply to bot message routes</td><td>Idea has <code>botMessageId: 456</code> → reply to msg 456 → <code>sendEvent</code> called on correct workflow instance</td></tr>
+    </table>
+
+    <h3>5. <code>workflow-approval-to-linkedin-draft.integration.test.ts</code></h3>
+    <p>Validates the full Workflow lifecycle from draft generation through approval, revision, and LinkedIn publishing.</p>
+
+    <table>
+        <tr><th>Test</th><th>Scenario</th></tr>
+        <tr><td>Generate → notify</td><td>Workflow runs <code>step.do("generate")</code> with stateful GitHub + deterministic LLM → draft created, <code>step.do("notify")</code> sends draft to Telegram, <code>botMessageId</code> stored in GitHub</td></tr>
+        <tr><td>Approve → LinkedIn draft</td><td><code>waitForEvent</code> returns <code>__approve__</code> → <code>linkedin-publish</code> called, <code>createDraftPost</code> payload captured in <code>getState().linkedinDrafts</code>, idea moved to archive in GitHub</td></tr>
+        <tr><td>Revise then approve</td><td><code>waitForEvent</code> → revise text → <code>revise-0</code> runs → next <code>waitForEvent</code> → <code>__approve__</code> → linkedin-publish + archive</td></tr>
+        <tr><td>Revise then timeout</td><td><code>waitForEvent</code> → revise text → next <code>waitForEvent</code> → timeout → status = <code>awaiting-feedback-expired</code>, no publish/archive</td></tr>
+        <tr><td>Max revise limit</td><td><code>waitForEvent</code> returns non-approve text all 4 times → workflow ends without linkedin-publish (loop falls off)</td></tr>
+        <tr><td>Publish failure hygiene</td><td>LinkedIn returns 401 → <code>LinkedInError</code> caught → Telegram message contains <code>HTTP 401</code>, raw response body NOT leaked</td></tr>
+        <tr><td>LinkedIn not configured</td><td>No <code>LINKEDIN_AUTHOR_URN</code> → workflow exits with "not configured" message, no publish attempt</td></tr>
+        <tr><td>Notify step non-critical failure</td><td><code>updateIdea</code> fails during <code>notify</code> → error caught, workflow continues</td></tr>
+    </table>
+
+    <h2>4. Phase 3: Script Configuration</h2>
+    <p>Integration tests are kept separate from unit tests until stable. Real-service smoke testing is strictly opt-in.</p>
+
+    <pre><code><span class="string">"scripts"</span>: {
+  <span class="comment">// Standard vitest run (integration suite excluded via config)</span>
+  <span class="string">"test"</span>: <span class="string">"vitest run"</span>,
+
+  <span class="comment">// Explicit partition scripts</span>
+  <span class="string">"test:unit"</span>: <span class="string">"vitest run src/__tests__/"</span>,
+  <span class="string">"test:integration"</span>: <span class="string">"vitest run src/__integration__/"</span>,
+
+  <span class="comment">// Real services must be explicit and NOT part of 'pnpm check'</span>
+  <span class="string">"test:smoke:real"</span>: <span class="string">"RUN_REAL_SERVICE_TESTS=1 vitest run scripts/local-workflow.test.ts"</span>
+}</code></pre>
+
+    <h3>Acceptance Criteria</h3>
+    <ul>
+        <li><code>pnpm test:integration</code> runs cleanly in &lt;5 seconds using only local memory.</li>
+        <li><code>pnpm check</code> does not invoke <code>test:smoke:real</code>.</li>
+        <li><code>vitest.config.ts</code> excludes <code>src/__integration__/**</code> by default.</li>
+    </ul>
+
+    <p><strong>Relationship to existing <code>__tests__/</code>:</strong> Unit tests (<code>src/__tests__/</code>) remain as focused scenarios with precise per-test mock expectations. Integration tests serve as the definitive "wiring is correct" safety net. Both are maintained in parallel.</p>
+
+</body>
+</html>

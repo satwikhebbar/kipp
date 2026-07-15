@@ -11,8 +11,11 @@
     "lint:ci": "biome ci src/",
     "check": "pnpm lint && pnpm typecheck && pnpm test",
     "test": "vitest run",
+    "test:unit": "vitest run src/__tests__/",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",
     "test:e2e": "vitest run scripts/local-workflow.test.ts --reporter=verbose --test-timeout=300000",
+    "test:smoke:real": "RUN_REAL_SERVICE_TESTS=1 vitest run scripts/local-workflow.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
