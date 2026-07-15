@@ -93,6 +93,40 @@ describe("security-boundaries", () => {
     expect(res.status).toBe(403)
   })
 
+  it("rejects revise callback queries from disallowed users", async () => {
+    vi.stubGlobal("fetch", createFakeNetwork().fetch)
+    const env = baseEnv({ TELEGRAM_ALLOWED_USER_ID: "42" })
+    const body = JSON.stringify({
+      update_id: 1,
+      callback_query: {
+        id: "cq-2",
+        from: { id: 99 },
+        message: { message_id: 1, chat: { id: 100 } },
+        data: "revise:wf-1",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env,
+    )
+    expect(res.status).toBe(403)
+  })
+
+  it("returns 404 for unseeded GitHub files in the fake harness", async () => {
+    const { fetch } = createFakeNetwork()
+    const res = await fetch("https://api.github.com/repos/o/r/contents/nonexistent.md")
+    expect(res.status).toBe(404)
+  })
+
+  it("throws on unexpected external fetch", async () => {
+    const { fetch } = createFakeNetwork()
+    await expect(fetch("https://unexpected-api.example.com/data")).rejects.toThrow("Unexpected fetch")
+  })
+
   it("does not leak LinkedIn token in Telegram error message on publish failure", async () => {
     const telegramTexts: string[] = []
 

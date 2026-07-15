@@ -140,11 +140,17 @@
     <h1>Integration Testing Engineering Plan</h1>
 
     <div class="success-box">
+        <strong>Status:</strong> Implemented and refined via code review (commit <code>f805777</code> + follow-up). 27 tests across 5 files, tsc &amp; biome clean. Coverage notes below.
+    </div>
+
+    <div class="success-box">
         <strong>Core Principle:</strong> Integration tests exercise real application wiring (handlers, orchestrators, parsers) with deterministic, <em>stateful</em> local fakes. They should <strong>never</strong> make real network calls to Telegram, GitHub, LinkedIn, or LLM APIs.
     </div>
 
     <div class="highlight-box">
         <strong>Integration boundary:</strong> Real app modules wired together; only platform/runtime edges (Cloudflare bindings, <code>step.do</code>, <code>waitForEvent</code>) and external HTTP (<code>fetch</code>) are faked. Neighboring app modules (providers, clients, parsers, archive logic, backlog managers) are <strong>not</strong> mocked.
+
+        <p><strong>Workflow runtime boundary:</strong> Vitest tests do <strong>not</strong> emulate Cloudflare Workflow scheduling/resume semantics. <code>workflow-approval-to-linkedin-draft</code> instantiates <code>PipelineWorkflow</code> with fake <code>step.do</code> and <code>waitForEvent</code>. <code>telegram-approval-routing</code> tests only that webhook callbacks call <code>env.PIPELINE_WORKFLOW.get(id).sendEvent(...)</code>. No single test covers "Telegram confirm callback starts and completes the whole workflow."</p>
     </div>
 
     <h2>1. Scope & Strategy</h2>
@@ -187,6 +193,8 @@
 
     <p>The <code>fetch</code> handler routes by URL path for GitHub API, Telegram API, LinkedIn API, RSS feed URLs, and LLM providers. <code>githubFiles</code> is pre-populated with <code>style-prompt.md</code> and any provided overrides. State is updated on each call (GitHub PUT, Telegram sent messages, LinkedIn draft creation).</p>
 
+    <p><strong>Unknown requests fail loud:</strong> Any <code>fetch</code> to an unrecognized URL returns <code>404</code>. This prevents integration tests from silently passing when the app calls an unexpected third-party endpoint or wrong URL. Tests register expected external endpoints via the <code>rssFeedUrl</code> config; unrecognized endpoints need explicit addition to the harness.</p>
+
     <p class="highlight-box"><strong>Future improvement:</strong> As more stateful endpoints are added, make which state shape comes back configurable per endpoint. Not optimized for now.</p>
 
     <h3>Acceptance Criteria</h3>
@@ -197,6 +205,8 @@
         <li>LLM responses are configurable to return deterministic JSON structures mimicking valid outputs.</li>
         <li>RSS feed requests return configurable XML.</li>
         <li>Fake <code>step</code> and fake Workflow binding allow testing WorkflowEntrypoint subclasses and handlers that call <code>env.PIPELINE_WORKFLOW.*</code>.</li>
+        <li>Captured outbound payloads (Telegram messages, LinkedIn drafts, LLM calls) are inspectable via <code>getState()</code> without logging secrets to test output.</li>
+        <li>Security tests assert captured Telegram messages do not contain raw access tokens, refresh tokens, GitHub PATs, or raw LinkedIn error bodies.</li>
     </ul>
 
     <h2>3. Phase 2: High-Value Integration Tests</h2>
@@ -205,13 +215,14 @@
     <p>Validates that edge protections and failure modes are secure.</p>
 
     <table>
-        <tr><th>Test</th><th>Scenario</th></tr>
-        <tr><td>Invalid webhook secret</td><td>Wrong <code>X-Telegram-Bot-Api-Secret-Token</code> header → 401 response</td></tr>
-        <tr><td>Disallowed user /add</td><td><code>TELEGRAM_ALLOWED_USER_ID</code> mismatch on message → 403</td></tr>
-        <tr><td>Disallowed user /approve callback</td><td>Forbidden user sends <code>confirm:</code> callback → 403</td></tr>
-        <tr><td>Disallowed user /revise callback</td><td>Forbidden user sends <code>revise:</code> callback → 403</td></tr>
-        <tr><td>Token leak prevention</td><td>LinkedIn 401 → Telegram error message contains <code>HTTP 401</code> but NOT the raw response body with the token</td></tr>
-        <tr><td>Token refresh isolation</td><td>Refresh writes only to <code>.linkedin-tokens.json</code>; no token leakage into logs or messages</td></tr>
+        <tr><th>Test</th><th>Status</th><th>Scenario</th></tr>
+        <tr><td>Invalid webhook secret</td><td>✅</td><td>Wrong <code>X-Telegram-Bot-Api-Secret-Token</code> header → 401 response</td></tr>
+        <tr><td>Disallowed user /add</td><td>✅</td><td><code>TELEGRAM_ALLOWED_USER_ID</code> mismatch on message → 403</td></tr>
+        <tr><td>Disallowed user /approve callback</td><td>✅</td><td>Forbidden user sends <code>confirm:</code> callback → 403</td></tr>
+        <tr><td>Disallowed user /revise callback</td><td>✅</td><td>Forbidden user sends <code>revise:</code> callback → 403</td></tr>
+        <tr><td>Token leak prevention</td><td>✅</td><td>LinkedIn 401 → Telegram error contains <code>HTTP 401</code> but NOT raw response body with token</td></tr>
+        <tr><td>Token refresh isolation</td><td>⏳ Unit test only</td><td>Refresh writes only to <code>.linkedin-tokens.json</code>; covered by <code>token-check.test.ts</code></td></tr>
+        <tr><td>GitHub PAT leak</td><td>⏳ Deferred</td><td>No practical Telegram-leak vector for GitHub PAT; covered by the same linked-publish-hygiene pattern if needed</td></tr>
     </table>
 
     <h3>2. <code>telegram-to-backlog.integration.test.ts</code></h3>
@@ -267,15 +278,33 @@
     </table>
 
     <h2>4. Phase 3: Script Configuration</h2>
-    <p>Integration tests are kept separate from unit tests until stable. Real-service smoke testing is strictly opt-in.</p>
+    <p>Integration tests are kept separate from unit tests via a dedicated Vitest config. Real-service smoke testing is strictly opt-in.</p>
+
+    <pre><code><span class="comment">// vitest.integration.config.ts — separate config targeting only integration tests</span>
+<span class="keyword">import</span> { defineConfig } from <span class="string">"vitest/config"</span>
+<span class="keyword">export default</span> defineConfig({
+  test: {
+    pool: <span class="string">"forks"</span>,
+    include: [<span class="string">"src/__integration__/**/*.test.ts"</span>],
+    exclude: [<span class="string">"**/node_modules/**"</span>],
+  },
+})
+
+<span class="comment">// vitest.config.ts (default) — integration suite excluded from default test</span>
+<span class="keyword">export default</span> defineConfig({
+  test: {
+    pool: <span class="string">"forks"</span>,
+    exclude: [<span class="string">"scripts/**/*.test.ts"</span>, <span class="string">"src/__integration__/**"</span>, <span class="string">"**/node_modules/**"</span>],
+  },
+})</code></pre>
 
     <pre><code><span class="string">"scripts"</span>: {
-  <span class="comment">// Standard vitest run (integration suite excluded via config)</span>
+  <span class="comment">// Default test (unit only, integration excluded via config)</span>
   <span class="string">"test"</span>: <span class="string">"vitest run"</span>,
 
   <span class="comment">// Explicit partition scripts</span>
   <span class="string">"test:unit"</span>: <span class="string">"vitest run src/__tests__/"</span>,
-  <span class="string">"test:integration"</span>: <span class="string">"vitest run src/__integration__/"</span>,
+  <span class="string">"test:integration"</span>: <span class="string">"vitest run --config vitest.integration.config.ts"</span>,
 
   <span class="comment">// Real services must be explicit and NOT part of 'pnpm check'</span>
   <span class="string">"test:smoke:real"</span>: <span class="string">"RUN_REAL_SERVICE_TESTS=1 vitest run scripts/local-workflow.test.ts"</span>
@@ -285,10 +314,27 @@
     <ul>
         <li><code>pnpm test:integration</code> runs cleanly in &lt;5 seconds using only local memory.</li>
         <li><code>pnpm check</code> does not invoke <code>test:smoke:real</code>.</li>
-        <li><code>vitest.config.ts</code> excludes <code>src/__integration__/**</code> by default.</li>
+        <li><code>vitest.config.ts</code> excludes <code>src/__integration__/**</code> by default; <code>vitest.integration.config.ts</code> provides the explicit runner.</li>
     </ul>
 
     <p><strong>Relationship to existing <code>__tests__/</code>:</strong> Unit tests (<code>src/__tests__/</code>) remain as focused scenarios with precise per-test mock expectations. Integration tests serve as the definitive "wiring is correct" safety net. Both are maintained in parallel.</p>
+
+    <h3>Deferred / Phase 2</h3>
+    <p>The following items are intentionally deferred from the initial integration suite:</p>
+    <ul>
+        <li><strong>Max revise limit</strong> — The 4-iteration feedback loop fall-off; low risk, easy to verify manually.</li>
+        <li><strong>Notify step non-critical failure</strong> — try-catch around <code>botMessageId</code> update; already tested implicitly by the happy-path test.</li>
+        <li><strong>Token refresh isolation</strong> — Covered by existing unit test (<code>token-check.test.ts</code>).</li>
+        <li><strong>GitHub PAT leak</strong> — No practical Telegram-leak vector; PAT is request-header only, never echoed by the GitHub API.</li>
+    </ul>
+
+    <h3>Phase 2 candidates (future)</h3>
+    <ul>
+        <li>RSS trigger with workflow polling (non-Cron path).</li>
+        <li>Revise-more callback → pending revision → workflow resume (full roundtrip).</li>
+        <li>Concurrent workflow instance isolation.</li>
+        <li>Real-service smoke test improvements.</li>
+    </ul>
 
 </body>
 </html>

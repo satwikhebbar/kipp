@@ -75,7 +75,7 @@ function makeEvent() {
 describe("workflow-approval-to-linkedin-draft", () => {
   it("generates draft, notifies, publishes to LinkedIn, and archives on approval", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA },
+      githubFiles: { "ideas.md": RAW_IDEA, "archive.md": "" },
       llmResponses: [DRAFT_RESPONSE, CRITIQUE_PASS],
     })
     vi.stubGlobal("fetch", fetch)
@@ -141,7 +141,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
 
   it("revises on feedback then publishes on subsequent approval", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA },
+      githubFiles: { "ideas.md": RAW_IDEA, "archive.md": "" },
       llmResponses: [DRAFT_RESPONSE, CRITIQUE_PASS, REVISE_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)

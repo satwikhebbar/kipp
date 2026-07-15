@@ -67,8 +67,11 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
         return respond({ content: { sha: "new-sha" } })
       }
 
-      const content = state.githubFiles.get(path) ?? ""
-      return respond({ content: b64encode(content), sha: "sha1" })
+      if (!state.githubFiles.has(path)) {
+        return respond({ message: "Not Found" }, 404)
+      }
+      const fileContent = state.githubFiles.get(path)
+      return respond({ content: b64encode(fileContent ?? ""), sha: "sha1" })
     }
 
     if (urlStr.includes("api.telegram.org/bot")) {
@@ -109,7 +112,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
       return respond(config.rssFeedXml ?? "<?xml version='1.0'?><rss><channel></channel></rss>")
     }
 
-    return respond({ message: "not found" }, 404)
+    throw new Error(`Unexpected fetch: ${opts?.method ?? "GET"} ${urlStr}`)
   })
 
   return { fetch: fetch as unknown as typeof globalThis.fetch, getState: () => state }
