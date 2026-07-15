@@ -61,16 +61,20 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     } else if (cq.data?.startsWith("revise:") && cq.message) {
       const workflowId = cq.data.slice("revise:".length)
       if (workflowId) {
+        const chatId = cq.message.chat.id
         const client = createGitHubClient(env)
         await client.mutateFile("ideas.md", (c) => {
           const all = parseIdeas(c)
           const idx = all.findIndex((i) => i.correlation?.workflowInstanceId === workflowId)
           if (idx !== -1) {
-            all[idx] = { ...all[idx], correlation: { ...all[idx].correlation, pendingRevision: workflowId } }
+            all[idx] = {
+              ...all[idx],
+              correlation: { ...all[idx].correlation, pendingRevision: String(chatId) },
+            }
           }
           return serializeIdeas(all)
         })
-        await tg.sendMessage(cq.message.chat.id, "Type your revision feedback.")
+        await tg.sendMessage(chatId, "Type your revision feedback.")
       }
     }
 
@@ -149,7 +153,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     }
 
     const all = parseIdeas((await client.readFile("ideas.md")).content)
-    const pendingIdea = all.find((i) => i.correlation?.pendingRevision)
+    const pendingIdea = all.find((i) => i.correlation?.pendingRevision === String(msg.chat.id))
 
     if (pendingIdea?.correlation?.workflowInstanceId) {
       const instance = await env.PIPELINE_WORKFLOW.get(pendingIdea.correlation.workflowInstanceId)

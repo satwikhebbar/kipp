@@ -140,7 +140,73 @@ Body`
     expect(sendEvent).not.toHaveBeenCalled()
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("sendMessage"), expect.any(Object))
     const updated = JSON.parse(putBody)
-    expect(atob(updated.content)).toContain("pendingRevision: wf-xyz")
+    expect(atob(updated.content)).toContain("pendingRevision: 100")
+  })
+
+  it("routes free-text reply to correct chat when multiple pending revisions exist", async () => {
+    const REVISIONS = `---
+id: 1
+status: awaiting-feedback
+correlation:
+  workflowInstanceId: wf-one
+  pendingRevision: 100
+---
+
+Idea 1
+---
+id: 2
+status: awaiting-feedback
+correlation:
+  workflowInstanceId: wf-two
+  pendingRevision: 200
+---
+
+Idea 2`
+
+    const putBodies: string[] = []
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (opts?.method === "PUT") {
+        putBodies.push(JSON.parse(opts.body as string).content)
+        return { ok: true, json: () => Promise.resolve({}) }
+      }
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      return { ok: true, json: () => Promise.resolve({ content: b64(REVISIONS), sha: "s1" }) }
+    })
+
+    const sendEvent1 = vi.fn()
+    const sendEvent2 = vi.fn()
+    const env = mockEnv()
+    env.PIPELINE_WORKFLOW.get = vi.fn((id: string) => {
+      if (id === "wf-one") return Promise.resolve({ sendEvent: sendEvent1 })
+      if (id === "wf-two") return Promise.resolve({ sendEvent: sendEvent2 })
+      return Promise.reject(new Error("unknown"))
+    }) as never
+
+    const body = JSON.stringify({
+      update_id: 3,
+      message: {
+        message_id: 7,
+        from: { id: 42, is_bot: false },
+        chat: { id: 100, type: "private" },
+        text: "Make it shorter",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+
+    expect(res.status).toBe(200)
+    expect(sendEvent1).toHaveBeenCalledWith({
+      type: "telegram-reply",
+      payload: { userId: 42, text: "Make it shorter" },
+    })
+    expect(sendEvent2).not.toHaveBeenCalled()
   })
 
   it("ignores callback_query with unknown prefix", async () => {

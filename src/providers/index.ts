@@ -5,8 +5,9 @@ import type { GenerateFn } from "./llm"
 export { type GenerateFn, type GenerateOptions, parseLLMJson } from "./llm"
 
 export function createGenerator(apiKey: string, provider: string, modelName?: string, maxRetries = 3): GenerateFn {
+  const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : 3
   const inner = createInnerGenerator(apiKey, provider, modelName)
-  return withRetry(inner, maxRetries)
+  return withRetry(inner, retries)
 }
 
 function createInnerGenerator(apiKey: string, provider: string, modelName?: string): GenerateFn {

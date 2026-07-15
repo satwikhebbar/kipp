@@ -141,7 +141,7 @@ describe("createBacklogManager", () => {
       await expect(mgr.moveToArchive(raw)).rejects.toThrow("Conflict")
     })
 
-    it("appends even if id already exists in archive", async () => {
+    it("does not duplicate an already archived idea id", async () => {
       const m = mockClient()
       m.setIdeas(RAW_IDEA)
       m.setArchive("")
@@ -154,7 +154,7 @@ describe("createBacklogManager", () => {
 
       const archived = await m.client.readFile("archive.md")
       const idCount = archived.content.match(/id: 1/g)?.length ?? 0
-      expect(idCount).toBe(2)
+      expect(idCount).toBe(1)
     })
 
     it("archives multiline draft without leaking into body", async () => {
