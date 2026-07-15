@@ -1,5 +1,6 @@
 import { Hono } from "hono"
 import { handleCadenceCron } from "./triggers/cadence"
+import { handleAuthCallback, handleAuthStart } from "./triggers/linkedin-auth"
 import { handleRssCron } from "./triggers/rss"
 import { handleTelegramWebhook } from "./triggers/telegram-webhook"
 import { handleTokenCheckCron } from "./triggers/token-check"
@@ -10,6 +11,14 @@ export { PipelineWorkflow } from "./workflow"
 const app = new Hono<{ Bindings: Env }>()
 
 app.get("/", (c) => c.text("LinkedIn Pipeline — running"))
+
+app.get("/setup/linkedin", (c) => handleAuthStart(c.req.header("host") ?? "", c.env))
+
+app.get("/auth/linkedin/callback", async (c) => {
+  const code = c.req.query("code")
+  if (!code) return c.text("Missing code parameter", 400)
+  return handleAuthCallback(code, c.req.header("host") ?? "", c.env)
+})
 
 app.post("/webhook/telegram", async (c) => handleTelegramWebhook(c.req.raw, c.env))
 

@@ -17,7 +17,7 @@ export interface GithubFile {
 
 export interface GithubClient {
   readFile(path: string): Promise<GithubFile>
-  writeFile(path: string, content: string, sha: string): Promise<void>
+  writeFile(path: string, content: string, sha?: string): Promise<void>
   mutateFile(path: string, mutate: (content: string) => string): Promise<void>
 }
 
@@ -64,8 +64,9 @@ export function createGitHubClient(env: {
     return { content: b64decode(data.content), sha: data.sha }
   }
 
-  async function writeFile(path: string, content: string, sha: string): Promise<void> {
-    const body = { message: `update ${path}`, content: b64encode(content), sha }
+  async function writeFile(path: string, content: string, sha?: string): Promise<void> {
+    const body: Record<string, unknown> = { message: `update ${path}`, content: b64encode(content) }
+    if (sha) body.sha = sha
     const res = await fetchWithRetry(() =>
       fetch(url(path), {
         method: "PUT",
