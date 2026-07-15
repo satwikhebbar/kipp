@@ -7,6 +7,7 @@ export interface Env {
   LINKEDIN_CLIENT_SECRET: string
   LINKEDIN_ACCESS_TOKEN: string
   LINKEDIN_REFRESH_TOKEN: string
+  LINKEDIN_REDIRECT_ORIGIN?: string
   LINKEDIN_AUTHOR_URN: string
   LLM_API_KEY: string
   LLM_PROVIDER: string

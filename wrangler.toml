@@ -27,5 +27,7 @@ TIMEZONE = "UTC"
 WAIT_FOR_FEEDBACK_HOURS = "12"
 LLM_PROVIDER = "deepseek"
 LLM_MAX_RETRIES = "3"
+# Set to your deployed worker URL, e.g. https://linkedin-pipeline.your-name.workers.dev
+# LINKEDIN_REDIRECT_ORIGIN = "https://linkedin-pipeline.your-name.workers.dev"
 
 # --- Secrets (set via `wrangler secrets put`; for local dev set in .dev.vars) ---

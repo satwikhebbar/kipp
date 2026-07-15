@@ -12,12 +12,13 @@ const app = new Hono<{ Bindings: Env }>()
 
 app.get("/", (c) => c.text("LinkedIn Pipeline — running"))
 
-app.get("/setup/linkedin", (c) => handleAuthStart(c.req.header("host") ?? "", c.env))
+app.get("/setup/linkedin", async (c) => handleAuthStart(c.req.header("host") ?? "", c.env))
 
 app.get("/auth/linkedin/callback", async (c) => {
   const code = c.req.query("code")
+  const state = c.req.query("state") ?? ""
   if (!code) return c.text("Missing code parameter", 400)
-  return handleAuthCallback(code, c.req.header("host") ?? "", c.env)
+  return handleAuthCallback(code, state, c.req.header("host") ?? "", c.env)
 })
 
 app.post("/webhook/telegram", async (c) => handleTelegramWebhook(c.req.raw, c.env))

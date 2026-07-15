@@ -22,21 +22,34 @@ import { handleAuthCallback, handleAuthStart } from "../triggers/linkedin-auth"
 const MIN_ENV = {
   LINKEDIN_CLIENT_ID: "client-123",
   LINKEDIN_CLIENT_SECRET: "secret-456",
+  TELEGRAM_WEBHOOK_SECRET: "whsec-789",
   GITHUB_PAT: "ghp_token",
   DATA_REPO_OWNER: "owner",
   DATA_REPO_NAME: "repo",
 } as never
 
 describe("handleAuthStart", () => {
-  it("redirects to LinkedIn authorize URL with correct params", () => {
-    const res = handleAuthStart("example.com", MIN_ENV)
+  it("redirects to LinkedIn authorize URL with correct params", async () => {
+    const res = await handleAuthStart("example.com", MIN_ENV)
     expect(res.status).toBe(302)
-    const url = new URL(res.headers.get("location")!)
+    const loc = res.headers.get("location")
+    expect(loc).toBeTruthy()
+    const url = new URL(loc!)
     expect(url.origin + url.pathname).toBe("https://www.linkedin.com/oauth/v2/authorization")
     expect(url.searchParams.get("response_type")).toBe("code")
     expect(url.searchParams.get("client_id")).toBe("client-123")
     expect(url.searchParams.get("redirect_uri")).toBe("https://example.com/auth/linkedin/callback")
     expect(url.searchParams.get("scope")).toBe("w_member_social offline_access")
+    expect(url.searchParams.get("state")).toBeTruthy()
+  })
+
+  it("uses LINKEDIN_REDIRECT_ORIGIN when configured", async () => {
+    const env = Object.assign({}, MIN_ENV, { LINKEDIN_REDIRECT_ORIGIN: "https://custom.example.com" }) as never
+    const res = await handleAuthStart("ignored-host", env)
+    const loc = res.headers.get("location")
+    expect(loc).toBeTruthy()
+    const url = new URL(loc!)
+    expect(url.searchParams.get("redirect_uri")).toBe("https://custom.example.com/auth/linkedin/callback")
   })
 })
 
@@ -46,6 +59,12 @@ describe("handleAuthCallback", () => {
     mockReadFile.mockReset()
     mockWriteFile.mockReset()
   })
+
+  async function validState(host = "example.com"): Promise<string> {
+    const res = await handleAuthStart(host, MIN_ENV)
+    const loc = res.headers.get("location")!
+    return new URL(loc).searchParams.get("state")!
+  }
 
   it("exchanges code and stores tokens on success", async () => {
     mockFetch.mockResolvedValue({
@@ -59,7 +78,8 @@ describe("handleAuthCallback", () => {
     })
     mockReadFile.mockRejectedValue(new Error("Not found"))
 
-    const res = await handleAuthCallback("auth-code-123", "example.com", MIN_ENV)
+    const state = await validState()
+    const res = await handleAuthCallback("auth-code-123", state, "example.com", MIN_ENV)
     expect(res.status).toBe(200)
 
     expect(mockFetch).toHaveBeenCalledWith(
@@ -90,22 +110,41 @@ describe("handleAuthCallback", () => {
     })
     mockReadFile.mockResolvedValue({ content: '{"access_token":"old"}', sha: "abc123" })
 
-    const res = await handleAuthCallback("code-456", "example.com", MIN_ENV)
+    const state = await validState()
+    const res = await handleAuthCallback("code-456", state, "example.com", MIN_ENV)
     expect(res.status).toBe(200)
     expect(mockWriteFile).toHaveBeenCalledWith(".linkedin-tokens.json", expect.any(String), "abc123")
   })
 
-  it("returns error when LinkedIn returns non-ok", async () => {
+  it("rejects callback with missing or mismatched state", async () => {
+    mockReadFile.mockRejectedValue(new Error("Not found"))
+
+    const noState = await handleAuthCallback("code", "", "example.com", MIN_ENV)
+    expect(noState.status).toBe(400)
+    expect(await noState.text()).toContain("invalid state")
+    expect(mockWriteFile).not.toHaveBeenCalled()
+
+    const badState = await handleAuthCallback("code", "bad-state", "example.com", MIN_ENV)
+    expect(badState.status).toBe(400)
+    expect(await badState.text()).toContain("invalid state")
+    expect(mockWriteFile).not.toHaveBeenCalled()
+  })
+
+  it("sanitizes LinkedIn exchange errors (no raw body leaked)", async () => {
     mockFetch.mockResolvedValue({
       ok: false,
       status: 400,
-      text: () => Promise.resolve("invalid_grant"),
+      text: () => Promise.resolve('invalid_grant with access_token="leaked"'),
     })
     mockReadFile.mockRejectedValue(new Error("Not found"))
 
-    const res = await handleAuthCallback("bad-code", "example.com", MIN_ENV)
+    const state = await validState()
+    const res = await handleAuthCallback("bad-code", state, "example.com", MIN_ENV)
     expect(res.status).toBe(400)
-    expect(await res.text()).toContain("invalid_grant")
+    const body = await res.text()
+    expect(body).toContain("token exchange error")
+    expect(body).not.toContain("invalid_grant")
+    expect(body).not.toContain("leaked")
     expect(mockWriteFile).not.toHaveBeenCalled()
   })
 })
