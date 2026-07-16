@@ -11,6 +11,15 @@ import type { Env, WorkflowParams } from "./types"
 
 export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
+    try {
+      return await this._run(event, step)
+    } catch (err) {
+      console.error(`[workflow ${event.instanceId}] unhandled error:`, err)
+      throw err
+    }
+  }
+
+  private async _run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
     const { ideaId, ideaTitle, ideaBody, substackBody } = event.payload
 
     const state = await step.do("generate", async () => {
@@ -37,7 +46,10 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       const ideas = await manager.readIdeas()
       const idea = ideas.find((i) => i.id === ideaId)
-      if (!idea) throw new Error(`Idea ${ideaId} not found`)
+      if (!idea) {
+        console.error(`[workflow ${event.instanceId}] idea ${ideaId} not found in generate step`)
+        throw new Error(`Idea ${ideaId} not found`)
+      }
 
       await manager.updateIdea(ideaId, {
         draft,
@@ -138,11 +150,16 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           return
         }
         await step.do("archive", async () => {
-          const client = createGitHubClient(this.env)
-          const manager = createBacklogManager(client)
-          const ideas = await manager.readIdeas()
-          const idea = ideas.find((i) => i.id === ideaId)
-          if (idea) await manager.moveToArchive(idea)
+          try {
+            const client = createGitHubClient(this.env)
+            const manager = createBacklogManager(client)
+            const ideas = await manager.readIdeas()
+            const idea = ideas.find((i) => i.id === ideaId)
+            if (idea) await manager.moveToArchive(idea)
+          } catch (err) {
+            console.error(`[workflow ${event.instanceId}] archive step failed:`, err)
+            throw err
+          }
         })
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
           await step.do("notify-published", async () => {
