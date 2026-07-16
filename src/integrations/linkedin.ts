@@ -5,13 +5,19 @@ import { createGitHubClient } from "./github"
 const LINKEDIN_API = "https://api.linkedin.com"
 
 export class LinkedInError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-    public readonly body?: string,
-  ) {
+  readonly status: number
+  declare readonly body?: string
+
+  constructor(status: number, message: string, body?: string) {
     super(message)
     this.name = "LinkedInError"
+    this.status = status
+    Object.defineProperty(this, "body", {
+      value: body,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    })
   }
 }
 

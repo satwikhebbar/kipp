@@ -1,8 +1,8 @@
 # LinkedIn Posting Pipeline
 
-An automated LinkedIn posting pipeline on **Cloudflare Workers + Workflows**. Captures ideas, drafts posts, runs a critique–revise loop with Telegram-based feedback, and creates a LinkedIn **DRAFT** (never auto-published).
+An automated LinkedIn posting pipeline on **Cloudflare Workers + Workflows**. Captures ideas, drafts posts via LLM, runs a critique–revise loop with Telegram-based feedback, and creates a LinkedIn **DRAFT** (never auto-published).
 
-Designed as an **open-source template**. Your data and credentials stay in a separate private repo.
+Designed as an **open-source template**. Your data and credentials stay in a separate private GitHub repo.
 
 ## How It Works
 
@@ -13,7 +13,7 @@ Telegram /generate ───────────────┘          Tel
 Cadence check (weekly) ──────────┘
 ```
 
-The workflow pauses indefinitely at each "awaiting feedback" step, waiting for your Telegram reply — zero cost during idle time (powered by `step.waitForEvent()`).
+The workflow pauses indefinitely at each "awaiting feedback" step, waiting for your Telegram reply — zero cost during idle (powered by `step.waitForEvent()`).
 
 ## Prerequisites
 
@@ -22,17 +22,18 @@ The workflow pauses indefinitely at each "awaiting feedback" step, waiting for y
 - Cloudflare account (Workers Paid — $5/mo)
 - Telegram bot (from [BotFather](https://t.me/BotFather))
 - LinkedIn Developer App (with Posts API)
-- A **private GitHub repo** for your data (`ideas.md`, `archive.md`, `style-prompt.md`)
-- An LLM API key (Gemini Flash by default, DeepSeek as budget alternative)
+- A **private** GitHub repo for your data (`ideas.md`, `archive.md`, `style-prompt.md`)
+- An LLM API key (Gemini, DeepSeek, etc.)
 
 ## Setup
 
-### 1. Fork this repo
+### 1. Fork or clone this repo
 
 ```bash
-gh repo clone your-org/linkedin-pipeline
+git clone https://github.com/your-org/linkedin-pipeline.git
 cd linkedin-pipeline
 pnpm install
+pnpm lefthook install   # enable pre-commit hooks
 ```
 
 ### 2. Create your data repo
@@ -43,52 +44,80 @@ Create a **private** GitHub repo (e.g., `linkedin-pipeline-data`) containing:
 - `archive.md` — empty file (will hold published posts)
 - `style-prompt.md` — your writing style guide (see [example/style-prompt.md](example/style-prompt.md))
 
-### 3. Telegram bot
+### 3. Create a Telegram bot
 
 Talk to [BotFather](https://t.me/BotFather), create a bot, note the token.
-Set a webhook after deploying:
 
-```
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://your-worker.your-subdomain.workers.dev/webhook/telegram&secret_token=<WEBHOOK_SECRET>"
-```
+### 4. Create a LinkedIn app
 
-### 4. LinkedIn app
-
-1. Go to https://developer.linkedin.com/ → Create App
+1. Go to [LinkedIn Developer Portal](https://developer.linkedin.com/) → Create App
 2. Add the **Share on LinkedIn** product (free tier)
-3. Get OAuth 2.0 access token via the [OAuth 2.0 playground](https://developer.linkedin.com/oauth/tools)
-4. Note the access token and refresh token (if available)
+3. Note your **Client ID** and **Client Secret**
+4. Add a redirect URL: `https://your-worker.your-subdomain.workers.dev/auth/linkedin/callback`
 
-### 5. Deploy
+The OAuth token is obtained via the built-in setup endpoint (see step 5).
+
+### 5. Deploy and configure secrets
 
 ```bash
 pnpm wrangler deploy
 ```
 
-Then set secrets:
+Set required secrets (never commit these):
 
 ```bash
-pnpm wrangler secret put TELEGRAM_BOT_TOKEN
-pnpm wrangler secret put TELEGRAM_WEBHOOK_SECRET
-pnpm wrangler secret put LINKEDIN_ACCESS_TOKEN
-pnpm wrangler secret put LINKEDIN_REFRESH_TOKEN
-pnpm wrangler secret put LLM_API_KEY
-pnpm wrangler secret put LLM_PROVIDER
-pnpm wrangler secret put GITHUB_PAT
-pnpm wrangler secret put DATA_REPO_OWNER
-pnpm wrangler secret put DATA_REPO_NAME
+pnpm wrangler secret put GITHUB_PAT          # GitHub PAT with repo access to your data repo
+pnpm wrangler secret put DATA_REPO_OWNER     # GitHub username/org for your data repo
+pnpm wrangler secret put DATA_REPO_NAME      # GitHub data repo name
+pnpm wrangler secret put TELEGRAM_BOT_TOKEN  # from BotFather
+pnpm wrangler secret put TELEGRAM_WEBHOOK_SECRET  # any random string, used for HMAC signing
+pnpm wrangler secret put TELEGRAM_ALLOWED_USER_ID  # your Telegram numeric user ID
+pnpm wrangler secret put LLM_API_KEY         # Gemini or DeepSeek API key
+pnpm wrangler secret put LLM_PROVIDER        # "gemini" or "deepseek"
+pnpm wrangler secret put LINKEDIN_CLIENT_ID       # from LinkedIn Developer Portal
+pnpm wrangler secret put LINKEDIN_CLIENT_SECRET   # from LinkedIn Developer Portal
+pnpm wrangler secret put LINKEDIN_SETUP_SECRET    # any random string, gates the OAuth setup endpoint
+pnpm wrangler secret put LINKEDIN_AUTHOR_URN      # your LinkedIn author URN
 ```
 
-### 6. Register Telegram webhook
+Configurable vars (set in dashboard or `wrangler.toml`):
+
+| Var | Purpose |
+|---|---|
+| `SUBSTACK_RSS_URL` | RSS feed URL for daily idea capture |
+| `LLM_MODEL` | Model name override (e.g. `"gemini-2.0-flash"`) |
+| `LLM_MAX_RETRIES` | Retry count for LLM API calls (default `3`) |
+| `POSTING_CADENCE_DAYS` | Days between auto-prompted posts (default `7`) |
+| `WAIT_FOR_FEEDBACK_HOURS` | Hours to wait for Telegram feedback before timeout (default `12`) |
+| `LINKEDIN_REDIRECT_ORIGIN` | Override for OAuth redirect URI (default: derived from `Host`) |
+
+### 6. LinkedIn OAuth setup
+
+Visit the setup URL in your browser (replace `your-subdomain`):
+
+```
+https://linkedin-pipeline.your-subdomain.workers.dev/setup/linkedin?secret=YOUR_LINKEDIN_SETUP_SECRET
+```
+
+This initiates the OAuth flow:
+1. Redirects you to LinkedIn for authorization
+2. LinkedIn redirects back to the callback URL
+3. The worker exchanges the code for tokens and stores them in your data repo as `.linkedin-tokens.json`
+
+Tokens are automatically refreshed via a weekly cron (`handleTokenCheckCron`).
+
+> The `?secret=` parameter is required only if `LINKEDIN_SETUP_SECRET` is configured. If unset, the endpoint is publicly accessible (not recommended).
+
+### 7. Register Telegram webhook
 
 ```bash
 curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://linkedin-pipeline.your-subdomain.workers.dev/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-### 7. Verify
+### 8. Verify
 
 - Send a message to your Telegram bot — it should appear in `ideas.md`
-- Send `/generate` — it should start the pipeline
+- Send `/generate` — it should start the pipeline workflow
 - Check the Cloudflare dashboard for Workflow runs
 
 ## Usage
@@ -97,9 +126,20 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://li
 |---|---|
 | Quick-capture idea | Send any message to the Telegram bot |
 | Start pipeline | Send `/generate` |
-| Give feedback | Reply to a bot draft notification |
+| Approve draft | Tap **Approve** on the Telegram notification |
+| Request revision | Tap **Revise More** or reply with feedback text |
+| Re-trigger revision | Send `/add <idea text>` then `/generate` |
 
 The pipeline will **never** auto-publish. All finished drafts land as LinkedIn DRAFT posts for you to review and publish manually.
+
+## Secrets vs Vars
+
+| Type | Storage | Used for |
+|---|---|---|
+| **Secrets** | `wrangler secret put` | API keys, tokens, credentials |
+| **Vars** | `wrangler.toml` `[vars]` or dashboard | Configurable but non-sensitive defaults |
+
+Secrets are encrypted and never visible in plaintext. Vars are readable in the Cloudflare dashboard. Never put credentials in `wrangler.toml`.
 
 ## Commands
 
@@ -111,22 +151,26 @@ The pipeline will **never** auto-publish. All finished drafts land as LinkedIn D
 | `pnpm lint:fix` | Auto-fix lint and formatting issues |
 | `pnpm typecheck` | Run TypeScript type checking |
 | `pnpm test` | Run all tests |
+| `pnpm test:unit` | Run unit tests only |
+| `pnpm test:integration` | Run integration tests only |
 | `pnpm check` | Run lint + typecheck + test (use before committing) |
 
-Pre-commit hooks (via lefthook) run `typecheck`, `lint`, and `test` automatically on every commit. Initialize them with `pnpm lefthook install` after cloning.
+Pre-commit hooks (via lefthook) run `typecheck`, `lint`, and `test` automatically on every commit.
 
 ## Project Structure
 
 ```
 src/
 ├── index.ts                 # Worker entry (Hono routes)
-├── workflow.ts              # Workflow orchestration
+├── workflow.ts              # Workflow orchestration (Cloudflare Workflows)
 ├── types.ts                 # Shared types
 ├── backlog/                 # ideas.md / archive.md management
 ├── agent/                   # LLM agent steps (draft, critique, revise, classify)
 ├── providers/               # LLM provider clients (Gemini, DeepSeek)
-├── triggers/                # Triggers (RSS, cadence, Telegram webhook)
-└── integrations/            # External APIs (GitHub, LinkedIn, Telegram)
+├── triggers/                # Entry points (RSS, cadence, Telegram webhook, LinkedIn OAuth, token refresh)
+├── integrations/            # External API clients (GitHub, LinkedIn, Telegram)
+├── __tests__/               # Unit tests (vitest)
+└── __integration__/         # Integration tests (vitest, with fake network)
 ```
 
 ## License

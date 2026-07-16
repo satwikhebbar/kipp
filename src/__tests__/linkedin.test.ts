@@ -6,7 +6,7 @@ const mockFetch = vi.hoisted(() => {
   return fn
 })
 
-import { createLinkedInClient, getLinkedInToken } from "../integrations/linkedin"
+import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integrations/linkedin"
 
 interface MockClient {
   readFile(path: string): Promise<{ content: string; sha: string }>
@@ -99,5 +99,21 @@ describe("createLinkedInClient", () => {
     mockFetch.mockResolvedValue({ ok: false, status: 401, text: () => Promise.resolve("unauthorized") })
     const client = createLinkedInClient("bad-token")
     await expect(client.createDraftPost("urn:li:person:1", "x")).rejects.toThrow("LinkedIn API error 401")
+  })
+})
+
+describe("LinkedInError", () => {
+  it("stores body non-enumerably so production log serializers do not leak it", () => {
+    const err = new LinkedInError(401, "msg", "body with access_token=secret")
+    expect(err.body).toBe("body with access_token=secret")
+    expect(Object.keys(err)).not.toContain("body")
+    expect(JSON.stringify(err)).not.toContain("access_token")
+  })
+
+  it("works without body", () => {
+    const err = new LinkedInError(500, "server error")
+    expect(err.body).toBeUndefined()
+    expect(Object.keys(err)).not.toContain("body")
+    expect(JSON.stringify(err)).not.toContain("body")
   })
 })
