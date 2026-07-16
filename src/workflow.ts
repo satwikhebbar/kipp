@@ -22,7 +22,20 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   private async _run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
     const { ideaId, ideaTitle, ideaBody, substackBody } = event.payload
 
-    const state = await step.do("generate", async () => {
+    const stepDo = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+      const wrapped: () => Promise<T> = async () => {
+        try {
+          return await fn()
+        } catch (err) {
+          console.error(`[workflow ${event.instanceId}] step "${name}" failed:`, err)
+          throw err
+        }
+      }
+      // biome-ignore lint/suspicious/noExplicitAny: step.do requires Rpc.Serializable<T>, but callbacks return valid types
+      return step.do(name, wrapped as any) as Promise<T>
+    }
+
+    const state = await stepDo("generate", async () => {
       const gen = createGenerator(
         this.env.LLM_API_KEY,
         this.env.LLM_PROVIDER,
@@ -46,10 +59,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       const ideas = await manager.readIdeas()
       const idea = ideas.find((i) => i.id === ideaId)
-      if (!idea) {
-        console.error(`[workflow ${event.instanceId}] idea ${ideaId} not found in generate step`)
-        throw new Error(`Idea ${ideaId} not found`)
-      }
+      if (!idea) throw new Error(`Idea ${ideaId} not found`)
 
       await manager.updateIdea(ideaId, {
         draft,
@@ -66,7 +76,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     })
 
     if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-      await step.do("notify", async () => {
+      await stepDo("notify", async () => {
         const client = createGitHubClient(this.env)
         const manager = createBacklogManager(client)
         const ideas = await manager.readIdeas()
@@ -92,7 +102,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
               correlation: { ...idea.correlation, botMessageId: result.messageId },
             })
           } catch {
-            /* non-critical */
+            console.warn(`[workflow ${event.instanceId}] failed to save botMessageId for idea ${ideaId}`)
           }
         }
       })
@@ -107,7 +117,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         timeout: `${timeoutHours} hours` as any,
       })
       if (reply.type === "timeout") {
-        await step.do(`timeout-${i}`, async () => {
+        await stepDo(`timeout-${i}`, async () => {
           const client = createGitHubClient(this.env)
           const manager = createBacklogManager(client)
           await manager.updateIdea(ideaId, { status: "awaiting-feedback-expired" })
@@ -120,13 +130,14 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const publishToken = await getLinkedInToken(this.env)
         if (publishToken && this.env.LINKEDIN_AUTHOR_URN) {
           try {
-            await step.do("linkedin-publish", async () => {
+            await stepDo("linkedin-publish", async () => {
               const li = createLinkedInClient(publishToken)
               await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
             })
           } catch (err) {
+            console.error(`[workflow ${event.instanceId}] linkedin-publish failed:`, err)
             if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-              await step.do("notify-publish-failed", async () => {
+              await stepDo("notify-publish-failed", async () => {
                 const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
                 const safe =
                   err instanceof LinkedInError
@@ -139,7 +150,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           }
         } else {
           if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-            await step.do("notify-not-configured", async () => {
+            await stepDo("notify-not-configured", async () => {
               const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
               await tg.sendMessage(
                 state.chatId,
@@ -149,20 +160,15 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           }
           return
         }
-        await step.do("archive", async () => {
-          try {
-            const client = createGitHubClient(this.env)
-            const manager = createBacklogManager(client)
-            const ideas = await manager.readIdeas()
-            const idea = ideas.find((i) => i.id === ideaId)
-            if (idea) await manager.moveToArchive(idea)
-          } catch (err) {
-            console.error(`[workflow ${event.instanceId}] archive step failed:`, err)
-            throw err
-          }
+        await stepDo("archive", async () => {
+          const client = createGitHubClient(this.env)
+          const manager = createBacklogManager(client)
+          const ideas = await manager.readIdeas()
+          const idea = ideas.find((i) => i.id === ideaId)
+          if (idea) await manager.moveToArchive(idea)
         })
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-          await step.do("notify-published", async () => {
+          await stepDo("notify-published", async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
             await tg.sendMessage(state.chatId, "✅ Draft posted to LinkedIn!")
           })
@@ -170,7 +176,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         return
       }
 
-      currentDraft = await step.do(`revise-${i}`, async () => {
+      currentDraft = await stepDo(`revise-${i}`, async () => {
         const gen = createGenerator(
           this.env.LLM_API_KEY,
           this.env.LLM_PROVIDER,
@@ -187,7 +193,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       })
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-        await step.do(`notify-revised-${i}`, async () => {
+        await stepDo(`notify-revised-${i}`, async () => {
           const client = createGitHubClient(this.env)
           const manager = createBacklogManager(client)
           const ideas = await manager.readIdeas()
@@ -213,7 +219,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
                 correlation: { ...idea.correlation, botMessageId: result.messageId },
               })
             } catch {
-              /* non-critical */
+              console.warn(
+                `[workflow ${event.instanceId}] failed to save botMessageId for idea ${ideaId} (notify-revised)`,
+              )
             }
           }
         })
