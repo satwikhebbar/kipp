@@ -116,7 +116,7 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://li
 
 ### 8. Verify
 
-- Send a message to your Telegram bot — it should appear in `ideas.md`
+- Send `/add <your idea text>` to your Telegram bot — it should appear in `ideas.md`
 - Send `/generate` — it should start the pipeline workflow
 - Check the Cloudflare dashboard for Workflow runs
 
@@ -124,11 +124,10 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://li
 
 | Action | How |
 |---|---|
-| Quick-capture idea | Send any message to the Telegram bot |
+| Quick-capture idea | Send `/add <your idea text>` |
 | Start pipeline | Send `/generate` |
 | Approve draft | Tap **Approve** on the Telegram notification |
 | Request revision | Tap **Revise More** or reply with feedback text |
-| Re-trigger revision | Send `/add <idea text>` then `/generate` |
 
 The pipeline will **never** auto-publish. All finished drafts land as LinkedIn DRAFT posts for you to review and publish manually.
 
