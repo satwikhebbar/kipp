@@ -8,6 +8,7 @@ export class LinkedInError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly body?: string,
   ) {
     super(message)
     this.name = "LinkedInError"
@@ -43,7 +44,7 @@ export function createLinkedInClient(accessToken: string): LinkedinClient {
     })
     if (!res.ok) {
       const text = await res.text()
-      throw new LinkedInError(res.status, `LinkedIn API error ${res.status}: ${text}`)
+      throw new LinkedInError(res.status, `LinkedIn API error ${res.status}`, text)
     }
     return res
   }

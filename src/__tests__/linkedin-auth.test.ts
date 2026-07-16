@@ -28,6 +28,10 @@ const MIN_ENV = {
   DATA_REPO_NAME: "repo",
 } as never
 
+function envWithSetupSecret() {
+  return Object.assign({}, MIN_ENV, { LINKEDIN_SETUP_SECRET: "supersecret" }) as never
+}
+
 describe("handleAuthStart", () => {
   it("redirects to LinkedIn authorize URL with correct params", async () => {
     const res = await handleAuthStart("example.com", MIN_ENV)
@@ -48,6 +52,43 @@ describe("handleAuthStart", () => {
     const loc = res.headers.get("location") as string
     const url = new URL(loc)
     expect(url.searchParams.get("redirect_uri")).toBe("https://custom.example.com/auth/linkedin/callback")
+  })
+})
+
+describe("handleAuthStart — setup secret gate", () => {
+  it("redirects when LINKEDIN_SETUP_SECRET is not configured (backward compat)", async () => {
+    const res = await handleAuthStart("example.com", MIN_ENV)
+    expect(res.status).toBe(302)
+  })
+
+  it("returns 403 when LINKEDIN_SETUP_SECRET is set but no secret provided", async () => {
+    const res = await handleAuthStart("example.com", envWithSetupSecret())
+    expect(res.status).toBe(403)
+    expect(await res.text()).toContain("secret")
+  })
+
+  it("returns 403 when LINKEDIN_SETUP_SECRET is set but wrong secret provided", async () => {
+    const res = await handleAuthStart("example.com", envWithSetupSecret(), "wrongsecret")
+    expect(res.status).toBe(403)
+    expect(await res.text()).toContain("secret")
+  })
+
+  it("redirects when LINKEDIN_SETUP_SECRET is set and valid secret provided", async () => {
+    const res = await handleAuthStart("example.com", envWithSetupSecret(), "supersecret")
+    expect(res.status).toBe(302)
+  })
+
+  it("passes valid state to callback when gated setup is used", async () => {
+    const res = await handleAuthStart("example.com", envWithSetupSecret(), "supersecret")
+    const loc = res.headers.get("location") as string
+    const state = new URL(loc).searchParams.get("state") as string
+    mockReadFile.mockRejectedValue(new Error("Not found"))
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ access_token: "t", expires_in: 5184000 }),
+    })
+    const cbRes = await handleAuthCallback("code", state, "example.com", envWithSetupSecret())
+    expect(cbRes.status).toBe(200)
   })
 })
 
@@ -125,6 +166,14 @@ describe("handleAuthCallback", () => {
     const badState = await handleAuthCallback("code", "bad-state", "example.com", MIN_ENV)
     expect(badState.status).toBe(400)
     expect(await badState.text()).toContain("invalid state")
+    expect(mockWriteFile).not.toHaveBeenCalled()
+  })
+
+  it("rejects malformed state (dot but invalid base64) without error", async () => {
+    const malformed = "abc.!!!not-base64!!!"
+    const res = await handleAuthCallback("code", malformed, "example.com", MIN_ENV)
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain("invalid state")
     expect(mockWriteFile).not.toHaveBeenCalled()
   })
 

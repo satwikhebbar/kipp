@@ -24,15 +24,23 @@ async function verifyState(state: string, secret: string): Promise<boolean> {
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
     "verify",
   ])
-  const sig = new Uint8Array(
-    atob(sigB64)
-      .split("")
-      .map((c) => c.charCodeAt(0)),
-  )
+  let sig: Uint8Array
+  try {
+    sig = new Uint8Array(
+      atob(sigB64)
+        .split("")
+        .map((c) => c.charCodeAt(0)),
+    )
+  } catch {
+    return false
+  }
   return crypto.subtle.verify("HMAC", key, sig, encoder.encode(nonce))
 }
 
-export async function handleAuthStart(host: string, env: Env): Promise<Response> {
+export async function handleAuthStart(host: string, env: Env, setupSecret?: string): Promise<Response> {
+  if (env.LINKEDIN_SETUP_SECRET && setupSecret !== env.LINKEDIN_SETUP_SECRET) {
+    return new Response("Setup requires a valid secret", { status: 403 })
+  }
   const redirectUri = redirectUrl(env, host)
   const state = await createState(env.TELEGRAM_WEBHOOK_SECRET)
   const url = new URL(AUTH_URL)

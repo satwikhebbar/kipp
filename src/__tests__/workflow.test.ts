@@ -155,7 +155,7 @@ describe("PipelineWorkflow", () => {
     expect(stepDo).not.toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
   })
 
-  it("does not leak LinkedIn token in Telegram error message on publish failure", async () => {
+  it("does not leak LinkedIn token in Telegram error message or console.error on publish failure", async () => {
     const responses = [
       { text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } },
       {
@@ -165,6 +165,7 @@ describe("PipelineWorkflow", () => {
     ]
     let callIdx = 0
     let telegramText = ""
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
@@ -208,11 +209,17 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
+    consoleSpy.mockRestore()
+
     expect(stepDo).toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify-publish-failed", expect.any(Function))
     expect(telegramText).not.toContain("leaked-secret-abc")
     expect(telegramText).not.toContain("valid-token")
     expect(telegramText).toContain("HTTP 401")
+
+    const allErrorOutput = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n")
+    expect(allErrorOutput).not.toContain("leaked-secret-abc")
+    expect(allErrorOutput).not.toContain("valid-token")
   })
 
   it("revises on feedback and notifies on second approval without LinkedIn", async () => {

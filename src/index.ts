@@ -12,7 +12,7 @@ const app = new Hono<{ Bindings: Env }>()
 
 app.get("/", (c) => c.text("LinkedIn Pipeline — running"))
 
-app.get("/setup/linkedin", async (c) => handleAuthStart(c.req.header("host") ?? "", c.env))
+app.get("/setup/linkedin", async (c) => handleAuthStart(c.req.header("host") ?? "", c.env, c.req.query("secret")))
 
 app.get("/auth/linkedin/callback", async (c) => {
   const code = c.req.query("code")
