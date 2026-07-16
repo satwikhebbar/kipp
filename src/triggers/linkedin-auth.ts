@@ -39,7 +39,7 @@ export async function handleAuthStart(host: string, env: Env): Promise<Response>
   url.searchParams.set("response_type", "code")
   url.searchParams.set("client_id", env.LINKEDIN_CLIENT_ID)
   url.searchParams.set("redirect_uri", redirectUri)
-  url.searchParams.set("scope", "w_member_social offline_access")
+  url.searchParams.set("scope", "w_member_social")
   url.searchParams.set("state", state)
   return Response.redirect(url.toString(), 302)
 }
