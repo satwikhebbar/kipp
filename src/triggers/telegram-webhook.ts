@@ -140,6 +140,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
           created: new Date().toISOString(),
           source: "telegram" as const,
           body: text.slice(5).trim(),
+          correlation: { telegramChatId: String(msg.chat.id) },
         })
         return serializeIdeas(items)
       })

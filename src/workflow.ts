@@ -45,6 +45,10 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         correlation: { ...idea.correlation, workflowInstanceId: event.instanceId },
       })
       const chatId = idea.correlation?.telegramChatId ?? this.env.TELEGRAM_ALLOWED_USER_ID
+      if (!chatId)
+        console.log(
+          `[workflow ${event.instanceId}] no chatId resolved for idea ${ideaId} — notify/approval steps will be silent`,
+        )
 
       return { draft, chatId }
     })

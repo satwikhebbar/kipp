@@ -32,9 +32,8 @@ describe("handleAuthStart", () => {
   it("redirects to LinkedIn authorize URL with correct params", async () => {
     const res = await handleAuthStart("example.com", MIN_ENV)
     expect(res.status).toBe(302)
-    const loc = res.headers.get("location")
-    expect(loc).toBeTruthy()
-    const url = new URL(loc!)
+    const loc = res.headers.get("location") as string
+    const url = new URL(loc)
     expect(url.origin + url.pathname).toBe("https://www.linkedin.com/oauth/v2/authorization")
     expect(url.searchParams.get("response_type")).toBe("code")
     expect(url.searchParams.get("client_id")).toBe("client-123")
@@ -46,9 +45,8 @@ describe("handleAuthStart", () => {
   it("uses LINKEDIN_REDIRECT_ORIGIN when configured", async () => {
     const env = Object.assign({}, MIN_ENV, { LINKEDIN_REDIRECT_ORIGIN: "https://custom.example.com" }) as never
     const res = await handleAuthStart("ignored-host", env)
-    const loc = res.headers.get("location")
-    expect(loc).toBeTruthy()
-    const url = new URL(loc!)
+    const loc = res.headers.get("location") as string
+    const url = new URL(loc)
     expect(url.searchParams.get("redirect_uri")).toBe("https://custom.example.com/auth/linkedin/callback")
   })
 })
@@ -62,8 +60,8 @@ describe("handleAuthCallback", () => {
 
   async function validState(host = "example.com"): Promise<string> {
     const res = await handleAuthStart(host, MIN_ENV)
-    const loc = res.headers.get("location")!
-    return new URL(loc).searchParams.get("state")!
+    const loc = res.headers.get("location") as string
+    return new URL(loc).searchParams.get("state") as string
   }
 
   it("exchanges code and stores tokens on success", async () => {
