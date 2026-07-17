@@ -155,6 +155,39 @@ Second paragraph of draft.
 
 Third paragraph.`
 
+const DRAFT_WITH_HORIZONTAL_RULE = `---
+id: 9
+title: Post with --- in draft
+status: drafted
+source: substack
+created: 2026-07-14T12:00:00Z
+substackUrl: https://example.substack.com/p/test-hr
+teaser: Draft containing HR
+---
+
+# Idea 9
+
+Preamble text.
+
+## Draft
+
+Option 1: "Some quote here."
+
+Option 2: "Another quote."
+
+---
+
+Here's the deeper insight.
+
+---
+
+That's how you learn.
+
+## Critique
+
+- [x] Good hook
+- [ ] Needs stronger conclusion`
+
 describe("serializeIdea roundtrip", () => {
   const cases = [
     RAW_IDEA,
@@ -164,6 +197,7 @@ describe("serializeIdea roundtrip", () => {
     FINALIZED_IDEA,
     SKIPPED_IDEA,
     MULTILINE_DRAFT_IDEA,
+    DRAFT_WITH_HORIZONTAL_RULE,
   ]
 
   for (const input of cases) {
@@ -197,6 +231,18 @@ describe("parseIdeas / serializeIdeas", () => {
     const reparsed = parseIdeas(serialized)
     expect(reparsed).toEqual(ideas)
   })
+})
+
+it("parseIdeas handles --- in draft body without corrupting adjacent ideas", () => {
+  const file = `${RAW_IDEA}\n${DRAFT_WITH_HORIZONTAL_RULE}\n${SKIPPED_IDEA}`
+  const ideas = parseIdeas(file)
+  expect(ideas).toHaveLength(3)
+  expect(ideas[0].id).toBe("1")
+  expect(ideas[1].id).toBe("9")
+  expect(ideas[1].draft).toContain("---")
+  expect(ideas[1].draft).toContain("Option 1")
+  expect(ideas[1].draft).toContain("That's how you learn")
+  expect(ideas[2].id).toBe("3")
 })
 
 describe("duplicate ID handling", () => {

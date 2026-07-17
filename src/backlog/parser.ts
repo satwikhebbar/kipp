@@ -148,7 +148,13 @@ export function parseIdeas(text: string): Idea[] {
     if (i >= lines.length) break
     i++ // past closing ---
 
-    while (i < lines.length && lines[i].trim() !== "---") i++
+    while (i < lines.length) {
+      if (lines[i].trim() === "---") {
+        const next = lines[i + 1]?.trim()
+        if (next && /^\w+:(\s|$)/.test(next)) break
+      }
+      i++
+    }
 
     ideas.push(parseIdea(lines.slice(ideaStart, i).join("\n")))
   }
