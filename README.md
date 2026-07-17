@@ -121,6 +121,27 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://li
 - Send `/generate` — it should start the pipeline workflow
 - Check the Cloudflare dashboard for Workflow runs
 
+## Local Development & Testing
+
+To test the Telegram flow locally without hijacking the production webhook, you must use a separate **dev bot**. Telegram only allows one webhook URL per bot.
+
+1. **Create a Dev Bot**: Talk to BotFather, create a second bot (e.g., `MyBotDev`), and note the token.
+2. **Configure `.dev.vars`**: Create a `.dev.vars` file in the project root with your dev bot token and a webhook secret:
+   ```env
+   TELEGRAM_BOT_TOKEN="dev_bot_token_here"
+   TELEGRAM_WEBHOOK_SECRET="some_random_secret"
+   ```
+3. **Start Local Server**: Run `pnpm dev` to start `wrangler dev` locally (usually on port 8787).
+4. **Start ngrok**: In a new terminal, expose your local server to the internet using ngrok:
+   ```bash
+   ngrok http 8787
+   ```
+5. **Register Dev Webhook**: In another terminal, run the helper script to automatically find your active ngrok URL and point your dev bot's webhook to it:
+   ```bash
+   pnpm run webhook:dev
+   ```
+Now, messages sent to your *dev bot* will route to your local server, while your production worker continues to safely handle messages from your production bot.
+
 ## Usage
 
 | Action | How |
@@ -146,6 +167,7 @@ Secrets are encrypted and never visible in plaintext. Vars are readable in the C
 | Command | Purpose |
 |---|---|
 | `pnpm dev` | Start local dev server (wrangler) |
+| `pnpm run webhook:dev` | Register dev bot webhook to active ngrok tunnel |
 | `pnpm deploy` | Deploy to Cloudflare Workers |
 | `pnpm lint` | Check lint rules and formatting |
 | `pnpm lint:fix` | Auto-fix lint and formatting issues |

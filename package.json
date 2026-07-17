@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "webhook:dev": "bash scripts/dev-webhook.sh",
     "deploy": "wrangler deploy",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
