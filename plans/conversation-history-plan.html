@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Provider-Neutral Conversation History Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --code:#020617; }
+      * { box-sizing:border-box; }
+      body { max-width:980px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; }
+      h1,h2,h3 { line-height:1.25; color:#f8fafc; }
+      h1 { margin:0 0 10px; font-size:2.2rem; border-bottom:2px solid var(--line); padding-bottom:20px; }
+      h2 { margin-top:48px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; }
+      h3 { margin-top:28px; font-size:1.1rem; }
+      p,li { max-width:82ch; }
+      .lede { color:var(--muted); font-size:1.1rem; }
+      .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; }
+      .note { border-left-color:var(--amber); }
+      code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:0.9em ui-monospace,SFMono-Regular,Menlo,monospace; }
+      pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); }
+      pre code { padding:0; color:var(--ink); }
+      table { width:100%; border-collapse:collapse; margin:20px 0; }
+      th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+      th { color:#cbd5e1; background:#1e293b; }
+      ol>li { margin:12px 0; }
+      .status { color:var(--green); font-weight:700; }
+      @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Provider-Neutral Conversation History Plan</h1>
+    <p class="lede">Issue #13 extension: retain the author-facing drafting conversation across the Cloudflare Workflow approval loop, then supply it to every human-feedback revision.</p>
+
+    <div class="callout">
+      <strong>Status:</strong> Ready for implementation.<br />
+      <strong>Decisions captured:</strong> author-facing messages only; retain the complete transcript for the existing maximum of four feedback rounds; no post-completion persistence; the <em>Revise More</em> button is not a conversational user message.
+    </div>
+
+    <h2>1. Problem and outcome</h2>
+    <p>Today the initial draft call has the style prompt, source idea, and optional source material. A later call to <code>createReviseAgent</code> receives only the current draft, critique items, and an optional feedback string. It therefore cannot see the original request, the style prompt, earlier drafts, or earlier author feedback.</p>
+    <p>The result will be a reusable conversation contract. A revision will send the LLM this sequence: initial system guidance, the original drafting request, every draft shown to the author, and each actual Telegram feedback message. The current review-only revision instruction remains available without treating internal critique as part of the author conversation.</p>
+
+    <h2>2. Scope and boundaries</h2>
+    <table>
+      <thead><tr><th>Included</th><th>Explicitly excluded</th></tr></thead>
+      <tbody>
+        <tr><td>Style prompt as a system message</td><td>Persisting transcripts to <code>ideas.md</code>, D1, KV, or another store</td></tr>
+        <tr><td>Original idea/source request as a user message</td><td>Adding a synthetic user message for the <em>Revise More</em> button</td></tr>
+        <tr><td>Each draft delivered for author review as an assistant message</td><td>Internal critique/classification exchanges in the author-facing transcript</td></tr>
+        <tr><td>Actual Telegram feedback as a user message</td><td>Long-running memory, summarisation, branching, or cross-workflow handoff</td></tr>
+        <tr><td>DeepSeek and Gemini adapters over one common contract</td><td>Changing publishing, backlog, or Telegram routing behaviour</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3. Target contract</h2>
+    <p>Replace the current two-field prompt input with a provider-neutral message list in <code>src/providers/llm.ts</code>. Keep the type deliberately small and serializable so it can be held in Workflow step outputs.</p>
+    <pre><code>export type LLMRole = "system" | "user" | "assistant"
+
+export interface LLMMessage {
+  role: LLMRole
+  content: string
+}
+
+export interface GenerateOptions {
+  messages: LLMMessage[]
+}
+
+export type GenerateFn = (options: GenerateOptions) =&gt; Promise&lt;LLMResponse&gt;</code></pre>
+    <p>Do not include Telegram IDs, persistence concerns, provider-specific roles, or workflow fields in this type. Those belong at the integration edges. Future metadata can be added only when a concrete consumer needs it.</p>
+
+    <h2>4. Provider adaptation</h2>
+    <table>
+      <thead><tr><th>Provider</th><th>Mapping</th><th>Implementation note</th></tr></thead>
+      <tbody>
+        <tr><td>DeepSeek</td><td>Pass the canonical messages as OpenAI-compatible <code>{ role, content }</code> messages.</td><td>Preserve the selected model configuration: currently the adapter hard-codes <code>deepseek-chat</code>; this plan should also correct it to use the supplied model name when provided.</td></tr>
+        <tr><td>Gemini</td><td>Concatenate all system messages, in order, into one <code>systemInstruction</code>. Map <code>assistant</code> to Gemini <code>model</code>; map <code>user</code> to <code>user</code> contents.</td><td>Gemini accepts system instruction separately, so system messages must not appear again in <code>contents</code>.</td></tr>
+      </tbody>
+    </table>
+    <div class="note callout"><strong>Compatibility rule:</strong> provider files are the only location that knows provider wire formats. Every current and future agent passes the canonical transcript to <code>GenerateFn</code>.</div>
+
+    <h2>5. Conversation construction and agent changes</h2>
+    <ol>
+      <li>Extract the initial drafting request construction from <code>createDraftAgent</code> into a reusable helper that returns an <code>LLMMessage[]</code>: style prompt (system) followed by a single user message containing the original idea/source request <em>and</em> the fixed length/format directive currently inlined in <code>createDraftAgent</code> (the "Write a concise LinkedIn post (150-300 words)…" instruction). That directive is part of the authoring request, so it belongs in the triggering user message, not a separate role.</li>
+      <li>Have the draft agent generate from that list and return the draft. In <code>PipelineWorkflow</code>, append <code>{ role: "assistant", content: draft }</code> before the draft is persisted/notified.</li>
+      <li>Refactor <code>createReviseAgent</code> to accept the existing conversation plus review context. Build a new request by appending a non-author-facing revision instruction that supplies failed checks when present; append the actual human Telegram feedback as a <code>user</code> message only when it is non-empty.</li>
+      <li>Call the generator with the resulting message list. Append the returned revised draft as the next <code>assistant</code> message.</li>
+      <li>Keep <code>createCritiqueAgent</code> independent. It evaluates a draft but neither reads nor appends to the author transcript.</li>
+    </ol>
+    <p>The revision instruction should say that the assistant must revise the latest draft in the conversation, preserve the established style and topic, and output draft text only. It should not repeat the previous draft or author feedback as string-labelled blocks; that information is already represented by message roles.</p>
+    <div class="note callout"><strong>Revise More is upstream:</strong> the <code>__revise__</code> sentinel originates from Telegram <code>revise:</code> callback_data translation outside <code>workflow.ts</code>. The workflow's contract is simply that a <code>__revise__</code> event text adds no transcript message; only a subsequent real Telegram reply extends history. The trigger side is out of scope here but must keep emitting <code>__revise__</code> as the event text.</div>
+
+    <h2>6. Workflow state strategy</h2>
+    <p>Use Cloudflare Workflow step results as the active workflow’s durable state. The <code>generate</code> step returns a serializable object containing both <code>draft</code> and <code>messages</code>. Each <code>revise-N</code> step returns the same shape with the extended transcript. Assign the returned transcript outside the step before the next wait/iteration.</p>
+    <div class="note callout"><strong>Two four-round loops, one in scope:</strong> <code>workflow.ts</code> has two distinct <code>for (i&lt;4)</code> loops — an internal critique loop <em>inside</em> the <code>generate</code> step (<code>src/workflow.ts:57</code>) and the human-feedback loop (<code>src/workflow.ts:115</code>). This plan targets only the latter; the internal critique loop is unchanged and out of scope. All step calls below use the existing <code>stepDo</code> wrapper (<code>src/workflow.ts:27</code>), not raw <code>step.do</code>, to preserve per-step error logging and the RPC-serializable cast.</div>
+    <pre><code>let state = await stepDo("generate", async () =&gt; {
+  const messages = createDraftConversation(...)
+  const draft = await draftAgent(messages)
+  return { draft, messages: [...messages, { role: "assistant", content: draft }], chatId }
+})
+
+// On actual Telegram feedback:
+state = await stepDo(`revise-${i}`, async () =&gt; {
+  const messages = appendHumanFeedback(state.messages, feedback)
+  const draft = await reviseAgent({ messages, failedItems: [] })
+  return { draft, messages: [...messages, { role: "assistant", content: draft }], chatId: state.chatId }
+})</code></pre>
+    <p>This matches the current bounded workflow: step outputs survive waits/replays, require no new binding or operational store, and avoid coupling the generic conversation abstraction to the LinkedIn/Telegram backlog format.</p>
+    <p>Do not use <code>ideas.md</code> as transcript storage. It is the existing business-state record, but mutable Markdown is a poor append log and would force unrelated future workflows to use GitHub. Do not use KV because its eventual consistency is the wrong default for sequential conversation state. D1 or a Durable Object becomes appropriate only when conversations must continue after a workflow completes, be queried/audited, grow beyond safe step-output sizes, or need multi-client concurrency.</p>
+
+    <h2>7. Recorded Cloudflare storage decision and limits</h2>
+    <div class="callout">
+      <strong>Decision:</strong> use <em>Cloudflare Workflow persisted step state</em> for this bounded, active drafting loop. Do not introduce Durable Objects, D1, KV, R2, or GitHub-backed transcript persistence in this increment.
+    </div>
+    <p>“Durable storage” can refer either to Workflow state or to Durable Object storage. This implementation uses the former: cached <code>step.do()</code> return values and durable wait/event progress. It does not use Durable Objects.</p>
+    <table>
+      <thead><tr><th>Workflow constraint</th><th>Current limit</th><th>Decision and implementation consequence</th></tr></thead>
+      <tbody>
+        <tr><td>Non-stream <code>step.do()</code> result</td><td>1 MiB</td><td><strong>Applies now.</strong> Each generate/revise result contains the complete transcript. Before returning it from a step, measure the UTF-8 byte size of its JSON-serialized form and fail clearly if it would exceed a conservative threshold (for example 900 KiB). Do not silently truncate author context.</td></tr>
+        <tr><td>Total persisted state per instance</td><td>100 MB Free; 1 GB Paid</td><td>Safe for four short review rounds, but step snapshots retain prior messages. An unbounded history grows stored state over time and must not be introduced without compaction/persistence design.</td></tr>
+        <tr><td>Completed-instance retention</td><td>3 days Free; 30 days Paid by default</td><td>Acceptable: the transcript is required only during the active workflow. This is explicitly <strong>not</strong> post-completion or cross-workflow memory.</td></tr>
+        <tr><td>Event payload</td><td>1 MiB</td><td>Telegram feedback is far below this. A future channel that accepts large text or files needs validation before calling <code>sendEvent</code>.</td></tr>
+        <tr><td>Steps per workflow</td><td>1,024 Free; 10,000 Paid by default</td><td>Not material for the current four-round loop. It is a future multi-turn-agent constraint.</td></tr>
+      </tbody>
+    </table>
+    <p>Implement the size check in the generic conversation utility, not in the LinkedIn workflow. It should measure the exact serializable shape the workflow returns — including the <code>chatId</code> field alongside <code>draft</code> and <code>messages</code>, not the <code>messages</code> array alone — use <code>TextEncoder</code> for UTF-8 byte length, and include the measured size and configured limit in a safe error message. The guard is a platform-boundary validation, not a context-management policy.</p>
+    <h3>Why Durable Objects are deferred</h3>
+    <p>A Durable Object would add a strongly consistent, transactional SQLite-backed store and per-conversation serialisation. That is useful when history must outlive a Workflow, be queried, be shared among multiple clients, or be updated concurrently. It does not solve a current requirement and would add a binding, schema, lifecycle, and cost surface.</p>
+    <p>If a Durable Object is selected later, use one object per conversation and the SQLite backend. Its relevant constraints are a 2 MiB key/value-or-row limit, a 10 GB per-object limit on Paid (1 GB Free), and inherently single-threaded handling with a soft limit of about 1,000 requests per second per object. It must not become a global conversation bottleneck.</p>
+
+    <h2>8. Implementation sequence</h2>
+    <ol>
+      <li>Introduce <code>LLMRole</code>, <code>LLMMessage</code>, and the messages-only <code>GenerateOptions</code> contract. Update call sites and mocks so TypeScript identifies any remaining legacy prompt usage.</li>
+      <li>Update <code>src/providers/deepseek.ts</code>, <code>src/providers/gemini.ts</code>, and their tests to validate exact message translation and role ordering.</li>
+      <li>Refactor draft/revise agent APIs and unit tests around messages. Maintain the existing text-only output contract from agents.</li>
+      <li>Add a generic serializable-transcript size guard. Call it immediately before every Workflow step returns transcript state; test its boundary and error behaviour.</li>
+      <li>Modify <code>src/workflow.ts</code> so every draft/revision state transition carries the extended transcript. Ensure <code>__revise__</code> adds no message and only actual text feedback is appended.</li>
+      <li>Add workflow tests for first feedback and multiple feedback turns; run the full quality suite.</li>
+    </ol>
+
+    <h2>9. Required tests</h2>
+    <table>
+      <thead><tr><th>Layer</th><th>Case</th><th>Expected assertion</th></tr></thead>
+      <tbody>
+        <tr><td>Provider</td><td>DeepSeek full transcript</td><td>HTTP request preserves ordered system/user/assistant/user messages.</td></tr>
+        <tr><td>Provider</td><td>Gemini full transcript</td><td>System messages are merged into <code>systemInstruction</code>; assistant becomes <code>model</code>; order of non-system contents is preserved.</td></tr>
+        <tr><td>Agent</td><td>Draft construction</td><td>Style prompt is system; initial idea/source content is user.</td></tr>
+        <tr><td>Agent</td><td>Revision construction</td><td>Existing transcript is preserved; feedback is appended as user; response is appended by workflow as assistant.</td></tr>
+        <tr><td>Conversation utility</td><td>Workflow-size guard</td><td>Uses UTF-8 serialized byte length; allows a transcript below the configured threshold and rejects one at/over it without modifying messages.</td></tr>
+        <tr><td>Workflow</td><td>One text-feedback revision</td><td>Revision generator receives style, initial request, initial draft, and Telegram feedback in that order.</td></tr>
+        <tr><td>Workflow</td><td>Two text-feedback revisions</td><td>Second revision also receives the first feedback and first revised draft.</td></tr>
+        <tr><td>Workflow</td><td><em>Revise More</em> event</td><td>No synthetic transcript message is added; only the subsequent real Telegram reply changes history.</td></tr>
+        <tr><td>Regression</td><td>Approval/timeout/publish paths</td><td>Existing behaviours and notifications remain unchanged.</td></tr>
+      </tbody>
+    </table>
+
+    <h2>10. Acceptance criteria</h2>
+    <ul>
+      <li>A revision after Telegram feedback receives the original style prompt, original idea/source request, all earlier author-visible drafts, and all earlier actual feedback in chronological order.</li>
+      <li>DeepSeek and Gemini both accept the same canonical conversation input and preserve its meaning in their native APIs.</li>
+      <li>The transcript survives Workflow waits/replay within the existing feedback loop without external persistence.</li>
+      <li>Every persisted transcript is validated against a conservative Workflow step-output size threshold; oversized transcripts fail with a safe, actionable error and are never silently truncated.</li>
+      <li>Internal critique and the <em>Revise More</em> button do not appear as author messages.</li>
+      <li><code>pnpm typecheck</code>, <code>pnpm lint</code>, and <code>pnpm test</code> pass.</li>
+    </ul>
+
+    <h2>11. Deferred scalability checkpoint</h2>
+    <p>Before introducing a workflow with unbounded or significantly longer conversations, add a separate design pass for context limits and retention. That pass should define a provider-aware token budget, a summarisation/compaction strategy, redaction and audit requirements, and whether D1 or a Durable Object should become the persistent conversation store. It must also choose an external-storage lifecycle and retrieval strategy, rather than relying on Workflow completed-instance retention. None of those concerns should distort this bounded first implementation.</p>
+  </body>
+</html>
