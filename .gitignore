@@ -7,6 +7,9 @@ logs/
 *.log
 .DS_Store
 
+# Downloaded tooling artifacts
+.opencode/skills/
+
 # Local agent handoff queues
 .agent-handoff/inbox/*
 .agent-handoff/in-progress/*
