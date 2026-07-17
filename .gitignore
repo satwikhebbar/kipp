@@ -7,6 +7,9 @@ logs/
 *.log
 .DS_Store
 
+# Development scripts (local utility, not part of the deployable project)
+scripts/
+
 # Opencode tooling artifacts (project-level config lives elsewhere)
 .opencode/
 
