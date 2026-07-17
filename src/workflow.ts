@@ -68,18 +68,19 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const idea = ideas.find((i) => i.id === ideaId)
       if (!idea) throw new Error(`Idea ${ideaId} not found`)
 
-      await manager.updateIdea(ideaId, {
-        draft,
-        status: "awaiting-feedback",
-        correlation: { ...idea.correlation, workflowInstanceId: event.instanceId },
-      })
       const chatId = idea.correlation?.telegramChatId ?? this.env.TELEGRAM_ALLOWED_USER_ID
       if (!chatId)
         console.log(
           `[workflow ${event.instanceId}] no chatId resolved for idea ${ideaId} — notify/approval steps will be silent`,
         )
 
-      return assertStepOutputSize({ draft, messages, chatId })
+      const nextState = assertStepOutputSize({ draft, messages, chatId })
+      await manager.updateIdea(ideaId, {
+        draft,
+        status: "awaiting-feedback",
+        correlation: { ...idea.correlation, workflowInstanceId: event.instanceId },
+      })
+      return nextState
     })
 
     if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
@@ -192,15 +193,15 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           Number(this.env.LLM_MAX_RETRIES ?? 3),
         )
         const agent = createReviseAgent(gen)
-        // __revise__ (Revise More button) adds no transcript message; only real Telegram feedback extends history.
         const feedback = text === "__revise__" ? undefined : text
         let messages = feedback ? appendHumanFeedback(currentMessages, feedback) : currentMessages
         const nextDraft = await agent({ messages, failedItems: [] })
         messages = appendAssistant(messages, nextDraft)
+        const nextState = assertStepOutputSize({ draft: nextDraft, messages })
         const client = createGitHubClient(this.env)
         const manager = createBacklogManager(client)
         await manager.updateIdea(ideaId, { draft: nextDraft })
-        return assertStepOutputSize({ draft: nextDraft, messages })
+        return nextState
       })
       currentDraft = revised.draft
       currentMessages = revised.messages

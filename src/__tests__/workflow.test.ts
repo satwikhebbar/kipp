@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
+import { TranscriptTooLargeError } from "../conversation"
 import type { Env } from "../types"
 
 vi.mock("cloudflare:workers", () => {
@@ -13,6 +14,20 @@ const mockCreateGenerator = vi.hoisted(() => vi.fn())
 vi.mock("../providers", () => ({
   createGenerator: () => mockCreateGenerator,
 }))
+
+const mockAssertStepOutputSize = vi.hoisted(() => vi.fn((v: unknown) => v))
+vi.mock("../conversation", async () => {
+  const actual = await vi.importActual("../conversation")
+  return {
+    ...actual,
+    appendAssistant: (msgs: unknown[], content: string) => [...(msgs as unknown[]), { role: "assistant", content }],
+    appendHumanFeedback: (msgs: unknown[], feedback: string) => [
+      ...(msgs as unknown[]),
+      { role: "user", content: feedback },
+    ],
+    assertStepOutputSize: mockAssertStepOutputSize,
+  }
+})
 
 import { PipelineWorkflow } from "../workflow"
 
@@ -68,6 +83,7 @@ describe("PipelineWorkflow", () => {
     stepDo.mockImplementation(async (_name: string, fn: () => unknown) => fn())
     waitForEvent.mockReset()
     mockCreateGenerator.mockReset()
+    mockAssertStepOutputSize.mockReset()
   }
 
   function makeStep() {
@@ -413,5 +429,38 @@ describe("PipelineWorkflow", () => {
     const secondReviseMessages = genCalls[3].messages
     expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "actually make it shorter")).toBe(true)
     expect(secondReviseMessages.some((m) => m.content === "__revise__")).toBe(false)
+  })
+
+  it("throws TranscriptTooLargeError before any ideas.md update when the generate transcript is oversized", async () => {
+    testRun()
+    const putCalls: { url: string; opts?: RequestInit }[] = []
+    mockCreateGenerator
+      .mockResolvedValueOnce({ text: "big draft", usage: { inputTokens: 5, outputTokens: 3 } })
+      .mockResolvedValueOnce({
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 3 },
+      })
+    mockAssertStepOutputSize.mockImplementation(() => {
+      throw new TranscriptTooLargeError("too big", 950 * 1024, 900 * 1024)
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT") putCalls.push({ url, opts })
+        if (url?.includes?.("api.telegram.org"))
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await expect(
+      (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep()),
+    ).rejects.toThrow("too big")
+    expect(putCalls.some((c) => c.url.includes("ideas.md"))).toBe(false)
   })
 })
