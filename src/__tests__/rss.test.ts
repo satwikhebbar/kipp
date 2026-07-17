@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const mockGen = vi.hoisted(() => vi.fn())
 vi.mock("../providers/index", async () => ({
   createGenerator: vi.fn(() => mockGen),
+  messages: (await vi.importActual("../providers/llm")).messages,
   parseLLMJson: (await vi.importActual("../providers/llm")).parseLLMJson,
 }))
 

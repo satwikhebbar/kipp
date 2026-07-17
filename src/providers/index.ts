@@ -2,7 +2,7 @@ import { createDeepseekGenerator } from "./deepseek"
 import { createGeminiGenerator } from "./gemini"
 import type { GenerateFn } from "./llm"
 
-export { type GenerateFn, type GenerateOptions, parseLLMJson } from "./llm"
+export { type GenerateFn, type GenerateOptions, type LLMMessage, type LLMRole, messages, parseLLMJson } from "./llm"
 
 export function createGenerator(apiKey: string, provider: string, modelName?: string, maxRetries = 3): GenerateFn {
   const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : 3
@@ -15,7 +15,7 @@ function createInnerGenerator(apiKey: string, provider: string, modelName?: stri
     case "gemini":
       return createGeminiGenerator(apiKey, modelName)
     case "deepseek":
-      return createDeepseekGenerator(apiKey)
+      return createDeepseekGenerator(apiKey, modelName)
     default:
       throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek"`)
   }

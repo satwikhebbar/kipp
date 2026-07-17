@@ -1,19 +1,15 @@
 import type { LLMResponse } from "../types"
 import type { GenerateOptions } from "./llm"
 
-export function createDeepseekGenerator(apiKey: string) {
-  return async ({ system, prompt }: GenerateOptions): Promise<LLMResponse> => {
-    const messages: Array<{ role: string; content: string }> = []
-    if (system) messages.push({ role: "system", content: system })
-    messages.push({ role: "user", content: prompt })
-
+export function createDeepseekGenerator(apiKey: string, modelName = "deepseek-chat") {
+  return async ({ messages }: GenerateOptions): Promise<LLMResponse> => {
     const res = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: "deepseek-chat", messages }),
+      body: JSON.stringify({ model: modelName, messages }),
     })
 
     if (!res.ok) {

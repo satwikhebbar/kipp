@@ -1,8 +1,9 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
 import { createCritiqueAgent } from "./agent/critique"
-import { createDraftAgent } from "./agent/draft"
+import { createDraftAgent, createDraftConversation } from "./agent/draft"
 import { createReviseAgent } from "./agent/revise"
 import { createBacklogManager } from "./backlog/manager"
+import { appendAssistant, appendHumanFeedback, assertStepOutputSize } from "./conversation"
 import { createGitHubClient } from "./integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "./integrations/linkedin"
 import { createTelegramClient } from "./integrations/telegram"
@@ -53,11 +54,14 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const critiqueAgent = createCritiqueAgent(gen)
       const reviseAgent = createReviseAgent(gen)
 
+      let messages = createDraftConversation(stylePrompt, { title: ideaTitle, body: ideaBody, substackBody })
       let draft = await draftAgent({ title: ideaTitle, body: ideaBody, substackBody })
+      messages = appendAssistant(messages, draft)
       for (let i = 0; i < 4; i++) {
         const items = await critiqueAgent(draft)
         if (items.every((c) => c.passed)) break
-        draft = await reviseAgent({ draft, failedItems: items.filter((c) => !c.passed) })
+        draft = await reviseAgent({ messages, failedItems: items.filter((c) => !c.passed) })
+        messages = appendAssistant(messages, draft)
       }
 
       const ideas = await manager.readIdeas()
@@ -75,7 +79,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           `[workflow ${event.instanceId}] no chatId resolved for idea ${ideaId} — notify/approval steps will be silent`,
         )
 
-      return { draft, chatId }
+      return assertStepOutputSize({ draft, messages, chatId })
     })
 
     if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
@@ -112,6 +116,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     }
 
     let currentDraft = state.draft
+    let currentMessages = state.messages
     for (let i = 0; i < 4; i++) {
       const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || "12"
       const reply = await step.waitForEvent<{ text?: string }>(`feedback-${i}`, {
@@ -179,7 +184,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         return
       }
 
-      currentDraft = await stepDo(`revise-${i}`, async () => {
+      const revised = await stepDo(`revise-${i}`, async () => {
         const gen = createGenerator(
           this.env.LLM_API_KEY,
           this.env.LLM_PROVIDER,
@@ -187,13 +192,18 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           Number(this.env.LLM_MAX_RETRIES ?? 3),
         )
         const agent = createReviseAgent(gen)
+        // __revise__ (Revise More button) adds no transcript message; only real Telegram feedback extends history.
         const feedback = text === "__revise__" ? undefined : text
-        const revised = await agent({ draft: currentDraft, failedItems: [], humanFeedback: feedback })
+        let messages = feedback ? appendHumanFeedback(currentMessages, feedback) : currentMessages
+        const nextDraft = await agent({ messages, failedItems: [] })
+        messages = appendAssistant(messages, nextDraft)
         const client = createGitHubClient(this.env)
         const manager = createBacklogManager(client)
-        await manager.updateIdea(ideaId, { draft: revised })
-        return revised
+        await manager.updateIdea(ideaId, { draft: nextDraft })
+        return assertStepOutputSize({ draft: nextDraft, messages })
       })
+      currentDraft = revised.draft
+      currentMessages = revised.messages
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
         await stepDo(`notify-revised-${i}`, async () => {

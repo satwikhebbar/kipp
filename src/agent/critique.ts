@@ -1,4 +1,4 @@
-import { type GenerateFn, parseLLMJson } from "../providers/llm"
+import { type GenerateFn, messages, parseLLMJson } from "../providers/llm"
 import type { ChecklistItem } from "../types"
 
 const CHECKLIST = [
@@ -27,7 +27,7 @@ export function createCritiqueAgent(generate: GenerateFn): CritiqueFn {
       `Checklist:\n${CHECKLIST.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
     ].join("\n\n")
 
-    const res = await generate({ system: SYSTEM_PROMPT, prompt })
+    const res = await generate(messages(SYSTEM_PROMPT, prompt))
     const items = parseLLMJson<ChecklistItem[]>(res.text)
     return items.map((item) => ({
       ...item,

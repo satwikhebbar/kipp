@@ -6,10 +6,18 @@ export function createGeminiGenerator(apiKey: string, modelName = "gemini-2.0-fl
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: modelName })
 
-  return async ({ system, prompt }: GenerateOptions): Promise<LLMResponse> => {
+  return async ({ messages }: GenerateOptions): Promise<LLMResponse> => {
+    const systemText = messages
+      .filter((m) => m.role === "system")
+      .map((m) => m.content)
+      .join("\n\n")
+    const contents = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }))
+
     const result = await model.generateContent({
-      systemInstruction: system ? { role: "system", parts: [{ text: system }] } : undefined,
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      systemInstruction: systemText ? { role: "system", parts: [{ text: systemText }] } : undefined,
+      contents,
     })
 
     const response = result.response

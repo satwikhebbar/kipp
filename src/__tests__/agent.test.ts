@@ -1,14 +1,18 @@
 import { describe, expect, it, vi } from "vitest"
 import { createClassifyAgent } from "../agent/classify"
 import { createCritiqueAgent } from "../agent/critique"
-import { createDraftAgent } from "../agent/draft"
-import { createReviseAgent } from "../agent/revise"
-import type { GenerateFn } from "../providers/llm"
+import { createDraftAgent, createDraftConversation } from "../agent/draft"
+import { buildReviseConversation, createReviseAgent } from "../agent/revise"
+import type { GenerateFn, LLMMessage } from "../providers/llm"
 
 const STYLE = "Professional but conversational. Concise. Story-driven."
 
 function mockGen(text: string): GenerateFn {
   return vi.fn().mockResolvedValue({ text, usage: { inputTokens: 10, outputTokens: 5 } })
+}
+
+function lastMessages(fn: ReturnType<typeof mockGen>): LLMMessage[] {
+  return (vi.mocked(fn).mock.calls[0][0] as { messages: LLMMessage[] }).messages
 }
 
 describe("draft agent", () => {
@@ -17,15 +21,29 @@ describe("draft agent", () => {
     const draft = createDraftAgent(generate, STYLE)
     const result = await draft({ title: "Test Title", body: "Some context" })
     expect(result).toBe("My LinkedIn post content")
-    expect(generate).toHaveBeenCalledWith(expect.objectContaining({ system: STYLE }))
+    const msgs = lastMessages(generate)
+    expect(msgs[0]).toEqual({ role: "system", content: STYLE })
+    expect(msgs[1].role).toBe("user")
+    expect(msgs[1].content).toContain("Test Title")
+    expect(msgs[1].content).toContain("Some context")
   })
 
-  it("includes substackBody when provided", async () => {
+  it("includes substackBody and the format directive in the user message", async () => {
     const generate = mockGen("Draft with reference")
     const draft = createDraftAgent(generate, STYLE)
     await draft({ title: "T", body: "B", substackBody: "Long reference text" })
-    const call = vi.mocked(generate).mock.calls[0][0]
-    expect(call.prompt).toContain("Long reference text")
+    const user = lastMessages(generate)[1].content
+    expect(user).toContain("Long reference text")
+    expect(user).toContain("150-300 words")
+  })
+
+  it("createDraftConversation returns style as system and idea/source as user without calling generate", () => {
+    const msgs = createDraftConversation(STYLE, { title: "T", body: "B", substackBody: "S" })
+    expect(msgs[0]).toEqual({ role: "system", content: STYLE })
+    expect(msgs[1].role).toBe("user")
+    expect(msgs[1].content).toContain("T")
+    expect(msgs[1].content).toContain("B")
+    expect(msgs[1].content).toContain("S")
   })
 })
 
@@ -51,22 +69,50 @@ describe("critique agent", () => {
 })
 
 describe("revise agent", () => {
-  it("produces revised draft from failed items", async () => {
+  it("preserves the existing transcript and appends a revision instruction + assistant response", async () => {
     const generate = mockGen("Revised draft text")
     const revise = createReviseAgent(generate)
+    const existing: LLMMessage[] = [
+      { role: "system", content: STYLE },
+      { role: "user", content: "original request" },
+      { role: "assistant", content: "original draft" },
+    ]
     const result = await revise({
-      draft: "Original draft",
+      messages: existing,
       failedItems: [{ check: "Post is too long", passed: false, feedback: "Shorten it" }],
     })
     expect(result).toBe("Revised draft text")
+    const sent = lastMessages(generate)
+    expect(sent.slice(0, 3)).toEqual(existing)
+    expect(sent[3].role).toBe("user")
+    expect(sent[3].content).toContain("Shorten it")
+    expect(sent.some((m) => m.role === "assistant" && m.content === "Revised draft text")).toBe(false)
   })
 
-  it("includes human feedback when provided", async () => {
+  it("appends human feedback as a separate user message when provided", async () => {
     const generate = mockGen("Revised")
     const revise = createReviseAgent(generate)
-    await revise({ draft: "D", failedItems: [], humanFeedback: "Make it funnier" })
-    const call = vi.mocked(generate).mock.calls[0][0]
-    expect(call.prompt).toContain("funnier")
+    const existing: LLMMessage[] = [
+      { role: "system", content: STYLE },
+      { role: "user", content: "original request" },
+      { role: "assistant", content: "draft" },
+    ]
+    await revise({ messages: existing, failedItems: [], humanFeedback: "Make it funnier" })
+    const sent = lastMessages(generate)
+    expect(sent.slice(0, 3)).toEqual(existing)
+    expect(sent[3].role).toBe("user")
+    expect(sent[4].role).toBe("user")
+    expect(sent[4].content).toBe("Make it funnier")
+  })
+
+  it("buildReviseConversation omits feedback user message when humanFeedback is empty", () => {
+    const existing: LLMMessage[] = [
+      { role: "system", content: "s" },
+      { role: "user", content: "u" },
+    ]
+    const built = buildReviseConversation({ messages: existing, failedItems: [] })
+    expect(built).toHaveLength(existing.length + 1)
+    expect(built[built.length - 1].role).toBe("user")
   })
 })
 

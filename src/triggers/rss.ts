@@ -1,7 +1,7 @@
 import { nextId } from "../backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../backlog/parser"
 import { createGitHubClient, type GithubClient } from "../integrations/github"
-import { createGenerator, type GenerateFn, parseLLMJson } from "../providers"
+import { createGenerator, type GenerateFn, messages, parseLLMJson } from "../providers"
 import type { Env, Idea } from "../types"
 
 interface RssItem {
@@ -58,7 +58,7 @@ function stripHtml(html: string): string {
 async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<ExtractedIdeas> {
   const text = stripHtml(item.contentHtml).slice(0, 6000)
   const prompt = `Newsletter: "${item.title}"\nURL: ${item.link}\n\nContent:\n${text}`
-  const res = await gen({ system: SYSTEM_PROMPT, prompt })
+  const res = await gen(messages(SYSTEM_PROMPT, prompt))
   const parsed = parseLLMJson<ExtractedIdeas>(res.text)
   if (!parsed.teaser || !Array.isArray(parsed.subIdeas)) {
     throw new Error("LLM returned malformed idea extraction")

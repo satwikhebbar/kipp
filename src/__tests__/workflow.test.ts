@@ -263,4 +263,155 @@ describe("PipelineWorkflow", () => {
     expect(stepDo).toHaveBeenCalledWith(expect.stringContaining("revise-"), expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify-not-configured", expect.any(Function))
   })
+
+  it("revision generator receives style, initial request, earlier drafts, and Telegram feedback in order", async () => {
+    const responses = [
+      { text: "First draft", usage: { inputTokens: 5, outputTokens: 3 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      { text: "Revised with feedback", usage: { inputTokens: 5, outputTokens: 3 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+    ]
+    let callIdx = 0
+    const genCalls: { messages: { role: string; content: string }[] }[] = []
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async (opts) => {
+      genCalls.push(opts as { messages: { role: string; content: string }[] })
+      return responses[callIdx++]
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        if (url?.includes?.("api.telegram.org"))
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "Make it more academic" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    // genCalls: [draft, critique, revise, critique]
+    const reviseMessages = genCalls[2].messages
+    expect(reviseMessages[0]).toEqual({ role: "system", content: STYLE_PROMPT })
+    expect(reviseMessages[1].role).toBe("user")
+    expect(reviseMessages[1].content).toContain("Test idea")
+    expect(reviseMessages[1].content).toContain("Body content")
+    const draftMsgs = reviseMessages.filter((m) => m.role === "assistant")
+    expect(draftMsgs[0].content).toBe("First draft")
+    const feedbackMsgs = reviseMessages.filter((m) => m.role === "user" && m.content === "Make it more academic")
+    expect(feedbackMsgs).toHaveLength(1)
+    const feedbackIdx = reviseMessages.findIndex((m) => m.content === "Make it more academic")
+    expect(reviseMessages[feedbackIdx - 1].role).toBe("assistant")
+  })
+
+  it("second revision also receives the first feedback and first revised draft", async () => {
+    const responses = [
+      { text: "Initial draft", usage: { inputTokens: 5, outputTokens: 3 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      { text: "Revised one", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "Revised two", usage: { inputTokens: 5, outputTokens: 3 } },
+    ]
+    let callIdx = 0
+    const genCalls: { messages: { role: string; content: string }[] }[] = []
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async (opts) => {
+      genCalls.push(opts as { messages: { role: string; content: string }[] })
+      return responses[callIdx++]
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        if (url?.includes?.("api.telegram.org"))
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "first feedback" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "second feedback" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    // genCalls: [draft, critique, revise1, revise2]
+    const secondReviseMessages = genCalls[3].messages
+    expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "first feedback")).toBe(true)
+    expect(secondReviseMessages.some((m) => m.role === "assistant" && m.content === "Revised one")).toBe(true)
+    expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "second feedback")).toBe(true)
+  })
+
+  it("Revise More (__revise__) adds no synthetic transcript message; only a later real reply changes history", async () => {
+    const responses = [
+      { text: "Initial draft", usage: { inputTokens: 5, outputTokens: 3 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+      { text: "Revised after __revise__", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "Revised after real reply", usage: { inputTokens: 5, outputTokens: 3 } },
+    ]
+    let callIdx = 0
+    const genCalls: { messages: { role: string; content: string }[] }[] = []
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async (opts) => {
+      genCalls.push(opts as { messages: { role: string; content: string }[] })
+      return responses[callIdx++]
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        if (url?.includes?.("api.telegram.org"))
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__revise__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "actually make it shorter" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    // genCalls: [draft, critique, revise after __revise__, revise after real reply]
+    const firstReviseMessages = genCalls[2].messages
+    expect(firstReviseMessages.some((m) => m.content === "__revise__")).toBe(false)
+    const lastAssistantBeforeInstruction = [...firstReviseMessages].reverse().find((m) => m.role === "assistant")
+    expect(lastAssistantBeforeInstruction?.content).toBe("Initial draft")
+
+    const secondReviseMessages = genCalls[3].messages
+    expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "actually make it shorter")).toBe(true)
+    expect(secondReviseMessages.some((m) => m.content === "__revise__")).toBe(false)
+  })
 })
