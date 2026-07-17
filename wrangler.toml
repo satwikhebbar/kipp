@@ -29,5 +29,7 @@ LLM_PROVIDER = "deepseek"
 LLM_MAX_RETRIES = "3"
 # Set to your deployed worker URL, e.g. https://linkedin-pipeline.your-name.workers.dev
 # LINKEDIN_REDIRECT_ORIGIN = "https://linkedin-pipeline.your-name.workers.dev"
+# Path to style prompt in the data repo. Falls back to src/prompts/defaults/style-prompt.md if not set or file missing.
+# PROMPT_STYLE_PATH = "prompts/style-prompt.md"
 
 # --- Secrets (set via `wrangler secrets put`; for local dev set in .dev.vars) ---

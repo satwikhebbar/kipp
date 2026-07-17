@@ -42,7 +42,7 @@ Create a **private** GitHub repo (e.g., `linkedin-pipeline-data`) containing:
 
 - `ideas.md` — your idea backlog (see [example/ideas-template.md](example/ideas-template.md))
 - `archive.md` — empty file (will hold published posts)
-- `style-prompt.md` — your writing style guide (see [example/style-prompt.md](example/style-prompt.md))
+- `style-prompt.md` — your writing style guide (optional; falls back to the built-in default at `src/prompts/defaults/style-prompt.md`)
 
 ### 3. Create a Telegram bot
 
@@ -90,6 +90,7 @@ Configurable vars (set in dashboard or `wrangler.toml`):
 | `POSTING_CADENCE_DAYS` | Days between auto-prompted posts (default `7`) |
 | `WAIT_FOR_FEEDBACK_HOURS` | Hours to wait for Telegram feedback before timeout (default `12`) |
 | `LINKEDIN_REDIRECT_ORIGIN` | Override for OAuth redirect URI (default: derived from `Host`) |
+| `PROMPT_STYLE_PATH` | Path to a style prompt in the data repo (default: `style-prompt.md`). Falls back to the built-in default if missing. |
 
 ### 6. LinkedIn OAuth setup
 
@@ -164,6 +165,10 @@ src/
 ├── workflow.ts              # Workflow orchestration (Cloudflare Workflows)
 ├── types.ts                 # Shared types
 ├── backlog/                 # ideas.md / archive.md management
+├── prompts/                 # Prompt defaults and runtime resolution
+│   ├── defaults.ts          # Built-in default style prompt constant
+│   ├── defaults/            # Markdown versions of default prompts
+│   └── resolver.ts          # readPrompt() — data repo → built-in fallback
 ├── agent/                   # LLM agent steps (draft, critique, revise, classify)
 ├── providers/               # LLM provider clients (Gemini, DeepSeek)
 ├── triggers/                # Entry points (RSS, cadence, Telegram webhook, LinkedIn OAuth, token refresh)

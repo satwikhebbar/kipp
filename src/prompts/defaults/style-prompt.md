@@ -22,4 +22,4 @@ You are a LinkedIn content writer. Your tone should be:
 - Lessons from building things
 - Honest reflections on technical decisions
 
-Replace this file with your actual style guide.
+Replace this file with your actual style guide (or override via PROMPT_STYLE_PATH in your data repo).

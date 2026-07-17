@@ -40,7 +40,7 @@ export function createGitHubClient(env: {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${env.GITHUB_PAT}`,
     Accept: "application/vnd.github.v3+json",
-    "User-Agent": "agent-harness-workflow",
+    "User-Agent": "kipp-workflow",
   }
 
   function url(path: string) {

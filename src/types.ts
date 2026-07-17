@@ -3,6 +3,7 @@ export interface Env {
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_WEBHOOK_SECRET: string
   TELEGRAM_ALLOWED_USER_ID: string
+  PROMPT_STYLE_PATH?: string
   LINKEDIN_CLIENT_ID: string
   LINKEDIN_CLIENT_SECRET: string
   LINKEDIN_ACCESS_TOKEN: string

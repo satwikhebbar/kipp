@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { handleCadenceCron } from "../triggers/cadence"
 
 const mockFetch = vi.hoisted(() => vi.fn())
@@ -85,6 +85,14 @@ body: Finalized yesterday
 ---
 
 Final content`
+
+beforeEach(() => {
+  vi.spyOn(Date, "now").mockReturnValue(new Date("2026-07-12T12:00:00.000Z").getTime())
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 function setupMockedFetch(responses: Array<{ content?: string; sha?: string } | { ok: boolean }>) {
   let idx = 0

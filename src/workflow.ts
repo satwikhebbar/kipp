@@ -6,6 +6,8 @@ import { createBacklogManager } from "./backlog/manager"
 import { createGitHubClient } from "./integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "./integrations/linkedin"
 import { createTelegramClient } from "./integrations/telegram"
+import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
+import { readPrompt } from "./prompts/resolver"
 import { createGenerator } from "./providers"
 import type { Env, WorkflowParams } from "./types"
 
@@ -45,7 +47,11 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const client = createGitHubClient(this.env)
       const manager = createBacklogManager(client)
 
-      const { content: stylePrompt } = await client.readFile("style-prompt.md")
+      const stylePrompt = await readPrompt(
+        client,
+        this.env.PROMPT_STYLE_PATH ?? "style-prompt.md",
+        DEFAULT_STYLE_PROMPT,
+      )
       const draftAgent = createDraftAgent(gen, stylePrompt)
       const critiqueAgent = createCritiqueAgent(gen)
       const reviseAgent = createReviseAgent(gen)
