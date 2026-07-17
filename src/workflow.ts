@@ -47,11 +47,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const client = createGitHubClient(this.env)
       const manager = createBacklogManager(client)
 
-      const stylePrompt = await readPrompt(
-        client,
-        this.env.PROMPT_STYLE_PATH ?? "style-prompt.md",
-        DEFAULT_STYLE_PROMPT,
-      )
+      const stylePaths = [this.env.PROMPT_STYLE_PATH, "style-prompt.md"].filter(Boolean) as string[]
+      const stylePrompt = await readPrompt(client, stylePaths, DEFAULT_STYLE_PROMPT)
       const draftAgent = createDraftAgent(gen, stylePrompt)
       const critiqueAgent = createCritiqueAgent(gen)
       const reviseAgent = createReviseAgent(gen)

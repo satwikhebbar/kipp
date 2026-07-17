@@ -42,7 +42,7 @@ Create a **private** GitHub repo (e.g., `linkedin-pipeline-data`) containing:
 
 - `ideas.md` — your idea backlog (see [example/ideas-template.md](example/ideas-template.md))
 - `archive.md` — empty file (will hold published posts)
-- `style-prompt.md` — your writing style guide (optional; falls back to the built-in default at `src/prompts/defaults/style-prompt.md`)
+- `style-prompt.md` — your writing style guide (optional; falls back to the built-in default in `src/prompts/defaults.ts`)
 
 ### 3. Create a Telegram bot
 
@@ -166,9 +166,8 @@ src/
 ├── types.ts                 # Shared types
 ├── backlog/                 # ideas.md / archive.md management
 ├── prompts/                 # Prompt defaults and runtime resolution
-│   ├── defaults.ts          # Built-in default style prompt constant
-│   ├── defaults/            # Markdown versions of default prompts
-│   └── resolver.ts          # readPrompt() — data repo → built-in fallback
+│   ├── defaults.ts          # Built-in default style prompt constant (single source of truth)
+│   └── resolver.ts          # readPrompt() — multi-path data repo → built-in fallback
 ├── agent/                   # LLM agent steps (draft, critique, revise, classify)
 ├── providers/               # LLM provider clients (Gemini, DeepSeek)
 ├── triggers/                # Entry points (RSS, cadence, Telegram webhook, LinkedIn OAuth, token refresh)
