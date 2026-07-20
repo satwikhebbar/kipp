@@ -71,6 +71,7 @@ export async function verifyAccessJwt(request: Request, env: Env): Promise<Acces
     }
     const jwk = jwks.keys.find((k) => (k as unknown as { kid: string }).kid === header.kid)
     if (jwk?.kty !== "RSA") return null
+    if (jwk?.use && jwk.use !== "sig") return null
 
     const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, [
       "verify",
