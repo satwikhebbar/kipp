@@ -1,8 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { TokenVaultDO } from "../token-vault"
 import { createTokenVault } from "../token-vault-client"
 import { handleAuthCallback, handleAuthStart } from "../triggers/linkedin-auth"
 import type { Env } from "../types"
+
+vi.mock("../workflow", () => ({ PipelineWorkflow: class {} }))
+
+import worker from "../index"
 
 function nonNull<T>(v: T | null): T {
   expect(v).not.toBeNull()
@@ -165,11 +169,14 @@ describe("end-to-end OAuth/DO contract", () => {
     expect(envelope).not.toBeUndefined()
     expect(envelope.ct).toBeTypeOf("string")
     expect(envelope.kid).toBe("k20260720a")
+    expect(JSON.stringify(envelope)).not.toContain("e2e-access-token")
+    expect(JSON.stringify(envelope)).not.toContain("e2e-refresh-token")
 
     const vault = createTokenVault(env as Env)
     const { tokens } = await vault.readTokens()
     expect(tokens).not.toBeNull()
     expect(tokens?.access_token).toBe("e2e-access-token")
+    expect(tokens?.refresh_token).toBe("e2e-refresh-token")
   })
 
   it("replayed state cannot complete callback again", async () => {
@@ -215,5 +222,238 @@ describe("end-to-end OAuth/DO contract", () => {
 
     const { tokens } = await vault.readTokens()
     expect(tokens?.access_token).toBe("no-cl-token")
+  })
+})
+
+describe("Worker fetch — production-mode routes", () => {
+  let keyPair: CryptoKeyPair
+  let publicJwk: JsonWebKey & { kid: string }
+  const KID = "wrk-test-key-01"
+  const TEAM = "wrk-test-team"
+  const ISS = `https://${TEAM}.cloudflareaccess.com`
+  const AUD = "wrk-test-aud-123"
+  const ADMIN_EMAIL = "admin-wrk@example.com"
+
+  async function createJwt(payload: Record<string, unknown>): Promise<string> {
+    const enc = (obj: Record<string, unknown>) =>
+      btoa(JSON.stringify(obj)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+    const header = { alg: "RS256", kid: KID, typ: "JWT" }
+    const h = enc(header)
+    const p = enc(payload)
+    const data = new TextEncoder().encode(`${h}.${p}`)
+    const sig = await crypto.subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, keyPair.privateKey, data)
+    const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "")
+    return `${h}.${p}.${sigB64}`
+  }
+
+  function validClaims(): Record<string, unknown> {
+    const now = Date.now()
+    return {
+      sub: "u-123",
+      email: ADMIN_EMAIL,
+      aud: AUD,
+      iss: ISS,
+      exp: Math.floor(now / 1000) + 3600,
+      nbf: Math.floor(now / 1000) - 60,
+      iat: Math.floor(now / 1000) - 60,
+    }
+  }
+
+  function makeVaultEnv(storage: DurableObjectStorage): Env {
+    const env = {
+      LINKEDIN_CLIENT_ID: "wrk-client-id",
+      LINKEDIN_CLIENT_SECRET: "wrk-client-secret",
+      TOKEN_ENCRYPTION_KEY_IDS: "k20260720a",
+      TOKEN_ENCRYPTION_KEY_k20260720a: makeKey(),
+      ACCESS_TEAM: TEAM,
+      ACCESS_AUDIENCE: AUD,
+      ACCESS_ADMIN_EMAILS: ADMIN_EMAIL,
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "false",
+    } as unknown as Env
+    const doInstance = new TokenVaultDO({ storage } as never, env)
+    const ns = {
+      idFromName: vi.fn().mockReturnValue({ toString: () => "wrk-test-id" }),
+      get: vi.fn().mockReturnValue(makeStub(doInstance)),
+    } as unknown as DurableObjectNamespace
+    ;(env as unknown as Record<string, unknown>).TOKEN_VAULT = ns
+    return env
+  }
+
+  beforeAll(async () => {
+    keyPair = (await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair
+    publicJwk = (await crypto.subtle.exportKey("jwk", keyPair.publicKey)) as JsonWebKey & { kid: string }
+    publicJwk.kid = KID
+    publicJwk.alg = "RS256"
+  })
+
+  function setupJwksMock(): void {
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("cloudflareaccess.com/cdn-cgi/access/certs")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ keys: [publicJwk as unknown as JsonWebKey] }),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ access_token: "wrk-at", expires_in: 5184000, refresh_token: "wrk-rt" }),
+      })
+    })
+  }
+
+  it("setup/linkedin returns 403 without JWT", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const req = new Request("https://example.com/setup/linkedin")
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(403)
+  })
+
+  it("setup/linkedin returns 403 with forged JWT", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const req = new Request("https://example.com/setup/linkedin", {
+      headers: { "Cf-Access-Jwt-Assertion": "bad.header.sig" },
+    })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(403)
+  })
+
+  it("setup/linkedin returns 302 with valid JWT", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const jwt = await createJwt(validClaims())
+    const req = new Request("https://example.com/setup/linkedin", {
+      headers: { "Cf-Access-Jwt-Assertion": jwt },
+    })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(302)
+  })
+
+  it("callback returns 403 without JWT", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const req = new Request("https://example.com/auth/linkedin/callback?code=abc&state=xyz")
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(403)
+  })
+
+  it("callback returns 400 when code parameter is missing", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const jwt = await createJwt(validClaims())
+    const req = new Request("https://example.com/auth/linkedin/callback?state=xyz", {
+      headers: { "Cf-Access-Jwt-Assertion": jwt },
+    })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(400)
+  })
+
+  it("callback completes full OAuth flow through worker.fetch", async () => {
+    const storage = mockStorage()
+    const env = makeVaultEnv(storage)
+    env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK = "true" as never
+
+    // First request — setup creates state
+    const jwt = await createJwt(validClaims())
+    const setupReq = new Request("https://example.com/setup/linkedin", {
+      headers: { "Cf-Access-Jwt-Assertion": jwt },
+    })
+    const setupRes = await worker.fetch(setupReq, env, {} as ExecutionContext)
+    expect(setupRes.status).toBe(302)
+
+    const setCookie = setupRes.headers.get("set-cookie") ?? ""
+    const cookieId = nonNull(setCookie.match(/oauth-session=([^;]+)/))[1]
+    const loc = setupRes.headers.get("location") ?? ""
+    const state = nonNull(new URL(loc).searchParams.get("state"))
+
+    // Second request — callback consumes state, exchanges code
+    setupJwksMock()
+    const callbackReq = new Request(`https://example.com/auth/linkedin/callback?code=abc&state=${state}`, {
+      headers: { "Cf-Access-Jwt-Assertion": jwt, cookie: `oauth-session=${cookieId}` },
+    })
+    const callbackRes = await worker.fetch(callbackReq, env, {} as ExecutionContext)
+    expect(callbackRes.status).toBe(200)
+  })
+
+  it("rewrap returns 403 without JWT", async () => {
+    const storage = mockStorage()
+    await storage.put("tokens", { v: 1, kid: "k20260720a", aad: "", iv: "", ct: "" })
+    const env = makeVaultEnv(storage)
+    setupJwksMock()
+    const req = new Request("https://example.com/admin/rewrap", { method: "POST" })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(403)
+  })
+
+  it("rewrap returns 500 with unauthenticated env when no tokens stored", async () => {
+    const env = makeVaultEnv(mockStorage())
+    env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK = "true" as never
+    setupJwksMock()
+    const req = new Request("https://example.com/admin/rewrap", { method: "POST" })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(500)
+    const body = await res.json()
+    expect(body).toEqual({ success: false })
+  })
+
+  it("rewrap returns 200 with tokens and valid JWT", async () => {
+    const storage = mockStorage()
+    const env = makeVaultEnv(storage)
+    setupJwksMock()
+
+    // Store tokens via the vault client first
+    const vault = createTokenVault(env)
+    await vault.writeTokens({ access_token: "rewrap-at", expires_in: 3600, created_at: "now" })
+
+    const jwt = await createJwt(validClaims())
+    const req = new Request("https://example.com/admin/rewrap", {
+      method: "POST",
+      headers: { "Cf-Access-Jwt-Assertion": jwt },
+    })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body).toEqual({ success: true })
+  })
+
+  it("denies requests with expired JWT", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const expired = { ...validClaims(), exp: Math.floor(Date.now() / 1000) - 10 }
+    const jwt = await createJwt(expired)
+    const req = new Request("https://example.com/setup/linkedin", {
+      headers: { "Cf-Access-Jwt-Assertion": jwt },
+    })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(403)
+  })
+
+  it("denies requests with wrong audience", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const badAud = { ...validClaims(), aud: "wrong-aud" }
+    const jwt = await createJwt(badAud)
+    const req = new Request("https://example.com/setup/linkedin", {
+      headers: { "Cf-Access-Jwt-Assertion": jwt },
+    })
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(403)
+  })
+
+  it("ALLOW_INSECURE=true bypasses JWT check in dev mode", async () => {
+    const env = makeVaultEnv(mockStorage())
+    env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK = "true" as never
+    setupJwksMock()
+    const req = new Request("https://example.com/setup/linkedin")
+    const res = await worker.fetch(req, env, {} as ExecutionContext)
+    expect(res.status).toBe(302)
   })
 })

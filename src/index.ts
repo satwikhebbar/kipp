@@ -29,8 +29,12 @@ app.post("/admin/rewrap", async (c) => {
     return c.text("Unauthorized", 403)
   }
   const vault = createTokenVault(c.env)
-  const result = await vault.rewrap()
-  return c.json(result)
+  try {
+    const result = await vault.rewrap()
+    return c.json(result)
+  } catch {
+    return c.json({ success: false }, 500)
+  }
 })
 
 app.post("/webhook/telegram", async (c) => handleTelegramWebhook(c.req.raw, c.env))
