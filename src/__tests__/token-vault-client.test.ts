@@ -272,3 +272,95 @@ describe("verifyAccessJwt — claims validation", () => {
     expect(await verifyAccessJwt(await signedRequest({ ...validClaims(), email: "" }), baseEnv())).toBeNull()
   })
 })
+
+describe("verifyAccessJwt — team-scoped JWKS cache", () => {
+  it("uses separate cache entries for different team domains", async () => {
+    const TEAM_A = "team-a"
+    const TEAM_B = "team-b"
+    const ISS_A = `https://${TEAM_A}.cloudflareaccess.com`
+    const ISS_B = `https://${TEAM_B}.cloudflareaccess.com`
+    const AUD = "test-aud"
+
+    const kpA = (await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair
+    const jwkA = (await crypto.subtle.exportKey("jwk", kpA.publicKey)) as JsonWebKey & { kid: string }
+    jwkA.kid = "key-a"
+    jwkA.alg = "RS256"
+
+    const kpB = (await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    )) as CryptoKeyPair
+    const jwkB = (await crypto.subtle.exportKey("jwk", kpB.publicKey)) as JsonWebKey & { kid: string }
+    jwkB.kid = "key-b"
+    jwkB.alg = "RS256"
+
+    const envA = {
+      ACCESS_TEAM: TEAM_A,
+      ACCESS_AUDIENCE: AUD,
+      ACCESS_ADMIN_EMAILS: "admin@example.com",
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "false",
+    } as unknown as Env
+    const envB = {
+      ACCESS_TEAM: TEAM_B,
+      ACCESS_AUDIENCE: AUD,
+      ACCESS_ADMIN_EMAILS: "admin@example.com",
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "false",
+    } as unknown as Env
+
+    let fetchCount = 0
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      fetchCount++
+      if (url.includes(TEAM_A)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ keys: [jwkA] }) })
+      }
+      if (url.includes(TEAM_B)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ keys: [jwkB] }) })
+      }
+      return Promise.reject(new Error("unexpected url"))
+    })
+
+    async function signFor(payload: Record<string, unknown>, kp: CryptoKeyPair): Promise<string> {
+      const enc = (obj: Record<string, unknown>) =>
+        btoa(JSON.stringify(obj)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+      const kid = kp === kpA ? "key-a" : "key-b"
+      const h = enc({ alg: "RS256", kid })
+      const p = enc(payload)
+      const data = new TextEncoder().encode(`${h}.${p}`)
+      const sig = await crypto.subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, kp.privateKey, data)
+      const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "")
+      return `${h}.${p}.${sigB64}`
+    }
+
+    const now = Date.now()
+    const payload = (iss: string) => ({
+      sub: "u",
+      email: "admin@example.com",
+      aud: AUD,
+      iss,
+      exp: Math.floor(now / 1000) + 3600,
+      nbf: Math.floor(now / 1000) - 60,
+      iat: Math.floor(now / 1000) - 60,
+    })
+
+    // First call for each team fetches JWKS (2 fetches)
+    expect(await verifyAccessJwt(await makeRequest(await signFor(payload(ISS_A), kpA)), envA)).not.toBeNull()
+    expect(await verifyAccessJwt(await makeRequest(await signFor(payload(ISS_B), kpB)), envB)).not.toBeNull()
+    expect(fetchCount).toBe(2)
+
+    // Second call for each team uses cache (0 additional fetches)
+    expect(await verifyAccessJwt(await makeRequest(await signFor(payload(ISS_A), kpA)), envA)).not.toBeNull()
+    expect(await verifyAccessJwt(await makeRequest(await signFor(payload(ISS_B), kpB)), envB)).not.toBeNull()
+    expect(fetchCount).toBe(2)
+
+    // Cross-team JWT should fail (wrong key)
+    expect(await verifyAccessJwt(await makeRequest(await signFor(payload(ISS_A), kpB)), envA)).toBeNull()
+  })
+})

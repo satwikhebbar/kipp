@@ -23,8 +23,7 @@ function jwtToObject(payload: string): Record<string, unknown> {
   return JSON.parse(new TextDecoder().decode(base64urlDecode(payload)))
 }
 
-let cachedJwks: { keys: JsonWebKey[] } | null = null
-let jwksFetchedAt = 0
+const jwksCache = new Map<string, { keys: JsonWebKey[]; fetchedAt: number }>()
 
 async function fetchJwks(teamDomain: string): Promise<{ keys: JsonWebKey[] }> {
   const url = `https://${teamDomain}.cloudflareaccess.com/cdn-cgi/access/certs`
@@ -35,12 +34,12 @@ async function fetchJwks(teamDomain: string): Promise<{ keys: JsonWebKey[] }> {
 
 function getJwks(teamDomain: string): Promise<{ keys: JsonWebKey[] }> {
   const now = Date.now()
-  if (cachedJwks && now - jwksFetchedAt < 3_600_000) {
-    return Promise.resolve(cachedJwks)
+  const cached = jwksCache.get(teamDomain)
+  if (cached && now - cached.fetchedAt < 3_600_000) {
+    return Promise.resolve({ keys: cached.keys })
   }
   return fetchJwks(teamDomain).then((jwks) => {
-    cachedJwks = jwks
-    jwksFetchedAt = now
+    jwksCache.set(teamDomain, { keys: jwks.keys, fetchedAt: now })
     return jwks
   })
 }
