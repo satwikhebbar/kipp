@@ -3,6 +3,15 @@ main = "src/index.ts"
 compatibility_date = "2025-07-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Durable Object — token vault
+[[durable_objects.bindings]]
+name = "TOKEN_VAULT"
+class_name = "TokenVaultDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TokenVaultDO"]
+
 # Cloudflare Workflow binding
 [[workflows]]
 binding = "PIPELINE_WORKFLOW"
@@ -27,6 +36,8 @@ TIMEZONE = "UTC"
 WAIT_FOR_FEEDBACK_HOURS = "12"
 LLM_PROVIDER = "deepseek"
 LLM_MAX_RETRIES = "3"
+ACCESS_TEAM = "my-team"
+TOKEN_ENCRYPTION_KEY_IDS = "2026-07-20-a"
 # Set to your deployed worker URL, e.g. https://linkedin-pipeline.your-name.workers.dev
 # LINKEDIN_REDIRECT_ORIGIN = "https://linkedin-pipeline.your-name.workers.dev"
 # Path to style prompt in the data repo. Falls back to src/prompts/defaults/style-prompt.md if not set or file missing.

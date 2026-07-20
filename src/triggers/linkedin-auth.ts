@@ -1,61 +1,68 @@
-import { createGitHubClient } from "../integrations/github"
+import { createTokenVault, verifyAccessJwt } from "../token-vault-client"
 import type { Env, LinkedInTokens } from "../types"
 
 const AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 const TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 
-async function createState(secret: string): Promise<string> {
-  const nonce = crypto.randomUUID()
-  const encoder = new TextEncoder()
-  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
-    "sign",
-  ])
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(nonce))
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
-  return `${nonce}.${sigB64}`
+function extractCookie(cookieHeader: string | null, name: string): string | null {
+  if (!cookieHeader) return null
+  for (const part of cookieHeader.split(";")) {
+    const trimmed = part.trim()
+    if (trimmed.startsWith(`${name}=`)) return trimmed.slice(name.length + 1)
+  }
+  return null
 }
 
-async function verifyState(state: string, secret: string): Promise<boolean> {
-  const dot = state.indexOf(".")
-  if (dot === -1) return false
-  const nonce = state.slice(0, dot)
-  const sigB64 = state.slice(dot + 1)
-  const encoder = new TextEncoder()
-  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
-    "verify",
-  ])
-  let sig: Uint8Array
-  try {
-    sig = new Uint8Array(
-      atob(sigB64)
-        .split("")
-        .map((c) => c.charCodeAt(0)),
-    )
-  } catch {
-    return false
-  }
-  return crypto.subtle.verify("HMAC", key, sig, encoder.encode(nonce))
+function redirectUrl(env: Env, host: string): string {
+  const origin = env.LINKEDIN_REDIRECT_ORIGIN || `https://${host}`
+  return `${origin}/auth/linkedin/callback`
 }
 
-export async function handleAuthStart(host: string, env: Env, setupSecret?: string): Promise<Response> {
-  if (env.LINKEDIN_SETUP_SECRET && setupSecret !== env.LINKEDIN_SETUP_SECRET) {
-    return new Response("Setup requires a valid secret", { status: 403 })
+export async function handleAuthStart(request: Request, host: string, env: Env): Promise<Response> {
+  const claims = await verifyAccessJwt(request, env)
+  if (!claims && !env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK) {
+    return new Response("Setup requires authentication", { status: 403 })
   }
+
+  const vault = createTokenVault(env)
+  const { state, cookieId } = await vault.issueState()
+
   const redirectUri = redirectUrl(env, host)
-  const state = await createState(env.TELEGRAM_WEBHOOK_SECRET)
   const url = new URL(AUTH_URL)
   url.searchParams.set("response_type", "code")
   url.searchParams.set("client_id", env.LINKEDIN_CLIENT_ID)
   url.searchParams.set("redirect_uri", redirectUri)
   url.searchParams.set("scope", "w_member_social")
   url.searchParams.set("state", state)
-  return Response.redirect(url.toString(), 302)
+
+  const headers = new Headers()
+  headers.append(
+    "Set-Cookie",
+    `oauth-session=${cookieId}; Secure; HttpOnly; SameSite=Lax; Path=/auth/linkedin; Max-Age=300`,
+  )
+  headers.append("Location", url.toString())
+  return new Response(null, { status: 302, headers })
 }
 
-export async function handleAuthCallback(code: string, state: string, host: string, env: Env): Promise<Response> {
-  if (!state || !(await verifyState(state, env.TELEGRAM_WEBHOOK_SECRET))) {
-    return new Response("OAuth setup failed: invalid state", { status: 400 })
+export async function handleAuthCallback(
+  code: string,
+  state: string,
+  host: string,
+  env: Env,
+  request: Request,
+): Promise<Response> {
+  const claims = await verifyAccessJwt(request, env)
+  if (!claims && !env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK) {
+    return new Response("OAuth setup failed", { status: 403 })
   }
+
+  const cookieHeader = request.headers.get("cookie")
+  const cookieId = extractCookie(cookieHeader, "oauth-session")
+  if (!cookieId) return new Response("OAuth setup failed", { status: 400 })
+
+  const vault = createTokenVault(env)
+  const { valid } = await vault.consumeState(state, cookieId)
+  if (!valid) return new Response("OAuth setup failed", { status: 400 })
 
   const redirectUri = redirectUrl(env, host)
 
@@ -72,7 +79,7 @@ export async function handleAuthCallback(code: string, state: string, host: stri
   })
 
   if (!res.ok) {
-    return new Response("OAuth setup failed: token exchange error", { status: 400 })
+    return new Response("OAuth setup failed", { status: 400 })
   }
 
   const data = (await res.json()) as {
@@ -90,20 +97,8 @@ export async function handleAuthCallback(code: string, state: string, host: stri
     ...(data.refresh_token_expires_in ? { refresh_token_expires_in: data.refresh_token_expires_in } : {}),
   }
 
-  const github = createGitHubClient(env)
-  let sha: string | undefined
-  try {
-    const existing = await github.readFile(".linkedin-tokens.json")
-    sha = existing.sha
-  } catch {
-    /* new file, no sha needed */
-  }
-  await github.writeFile(".linkedin-tokens.json", JSON.stringify(tokens, null, 2), sha)
+  const { ok } = await vault.writeTokens(tokens)
+  if (!ok) return new Response("OAuth setup failed", { status: 500 })
 
-  return new Response("✅ LinkedIn tokens stored. You can close this tab.", { status: 200 })
-}
-
-function redirectUrl(env: Env, host: string): string {
-  const origin = env.LINKEDIN_REDIRECT_ORIGIN || `https://${host}`
-  return `${origin}/auth/linkedin/callback`
+  return new Response("Ok", { status: 200 })
 }

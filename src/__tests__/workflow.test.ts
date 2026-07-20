@@ -53,9 +53,16 @@ function mockEnv(): Env {
     LINKEDIN_CLIENT_ID: "",
     LINKEDIN_CLIENT_SECRET: "",
     LINKEDIN_ACCESS_TOKEN: "",
-    LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    TOKEN_VAULT: {
+      idFromName: () => "mock-do-id",
+      get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ tokens: null }))) }),
+    } as never,
+    TOKEN_ENCRYPTION_KEY_IDS: "test-key",
+    ACCESS_TEAM: "test-team",
+    ACCESS_AUDIENCE: "test-aud",
+    ACCESS_ADMIN_EMAILS: "admin@test.com",
     PIPELINE_WORKFLOW: {} as never,
   }
 }
@@ -215,11 +222,11 @@ describe("PipelineWorkflow", () => {
     Object.assign(wf, {
       env: {
         ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
         LINKEDIN_ACCESS_TOKEN: "valid-token",
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
         LINKEDIN_CLIENT_SECRET: "client-secret",
-        LINKEDIN_REFRESH_TOKEN: "refresh-token",
       },
     })
 

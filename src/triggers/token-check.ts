@@ -1,19 +1,13 @@
-import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
+import { createTokenVault } from "../token-vault-client"
 import type { Env, LinkedInTokens } from "../types"
 
 const TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 
 export async function handleTokenCheckCron(env: Env): Promise<{ alerted: boolean; refreshed: boolean }> {
-  const github = createGitHubClient(env)
-
-  let tokens: LinkedInTokens
-  try {
-    const file = await github.readFile(".linkedin-tokens.json")
-    tokens = JSON.parse(file.content) as LinkedInTokens
-  } catch {
-    return { alerted: false, refreshed: false }
-  }
+  const vault = createTokenVault(env)
+  const { tokens } = await vault.readTokens()
+  if (!tokens) return { alerted: false, refreshed: false }
 
   const expiresAt = new Date(tokens.created_at).getTime() + tokens.expires_in * 1000
   const daysUntilExpiry = (expiresAt - Date.now()) / (1000 * 60 * 60 * 24)
@@ -49,7 +43,7 @@ export async function handleTokenCheckCron(env: Env): Promise<{ alerted: boolean
           ...(data.refresh_token_expires_in ? { refresh_token_expires_in: data.refresh_token_expires_in } : {}),
         }
 
-        await github.mutateFile(".linkedin-tokens.json", () => JSON.stringify(updated, null, 2))
+        await vault.writeTokens(updated)
         return { alerted: false, refreshed: true }
       }
     } catch {
@@ -61,7 +55,7 @@ export async function handleTokenCheckCron(env: Env): Promise<{ alerted: boolean
     const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
     await tg.sendMessage(
       Number(env.TELEGRAM_ALLOWED_USER_ID),
-      `⚠️ LinkedIn access token expires in ${Math.ceil(daysUntilExpiry)} days.\nRun \`wrangler secrets put LINKEDIN_ACCESS_TOKEN <new-token>\` to update it.`,
+      `⚠️ LinkedIn access token expires in ${Math.ceil(daysUntilExpiry)} days. Re-run OAuth setup to renew.`,
     )
   }
 
