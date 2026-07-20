@@ -54,6 +54,8 @@ export class TokenVaultDO implements DurableObject {
         case "readTokens":
           return this.#readTokens()
         case "writeTokens":
+          if (typeof args.tokens !== "object" || args.tokens === null || Array.isArray(args.tokens))
+            return new Response(JSON.stringify({ ok: false }), { status: 400 })
           return this.#writeTokens(args.tokens as LinkedInTokens)
         case "rewrap":
           return this.#rewrap()

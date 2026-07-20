@@ -213,6 +213,24 @@ describe("TokenVaultDO — encrypted read/write", () => {
     const res = await callFetch(makeDO(keyEnv()), { op: "writeTokens", tokens: { expires_in: 3600 } })
     expect(await res.json()).toEqual({ ok: false })
   })
+
+  it("rejects writeTokens with null tokens", async () => {
+    const res = await callFetch(makeDO(keyEnv()), { op: "writeTokens", tokens: null })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ ok: false })
+  })
+
+  it("rejects writeTokens with scalar tokens", async () => {
+    const res = await callFetch(makeDO(keyEnv()), { op: "writeTokens", tokens: "bad" })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ ok: false })
+  })
+
+  it("rejects writeTokens with array tokens", async () => {
+    const res = await callFetch(makeDO(keyEnv()), { op: "writeTokens", tokens: ["a"] })
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ ok: false })
+  })
 })
 
 describe("TokenVaultDO — key rotation", () => {
