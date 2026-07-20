@@ -160,6 +160,18 @@ describe("verifyAccessJwt — JWKS and signature", () => {
     expect(await verifyAccessJwt(await signedRequest(validClaims()), baseEnv())).toBeNull()
   })
 
+  it("rejects JWK with use: enc even when signature is valid", async () => {
+    const encJwk = { ...publicJwk, use: "enc" }
+    await setupJwksFetch([encJwk as unknown as JsonWebKey])
+    expect(await verifyAccessJwt(await signedRequest(validClaims()), baseEnv())).toBeNull()
+  })
+
+  it("accepts JWK with use: sig", async () => {
+    const sigJwk = { ...publicJwk, use: "sig" }
+    await setupJwksFetch([sigJwk as unknown as JsonWebKey])
+    expect(await verifyAccessJwt(await signedRequest(validClaims()), baseEnv())).not.toBeNull()
+  })
+
   it("returns null on bad signature", async () => {
     await setupJwksFetch()
     const jwt = await createJwt(validClaims())
