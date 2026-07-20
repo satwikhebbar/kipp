@@ -14,16 +14,16 @@ function baseEnv(overrides?: Partial<Env>): Env {
     LINKEDIN_CLIENT_ID: "",
     LINKEDIN_CLIENT_SECRET: "",
     LINKEDIN_ACCESS_TOKEN: "",
-    LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
     LLM_API_KEY: "key",
     LLM_PROVIDER: "deepseek",
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    TOKEN_VAULT: {} as never,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
-  }
+  } as never
 }
 
 function telegramCallbackRequest(body: Record<string, unknown>) {

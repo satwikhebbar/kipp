@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+const mockReadTokens = vi.hoisted(() => vi.fn())
+
+vi.mock("../token-vault-client", () => ({
+  createTokenVault: () => ({ readTokens: mockReadTokens }),
+}))
+
 const mockFetch = vi.hoisted(() => {
   const fn = vi.fn()
   globalThis.fetch = fn
@@ -8,55 +14,31 @@ const mockFetch = vi.hoisted(() => {
 
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integrations/linkedin"
 
-interface MockClient {
-  readFile(path: string): Promise<{ content: string; sha: string }>
-  writeFile: (...args: unknown[]) => unknown
-  mutateFile: (...args: unknown[]) => unknown
-}
-
-function mockClient(content?: string): MockClient {
-  return {
-    async readFile(path: string) {
-      if (path === ".linkedin-tokens.json" && content !== undefined) return { content, sha: "s1" }
-      throw Object.assign(new Error("Not found"), { status: 404 })
-    },
-    writeFile: vi.fn(),
-    mutateFile: vi.fn(),
-  }
-}
-
 describe("getLinkedInToken", () => {
-  it("reads from .linkedin-tokens.json when available", async () => {
-    const gh = mockClient(JSON.stringify({ access_token: "file-token" }))
-    const token = await getLinkedInToken({} as never, gh as never)
-    expect(token).toBe("file-token")
+  it("reads from DO when tokens exist", async () => {
+    mockReadTokens.mockResolvedValue({ tokens: { access_token: "do-token" } })
+    const token = await getLinkedInToken({} as never)
+    expect(token).toBe("do-token")
   })
 
-  it("falls back to LINKEDIN_ACCESS_TOKEN when file is missing", async () => {
-    const gh = mockClient()
-    const token = await getLinkedInToken({ LINKEDIN_ACCESS_TOKEN: "env-token" } as never, gh as never)
+  it("falls back to env var when ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK is set", async () => {
+    mockReadTokens.mockResolvedValue({ tokens: null })
+    const token = await getLinkedInToken({
+      LINKEDIN_ACCESS_TOKEN: "env-token",
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+    } as never)
     expect(token).toBe("env-token")
   })
 
-  it("falls through when file lacks access_token key", async () => {
-    const gh = mockClient(JSON.stringify({}))
-    const token = await getLinkedInToken({ LINKEDIN_ACCESS_TOKEN: "env-token" } as never, gh as never)
-    expect(token).toBe("env-token")
+  it("returns empty when DO has no tokens and no dev fallback", async () => {
+    mockReadTokens.mockResolvedValue({ tokens: null })
+    const token = await getLinkedInToken({} as never)
+    expect(token).toBe("")
   })
 
-  it("falls through on file read error", async () => {
-    const gh = {
-      readFile: vi.fn().mockRejectedValue(new Error("network error")),
-      writeFile: vi.fn(),
-      mutateFile: vi.fn(),
-    }
-    const token = await getLinkedInToken({ LINKEDIN_ACCESS_TOKEN: "env-token" } as never, gh as never)
-    expect(token).toBe("env-token")
-  })
-
-  it("returns empty string when neither source has a token", async () => {
-    const gh = mockClient()
-    const token = await getLinkedInToken({} as never, gh as never)
+  it("does NOT fall back to env var without ALLOW_INSECURE flag", async () => {
+    mockReadTokens.mockResolvedValue({ tokens: null })
+    const token = await getLinkedInToken({ LINKEDIN_ACCESS_TOKEN: "env-token" } as never)
     expect(token).toBe("")
   })
 })

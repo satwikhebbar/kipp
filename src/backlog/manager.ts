@@ -1,6 +1,6 @@
 import type { GithubClient } from "../integrations/github"
 import type { Idea, IdeaStatus } from "../types"
-import { appendToArchive } from "./archive"
+import { appendToArchive, cleanupArchive } from "./archive"
 import { parseIdeas, serializeIdeas } from "./parser"
 
 export function createBacklogManager(client: GithubClient) {
@@ -43,6 +43,7 @@ export function createBacklogManager(client: GithubClient) {
       if (!(err instanceof Error && err.message === `Idea ${idea.id} not found`)) throw err
     }
     await appendToArchive(client, idea)
+    await cleanupArchive(client)
     await client.mutateFile("ideas.md", (content) => {
       const ideas = parseIdeas(content)
       return serializeIdeas(ideas.filter((i) => i.id !== idea.id))

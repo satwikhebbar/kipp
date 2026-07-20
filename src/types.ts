@@ -1,5 +1,6 @@
 export interface Env {
   PIPELINE_WORKFLOW: Workflow
+  TOKEN_VAULT: DurableObjectNamespace
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_WEBHOOK_SECRET: string
   TELEGRAM_ALLOWED_USER_ID: string
@@ -7,10 +8,13 @@ export interface Env {
   LINKEDIN_CLIENT_ID: string
   LINKEDIN_CLIENT_SECRET: string
   LINKEDIN_ACCESS_TOKEN: string
-  LINKEDIN_REFRESH_TOKEN: string
   LINKEDIN_REDIRECT_ORIGIN?: string
-  LINKEDIN_SETUP_SECRET?: string
   LINKEDIN_AUTHOR_URN: string
+  ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK?: string
+  TOKEN_ENCRYPTION_KEY_IDS: string
+  ACCESS_TEAM: string
+  ACCESS_AUDIENCE: string
+  ACCESS_ADMIN_EMAILS: string
   LLM_API_KEY: string
   LLM_PROVIDER: string
   LLM_MODEL?: string

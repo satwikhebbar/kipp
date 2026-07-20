@@ -1,6 +1,5 @@
-import type { Env, LinkedInTokens } from "../types"
-import type { GithubClient } from "./github"
-import { createGitHubClient } from "./github"
+import { createTokenVault } from "../token-vault-client"
+import type { Env } from "../types"
 
 const LINKEDIN_API = "https://api.linkedin.com"
 
@@ -25,16 +24,13 @@ export interface LinkedinClient {
   createDraftPost(authorUrn: string, text: string): Promise<{ urn: string }>
 }
 
-export async function getLinkedInToken(env: Env, gh?: GithubClient): Promise<string> {
-  try {
-    const client = gh ?? createGitHubClient(env)
-    const file = await client.readFile(".linkedin-tokens.json")
-    const tokens = JSON.parse(file.content) as LinkedInTokens
-    if (tokens.access_token) return tokens.access_token
-  } catch {
-    /* fall through */
+export async function getLinkedInToken(env: Env): Promise<string> {
+  const vault = createTokenVault(env)
+  const { tokens } = await vault.readTokens()
+  if (tokens?.access_token) return tokens.access_token
+  if (env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.LINKEDIN_ACCESS_TOKEN) {
+    return env.LINKEDIN_ACCESS_TOKEN
   }
-  if (env.LINKEDIN_ACCESS_TOKEN) return env.LINKEDIN_ACCESS_TOKEN
   return ""
 }
 

@@ -23,16 +23,20 @@ function baseEnv(overrides?: Partial<Env>): Env {
     LINKEDIN_CLIENT_ID: "",
     LINKEDIN_CLIENT_SECRET: "",
     LINKEDIN_ACCESS_TOKEN: "",
-    LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
     LLM_API_KEY: "key",
     LLM_PROVIDER: "deepseek",
     SUBSTACK_RSS_URL: "",
     POSTING_CADENCE_DAYS: "7",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+    TOKEN_VAULT: {
+      idFromName: () => ({}) as never,
+      get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ tokens: null }), { status: 200 })) }),
+    } as never,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
-  }
+  } as never
 }
 
 describe("security-boundaries", () => {
