@@ -29,7 +29,11 @@ function baseEnv(overrides?: Partial<Env>): Env {
     SUBSTACK_RSS_URL: "",
     POSTING_CADENCE_DAYS: "7",
     WAIT_FOR_FEEDBACK_HOURS: "168",
-    TOKEN_VAULT: {} as never,
+    ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+    TOKEN_VAULT: {
+      idFromName: () => ({}) as never,
+      get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ tokens: null }), { status: 200 })) }),
+    } as never,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
   } as never

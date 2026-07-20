@@ -117,11 +117,15 @@ export class TokenVaultDO implements DurableObject {
     return Response.json({ success: true })
   }
 
+  #validKid(kid: string): boolean {
+    return /^[a-zA-Z0-9_]+$/.test(kid)
+  }
+
   async #encrypt(plaintext: Record<string, unknown>): Promise<Envelope> {
     const env = this.env as unknown as Record<string, string | undefined>
     const keyIds = env.TOKEN_ENCRYPTION_KEY_IDS?.split(",") ?? []
     const keyId = keyIds[0]
-    if (!keyId) throw new Error("no encryption keys configured")
+    if (!keyId || !this.#validKid(keyId)) throw new Error("no valid encryption keys configured")
     const keyB64 = env[`TOKEN_ENCRYPTION_KEY_${keyId}`]
     if (!keyB64) throw new Error(`key ${keyId} not found in env`)
     const rawKey = b64decode(keyB64)
@@ -131,7 +135,7 @@ export class TokenVaultDO implements DurableObject {
   async #decrypt(envelope: Envelope): Promise<Record<string, unknown> | null> {
     const env = this.env as unknown as Record<string, string | undefined>
     const keyIds = env.TOKEN_ENCRYPTION_KEY_IDS?.split(",") ?? []
-    const ordered = [...keyIds]
+    const ordered = [...keyIds.filter((k) => this.#validKid(k))]
     const kidIdx = ordered.indexOf(envelope.kid)
     if (kidIdx !== -1) {
       ordered.splice(kidIdx, 1)

@@ -11,6 +11,15 @@ vi.mock("cloudflare:workers", () => {
   return { WorkflowEntrypoint }
 })
 
+function mockDoNamespace() {
+  return {
+    idFromName: () => ({}) as never,
+    get: () => ({
+      fetch: () => Promise.resolve(new Response(JSON.stringify({ tokens: null }), { status: 200 })),
+    }),
+  } as never
+}
+
 function baseEnv(overrides?: Partial<Env>): Env {
   return {
     GITHUB_PAT: "pat",
@@ -23,12 +32,13 @@ function baseEnv(overrides?: Partial<Env>): Env {
     LINKEDIN_CLIENT_SECRET: "",
     LINKEDIN_ACCESS_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
+    ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
     LLM_API_KEY: "key",
     LLM_PROVIDER: "deepseek",
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
-    TOKEN_VAULT: {} as never,
+    TOKEN_VAULT: mockDoNamespace(),
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
   } as never

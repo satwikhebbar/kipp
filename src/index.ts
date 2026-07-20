@@ -25,7 +25,7 @@ app.get("/auth/linkedin/callback", async (c) => {
 
 app.post("/admin/rewrap", async (c) => {
   const claims = await verifyAccessJwt(c.req.raw, c.env)
-  if (!claims && !c.env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK) {
+  if (!claims && c.env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK !== "true") {
     return c.text("Unauthorized", 403)
   }
   const vault = createTokenVault(c.env)

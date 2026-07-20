@@ -37,7 +37,7 @@ WAIT_FOR_FEEDBACK_HOURS = "12"
 LLM_PROVIDER = "deepseek"
 LLM_MAX_RETRIES = "3"
 ACCESS_TEAM = "my-team"
-TOKEN_ENCRYPTION_KEY_IDS = "2026-07-20-a"
+TOKEN_ENCRYPTION_KEY_IDS = "k20260720a"
 # Set to your deployed worker URL, e.g. https://linkedin-pipeline.your-name.workers.dev
 # LINKEDIN_REDIRECT_ORIGIN = "https://linkedin-pipeline.your-name.workers.dev"
 # Path to style prompt in the data repo. Falls back to src/prompts/defaults/style-prompt.md if not set or file missing.

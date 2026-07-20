@@ -57,7 +57,25 @@ Talk to [BotFather](https://t.me/BotFather), create a bot, note the token.
 
 The OAuth token is obtained via the built-in setup endpoint (see step 5).
 
-### 5. Deploy and configure secrets
+### 5. Configure Cloudflare Access
+
+The `/setup/linkedin`, `/auth/linkedin/callback`, and `/admin/rewrap` endpoints require Cloudflare Access authentication.
+
+1. In the Cloudflare Dashboard, go to **Zero Trust → Access → Applications**
+2. Create a **Self-hosted** application
+3. Set **Application domain** to your worker's hostname (e.g. `linkedin-pipeline.your-subdomain.workers.dev`)
+4. Add these **Application paths**:
+   - `https://<your-worker>/setup/linkedin`
+   - `https://<your-worker>/auth/linkedin/callback`
+   - `https://<your-worker>/admin/rewrap`
+5. Configure your identity provider and a policy that allows your email
+6. Note the **Application Audience (AUD)** tag from the Access application page
+7. Set `ACCESS_AUDIENCE` in `wrangler.toml` `[vars]` to this AUD value
+8. Set `ACCESS_TEAM` in `wrangler.toml` `[vars]` to your Cloudflare Zero Trust team name (e.g. `my-team`)
+
+**Important:** Disable the `*.workers.dev` route in the Cloudflare Dashboard under **Workers & Pages → your-worker → Triggers → Routes** to prevent direct access that bypasses Access. Only allow traffic through the custom domain routed through Cloudflare Access.
+
+### 6. Deploy and configure secrets
 
 ```bash
 pnpm wrangler deploy
@@ -76,9 +94,20 @@ pnpm wrangler secret put LLM_API_KEY         # Gemini or DeepSeek API key
 pnpm wrangler secret put LLM_PROVIDER        # "gemini" or "deepseek"
 pnpm wrangler secret put LINKEDIN_CLIENT_ID       # from LinkedIn Developer Portal
 pnpm wrangler secret put LINKEDIN_CLIENT_SECRET   # from LinkedIn Developer Portal
-pnpm wrangler secret put LINKEDIN_SETUP_SECRET    # any random string, gates the OAuth setup endpoint
 pnpm wrangler secret put LINKEDIN_AUTHOR_URN      # your LinkedIn author URN
+pnpm wrangler secret put ACCESS_ADMIN_EMAILS      # comma-separated emails allowed to access setup/admin endpoints
 ```
+
+Set the token encryption key:
+
+```bash
+# Generate a 32-byte base64url-encoded key
+node -e "const c = require('crypto'); console.log(c.randomBytes(32).toString('base64url'))"
+# Store it as a secret
+pnpm wrangler secret put TOKEN_ENCRYPTION_KEY_k20260720a
+```
+
+Configure `TOKEN_ENCRYPTION_KEY_IDS` in `wrangler.toml` `[vars]` with the key ID used above (default: `k20260720a`). For key rotation, generate a new key, add its ID to the comma-separated list (e.g. `k20260720a,k20260720b`), `put` the new secret, and call `POST /admin/rewrap`. Once rewrap succeeds, remove the old ID from the list and delete the old secret.
 
 Configurable vars (set in dashboard or `wrangler.toml`):
 
@@ -91,31 +120,32 @@ Configurable vars (set in dashboard or `wrangler.toml`):
 | `WAIT_FOR_FEEDBACK_HOURS` | Hours to wait for Telegram feedback before timeout (default `12`) |
 | `LINKEDIN_REDIRECT_ORIGIN` | Override for OAuth redirect URI (default: derived from `Host`) |
 | `PROMPT_STYLE_PATH` | Path to a style prompt in the data repo (default: `style-prompt.md`). Falls back to the built-in default if missing. |
+| `ACCESS_TEAM` | Cloudflare Zero Trust team name (e.g. `my-team`) |
+| `ACCESS_AUDIENCE` | Application Audience (AUD) tag from the Access application |
+| `TOKEN_ENCRYPTION_KEY_IDS` | Comma-separated key IDs (e.g. `k20260720a`). The first is used for encryption; the rest are tried for decryption. |
 
-### 6. LinkedIn OAuth setup
+### 7. LinkedIn OAuth setup
 
-Visit the setup URL in your browser (replace `your-subdomain`):
+Visit the setup URL in your browser through the Cloudflare Access-protected domain:
 
 ```
-https://linkedin-pipeline.your-subdomain.workers.dev/setup/linkedin?secret=YOUR_LINKEDIN_SETUP_SECRET
+https://linkedin-pipeline.your-subdomain.workers.dev/setup/linkedin
 ```
 
-This initiates the OAuth flow:
+The worker verifies your Access JWT, initiates the OAuth flow:
 1. Redirects you to LinkedIn for authorization
 2. LinkedIn redirects back to the callback URL
-3. The worker exchanges the code for tokens and stores them in your data repo as `.linkedin-tokens.json`
+3. The worker validates your Access session, exchanges the code for tokens, encrypts them with AES-256-GCM, and stores them in the Durable Object token vault
 
-Tokens are automatically refreshed via a weekly cron (`handleTokenCheckCron`).
+Tokens are automatically refreshed via a weekly cron (`handleTokenCheckCron`). A `POST /admin/rewrap` endpoint re-encrypts stored tokens with the current active key encryption key.
 
-> The `?secret=` parameter is required only if `LINKEDIN_SETUP_SECRET` is configured. If unset, the endpoint is publicly accessible (not recommended).
-
-### 7. Register Telegram webhook
+### 8. Register Telegram webhook
 
 ```bash
 curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://linkedin-pipeline.your-subdomain.workers.dev/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-### 8. Verify
+### 9. Verify
 
 - Send `/add <your idea text>` to your Telegram bot — it should appear in `ideas.md`
 - Send `/generate` — it should start the pipeline workflow
@@ -130,7 +160,12 @@ To test the Telegram flow locally without hijacking the production webhook, you 
    ```env
    TELEGRAM_BOT_TOKEN="dev_bot_token_here"
    TELEGRAM_WEBHOOK_SECRET="some_random_secret"
+   ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK="true"
+   LINKEDIN_ACCESS_TOKEN="your_linkedin_token"
+   TOKEN_ENCRYPTION_KEY_IDS="k20260720a"
+   TOKEN_ENCRYPTION_KEY_k20260720a="<base64url-32-byte-key>"
    ```
+   `ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK="true"` skips Cloudflare Access JWT verification and falls back to the `LINKEDIN_ACCESS_TOKEN` env var for LinkedIn API calls. Never set this in production.
 3. **Start Local Server**: Run `pnpm dev` to start `wrangler dev` locally (usually on port 8787).
 4. **Start ngrok**: In a new terminal, expose your local server to the internet using ngrok:
    ```bash
@@ -186,6 +221,9 @@ src/
 ├── index.ts                 # Worker entry (Hono routes)
 ├── workflow.ts              # Workflow orchestration (Cloudflare Workflows)
 ├── types.ts                 # Shared types
+├── crypto.ts                # AES-256-GCM encrypt/decrypt, base64url helpers
+├── token-vault.ts           # TokenVaultDO Durable Object (encrypted token store)
+├── token-vault-client.ts    # DO stub client + verifyAccessJwt (Cloudflare Access JWT)
 ├── backlog/                 # ideas.md / archive.md management
 ├── prompts/                 # Prompt defaults and runtime resolution
 │   ├── defaults.ts          # Built-in default style prompt constant (single source of truth)
