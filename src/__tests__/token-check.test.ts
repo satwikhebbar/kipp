@@ -139,4 +139,39 @@ describe("handleTokenCheckCron", () => {
     expect(result).toEqual({ alerted: true, refreshed: false })
     expect(sentMessage).toContain("expires")
   })
+
+  it("does not leak tokens, secrets, or provider error body in Telegram alert on refresh failure", async () => {
+    let sentMessage = ""
+    const accessToken = "at-leak-check-xyz"
+    const refreshToken = "rt-leak-check-xyz"
+    const clientSecret = "cs-leak-check-xyz"
+    const errorBody = JSON.stringify({ error: "invalid_client", error_description: "secret_mismatch" })
+    mockReadTokens.mockResolvedValue({
+      tokens: {
+        access_token: accessToken,
+        expires_in: 5184000,
+        created_at: new Date(Date.now() - 1000 * 60 * 60 * 24 * 55).toISOString(),
+        refresh_token: refreshToken,
+      },
+    })
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url?.includes?.("linkedin.com/oauth")) {
+        return { ok: false, status: 400, text: () => Promise.resolve(errorBody) }
+      }
+      if (url?.includes?.("api.telegram.org/bot")) {
+        const body = JSON.parse(opts?.body as string) as { text?: string }
+        sentMessage = body.text ?? ""
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 1 } }) }
+      }
+      return { ok: true, json: () => Promise.resolve({}) }
+    })
+    const result = await handleTokenCheckCron(mockEnv({ LINKEDIN_CLIENT_SECRET: clientSecret }) as never)
+    expect(result).toEqual({ alerted: true, refreshed: false })
+    expect(sentMessage).toContain("expires")
+    expect(sentMessage).not.toContain(accessToken)
+    expect(sentMessage).not.toContain(refreshToken)
+    expect(sentMessage).not.toContain(clientSecret)
+    expect(sentMessage).not.toContain("invalid_client")
+    expect(sentMessage).not.toContain("secret_mismatch")
+  })
 })
