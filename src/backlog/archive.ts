@@ -1,6 +1,8 @@
 import type { GithubClient } from "../integrations/github"
 import type { Idea } from "../types"
-import { parseIdeas, serializeIdea } from "./parser"
+import { parseIdeas, serializeIdea, serializeIdeas } from "./parser"
+
+export const ARCHIVE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 export async function appendToArchive(client: GithubClient, idea: Idea): Promise<void> {
   await client.mutateFile("archive.md", (content) => {
@@ -8,5 +10,21 @@ export async function appendToArchive(client: GithubClient, idea: Idea): Promise
     const existing = parseIdeas(content)
     if (existing.some((e) => e.id === archived.id)) return content
     return `${content.trim()}\n\n${serializeIdea(archived)}`
+  })
+}
+
+export async function cleanupArchive(client: GithubClient): Promise<void> {
+  await client.mutateFile("archive.md", (content) => {
+    const entries = parseIdeas(content)
+    const cutoff = Date.now() - ARCHIVE_RETENTION_MS
+    const kept = entries.filter((e) => {
+      if (!e.finalized) return true
+      const ts = new Date(e.finalized).getTime()
+      // ponytail: global lock, per-account locks if throughput matters
+      if (Number.isNaN(ts)) return true
+      return ts >= cutoff
+    })
+    if (kept.length === entries.length) return content
+    return serializeIdeas(kept)
   })
 }

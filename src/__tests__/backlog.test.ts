@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { cleanupArchive } from "../backlog/archive"
 import { createBacklogManager } from "../backlog/manager"
 import type { GithubClient, GithubFile } from "../integrations/github"
 
@@ -323,5 +324,123 @@ Body 3`)
       expect(reParsed[0].body).toBe("# Idea 1\n\nThis is a raw idea.")
       expect(reParsed[0].body).not.toContain("Line one")
     })
+  })
+})
+
+describe("cleanupArchive", () => {
+  const NOW = 1_758_000_000_000
+  const DAY = 86_400_000
+  const THIRTY_DAYS_AGO = new Date(NOW - 30 * DAY).toISOString()
+  const THIRTY_ONE_DAYS_AGO = new Date(NOW - 31 * DAY).toISOString()
+  const TWENTY_NINE_DAYS_AGO = new Date(NOW - 29 * DAY).toISOString()
+
+  function entry(id: string, finalized: string | undefined): string {
+    return `---
+id: ${id}
+title: Entry ${id}
+status: finalized
+source: manual
+created: 2026-01-01
+finalized: ${finalized ?? ""}
+---
+
+Body ${id}
+`
+  }
+
+  function archiveContent(...entries: string[]): string {
+    return entries.join("\n")
+  }
+
+  beforeAll(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+  })
+
+  afterAll(() => {
+    vi.useRealTimers()
+  })
+
+  it("prunes entries older than 30 days", async () => {
+    const m = mockClient()
+    m.setArchive(archiveContent(entry("old", THIRTY_ONE_DAYS_AGO), entry("recent", TWENTY_NINE_DAYS_AGO)))
+    await cleanupArchive(m.client)
+    const archived = await m.client.readFile("archive.md")
+    expect(archived.content).not.toContain("id: old")
+    expect(archived.content).toContain("id: recent")
+  })
+
+  it("keeps entry at exactly 30-day boundary", async () => {
+    const m = mockClient()
+    m.setArchive(archiveContent(entry("boundary", THIRTY_DAYS_AGO)))
+    await cleanupArchive(m.client)
+    const archived = await m.client.readFile("archive.md")
+    expect(archived.content).toContain("id: boundary")
+  })
+
+  it("preserves entry without finalized field", async () => {
+    const m = mockClient()
+    m.setArchive(archiveContent(entry("no-date", undefined)))
+    await cleanupArchive(m.client)
+    const archived = await m.client.readFile("archive.md")
+    expect(archived.content).toContain("id: no-date")
+  })
+
+  it("preserves entry with malformed finalized date", async () => {
+    const m = mockClient()
+    m.setArchive(`---
+id: bad
+title: Bad date
+status: finalized
+source: manual
+created: 2026-01-01
+finalized: not-a-date
+---
+
+Body bad
+`)
+    await cleanupArchive(m.client)
+    const archived = await m.client.readFile("archive.md")
+    expect(archived.content).toContain("id: bad")
+  })
+
+  it("does not mutate archive when nothing to prune", async () => {
+    const m = mockClient()
+    const content = archiveContent(entry("recent", TWENTY_NINE_DAYS_AGO))
+    m.setArchive(content)
+    const writeSpy = vi.spyOn(m.client, "writeFile")
+    await cleanupArchive(m.client)
+    expect(writeSpy).not.toHaveBeenCalled()
+  })
+
+  it("prunes only old entries leaving multiple intact", async () => {
+    const m = mockClient()
+    m.setArchive(
+      archiveContent(
+        entry("a", THIRTY_ONE_DAYS_AGO),
+        entry("b", TWENTY_NINE_DAYS_AGO),
+        entry("c", THIRTY_ONE_DAYS_AGO),
+        entry("d", TWENTY_NINE_DAYS_AGO),
+      ),
+    )
+    await cleanupArchive(m.client)
+    const archived = await m.client.readFile("archive.md")
+    expect(archived.content).toContain("id: b")
+    expect(archived.content).toContain("id: d")
+    expect(archived.content).not.toContain("id: a")
+    expect(archived.content).not.toContain("id: c")
+  })
+
+  it("cleans up when moveToArchive triggers archive of new entry", async () => {
+    const m = mockClient()
+    m.setIdeas(RAW_IDEA)
+    m.setArchive(archiveContent(entry("old", THIRTY_ONE_DAYS_AGO)))
+    const mgr = createBacklogManager(m.client)
+    const raw = await mgr.getNextIdea()
+    if (!raw) throw new Error("Expected an idea")
+    await mgr.moveToArchive(raw)
+    const archived = await m.client.readFile("archive.md")
+    expect(archived.content).not.toContain("id: old")
+    expect(archived.content).toContain("id: 1")
   })
 })
