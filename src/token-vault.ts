@@ -28,14 +28,22 @@ export class TokenVaultDO implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("content-type") !== "application/json")
       return new Response("invalid request", { status: 400 })
-    const len = Number(request.headers.get("content-length") ?? -1)
-    if (len < 0 || len > 10_000) return new Response("request too large", { status: 413 })
-    let body: Record<string, unknown>
+    let raw: string
     try {
-      body = (await request.json()) as Record<string, unknown>
+      raw = await request.text()
     } catch {
       return new Response("invalid body", { status: 400 })
     }
+    if (new TextEncoder().encode(raw).byteLength > 10_000) return new Response("request too large", { status: 413 })
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return new Response("invalid body", { status: 400 })
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      return new Response("invalid body", { status: 400 })
+    const body = parsed as Record<string, unknown>
     const { op, ...args } = body
     try {
       switch (op) {
@@ -109,9 +117,10 @@ export class TokenVaultDO implements DurableObject {
 
   async #rewrap(): Promise<Response> {
     const raw = await this.ctx.storage.get<Envelope>("tokens")
-    if (!raw) return Response.json({ success: false })
+    if (!raw) return new Response(JSON.stringify({ success: false, reason: "no tokens stored" }), { status: 500 })
     const decrypted = await this.#decrypt(raw)
-    if (!decrypted) return Response.json({ success: false })
+    if (!decrypted)
+      return new Response(JSON.stringify({ success: false, reason: "decryption failed" }), { status: 500 })
     const reencrypted = await this.#encrypt(decrypted)
     await this.ctx.storage.put("tokens", reencrypted)
     return Response.json({ success: true })
