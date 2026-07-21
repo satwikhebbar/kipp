@@ -128,10 +128,12 @@ secrets stay in the Cloudflare dashboard (production) or `.dev.vars` (local).
 
 ```bash
 # Local development
-pnpm wrangler dev --config wrangler.local.toml
+pnpm dev                           # shortcut — uses wrangler.local.toml
+pnpm wrangler dev --config wrangler.local.toml   # explicit equivalent
 
 # Production deployment
-pnpm wrangler deploy --config wrangler.prod.toml
+pnpm deploy                        # shortcut — uses wrangler.prod.toml
+pnpm wrangler deploy --config wrangler.prod.toml # explicit equivalent
 ```
 
 The configuration files define the same runtime bindings and environment
@@ -184,7 +186,7 @@ To test the Telegram flow locally without hijacking the production webhook, you 
    TOKEN_ENCRYPTION_KEY_k20260720a="<base64url-32-byte-key>"
    ```
    `ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK="true"` skips Cloudflare Access JWT verification and falls back to the `LINKEDIN_ACCESS_TOKEN` env var for LinkedIn API calls. Never set this in production.
-3. **Start Local Server**: Run `pnpm wrangler dev --config wrangler.local.toml` (usually on port 8787).
+3. **Start Local Server**: Run `pnpm dev` (or `pnpm wrangler dev --config wrangler.local.toml`; usually on port 8787).
 4. **Start ngrok**: In a new terminal, expose your local server to the internet using ngrok:
    ```bash
    ngrok http 8787
@@ -220,9 +222,9 @@ Cloudflare dashboard. Never put credentials in either Wrangler configuration.
 
 | Command | Purpose |
 |---|---|
-| `pnpm wrangler dev --config wrangler.local.toml` | Start the local Worker with local configuration |
+| `pnpm dev` | Start the local Worker with local configuration (`wrangler.local.toml`) |
 | `pnpm run webhook:dev` | Register dev bot webhook to active ngrok tunnel |
-| `pnpm wrangler deploy --config wrangler.prod.toml` | Deploy with production configuration |
+| `pnpm deploy` | Deploy with production configuration (`wrangler.prod.toml`) |
 | `pnpm lint` | Check lint rules and formatting |
 | `pnpm lint:fix` | Auto-fix lint and formatting issues |
 | `pnpm typecheck` | Run TypeScript type checking |

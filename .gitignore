@@ -13,6 +13,10 @@ scripts/
 # Opencode tooling artifacts (project-level config lives elsewhere)
 .opencode/
 
+# Env-specific Wrangler config (contain real credentials/hashes/URNs)
+wrangler.local.toml
+wrangler.prod.toml
+
 # Local agent handoff queues
 .agent-handoff/inbox/*
 .agent-handoff/in-progress/*
