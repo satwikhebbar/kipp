@@ -3,8 +3,7 @@
 An automated LinkedIn posting pipeline on **Cloudflare Workers + Workflows**. Captures ideas, drafts posts via LLM, runs a critique–revise loop with Telegram-based feedback, and creates a LinkedIn **DRAFT** (never auto-published).
 
 Designed as an **open-source template**. Your content data lives in a separate
-private GitHub repository; credentials are kept out of Git in Cloudflare Worker
-secrets or local-only development files.
+private GitHub repository.
 
 Architecture documentation, including Mermaid diagrams and the machine-readable
 architecture inventory, lives in [docs/architecture](docs/architecture/README.md).
