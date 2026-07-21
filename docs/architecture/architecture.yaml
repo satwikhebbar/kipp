@@ -1,0 +1,132 @@
+version: 1
+system:
+  name: Kipp
+  purpose: Create LinkedIn drafts from captured ideas with a human approval loop.
+  runtime:
+    platform: Cloudflare Workers
+    entrypoint: src/index.ts
+
+runtime_components:
+  worker:
+    owns:
+      - HTTP routing
+      - scheduled trigger dispatch
+      - request authentication at protected routes
+    depends_on:
+      - pipeline_workflow
+      - token_vault
+      - triggers
+  pipeline_workflow:
+    implementation: src/workflow.ts
+    owns:
+      - draft, critique, and revision orchestration
+      - approval wait states
+      - creating the LinkedIn draft after explicit approval
+    depends_on:
+      - backlog
+      - agents
+      - providers
+      - integrations
+      - token_vault
+  token_vault:
+    implementation: src/token-vault.ts
+    type: Cloudflare Durable Object with SQLite storage
+    owns:
+      - OAuth state and expiry cleanup
+      - encrypted LinkedIn token storage and key rewrapping
+    depends_on:
+      - crypto
+
+modules:
+  triggers:
+    path: src/triggers
+    owns:
+      - Telegram webhook handling
+      - RSS, cadence, and token-check schedules
+      - LinkedIn OAuth start and callback handling
+    depends_on:
+      - backlog
+      - integrations
+      - providers
+      - pipeline_workflow
+      - token_vault
+  backlog:
+    path: src/backlog
+    owns:
+      - parsing and serializing ideas and archive files
+      - backlog mutation and archive retention
+    depends_on:
+      - integrations.github
+  agents:
+    path: src/agent
+    owns:
+      - drafting, critique, classification, and revision prompts
+    depends_on:
+      - providers
+  providers:
+    path: src/providers
+    owns:
+      - provider selection and normalized LLM generation interface
+    depends_on:
+      - Gemini API
+      - DeepSeek API
+  integrations:
+    path: src/integrations
+    owns:
+      - GitHub Contents API access
+      - Telegram Bot API access
+      - LinkedIn draft creation
+    depends_on:
+      - GitHub API
+      - Telegram Bot API
+      - LinkedIn API
+  prompts:
+    path: src/prompts
+    owns:
+      - default writing-style prompt and data-repository resolution
+    depends_on:
+      - integrations.github
+  crypto:
+    path: src/crypto.ts
+    owns:
+      - AES-256-GCM token envelope encryption and decryption
+    depends_on: []
+
+data_stores:
+  github_data_repository:
+    type: Private GitHub repository accessed through the Contents API
+    data:
+      - ideas.md
+      - archive.md
+      - optional style-prompt.md
+    owner: backlog
+  token_vault_storage:
+    type: Durable Object SQLite storage
+    data:
+      - encrypted LinkedIn OAuth tokens
+      - short-lived OAuth state records
+    owner: token_vault
+  workflow_state:
+    type: Cloudflare Workflows durable execution state
+    data:
+      - workflow steps
+      - Telegram approval or revision events
+    owner: pipeline_workflow
+
+external_systems:
+  - Telegram Bot API
+  - Substack RSS feed
+  - GitHub Contents API
+  - LinkedIn OAuth and Posts API
+  - Gemini API
+  - DeepSeek API
+  - Cloudflare Access
+
+security_boundaries:
+  - Cloudflare Access protects the Worker hostname by default
+  - A separate Access application bypasses only /webhook/telegram for Telegram delivery
+  - Telegram webhook secret and allowed-user check protect the bypassed endpoint
+  - Cloudflare Access JWT validation for setup and administration routes
+  - OAuth state paired with an HTTP-only, secure cookie
+  - AES-256-GCM encryption for LinkedIn tokens at rest
+  - LinkedIn posts are created as drafts only after explicit Telegram approval
