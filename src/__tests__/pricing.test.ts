@@ -27,6 +27,18 @@ describe("computeCost", () => {
     const cost = computeCost({ inputTokens: 1, outputTokens: 1 }, "deepseek-v4-flash")
     expect(cost.totalCostUsd).toBeCloseTo(0.00000042, 8)
   })
+
+  test("deepseek-chat pricing arithmetic", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "deepseek-chat")
+    expect(cost.totalCostUsd).toBeCloseTo(0.82, 4)
+    expect(cost.model).toBe("deepseek-chat")
+  })
+
+  test("gemini-2.0-flash pricing arithmetic", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "gemini-2.0-flash")
+    expect(cost.totalCostUsd).toBeCloseTo(0.3, 4)
+    expect(cost.model).toBe("gemini-2.0-flash")
+  })
 })
 
 describe("formatCostLine", () => {
