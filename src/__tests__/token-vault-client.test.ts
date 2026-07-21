@@ -54,6 +54,7 @@ beforeAll(async () => {
   publicJwk = (await crypto.subtle.exportKey("jwk", keyPair.publicKey)) as JsonWebKey & { kid: string }
   publicJwk.kid = KID
   publicJwk.alg = "RS256"
+  publicJwk.use = "sig"
 })
 
 beforeEach(() => {
@@ -81,10 +82,11 @@ function validClaims(): Record<string, unknown> {
 
 async function setupJwksFetch(keys?: JsonWebKey[]): Promise<void> {
   const jwks = keys ?? [publicJwk as unknown as JsonWebKey]
-  globalThis.fetch = vi.fn().mockResolvedValue({
-    ok: true,
-    json: () => Promise.resolve({ keys: jwks }),
-  })
+  globalThis.fetch = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ keys: jwks }), {
+      headers: { "cache-control": "public, max-age=3600" },
+    }),
+  )
 }
 
 async function signedRequest(payload: Record<string, unknown>): Promise<Request> {
@@ -143,7 +145,7 @@ describe("verifyAccessJwt — JWKS and signature", () => {
   })
 
   it("returns null on JWKS non-ok response", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500 })
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 500 }))
     expect(await verifyAccessJwt(await signedRequest(validClaims()), baseEnv())).toBeNull()
   })
 
@@ -169,6 +171,13 @@ describe("verifyAccessJwt — JWKS and signature", () => {
   it("accepts JWK with use: sig", async () => {
     const sigJwk = { ...publicJwk, use: "sig" }
     await setupJwksFetch([sigJwk as unknown as JsonWebKey])
+    expect(await verifyAccessJwt(await signedRequest(validClaims()), baseEnv())).not.toBeNull()
+  })
+
+  it("accepts JWK without use field", async () => {
+    const noUseJwk = { ...publicJwk }
+    delete (noUseJwk as { use?: string }).use
+    await setupJwksFetch([noUseJwk as unknown as JsonWebKey])
     expect(await verifyAccessJwt(await signedRequest(validClaims()), baseEnv())).not.toBeNull()
   })
 
@@ -328,10 +337,18 @@ describe("verifyAccessJwt — team-scoped JWKS cache", () => {
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
       fetchCount++
       if (url.includes(TEAM_A)) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ keys: [jwkA] }) })
+        return Promise.resolve(
+          new Response(JSON.stringify({ keys: [jwkA] }), {
+            headers: { "cache-control": "public, max-age=3600" },
+          }),
+        )
       }
       if (url.includes(TEAM_B)) {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ keys: [jwkB] }) })
+        return Promise.resolve(
+          new Response(JSON.stringify({ keys: [jwkB] }), {
+            headers: { "cache-control": "public, max-age=3600" },
+          }),
+        )
       }
       return Promise.reject(new Error("unexpected url"))
     })
