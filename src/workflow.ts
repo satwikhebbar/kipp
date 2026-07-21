@@ -208,9 +208,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           let line = ""
           if (idea) {
             const model = idea.costModel ?? state.model ?? ""
-            if (idea.costInputTokens) {
+            if (model) {
               const cost = computeCost(
-                { inputTokens: idea.costInputTokens, outputTokens: idea.costOutputTokens ?? 0 },
+                { inputTokens: idea.costInputTokens ?? 0, outputTokens: idea.costOutputTokens ?? 0 },
                 model,
               )
               line = formatCostLine(cost)
