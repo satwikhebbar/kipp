@@ -54,6 +54,19 @@ reviewCount: 2
 
 Post content.`
 
+const ZERO_COST_IDEA = `---
+id: 99
+title: Zero input cost
+status: raw
+source: manual
+created: 2026-07-01T12:00:00Z
+costInputTokens: "0"
+costOutputTokens: "5"
+costModel: deepseek-v4-flash
+---
+
+Zero cost body.`
+
 const EXPIRED_IDEA = `---
 id: 12
 title: Expired post
@@ -198,6 +211,7 @@ describe("serializeIdea roundtrip", () => {
     SKIPPED_IDEA,
     MULTILINE_DRAFT_IDEA,
     DRAFT_WITH_HORIZONTAL_RULE,
+    ZERO_COST_IDEA,
   ]
 
   for (const input of cases) {
