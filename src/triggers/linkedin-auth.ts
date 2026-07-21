@@ -20,7 +20,7 @@ function redirectUrl(env: Env, host: string): string {
 
 export async function handleAuthStart(request: Request, host: string, env: Env): Promise<Response> {
   const claims = await verifyAccessJwt(request, env)
-  if (!claims && env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK !== "true") {
+  if (!claims && !(env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development")) {
     return new Response("Setup requires authentication", { status: 403 })
   }
 
@@ -52,7 +52,7 @@ export async function handleAuthCallback(
   request: Request,
 ): Promise<Response> {
   const claims = await verifyAccessJwt(request, env)
-  if (!claims && env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK !== "true") {
+  if (!claims && !(env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development")) {
     return new Response("OAuth setup failed", { status: 403 })
   }
 

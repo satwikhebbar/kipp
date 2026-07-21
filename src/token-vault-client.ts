@@ -46,7 +46,7 @@ function getJwks(teamDomain: string): Promise<{ keys: JsonWebKey[] }> {
 }
 
 export async function verifyAccessJwt(request: Request, env: Env): Promise<AccessJwtClaims | null> {
-  if (env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true") return null
+  if (env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development") return null
 
   try {
     const jwt = request.headers.get("Cf-Access-Jwt-Assertion")

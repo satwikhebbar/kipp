@@ -28,7 +28,11 @@ export async function getLinkedInToken(env: Env): Promise<string> {
   const vault = createTokenVault(env)
   const { tokens } = await vault.readTokens()
   if (tokens?.access_token) return tokens.access_token
-  if (env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.LINKEDIN_ACCESS_TOKEN) {
+  if (
+    env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" &&
+    env.DEPLOYMENT_ENV === "development" &&
+    env.LINKEDIN_ACCESS_TOKEN
+  ) {
     return env.LINKEDIN_ACCESS_TOKEN
   }
   return ""
