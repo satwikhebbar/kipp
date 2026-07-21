@@ -120,7 +120,7 @@ export function serializeIdea(idea: Idea): string {
   if (idea.title) fm.title = idea.title
   if (idea.substackUrl) fm.substackUrl = idea.substackUrl
   if (idea.teaser) fm.teaser = idea.teaser
-  if (idea.reviewCount) fm.reviewCount = String(idea.reviewCount)
+  if (idea.reviewCount !== undefined) fm.reviewCount = String(idea.reviewCount)
   if (idea.finalized) fm.finalized = idea.finalized
   if (idea.costUsd !== undefined) fm.costUsd = String(idea.costUsd)
   if (idea.costInputTokens !== undefined) fm.costInputTokens = String(idea.costInputTokens)

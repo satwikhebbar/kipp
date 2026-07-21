@@ -67,6 +67,17 @@ costModel: deepseek-v4-flash
 
 Zero cost body.`
 
+const ZERO_REVIEW_COUNT_IDEA = `---
+id: 100
+title: Zero review count
+status: awaiting-feedback
+source: manual
+created: 2026-07-01T12:00:00Z
+reviewCount: "0"
+---
+
+Zero review count body.`
+
 const EXPIRED_IDEA = `---
 id: 12
 title: Expired post
@@ -212,6 +223,7 @@ describe("serializeIdea roundtrip", () => {
     MULTILINE_DRAFT_IDEA,
     DRAFT_WITH_HORIZONTAL_RULE,
     ZERO_COST_IDEA,
+    ZERO_REVIEW_COUNT_IDEA,
   ]
 
   for (const input of cases) {
