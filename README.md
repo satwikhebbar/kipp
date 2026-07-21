@@ -2,7 +2,12 @@
 
 An automated LinkedIn posting pipeline on **Cloudflare Workers + Workflows**. Captures ideas, drafts posts via LLM, runs a critique–revise loop with Telegram-based feedback, and creates a LinkedIn **DRAFT** (never auto-published).
 
-Designed as an **open-source template**. Your data and credentials stay in a separate private GitHub repo.
+Designed as an **open-source template**. Your content data lives in a separate
+private GitHub repository; credentials are kept out of Git in Cloudflare Worker
+secrets or local-only development files.
+
+Architecture documentation, including Mermaid diagrams and the machine-readable
+architecture inventory, lives in [docs/architecture](docs/architecture/README.md).
 
 ## How It Works
 
@@ -13,7 +18,10 @@ Telegram /generate ───────────────┘          Tel
 Cadence check (weekly) ──────────┘
 ```
 
-The workflow pauses indefinitely at each "awaiting feedback" step, waiting for your Telegram reply — zero cost during idle (powered by `step.waitForEvent()`).
+The workflow durably waits for Telegram feedback without a running Worker
+process (powered by `step.waitForEvent()`). It waits for
+`WAIT_FOR_FEEDBACK_HOURS` (12 hours by default), then marks the idea
+`awaiting-feedback-expired` if no response arrives.
 
 ## Prerequisites
 
@@ -30,8 +38,8 @@ The workflow pauses indefinitely at each "awaiting feedback" step, waiting for y
 ### 1. Fork or clone this repo
 
 ```bash
-git clone https://github.com/your-org/linkedin-pipeline.git
-cd linkedin-pipeline
+git clone git@github.com:satwikhebbar/kipp.git
+cd kipp
 pnpm install
 pnpm lefthook install   # enable pre-commit hooks
 ```
@@ -53,83 +61,94 @@ Talk to [BotFather](https://t.me/BotFather), create a bot, note the token.
 1. Go to [LinkedIn Developer Portal](https://developer.linkedin.com/) → Create App
 2. Add the **Share on LinkedIn** product (free tier)
 3. Note your **Client ID** and **Client Secret**
-4. Add a redirect URL: `https://your-worker.your-subdomain.workers.dev/auth/linkedin/callback`
+4. Add a redirect URL: `https://<worker>.workers.dev/auth/linkedin/callback`
 
 The OAuth token is obtained via the built-in setup endpoint (see step 5).
 
 ### 5. Configure Cloudflare Access
 
-The `/setup/linkedin`, `/auth/linkedin/callback`, and `/admin/rewrap` endpoints require Cloudflare Access authentication.
+The Worker hostname is protected by Cloudflare Access. Production uses two
+**self-hosted** Access applications on the same hostname:
 
-1. In the Cloudflare Dashboard, go to **Zero Trust → Access → Applications**
-2. Create a **Self-hosted** application
-3. Set **Application domain** to your worker's hostname (e.g. `linkedin-pipeline.your-subdomain.workers.dev`)
-4. Add these **Application paths**:
-   - `https://<your-worker>/setup/linkedin`
-   - `https://<your-worker>/auth/linkedin/callback`
-   - `https://<your-worker>/admin/rewrap`
-5. Configure your identity provider and a policy that allows your email
-6. Note the **Application Audience (AUD)** tag from the Access application page
-7. Set `ACCESS_AUDIENCE` in `wrangler.toml` `[vars]` to this AUD value
-8. Set `ACCESS_TEAM` in `wrangler.toml` `[vars]` to your Cloudflare Zero Trust team name (e.g. `my-team`)
+1. A primary application for `https://<worker>.workers.dev` with an **Allow**
+   policy for the administrator. This protects every path by default. Record
+   its audience value as `ACCESS_AUDIENCE` and set `ACCESS_TEAM` to the Zero
+   Trust team name.
+2. A second application scoped **only** to
+   `https://<worker>.workers.dev/webhook/telegram`, with a **Bypass** policy.
+   Telegram cannot complete an interactive Access login, so this narrow bypass
+   is required for webhook delivery.
 
-**Important:** Disable the `*.workers.dev` route in the Cloudflare Dashboard under **Workers & Pages → your-worker → Triggers → Routes** to prevent direct access that bypasses Access. Only allow traffic through the custom domain routed through Cloudflare Access.
+The bypass must not be broadened beyond `/webhook/telegram`. The Worker still
+requires Telegram's `X-Telegram-Bot-Api-Secret-Token` header and, when
+configured, checks `TELEGRAM_ALLOWED_USER_ID` before it performs any action.
+Protected setup, OAuth callback, and administrative routes validate the
+Cloudflare Access JWT in the Worker as a second layer of protection.
 
-### 6. Deploy and configure secrets
+Configure a separate Access application for preview URLs if preview deployments
+are enabled.
 
-```bash
-pnpm wrangler deploy
-```
+### 6. Configure Worker secrets and variables
 
-Set required secrets (never commit these):
+Set production values in **Workers & Pages → linkedin-pipeline → Settings →
+Variables and Secrets** (or with `pnpm wrangler secret put <NAME>`). Do not put
+secret values in a committed Wrangler file.
 
-```bash
-pnpm wrangler secret put GITHUB_PAT          # GitHub PAT with repo access to your data repo
-pnpm wrangler secret put DATA_REPO_OWNER     # GitHub username/org for your data repo
-pnpm wrangler secret put DATA_REPO_NAME      # GitHub data repo name
-pnpm wrangler secret put TELEGRAM_BOT_TOKEN  # from BotFather
-pnpm wrangler secret put TELEGRAM_WEBHOOK_SECRET  # any random string, used for HMAC signing
-pnpm wrangler secret put TELEGRAM_ALLOWED_USER_ID  # your Telegram numeric user ID
-pnpm wrangler secret put LLM_API_KEY         # Gemini or DeepSeek API key
-pnpm wrangler secret put LLM_PROVIDER        # "gemini" or "deepseek"
-pnpm wrangler secret put LINKEDIN_CLIENT_ID       # from LinkedIn Developer Portal
-pnpm wrangler secret put LINKEDIN_CLIENT_SECRET   # from LinkedIn Developer Portal
-pnpm wrangler secret put LINKEDIN_AUTHOR_URN      # your LinkedIn author URN
-pnpm wrangler secret put ACCESS_ADMIN_EMAILS      # comma-separated emails allowed to access setup/admin endpoints
-```
+| Type | Names | Purpose |
+| --- | --- | --- |
+| Secret | `ACCESS_ADMIN_EMAILS` | Comma-separated emails allowed by Worker-side Access JWT validation. |
+| Secret | `DATA_REPO_NAME`, `DATA_REPO_OWNER`, `GITHUB_PAT` | Private GitHub data repository access. |
+| Secret | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | LinkedIn OAuth client credentials. |
+| Secret | `LLM_API_KEY` | Gemini or DeepSeek API credential. |
+| Secret | `TELEGRAM_ALLOWED_USER_ID`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Telegram user allow-list, Bot API access, and webhook verification. |
+| Secret | `TOKEN_ENCRYPTION_KEY_<key-id>` | 32-byte base64url token-encryption key; the configured key ID determines its exact name. |
+| Plaintext variable | `ACCESS_AUDIENCE`, `ACCESS_TEAM`, `DATA_REPO_BRANCH`, `DEPLOYMENT_ENV` | Access validation and deployment configuration. |
+| Plaintext variable | `LINKEDIN_AUTHOR_URN`, `LLM_MAX_RETRIES`, `LLM_MODEL`, `LLM_PROVIDER` | LinkedIn identity and LLM behavior. |
+| Plaintext variable | `POSTING_CADENCE_DAYS`, `SUBSTACK_RSS_URL`, `TIMEZONE`, `WAIT_FOR_FEEDBACK_HOURS` | Scheduled-trigger and feedback-timeout behavior. |
+| Plaintext variable | `TOKEN_ENCRYPTION_KEY_IDS` | Ordered, comma-separated encryption key IDs; the first encrypts and all listed keys can decrypt. |
 
 Set the token encryption key:
 
 ```bash
 # Generate a 32-byte base64url-encoded key
 node -e "const c = require('crypto'); console.log(c.randomBytes(32).toString('base64url'))"
-# Store it as a secret
+# Store it as a Worker secret. Its suffix must match TOKEN_ENCRYPTION_KEY_IDS.
 pnpm wrangler secret put TOKEN_ENCRYPTION_KEY_k20260720a
 ```
 
-Configure `TOKEN_ENCRYPTION_KEY_IDS` in `wrangler.toml` `[vars]` with the key ID used above (default: `k20260720a`). For key rotation, generate a new key, add its ID to the comma-separated list (e.g. `k20260720a,k20260720b`), `put` the new secret, and call `POST /admin/rewrap`. Once rewrap succeeds, remove the old ID from the list and delete the old secret.
+For key rotation, add the new key ID to `TOKEN_ENCRYPTION_KEY_IDS` (for
+example, `k20260720a,k20260720b`), add the corresponding secret, and call
+`POST /admin/rewrap`. Once rewrapping succeeds, remove the old key ID and
+delete its secret.
 
-Configurable vars (set in dashboard or `wrangler.toml`):
+### 7. Choose the Wrangler configuration
 
-| Var | Purpose |
-|---|---|
-| `SUBSTACK_RSS_URL` | RSS feed URL for daily idea capture |
-| `LLM_MODEL` | Model name override (e.g. `"gemini-2.0-flash"`) |
-| `LLM_MAX_RETRIES` | Retry count for LLM API calls (default `3`) |
-| `POSTING_CADENCE_DAYS` | Days between auto-prompted posts (default `7`) |
-| `WAIT_FOR_FEEDBACK_HOURS` | Hours to wait for Telegram feedback before timeout (default `12`) |
-| `LINKEDIN_REDIRECT_ORIGIN` | Override for OAuth redirect URI (default: derived from `Host`) |
-| `PROMPT_STYLE_PATH` | Path to a style prompt in the data repo (default: `style-prompt.md`). Falls back to the built-in default if missing. |
-| `ACCESS_TEAM` | Cloudflare Zero Trust team name (e.g. `my-team`) |
-| `ACCESS_AUDIENCE` | Application Audience (AUD) tag from the Access application |
-| `TOKEN_ENCRYPTION_KEY_IDS` | Comma-separated key IDs (e.g. `k20260720a`). The first is used for encryption; the rest are tried for decryption. |
+Use `wrangler.local.toml` for local development and `wrangler.prod.toml` for
+production deployment. These files hold non-secret `[vars]` only; Worker
+secrets stay in the Cloudflare dashboard (production) or `.dev.vars` (local).
 
-### 7. LinkedIn OAuth setup
+```bash
+# Local development
+pnpm wrangler dev --config wrangler.local.toml
+
+# Production deployment
+pnpm wrangler deploy --config wrangler.prod.toml
+```
+
+The configuration files define the same runtime bindings and environment
+variables for their respective targets. Keep credentials out of both files.
+
+`LINKEDIN_REDIRECT_ORIGIN` and `PROMPT_STYLE_PATH` are optional overrides. The
+first overrides the OAuth callback origin; the second selects a style prompt in
+the data repository and otherwise falls back to `style-prompt.md` and then the
+built-in default.
+
+### 8. LinkedIn OAuth setup
 
 Visit the setup URL in your browser through the Cloudflare Access-protected domain:
 
 ```
-https://linkedin-pipeline.your-subdomain.workers.dev/setup/linkedin
+https://<worker>.workers.dev/setup/linkedin
 ```
 
 The worker verifies your Access JWT, initiates the OAuth flow:
@@ -139,13 +158,13 @@ The worker verifies your Access JWT, initiates the OAuth flow:
 
 Tokens are automatically refreshed via a weekly cron (`handleTokenCheckCron`). A `POST /admin/rewrap` endpoint re-encrypts stored tokens with the current active key encryption key.
 
-### 8. Register Telegram webhook
+### 9. Register Telegram webhook
 
 ```bash
-curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://linkedin-pipeline.your-subdomain.workers.dev/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<worker>.workers.dev/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-### 9. Verify
+### 10. Verify
 
 - Send `/add <your idea text>` to your Telegram bot — it should appear in `ideas.md`
 - Send `/generate` — it should start the pipeline workflow
@@ -166,7 +185,7 @@ To test the Telegram flow locally without hijacking the production webhook, you 
    TOKEN_ENCRYPTION_KEY_k20260720a="<base64url-32-byte-key>"
    ```
    `ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK="true"` skips Cloudflare Access JWT verification and falls back to the `LINKEDIN_ACCESS_TOKEN` env var for LinkedIn API calls. Never set this in production.
-3. **Start Local Server**: Run `pnpm dev` to start `wrangler dev` locally (usually on port 8787).
+3. **Start Local Server**: Run `pnpm wrangler dev --config wrangler.local.toml` (usually on port 8787).
 4. **Start ngrok**: In a new terminal, expose your local server to the internet using ngrok:
    ```bash
    ngrok http 8787
@@ -192,18 +211,19 @@ The pipeline will **never** auto-publish. All finished drafts land as LinkedIn D
 
 | Type | Storage | Used for |
 |---|---|---|
-| **Secrets** | `wrangler secret put` | API keys, tokens, credentials |
-| **Vars** | `wrangler.toml` `[vars]` or dashboard | Configurable but non-sensitive defaults |
+| **Secrets** | Cloudflare dashboard or `wrangler secret put` | API keys, tokens, private repository identifiers, and allow-lists |
+| **Vars** | `wrangler.local.toml`, `wrangler.prod.toml`, or dashboard | Configurable, non-sensitive environment settings |
 
-Secrets are encrypted and never visible in plaintext. Vars are readable in the Cloudflare dashboard. Never put credentials in `wrangler.toml`.
+Secrets are encrypted and never visible in plaintext. Vars are readable in the
+Cloudflare dashboard. Never put credentials in either Wrangler configuration.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `pnpm dev` | Start local dev server (wrangler) |
+| `pnpm wrangler dev --config wrangler.local.toml` | Start the local Worker with local configuration |
 | `pnpm run webhook:dev` | Register dev bot webhook to active ngrok tunnel |
-| `pnpm deploy` | Deploy to Cloudflare Workers |
+| `pnpm wrangler deploy --config wrangler.prod.toml` | Deploy with production configuration |
 | `pnpm lint` | Check lint rules and formatting |
 | `pnpm lint:fix` | Auto-fix lint and formatting issues |
 | `pnpm typecheck` | Run TypeScript type checking |
