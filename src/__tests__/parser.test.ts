@@ -47,7 +47,6 @@ correlation:
   telegramChatId: "12345"
   botMessageId: 42
   workflowInstanceId: wf_abc123
-reviewCount: 2
 ---
 
 # Idea 10
@@ -66,17 +65,6 @@ costModel: deepseek-v4-flash
 ---
 
 Zero cost body.`
-
-const ZERO_REVIEW_COUNT_IDEA = `---
-id: 100
-title: Zero review count
-status: awaiting-feedback
-source: manual
-created: 2026-07-01T12:00:00Z
-reviewCount: "0"
----
-
-Zero review count body.`
 
 const EXPIRED_IDEA = `---
 id: 12
@@ -141,7 +129,6 @@ describe("parseIdea", () => {
     expect(idea.correlation?.telegramChatId).toBe("12345")
     expect(idea.correlation?.botMessageId).toBe(42)
     expect(idea.correlation?.workflowInstanceId).toBe("wf_abc123")
-    expect(idea.reviewCount).toBe(2)
   })
 
   it("parses awaiting-feedback-expired", () => {
@@ -223,7 +210,6 @@ describe("serializeIdea roundtrip", () => {
     MULTILINE_DRAFT_IDEA,
     DRAFT_WITH_HORIZONTAL_RULE,
     ZERO_COST_IDEA,
-    ZERO_REVIEW_COUNT_IDEA,
   ]
 
   for (const input of cases) {

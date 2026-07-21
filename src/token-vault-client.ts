@@ -1,3 +1,4 @@
+import { base64urlDecode } from "./crypto"
 import type { Env, LinkedInTokens } from "./types"
 
 interface AccessJwtClaims {
@@ -8,15 +9,6 @@ interface AccessJwtClaims {
   exp: number
   nbf: number
   iat: number
-}
-
-function base64urlDecode(str: string): Uint8Array {
-  str = str.replace(/-/g, "+").replace(/_/g, "/")
-  while (str.length % 4) str += "="
-  const binary = atob(str)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes
 }
 
 function jwtToObject(payload: string): Record<string, unknown> {
