@@ -229,6 +229,7 @@ describe("PipelineWorkflow", () => {
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
         LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
       },
     })
 
@@ -633,6 +634,7 @@ Body content`
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
         LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
       },
     })
 
@@ -745,6 +747,7 @@ Body`
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
         LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
       },
     })
 

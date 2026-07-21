@@ -26,6 +26,7 @@ describe("getLinkedInToken", () => {
     const token = await getLinkedInToken({
       LINKEDIN_ACCESS_TOKEN: "env-token",
       ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+      DEPLOYMENT_ENV: "development",
     } as never)
     expect(token).toBe("env-token")
   })
