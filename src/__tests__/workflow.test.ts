@@ -11,8 +11,10 @@ vi.mock("cloudflare:workers", () => {
 })
 
 const mockCreateGenerator = vi.hoisted(() => vi.fn())
+const mockResolveModel = vi.hoisted(() => vi.fn((_p: string, m?: string) => m ?? "deepseek-v4-flash"))
 vi.mock("../providers", () => ({
   createGenerator: () => mockCreateGenerator,
+  resolveModel: mockResolveModel,
 }))
 
 const mockAssertStepOutputSize = vi.hoisted(() => vi.fn((v: unknown) => v))
