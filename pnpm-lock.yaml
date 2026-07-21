@@ -14,6 +14,9 @@ importers:
       hono:
         specifier: ^4.7.0
         version: 4.12.29
+      jose:
+        specifier: ^6.0.0
+        version: 6.2.3
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.5.3
@@ -703,6 +706,9 @@ packages:
   hono@4.12.29:
     resolution: {integrity: sha512-1hNiRjawYrLq/4m3DQQjPGFg0VZkk4RjQJDff/excI6Dm9BiL75qxGrd7/c6YOxPdq6AscP3LiXhQ6fKFC1Waw==}
     engines: {node: '>=16.9.0'}
+
+  jose@6.2.3:
+    resolution: {integrity: sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw==}
 
   js-tokens@9.0.1:
     resolution: {integrity: sha512-mxa9E9ITFOt0ban3j6L5MpjwegGz6lBQmM1IJkWeBZGcMxto50+eWdjC/52xDbS2vy0k7vIMK0Fe2wfL9OQSpQ==}
@@ -1458,6 +1464,8 @@ snapshots:
     optional: true
 
   hono@4.12.29: {}
+
+  jose@6.2.3: {}
 
   js-tokens@9.0.1: {}
 

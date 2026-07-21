@@ -15,7 +15,6 @@
     "test:unit": "vitest run src/__tests__/",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",
-
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -28,7 +27,8 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.0",
-    "hono": "^4.7.0"
+    "hono": "^4.7.0",
+    "jose": "^6.0.0"
   },
   "packageManager": "pnpm@9.15.4"
 }
