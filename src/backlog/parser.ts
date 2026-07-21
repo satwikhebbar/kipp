@@ -123,8 +123,8 @@ export function serializeIdea(idea: Idea): string {
   if (idea.reviewCount) fm.reviewCount = String(idea.reviewCount)
   if (idea.finalized) fm.finalized = idea.finalized
   if (idea.costUsd !== undefined) fm.costUsd = String(idea.costUsd)
-  if (idea.costInputTokens) fm.costInputTokens = String(idea.costInputTokens)
-  if (idea.costOutputTokens) fm.costOutputTokens = String(idea.costOutputTokens)
+  if (idea.costInputTokens !== undefined) fm.costInputTokens = String(idea.costInputTokens)
+  if (idea.costOutputTokens !== undefined) fm.costOutputTokens = String(idea.costOutputTokens)
   if (idea.costModel) fm.costModel = idea.costModel
 
   if (idea.correlation) {

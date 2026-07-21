@@ -472,4 +472,222 @@ describe("PipelineWorkflow", () => {
     ).rejects.toThrow("too big")
     expect(putCalls.some((c) => c.url.includes("ideas.md"))).toBe(false)
   })
+
+  it("includes cost line in initial Telegram notification", async () => {
+    const responses = [
+      { text: "My draft content", usage: { inputTokens: 100000, outputTokens: 50000 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 500, outputTokens: 200 },
+      },
+    ]
+    let callIdx = 0
+    const telegramTexts: string[] = []
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        if (url?.includes?.("api.telegram.org")) {
+          const body = JSON.parse(opts?.body as string) as { text?: string }
+          telegramTexts.push(body.text ?? "")
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    const notifyMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
+    expect(notifyMsg).toBeDefined()
+    expect(notifyMsg).toContain("Est. cost:")
+    expect(notifyMsg).toContain("100500 in")
+    expect(notifyMsg).toContain("50200 out")
+    expect(notifyMsg).toContain("deepseek-v4-flash")
+  })
+
+  it("cumulative cost across revisions persists and appears in revised notification", async () => {
+    const responses = [
+      { text: "First draft", usage: { inputTokens: 100, outputTokens: 50 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: false, feedback: "Weak opening" }]),
+        usage: { inputTokens: 30, outputTokens: 10 },
+      },
+      { text: "Revised draft", usage: { inputTokens: 200, outputTokens: 80 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 40, outputTokens: 15 },
+      },
+      // feedback loop revise-0: revise agent called once
+      { text: "Feedback revised", usage: { inputTokens: 50, outputTokens: 25 } },
+    ]
+    let callIdx = 0
+    const telegramTexts: string[] = []
+    const fileStore: Record<string, string> = {
+      "ideas.md": mockIdeas,
+      "style-prompt.md": STYLE_PROMPT,
+    }
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (url?.includes?.("api.telegram.org")) {
+          const body = JSON.parse(opts?.body as string) as { text?: string }
+          telegramTexts.push(body.text ?? "")
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        }
+        const path = url.split("/contents/")[1] ?? ""
+        if (opts?.method === "PUT" && path in fileStore) {
+          const reqBody = JSON.parse(opts?.body as string) as { content?: string }
+          fileStore[path] = atob(reqBody.content ?? "")
+          return { ok: true, json: () => Promise.resolve({}) }
+        }
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        const content = fileStore[path] ?? ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "Make it punchier" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    const finalIdeaContent = fileStore["ideas.md"]
+    expect(finalIdeaContent).toContain("costInputTokens: 420")
+    expect(finalIdeaContent).toContain("costOutputTokens: 180")
+
+    const notifyMsg = telegramTexts.find((t) => t.startsWith("*Revised draft for idea"))
+    expect(notifyMsg).toBeDefined()
+    expect(notifyMsg).toContain("Est. cost:")
+    expect(notifyMsg).toContain("420 in")
+    expect(notifyMsg).toContain("180 out")
+  })
+
+  it("cost fields persist through archive", async () => {
+    const archiveMockIdeas = `---
+id: 1
+title: Test idea
+status: raw
+created: 2026-07-01T12:00:00Z
+source: manual
+correlation:
+  telegramChatId: "42"
+costInputTokens: "15"
+costOutputTokens: "7"
+costModel: deepseek-v4-flash
+costUsd: "0.0000021"
+---
+
+Body content`
+    const responses = [
+      { text: "My draft", usage: { inputTokens: 10, outputTokens: 5 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 2 },
+      },
+    ]
+    let callIdx = 0
+    let archivePutContent = ""
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (url?.includes?.("api.telegram.org"))
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        if (opts?.method === "PUT" && url.includes("contents/archive.md")) {
+          const reqBody = JSON.parse(opts?.body as string) as { content?: string }
+          archivePutContent = atob(reqBody.content ?? "")
+          return { ok: true, json: () => Promise.resolve({}) }
+        }
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? archiveMockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        LINKEDIN_ACCESS_TOKEN: "valid-token",
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        LINKEDIN_CLIENT_ID: "client-id",
+        LINKEDIN_CLIENT_SECRET: "client-secret",
+      },
+    })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    expect(archivePutContent).toContain("costInputTokens: 15")
+    expect(archivePutContent).toContain("costOutputTokens: 7")
+  })
+
+  it("accumulates cost on idea without telegramChatId", async () => {
+    const noChatIdea = `---
+id: 1
+title: No chat
+status: raw
+created: 2026-07-01T12:00:00Z
+source: manual
+---
+
+Body`
+    const responses = [
+      { text: "Draft", usage: { inputTokens: 100, outputTokens: 50 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 50, outputTokens: 20 },
+      },
+    ]
+    let callIdx = 0
+    const ideaPutBodies: string[] = []
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    waitForEvent.mockResolvedValue({ type: "timeout" })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT" && url.includes("contents/ideas.md")) {
+          const reqBody = JSON.parse(opts?.body as string) as { content?: string }
+          ideaPutBodies.push(atob(reqBody.content ?? ""))
+          return { ok: true, json: () => Promise.resolve({}) }
+        }
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? noChatIdea : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: { ...mockEnv(), TELEGRAM_BOT_TOKEN: "" } })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    const costPut = ideaPutBodies.find((b) => b.includes("costInputTokens"))
+    expect(costPut).toBeDefined()
+    expect(costPut).toContain("costInputTokens: 150")
+    expect(costPut).toContain("costOutputTokens: 70")
+  })
 })
