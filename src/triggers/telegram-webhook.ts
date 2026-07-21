@@ -43,7 +43,21 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
   if (secret !== env.TELEGRAM_WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 })
 
-  const update: TelegramUpdate = await request.json()
+  let raw: string
+  try {
+    raw = await request.text()
+  } catch {
+    return new Response("invalid body", { status: 400 })
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return new Response("invalid body", { status: 400 })
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    return new Response("invalid body", { status: 400 })
+  const update = parsed as TelegramUpdate
 
   if (update.callback_query) {
     const cq = update.callback_query

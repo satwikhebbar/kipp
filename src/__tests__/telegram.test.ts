@@ -77,6 +77,54 @@ describe("handleTelegramWebhook", () => {
     expect(res.status).toBe(401)
   })
 
+  it("rejects malformed JSON body", async () => {
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body: "not json",
+      }),
+      mockEnv() as never,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it("rejects null JSON body", async () => {
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body: "null",
+      }),
+      mockEnv() as never,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it("rejects array JSON body", async () => {
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body: JSON.stringify([1, 2, 3]),
+      }),
+      mockEnv() as never,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it("rejects scalar JSON body", async () => {
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body: '"just a string"',
+      }),
+      mockEnv() as never,
+    )
+    expect(res.status).toBe(400)
+  })
+
   function callbackBody(data: string) {
     return JSON.stringify({
       update_id: 1,
