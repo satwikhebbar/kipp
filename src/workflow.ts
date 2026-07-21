@@ -7,10 +7,22 @@ import { appendAssistant, appendHumanFeedback, assertStepOutputSize } from "./co
 import { createGitHubClient } from "./integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "./integrations/linkedin"
 import { createTelegramClient } from "./integrations/telegram"
+import { computeCost, formatCostLine } from "./pricing"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
 import { readPrompt } from "./prompts/resolver"
-import { createGenerator } from "./providers"
-import type { Env, WorkflowParams } from "./types"
+import { createGenerator, type GenerateFn, resolveModel } from "./providers"
+import type { Env, LLMUsage, WorkflowParams } from "./types"
+
+function withUsageAccumulator(gen: GenerateFn): { gen: GenerateFn; getUsage: () => LLMUsage } {
+  const cumulative: LLMUsage = { inputTokens: 0, outputTokens: 0 }
+  const wrapped: GenerateFn = async (opts) => {
+    const res = await gen(opts)
+    cumulative.inputTokens += res.usage.inputTokens
+    cumulative.outputTokens += res.usage.outputTokens
+    return res
+  }
+  return { gen: wrapped, getUsage: () => ({ ...cumulative }) }
+}
 
 export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
@@ -39,12 +51,15 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     }
 
     const state = await stepDo("generate", async () => {
-      const gen = createGenerator(
+      const rawGen = createGenerator(
         this.env.LLM_API_KEY,
         this.env.LLM_PROVIDER,
         this.env.LLM_MODEL,
         Number(this.env.LLM_MAX_RETRIES ?? 3),
       )
+      const { gen, getUsage } = withUsageAccumulator(rawGen)
+      const model = resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
+
       const client = createGitHubClient(this.env)
       const manager = createBacklogManager(client)
 
@@ -68,17 +83,33 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const idea = ideas.find((i) => i.id === ideaId)
       if (!idea) throw new Error(`Idea ${ideaId} not found`)
 
+      const usage = getUsage()
+      const cost = computeCost(usage, model)
+      const costLine = formatCostLine(cost)
+
       const chatId = idea.correlation?.telegramChatId ?? this.env.TELEGRAM_ALLOWED_USER_ID
       if (!chatId)
         console.log(
           `[workflow ${event.instanceId}] no chatId resolved for idea ${ideaId} — notify/approval steps will be silent`,
         )
 
-      const nextState = assertStepOutputSize({ draft, messages, chatId })
+      const nextState = assertStepOutputSize({
+        draft,
+        messages,
+        chatId,
+        costInputTokens: usage.inputTokens,
+        costOutputTokens: usage.outputTokens,
+        costLine,
+        model,
+      })
       await manager.updateIdea(ideaId, {
         draft,
         status: "awaiting-feedback",
         correlation: { ...idea.correlation, workflowInstanceId: event.instanceId },
+        costUsd: cost.totalCostUsd ?? undefined,
+        costInputTokens: usage.inputTokens,
+        costOutputTokens: usage.outputTokens,
+        costModel: model,
       })
       return nextState
     })
@@ -92,7 +123,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
         const result = await tg.sendMessage(
           state.chatId,
-          `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nReply with feedback or tap below.`,
+          `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nReply with feedback or tap below.${state.costLine}`,
           {
             replyMarkup: {
               inline_keyboard: [
@@ -169,38 +200,76 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           }
           return
         }
-        await stepDo("archive", async () => {
+        const finalCostLine = await stepDo("archive", async () => {
           const client = createGitHubClient(this.env)
           const manager = createBacklogManager(client)
           const ideas = await manager.readIdeas()
           const idea = ideas.find((i) => i.id === ideaId)
-          if (idea) await manager.moveToArchive(idea)
+          let line = ""
+          if (idea) {
+            const model = idea.costModel ?? state.model ?? ""
+            if (idea.costInputTokens) {
+              const cost = computeCost(
+                { inputTokens: idea.costInputTokens, outputTokens: idea.costOutputTokens ?? 0 },
+                model,
+              )
+              line = formatCostLine(cost)
+            }
+            await manager.moveToArchive(idea)
+          }
+          return line
         })
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
           await stepDo("notify-published", async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-            await tg.sendMessage(state.chatId, "✅ Draft posted to LinkedIn!")
+            await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${finalCostLine}`)
           })
         }
         return
       }
 
       const revised = await stepDo(`revise-${i}`, async () => {
-        const gen = createGenerator(
+        const rawGen = createGenerator(
           this.env.LLM_API_KEY,
           this.env.LLM_PROVIDER,
           this.env.LLM_MODEL,
           Number(this.env.LLM_MAX_RETRIES ?? 3),
         )
+        const { gen, getUsage } = withUsageAccumulator(rawGen)
+        const model = state.model ?? resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
         const agent = createReviseAgent(gen)
         const feedback = text === "__revise__" ? undefined : text
         let messages = feedback ? appendHumanFeedback(currentMessages, feedback) : currentMessages
         const nextDraft = await agent({ messages, failedItems: [] })
         messages = appendAssistant(messages, nextDraft)
-        const nextState = assertStepOutputSize({ draft: nextDraft, messages })
         const client = createGitHubClient(this.env)
         const manager = createBacklogManager(client)
-        await manager.updateIdea(ideaId, { draft: nextDraft })
+        const ideas = await manager.readIdeas()
+        const idea = ideas.find((i) => i.id === ideaId)
+        const prevInput = idea?.costInputTokens ?? state.costInputTokens ?? 0
+        const prevOutput = idea?.costOutputTokens ?? state.costOutputTokens ?? 0
+        const stepUsage = getUsage()
+        const cumulativeUsage: LLMUsage = {
+          inputTokens: prevInput + stepUsage.inputTokens,
+          outputTokens: prevOutput + stepUsage.outputTokens,
+        }
+        const cost = computeCost(cumulativeUsage, model)
+        const costLine = formatCostLine(cost)
+        const nextState = assertStepOutputSize({
+          draft: nextDraft,
+          messages,
+          costInputTokens: cumulativeUsage.inputTokens,
+          costOutputTokens: cumulativeUsage.outputTokens,
+          costLine,
+          model,
+        })
+        await manager.updateIdea(ideaId, {
+          draft: nextDraft,
+          costUsd: cost.totalCostUsd ?? undefined,
+          costInputTokens: cumulativeUsage.inputTokens,
+          costOutputTokens: cumulativeUsage.outputTokens,
+          costModel: model,
+        })
         return nextState
       })
       currentDraft = revised.draft
@@ -215,7 +284,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
           const result = await tg.sendMessage(
             state.chatId,
-            `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nReply with feedback or tap below.`,
+            `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nReply with feedback or tap below.${revised.costLine}`,
             {
               replyMarkup: {
                 inline_keyboard: [

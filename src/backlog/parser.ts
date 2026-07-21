@@ -95,6 +95,10 @@ export function parseIdea(text: string): Idea {
   if (fm.teaser) idea.teaser = String(fm.teaser)
   if (fm.reviewCount) idea.reviewCount = Number(fm.reviewCount)
   if (fm.finalized) idea.finalized = String(fm.finalized)
+  if (fm.costUsd) idea.costUsd = Number(fm.costUsd)
+  if (fm.costInputTokens) idea.costInputTokens = Number(fm.costInputTokens)
+  if (fm.costOutputTokens) idea.costOutputTokens = Number(fm.costOutputTokens)
+  if (fm.costModel) idea.costModel = String(fm.costModel)
 
   return idea
 }
@@ -118,6 +122,10 @@ export function serializeIdea(idea: Idea): string {
   if (idea.teaser) fm.teaser = idea.teaser
   if (idea.reviewCount) fm.reviewCount = String(idea.reviewCount)
   if (idea.finalized) fm.finalized = idea.finalized
+  if (idea.costUsd !== undefined) fm.costUsd = String(idea.costUsd)
+  if (idea.costInputTokens) fm.costInputTokens = String(idea.costInputTokens)
+  if (idea.costOutputTokens) fm.costOutputTokens = String(idea.costOutputTokens)
+  if (idea.costModel) fm.costModel = idea.costModel
 
   if (idea.correlation) {
     const c: Record<string, string> = {}

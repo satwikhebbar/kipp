@@ -4,6 +4,18 @@ import type { GenerateFn } from "./llm"
 
 export { type GenerateFn, type GenerateOptions, type LLMMessage, type LLMRole, messages, parseLLMJson } from "./llm"
 
+export function resolveModel(provider: string, modelName?: string): string {
+  if (modelName) return modelName
+  switch (provider) {
+    case "gemini":
+      return "gemini-2.0-flash"
+    case "deepseek":
+      return "deepseek-chat"
+    default:
+      throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek"`)
+  }
+}
+
 export function createGenerator(apiKey: string, provider: string, modelName?: string, maxRetries = 3): GenerateFn {
   const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : 3
   const inner = createInnerGenerator(apiKey, provider, modelName)

@@ -39,6 +39,13 @@ export interface Correlation {
   pendingRevision?: string
 }
 
+export interface WorkflowCost {
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCostUsd: number | null
+  model: string
+}
+
 export interface Idea {
   id: string
   title?: string
@@ -53,6 +60,10 @@ export interface Idea {
   reviewCount?: number
   correlation?: Correlation
   finalized?: string
+  costUsd?: number
+  costInputTokens?: number
+  costOutputTokens?: number
+  costModel?: string
 }
 
 export interface ArchivedIdea {
