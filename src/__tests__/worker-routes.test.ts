@@ -122,7 +122,10 @@ describe("production-mode route authorization", () => {
 
   it("ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK=true bypasses for dev mode", async () => {
     const storage = mockStorage()
-    const env = baseEnv({ ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true" }) as unknown as Env
+    const env = baseEnv({
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+      DEPLOYMENT_ENV: "development",
+    }) as unknown as Env
     const doInstance = new TokenVaultDO({ storage } as never, env)
     env.TOKEN_VAULT = makeNs(doInstance)
 
@@ -135,7 +138,10 @@ describe("production-mode route authorization", () => {
 describe("end-to-end OAuth/DO contract", () => {
   it("OAuth flow creates state, completes callback with encrypted tokens", async () => {
     const storage = mockStorage()
-    const env = baseEnv({ ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true" }) as unknown as Env
+    const env = baseEnv({
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+      DEPLOYMENT_ENV: "development",
+    }) as unknown as Env
     const doInstance = new TokenVaultDO({ storage } as never, env)
     env.TOKEN_VAULT = makeNs(doInstance)
 
@@ -181,7 +187,10 @@ describe("end-to-end OAuth/DO contract", () => {
 
   it("replayed state cannot complete callback again", async () => {
     const storage = mockStorage()
-    const env = baseEnv({ ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true" }) as unknown as Env
+    const env = baseEnv({
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+      DEPLOYMENT_ENV: "development",
+    }) as unknown as Env
     const doInstance = new TokenVaultDO({ storage } as never, env)
     env.TOKEN_VAULT = makeNs(doInstance)
 
@@ -360,6 +369,7 @@ describe("Worker fetch — production-mode routes", () => {
     const storage = mockStorage()
     const env = makeVaultEnv(storage)
     env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK = "true" as never
+    env.DEPLOYMENT_ENV = "development" as never
 
     // First request — setup creates state
     const jwt = await createJwt(validClaims())
@@ -396,6 +406,7 @@ describe("Worker fetch — production-mode routes", () => {
   it("rewrap returns 500 with unauthenticated env when no tokens stored", async () => {
     const env = makeVaultEnv(mockStorage())
     env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK = "true" as never
+    env.DEPLOYMENT_ENV = "development" as never
     setupJwksMock()
     const req = new Request("https://example.com/admin/rewrap", { method: "POST" })
     const res = await worker.fetch(req, env, {} as ExecutionContext)
@@ -451,6 +462,7 @@ describe("Worker fetch — production-mode routes", () => {
   it("ALLOW_INSECURE=true bypasses JWT check in dev mode", async () => {
     const env = makeVaultEnv(mockStorage())
     env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK = "true" as never
+    env.DEPLOYMENT_ENV = "development" as never
     setupJwksMock()
     const req = new Request("https://example.com/setup/linkedin")
     const res = await worker.fetch(req, env, {} as ExecutionContext)

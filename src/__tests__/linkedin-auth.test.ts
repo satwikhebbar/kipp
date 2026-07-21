@@ -25,6 +25,7 @@ const MIN_ENV = {
   LINKEDIN_CLIENT_ID: "client-123",
   LINKEDIN_CLIENT_SECRET: "secret-456",
   ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+  DEPLOYMENT_ENV: "development",
 } as never
 
 function mockRequest(url = "https://example.com/setup/linkedin"): Request {
