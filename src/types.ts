@@ -57,7 +57,6 @@ export interface Idea {
   body: string
   draft?: string
   critique?: string
-  reviewCount?: number
   correlation?: Correlation
   finalized?: string
   costUsd?: number

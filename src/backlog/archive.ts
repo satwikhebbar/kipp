@@ -20,7 +20,6 @@ export async function cleanupArchive(client: GithubClient): Promise<void> {
     const kept = entries.filter((e) => {
       if (!e.finalized) return true
       const ts = new Date(e.finalized).getTime()
-      // ponytail: global lock, per-account locks if throughput matters
       if (Number.isNaN(ts)) return true
       return ts >= cutoff
     })

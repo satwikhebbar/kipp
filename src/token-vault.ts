@@ -1,4 +1,4 @@
-import { decryptToken, type Envelope, encryptToken } from "./crypto"
+import { base64urlDecode, decryptToken, type Envelope, encryptToken } from "./crypto"
 import type { Env, LinkedInTokens } from "./types"
 
 interface StateEntry {
@@ -8,12 +8,6 @@ interface StateEntry {
 
 function stateKey(state: string): string {
   return `state:${state}`
-}
-
-function b64decode(s: string): ArrayBuffer {
-  s = s.replace(/-/g, "+").replace(/_/g, "/")
-  while (s.length % 4) s += "="
-  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0)).buffer
 }
 
 export class TokenVaultDO implements DurableObject {
@@ -139,7 +133,7 @@ export class TokenVaultDO implements DurableObject {
     if (!keyId || !this.#validKid(keyId)) throw new Error("no valid encryption keys configured")
     const keyB64 = env[`TOKEN_ENCRYPTION_KEY_${keyId}`]
     if (!keyB64) throw new Error(`key ${keyId} not found in env`)
-    const rawKey = b64decode(keyB64)
+    const rawKey = base64urlDecode(keyB64).buffer as ArrayBuffer
     return encryptToken(plaintext, keyId, rawKey)
   }
 
@@ -155,7 +149,7 @@ export class TokenVaultDO implements DurableObject {
     for (const kid of ordered) {
       const keyB64 = env[`TOKEN_ENCRYPTION_KEY_${kid}`]
       if (!keyB64) continue
-      const rawKey = b64decode(keyB64)
+      const rawKey = base64urlDecode(keyB64).buffer as ArrayBuffer
       if (rawKey.byteLength !== 32) continue
       const result = await decryptToken(envelope, rawKey)
       if (result !== null) return result

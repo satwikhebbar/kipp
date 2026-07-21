@@ -81,6 +81,7 @@ export function createGitHubClient(env: {
   }
 
   async function mutateFile(path: string, mutate: (content: string) => string): Promise<void> {
+    // ponytail: global lock, per-account locks if throughput matters
     for (let attempt = 0; ; attempt++) {
       const { content, sha } = await readFile(path)
       const newContent = mutate(content)

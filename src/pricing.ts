@@ -4,6 +4,8 @@ type ModelPricing = { inputCacheMissPer1M: number; outputPer1M: number }
 
 const PRICING: Record<string, ModelPricing> = {
   "deepseek-v4-flash": { inputCacheMissPer1M: 0.14, outputPer1M: 0.28 },
+  "deepseek-chat": { inputCacheMissPer1M: 0.27, outputPer1M: 1.1 },
+  "gemini-2.0-flash": { inputCacheMissPer1M: 0.1, outputPer1M: 0.4 },
 }
 
 export function computeCost(usage: LLMUsage, model: string): WorkflowCost {

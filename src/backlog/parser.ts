@@ -93,7 +93,6 @@ export function parseIdea(text: string): Idea {
 
   if (fm.substackUrl) idea.substackUrl = String(fm.substackUrl)
   if (fm.teaser) idea.teaser = String(fm.teaser)
-  if (fm.reviewCount) idea.reviewCount = Number(fm.reviewCount)
   if (fm.finalized) idea.finalized = String(fm.finalized)
   if (fm.costUsd) idea.costUsd = Number(fm.costUsd)
   if (fm.costInputTokens) idea.costInputTokens = Number(fm.costInputTokens)
@@ -120,7 +119,6 @@ export function serializeIdea(idea: Idea): string {
   if (idea.title) fm.title = idea.title
   if (idea.substackUrl) fm.substackUrl = idea.substackUrl
   if (idea.teaser) fm.teaser = idea.teaser
-  if (idea.reviewCount !== undefined) fm.reviewCount = String(idea.reviewCount)
   if (idea.finalized) fm.finalized = idea.finalized
   if (idea.costUsd !== undefined) fm.costUsd = String(idea.costUsd)
   if (idea.costInputTokens !== undefined) fm.costInputTokens = String(idea.costInputTokens)

@@ -1,18 +1,13 @@
 import { describe, expect, it } from "vitest"
 import type { Envelope } from "../crypto"
+import { base64urlEncode } from "../crypto"
 import { TokenVaultDO } from "../token-vault"
 import type { Env } from "../types"
-
-function b64url(buf: Uint8Array): string {
-  let binary = ""
-  for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i])
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-}
 
 function makeKey(): string {
   const key = new Uint8Array(32)
   crypto.getRandomValues(key)
-  return b64url(key)
+  return base64urlEncode(key)
 }
 
 function mockStorage(): DurableObjectStorage {
