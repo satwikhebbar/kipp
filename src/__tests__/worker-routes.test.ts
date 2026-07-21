@@ -305,10 +305,11 @@ describe("Worker fetch — production-mode routes", () => {
   function setupJwksMock(): void {
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
       if (url.includes("cloudflareaccess.com/cdn-cgi/access/certs")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ keys: [publicJwk as unknown as JsonWebKey] }),
-        })
+        return Promise.resolve(
+          new Response(JSON.stringify({ keys: [publicJwk as unknown as JsonWebKey] }), {
+            headers: { "cache-control": "public, max-age=3600" },
+          }),
+        )
       }
       return Promise.resolve({
         ok: true,
