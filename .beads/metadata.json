@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "agent_harness",
+  "project_id": "01f45a86-0006-47f5-ac0b-fded7e8ee165"
+}
