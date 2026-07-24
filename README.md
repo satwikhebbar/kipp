@@ -233,7 +233,7 @@ Cloudflare dashboard. Never put credentials in either Wrangler configuration.
 | `pnpm test:integration` | Run integration tests only |
 | `pnpm check` | Run lint + typecheck + test (use before committing) |
 
-Pre-commit hooks (via lefthook) run `typecheck` and `lint` automatically on every commit.
+Pre-commit hooks (via lefthook) run `typecheck`, `lint`, and `test` automatically on every commit.
 
 ## Project Structure
 
