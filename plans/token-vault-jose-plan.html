@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plan — Token Vault: replace hand-rolled JWT/JWKS with jose</title>
+  <style>
+    :root {
+      --bg: #f8f9fa;
+      --fg: #1a1a2e;
+      --accent: #4361ee;
+      --accent-light: #eef1ff;
+      --border: #dde1e7;
+      --muted: #6b7280;
+      --success: #059669;
+      --warning: #d97706;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    header { margin-bottom: 2.5rem; }
+    header h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; }
+    header .subtitle {
+      color: var(--muted);
+      font-size: 1.05rem;
+      margin-top: 0.5rem;
+      border-left: 3px solid var(--accent);
+      padding-left: 1rem;
+    }
+    header .meta { margin-top: 1rem; font-size: 0.85rem; color: var(--muted); }
+    nav.toc {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem 2rem;
+      margin-bottom: 2rem;
+    }
+    nav.toc h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.75rem; }
+    nav.toc ol { list-style: none; counter-reset: toc-counter; }
+    nav.toc ol li { counter-increment: toc-counter; margin-bottom: 0.3rem; }
+    nav.toc ol li a { text-decoration: none; color: var(--accent); font-weight: 500; }
+    nav.toc ol li::before { content: counter(toc-counter) ". "; color: var(--muted); font-weight: 400; }
+    nav.toc ol li a:hover { text-decoration: underline; }
+    section {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.75rem 2rem;
+      margin-bottom: 1.5rem;
+    }
+    section h2 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid var(--accent-light);
+    }
+    section h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-top: 1.25rem;
+      margin-bottom: 0.5rem;
+    }
+    section p, section li { margin-bottom: 0.5rem; }
+    section ul, section ol { padding-left: 1.5rem; }
+    section ul li { list-style: disc; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.925rem;
+    }
+    th, td {
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      text-align: left;
+    }
+    th { background: var(--accent-light); font-weight: 600; }
+    td { background: white; }
+    code {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85em;
+      background: #f1f3f5;
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: #1a1a2e;
+      color: #e4e4ef;
+      padding: 1rem 1.25rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.875rem;
+      line-height: 1.5;
+      margin: 1rem 0;
+    }
+    pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+    .tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.15rem 0.55rem;
+      border-radius: 4px;
+      margin-right: 0.3rem;
+    }
+    .tag.change { background: var(--accent-light); color: var(--accent); }
+    .tag.keep { background: #ecfdf5; color: var(--success); }
+    .tag.delete { background: #fef2f2; color: #dc2626; }
+    .diff {
+      background: #1a1a2e;
+      color: #e4e4ef;
+      padding: 1rem 1.25rem;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      line-height: 1.5;
+      margin: 1rem 0;
+    }
+    .diff-add { color: #4ade80; }
+    .diff-rem { color: #f87171; }
+    hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-top: 2.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>Token Vault: Replace hand-rolled JWT/JWKS with jose</h1>
+    <div class="subtitle">Issue #17 — retrofitting a maintained library where 12 review rounds re-derived protocol invariants</div>
+    <div class="meta">
+      <span>Status: <strong>Proposed</strong></span> &middot;
+      <span>2026-07-21</span> &middot;
+      <span>Branch: <code>enhance/token-vault-use-jose-library</code></span>
+    </div>
+  </header>
+
+  <nav class="toc">
+    <h2>Table of Contents</h2>
+    <ol>
+      <li><a href="#problem">Problem</a></li>
+      <li><a href="#scope">Scope of Change</a></li>
+      <li><a href="#what-jose-covers">What jose provides vs what we hand-roll</a></li>
+      <li><a href="#file-changes">File Changes</a></li>
+      <li><a href="#test-strategy">Test Strategy</a></li>
+      <li><a href="#risk">Risk &amp; Mitigation</a></li>
+    </ol>
+  </nav>
+
+  <section id="problem">
+    <h2>Problem</h2>
+    <p>
+      <code>token-vault-client.ts</code> hand-rolls the full JWT verification pipeline:
+      base64url decode, header parsing, algorithm restriction, JWKS fetching with
+      manual caching, key lookup by kid, kty/use enforcement, raw
+      <code>crypto.subtle.importKey</code> + <code>crypto.subtle.verify</code>,
+      claims parsing, and exp/nbf/iss/aud validation. Five silent
+      <code>try/catch</code> blocks (lines 60, 69, 86, 94, 113) make every failure
+      path — attack <em>or</em> outage — return <code>null</code> identically.
+    </p>
+    <p>
+      The 12 review/fix rounds on 2026-07-20 repeatedly surfaced the same pattern:
+      protocol invariants that a maintained library provides for free (algorithm
+      allowlisting, key-use enforcement, claim validation order) were being
+      re-discovered and patched one at a time.
+    </p>
+  </section>
+
+  <section id="scope">
+    <h2>Scope of Change</h2>
+
+    <h3>Changing <span class="tag change">1 file</span></h3>
+    <p><code>src/token-vault-client.ts</code> — replace JWT verification and JWKS
+    caching with <code>jose.jwtVerify</code> + <code>jose.createRemoteJWKSet</code>.
+    Remove <code>base64urlDecode</code>, <code>jwtToObject</code>,
+    <code>fetchJwks</code>, <code>getJwks</code>, <code>jwksCache</code> module-level
+    Map, and 4 of the 5 try/catch blocks. The outer catch (line 113) plus the
+    fallback/environment bypass (line 48) stay.</p>
+
+    <pre><code>// ~90 lines → ~30 lines of actual code
+// ~40 lines of jose-callable boilerplate removed
+// ~20 lines of application logic (email/admin check) retained</code></pre>
+
+    <h3>Design decisions</h3>
+
+    <p><strong>Team-scoped JWKS resolver.</strong> <code>createRemoteJWKSet</code>
+    must be called with the JWKS URL at the point where <code>env.ACCESS_TEAM</code>
+    is available (inside <code>verifyAccessJwt</code>). A single module-level
+    resolver is impossible because <code>env</code> isn't available at module scope.
+    Use a <code>Map&lt;string, ReturnType&lt;typeof createRemoteJWKSet&gt;&gt;</code>
+    keyed by team domain, lazily created:</p>
+
+    <pre><code>const jwksResolvers = new Map&lt;string, ReturnType&lt;typeof createRemoteJWKSet&gt;&gt;()
+
+function getJwksResolver(teamDomain: string) {
+  let r = jwksResolvers.get(teamDomain)
+  if (!r) {
+    r = createRemoteJWKSet(
+      new URL(`https://${teamDomain}.cloudflareaccess.com/cdn-cgi/access/certs`),
+    )
+    jwksResolvers.set(teamDomain, r)
+  }
+  return r
+}</code></pre>
+
+    <p><strong>Required time claims.</strong> The current code rejects tokens
+    missing <code>exp</code> or <code>nbf</code>. <code>jwtVerify</code>
+    validates these when present but doesn't require them. Pass
+    <code>requiredClaims: ["exp", "nbf"]</code> to preserve the existing
+    behavior.</p>
+
+    <p><strong>JWK <code>use</code> policy.</strong> The current code accepts
+    JWKs with absent <code>use</code> (<code>if (jwk?.use && ...)</code> — the
+    guard only triggers when <code>use</code> is set). This is the correct
+    default per RFC 7517 (absent <code>use</code> means "any use") and matches
+    Cloudflare Access's published JWKS, which does not include <code>use</code>.
+    Preserve this leniency. <code>createRemoteJWKSet</code> by default only
+    returns keys suitable for the intended operation; if a key without
+    <code>use</code> is excluded, document that as an intentional tightening
+    and add a test. If included, add a test proving the absent-<code>use</code>
+    key continues to work.</p>
+
+    <h3>Adding <span class="tag change">1 dependency</span></h3>
+    <p><code>jose</code> (panva/jose, MIT, Workers-compatible, WebCrypto-native).</p>
+
+    <h3>Updating <span class="tag change">1 test file</span></h3>
+    <p><code>src/__tests__/token-vault-client.test.ts</code> — Default fixture uses
+    <code>use: "sig"</code> (signing-key model). A separate regression test
+    verifies a JWK with absent <code>use</code> is still accepted, matching the
+    documented policy. All 20+ existing test scenarios kept.</p>
+
+    <h3>Keeping <span class="tag keep">2 files</span></h3>
+    <ul>
+      <li><code>src/crypto.ts</code> — AES-256-GCM envelope encryption. 57 lines of clean WebCrypto wrappers. jose's JWE doesn't add value here (it targets RSA/ECDH key wrapping, not raw symmetric keys).</li>
+      <li><code>src/token-vault.ts</code> — Durable Object + RPC dispatcher. Application logic, not crypto protocol. Unchanged.</li>
+    </ul>
+
+    <p>Public API preserved: <code>verifyAccessJwt(request, env)</code> and <code>createTokenVault(env)</code> keep same signatures. No changes to <code>src/index.ts</code>, <code>src/integrations/linkedin.ts</code>, <code>src/triggers/linkedin-auth.ts</code>, or <code>src/triggers/token-check.ts</code>.</p>
+  </section>
+
+  <section id="what-jose-covers">
+    <h2>What jose provides vs what we hand-roll</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Invariant</th>
+          <th>Now (hand-rolled)</th>
+          <th>After (jose)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Algorithm restriction</td>
+          <td><code>header.alg !== "RS256"</code> (line 64)</td>
+          <td><code>algorithms: ["RS256"]</code> — jose rejects mismatches</td>
+        </tr>
+        <tr>
+          <td>Key type check</td>
+          <td><code>jwk.kty !== "RSA"</code> (line 73)</td>
+          <td>Built into key import for requested algorithm</td>
+        </tr>
+        <tr>
+          <td>Key use check</td>
+          <td><code>jwk.use !== "sig"</code> (line 74)</td>
+          <td>Built into JWKS processing (per JWA spec)</td>
+        </tr>
+        <tr>
+          <td>Signature verification</td>
+          <td><code>crypto.subtle.importKey</code> + <code>crypto.subtle.verify</code> (lines 76-88)</td>
+          <td>Built into <code>jwtVerify</code></td>
+        </tr>
+        <tr>
+          <td>Expiry check</td>
+          <td><code>Date.now() > rawClaims.exp * 1000</code> (line 98)</td>
+          <td><code>clockTolerance</code> option</td>
+        </tr>
+        <tr>
+          <td>Not-before check</td>
+          <td><code>Date.now() < rawClaims.nbf * 1000</code> (line 99)</td>
+          <td><code>clockTolerance</code> option</td>
+        </tr>
+        <tr>
+          <td>Issuer check</td>
+          <td>Manual string compare (line 100)</td>
+          <td><code>issuer</code> option</td>
+        </tr>
+        <tr>
+          <td>Audience check</td>
+          <td>Manual array/string compare (lines 102-105)</td>
+          <td><code>audience</code> option</td>
+        </tr>
+        <tr>
+          <td>JWKS caching</td>
+          <td><code>Map&lt;string, {keys, fetchedAt}&gt;</code> + manual staleness (lines 26-45, 1h hardcoded)</td>
+          <td><code>createRemoteJWKSet</code> — respects Cache-Control/Expires headers, auto-refetch</td>
+        </tr>
+        <tr>
+          <td>JWT format</td>
+          <td><code>parts.length !== 3</code> (line 55) + manual decode</td>
+          <td>Built-in</td>
+        </tr>
+        <tr>
+          <td>Error handling</td>
+          <td>5 silent <code>try/catch → null</code> blocks (lines 60, 69, 86, 94, 113)</td>
+          <td>1 <code>try/catch</code> around <code>jwtVerify</code> — jose throws typed errors for covered cases</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>What stays application-level</h3>
+    <ul>
+      <li><code>ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true"</code> bypass (line 48)</li>
+      <li>Email existence check (<code>typeof rawClaims.email !== "string"</code>, line 107)</li>
+      <li>Admin email allowlist (<code>ACCESS_ADMIN_EMAILS</code>, lines 109-110)</li>
+    </ul>
+  </section>
+
+  <section id="file-changes">
+    <h2>File Changes</h2>
+
+    <h3><code>src/token-vault-client.ts</code></h3>
+    <p><strong>Removed</strong> (deleted):</p>
+    <ul>
+      <li><code>base64urlDecode</code> (lines 13-20) — jose handles base64url natively</li>
+      <li><code>jwtToObject</code> (lines 22-24) — jose.decodeJwt</li>
+      <li><code>jwksCache</code> Map (line 26) — createRemoteJWKSet manages its own cache</li>
+      <li><code>fetchJwks</code> (lines 28-33) — createRemoteJWKSet fetches on demand</li>
+      <li><code>getJwks</code> (lines 35-45) — createRemoteJWKSet handles staleness</li>
+      <li>Manual JWT splitting + header decode (lines 54-64) — jwtVerify does this</li>
+      <li>Manual JWKS fetch + key matching (lines 66-74) — same</li>
+      <li>Manual <code>crypto.subtle.importKey</code> + <code>verify</code> (lines 76-88) — same</li>
+      <li>Manual claims decode + exp/nbf/iss/aud checks (lines 91-105) — jwtVerify options</li>
+      <li>Inner try/catch blocks (lines 60, 69, 86, 94)</li>
+    </ul>
+
+    <p><strong>Kept</strong>:</p>
+    <ul>
+      <li><code>verifyAccessJwt</code> function signature</li>
+      <li><code>AccessJwtClaims</code> interface (lines 3-11) — still used by callers</li>
+      <li><code>ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK</code> guard</li>
+      <li>Email string check + allowlist check</li>
+      <li>Outer try/catch (line 113 → now the only try/catch)</li>
+      <li><code>createTokenVault</code> unchanged</li>
+    </ul>
+
+    <p><strong>Net:</strong> ~90 lines → ~30 lines. <code>-6</code> exports deleted, <code>-4</code> try/catch blocks.</p>
+
+    <div class="diff">
+<pre><span class="diff-rem">-// Removed: base64urlDecode, jwtToObject, jwksCache, fetchJwks, getJwks</span>
+<span class="diff-rem">-// Removed: manual JWT split, header decode, JWKS fetch, key matching</span>
+<span class="diff-rem">-// Removed: manual crypto.subtle.importKey + verify</span>
+<span class="diff-rem">-// Removed: manual claims decode + exp/nbf/iss/aud</span>
+<span class="diff-rem">-// Removed: 4 try/catch blocks</span>
+
+<span class="diff-add">+import { createRemoteJWKSet, jwtVerify } from "jose"</span>
+<span class="diff-add">+</span>
+<span class="diff-add">+const jwksResolvers = new Map&lt;string, ReturnType&lt;typeof createRemoteJWKSet&gt;&gt;()</span>
+<span class="diff-add">+</span>
+<span class="diff-add">+function getResolver(domain: string) {</span>
+<span class="diff-add">+  let r = jwksResolvers.get(domain)</span>
+<span class="diff-add">+  if (!r) {</span>
+<span class="diff-add">+    r = createRemoteJWKSet(</span>
+<span class="diff-add">+      new URL(`https://${domain}.cloudflareaccess.com/cdn-cgi/access/certs`),</span>
+<span class="diff-add">+    )</span>
+<span class="diff-add">+    jwksResolvers.set(domain, r)</span>
+<span class="diff-add">+  }</span>
+<span class="diff-add">+  return r</span>
+<span class="diff-add">+}</span>
+<span class="diff-add">+</span>
+<span class="diff-add">+// inside verifyAccessJwt:</span>
+<span class="diff-add">+const JWKS = getResolver(env.ACCESS_TEAM)</span>
+<span class="diff-add">+const { payload } = await jwtVerify(jwt, JWKS, {</span>
+<span class="diff-add">+  algorithms: ["RS256"],</span>
+<span class="diff-add">+  requiredClaims: ["exp", "nbf"],</span>
+<span class="diff-add">+  issuer: `https://${env.ACCESS_TEAM}.cloudflareaccess.com`,</span>
+<span class="diff-add">+  audience: env.ACCESS_AUDIENCE,</span>
+<span class="diff-add">+})</span></pre>
+    </div>
+
+    <h3><code>package.json</code></h3>
+    <pre><code>+    "jose": "^6.0.0"</code></pre>
+
+    <h3><code>src/__tests__/token-vault-client.test.ts</code></h3>
+    <p>Existing test scenarios kept. Specific changes:</p>
+    <ul>
+      <li>JWK generation adds <code>use: "sig"</code> to the public key export
+      (signing-key fixture convention — not asserted as Cloudflare Access's production JWKS shape).</li>
+      <li>Add a test for a JWK without <code>use</code> — documents the policy
+      decision and catches regressions if jose's filtering changes.</li>
+      <li>Fetch mocks for <code>createRemoteJWKSet</code> must return full
+      <code>Response</code> objects with appropriate headers
+      (e.g. <code>cache-control: public, max-age=3600</code>) and JSON body
+      containing a <code>{ keys: [...] }</code> payload.
+      Existing <code>fetch</code> stubs that only returned
+      <code>{ ok: true, json: () => ... }</code> need updating.</li>
+      <li>Team-scoped JWKS isolation test stays but now verifies two
+      <code>createRemoteJWKSet</code> resolvers in the <code>Map</code> and
+      cross-team rejection.</li>
+      <li>Missing <code>exp</code> / missing <code>nbf</code> tests remain
+      and verify <code>requiredClaims</code> enforcement.</li>
+    </ul>
+  </section>
+
+  <section id="test-strategy">
+    <h2>Test Strategy</h2>
+    <p>Existing tests cover:</p>
+    <ul>
+      <li>No JWT header / missing header</li>
+      <li>Malformed JWT (not 3 parts)</li>
+      <li>Bad algorithm (HS256 instead of RS256)</li>
+      <li>Missing kid / unknown kid</li>
+      <li>Wrong key type (EC instead of RSA)</li>
+      <li>JWK with absent <code>use</code> (policy accepts it)</li>
+      <li>Wrong signature / tampered payload</li>
+      <li>Expired / not-yet-valid tokens</li>
+      <li>Wrong issuer / wrong audience</li>
+      <li>Array audience (valid match / no match)</li>
+      <li>Missing / wrong email, email not in allowlist</li>
+      <li>Team-scoped JWKS cache correct isolation</li>
+      <li>Insecure local fallback guard</li>
+    </ul>
+    <p>All should pass after migration. Test changes detailed in the "File Changes"
+    section above.</p>
+  </section>
+
+  <section id="risk">
+    <h2>Risk &amp; Mitigation</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Risk</th>
+          <th>Mitigation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>jose is ESM-only — Worker compat?</td>
+          <td>Yes. jose detects WebCrypto at runtime, works in Cloudflare Workers. No Node.js polyfills needed. Several production Workers use it.</td>
+        </tr>
+        <tr>
+          <td>createRemoteJWKSet caches differently than current Map (1h hardcoded)</td>
+          <td>jose respects Cache-Control/Expires from the JWKS response. Access JWKS endpoint sets Cache-Control: public, max-age=3600 — same effective TTL.</td>
+        </tr>
+        <tr>
+          <td>New jose version breaking semantics</td>
+          <td>Pin major version. jose is stable, semver. Panva is OpenID Foundation.</td>
+        </tr>
+        <tr>
+          <td>Bundle size increase</td>
+          <td>jose is tree-shakeable. <code>import { jwtVerify, createRemoteJWKSet }</code> pulls only JWT/JWK modules, ~20KB gzipped.</td>
+        </tr>
+        <tr>
+          <td>jose may reject JWKs without <code>use</code> — would tighten current behavior</td>
+          <td>If <code>createRemoteJWKSet</code> excludes keys without <code>use</code>,
+          that's an intentional tightening: Cloudflare Access JWKS doesn't include
+          <code>use</code>, so if jose rejects them, we need to confirm with a live
+          test or add a compatibility shim. Documented and tested regardless of
+          outcome.</td>
+        </tr>
+        <tr>
+          <td>createRemoteJWKSet requires real fetch Response objects in tests</td>
+          <td>Mock builder helper (e.g. <code>mockJwksResponse(keys)</code>) that
+          returns a proper <code>Response</code> with headers. Existing stubs
+          are insufficient.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <p>Token Vault jose plan &mdash; Issue #17 &mdash; 2026-07-21</p>
+  </footer>
+
+</div>
+</body>
+</html>

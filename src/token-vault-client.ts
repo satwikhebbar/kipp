@@ -11,12 +11,14 @@ interface AccessJwtClaims {
   iat: number
 }
 
+const JWKS_URL_TEMPLATE = "https://{domain}.cloudflareaccess.com/cdn-cgi/access/certs"
+
 const jwksResolvers = new Map<string, ReturnType<typeof createRemoteJWKSet>>()
 
 function getResolver(domain: string) {
   let r = jwksResolvers.get(domain)
   if (!r) {
-    r = createRemoteJWKSet(new URL(`https://${domain}.cloudflareaccess.com/cdn-cgi/access/certs`))
+    r = createRemoteJWKSet(new URL(JWKS_URL_TEMPLATE.replace("{domain}", domain)))
     jwksResolvers.set(domain, r)
   }
   return r
