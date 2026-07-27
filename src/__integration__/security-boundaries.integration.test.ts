@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
 import type { Env } from "../types"
 import { PipelineWorkflow } from "../workflow"
-import { createFakeNetwork } from "./setup"
+import { createFakeInteractionRouter, createFakeNetwork } from "./setup"
 
 vi.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -30,10 +30,12 @@ function baseEnv(overrides?: Partial<Env>): Env {
     POSTING_CADENCE_DAYS: "7",
     WAIT_FOR_FEEDBACK_HOURS: "168",
     ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+    DEPLOYMENT_ENV: "development",
     TOKEN_VAULT: {
       idFromName: () => ({}) as never,
       get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ tokens: null }), { status: 200 })) }),
     } as never,
+    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
   } as never

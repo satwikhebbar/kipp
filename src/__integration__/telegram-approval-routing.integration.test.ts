@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import type { Env } from "../types"
-import { createFakeNetwork, createFakeWorkflowBinding } from "./setup"
+import { type Env, INTERACTION_KIND } from "../types"
+import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 function baseEnv(overrides?: Partial<Env>): Env {
   return {
@@ -21,6 +21,7 @@ function baseEnv(overrides?: Partial<Env>): Env {
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
     TOKEN_VAULT: {} as never,
+    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
   } as never
@@ -57,7 +58,15 @@ describe("telegram-approval-routing", () => {
 
   it("routes confirm callback to workflow sendEvent", async () => {
     vi.stubGlobal("fetch", harness.fetch)
-    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const router = createFakeInteractionRouter()
+    router.register(100, {
+      interactionId: "approve-1",
+      version: 1,
+      workflowId: "wf-abc",
+      kind: INTERACTION_KIND.APPROVE,
+      callbackToken: "approve-token",
+    })
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never, INTERACTION_ROUTER: router.namespace })
 
     const res = await handleTelegramWebhook(
       telegramCallbackRequest({
@@ -66,7 +75,7 @@ describe("telegram-approval-routing", () => {
           id: "cq-1",
           from: { id: 42 },
           message: { message_id: 10, chat: { id: 100 } },
-          data: "confirm:wf-abc",
+          data: "approve-token",
         },
       }),
       env,
@@ -79,7 +88,7 @@ describe("telegram-approval-routing", () => {
     expect(events[0].event).toMatchObject({ type: "telegram-reply", payload: { text: "__approve__" } })
   })
 
-  it("sets pendingRevision on revise callback", async () => {
+  it("routes revise callback without mutating GitHub routing fields", async () => {
     harness = createFakeNetwork({
       githubFiles: {
         "ideas.md": `---
@@ -93,7 +102,15 @@ Body text`,
       },
     })
     vi.stubGlobal("fetch", harness.fetch)
-    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const router = createFakeInteractionRouter()
+    router.register(100, {
+      interactionId: "revise-1",
+      version: 1,
+      workflowId: "wf-xyz",
+      kind: INTERACTION_KIND.REVISE,
+      callbackToken: "revise-token",
+    })
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never, INTERACTION_ROUTER: router.namespace })
 
     const res = await handleTelegramWebhook(
       telegramCallbackRequest({
@@ -102,18 +119,17 @@ Body text`,
           id: "cq-2",
           from: { id: 42 },
           message: { message_id: 11, chat: { id: 100 } },
-          data: "revise:wf-xyz",
+          data: "revise-token",
         },
       }),
       env,
     )
     expect(res.status).toBe(200)
 
-    const state = harness.getState()
-    const ideasMd = state.githubFiles.get("ideas.md")
-    expect(ideasMd).toContain("pendingRevision: 100")
-    const revisionPrompt = state.telegramMessages.find((m) => m.text?.includes("Type your revision"))
-    expect(revisionPrompt).toBeDefined()
+    const events = binding.getReceivedEvents()
+    expect(events).toHaveLength(1)
+    expect(events[0].instanceId).toBe("wf-xyz")
+    expect(events[0].event).toMatchObject({ type: "telegram-reply", payload: { text: "__revise__" } })
   })
 
   it("routes pending revision text to the correct workflow", async () => {
@@ -140,7 +156,14 @@ Idea two`,
       },
     })
     vi.stubGlobal("fetch", harness.fetch)
-    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const router = createFakeInteractionRouter()
+    router.register(100, {
+      interactionId: "feedback-1",
+      version: 1,
+      workflowId: "wf-one",
+      kind: INTERACTION_KIND.REVISION_FEEDBACK,
+    })
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never, INTERACTION_ROUTER: router.namespace })
 
     const res = await handleTelegramWebhook(
       telegramMessageRequest({
@@ -165,9 +188,7 @@ Idea two`,
     })
 
     const state = harness.getState()
-    const ideasMd = state.githubFiles.get("ideas.md")
-    expect(ideasMd).not.toContain("pendingRevision: 100")
-    expect(ideasMd).toContain("pendingRevision: 200")
+    expect(state.githubFiles.get("ideas.md")).toContain("pendingRevision: 100")
   })
 
   it("does not route text from a non-pending chat", async () => {
@@ -259,7 +280,15 @@ Body`,
       },
     })
     vi.stubGlobal("fetch", harness.fetch)
-    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const router = createFakeInteractionRouter()
+    router.register(100, {
+      interactionId: "reply-1",
+      version: 1,
+      workflowId: "wf-abc",
+      kind: INTERACTION_KIND.REVISION_FEEDBACK,
+      botMessageId: 50,
+    })
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never, INTERACTION_ROUTER: router.namespace })
 
     const res = await handleTelegramWebhook(
       telegramMessageRequest({

@@ -1,8 +1,10 @@
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import type { LLMResponse } from "../types"
-import type { GenerateOptions } from "./llm"
+import { type GenerateOptions, type ToolProviderClient, ToolProviderProtocolError, toolDeclaration } from "./llm"
 
-export function createGeminiGenerator(apiKey: string, modelName = "gemini-2.0-flash") {
+const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+
+export function createGeminiGenerator(apiKey: string, modelName = GEMINI_DEFAULT_MODEL) {
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: modelName })
 
@@ -37,5 +39,54 @@ export function createGeminiGenerator(apiKey: string, modelName = "gemini-2.0-fl
         outputTokens: usage?.candidatesTokenCount ?? 0,
       },
     }
+  }
+}
+
+export function createGeminiToolClient(apiKey: string, modelName = GEMINI_DEFAULT_MODEL): ToolProviderClient {
+  const genAI = new GoogleGenerativeAI(apiKey)
+  const model = genAI.getGenerativeModel({ model: modelName })
+  return {
+    async generate({ messages, tools }) {
+      const system = messages
+        .filter((m) => "text" in m && m.role === "system")
+        .map((m) => (m as { text: string }).text)
+        .join("\n\n")
+      const contents = messages
+        .filter((m) => !("text" in m && m.role === "system"))
+        .map((message) => {
+          if ("text" in message)
+            return { role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.text }] }
+          if (message.role === "tool")
+            return {
+              role: "user",
+              parts: [{ functionResponse: { name: message.name, response: { result: message.output } } }],
+            }
+          return {
+            role: "model",
+            parts: message.toolCalls.map((call) => ({ functionCall: { name: call.name, args: call.input } })),
+          }
+        })
+      const result = await model.generateContent({
+        systemInstruction: system ? { role: "system", parts: [{ text: system }] } : undefined,
+        contents,
+        tools: [{ functionDeclarations: tools.map(toolDeclaration) }],
+      } as never)
+      const response = result.response
+      const candidate = response.candidates?.[0]
+      if (!candidate) throw new ToolProviderProtocolError("Gemini returned no candidates")
+      const parts = candidate.content.parts ?? []
+      return {
+        text: parts.map((part) => part.text ?? "").join("") || undefined,
+        toolCalls: parts.flatMap((part) =>
+          part.functionCall
+            ? [{ id: crypto.randomUUID(), name: part.functionCall.name, input: part.functionCall.args }]
+            : [],
+        ),
+        usage: {
+          inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
+          outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
+        },
+      }
+    },
   }
 }

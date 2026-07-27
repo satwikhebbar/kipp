@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
 import type { Env } from "../types"
-import { createFakeNetwork, createFakeWorkflowBinding } from "./setup"
+import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 function baseEnv(overrides?: Partial<Env>): Env {
   return {
@@ -21,6 +21,7 @@ function baseEnv(overrides?: Partial<Env>): Env {
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
     TOKEN_VAULT: {} as never,
+    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
   } as never

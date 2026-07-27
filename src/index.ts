@@ -7,6 +7,7 @@ import { handleTelegramWebhook } from "./triggers/telegram-webhook"
 import { handleTokenCheckCron } from "./triggers/token-check"
 import type { Env } from "./types"
 
+export { InteractionRouterDO } from "./interaction-router"
 export { TokenVaultDO } from "./token-vault"
 export { PipelineWorkflow } from "./workflow"
 

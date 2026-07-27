@@ -2,7 +2,8 @@ import { nextId } from "../backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../backlog/parser"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
-import type { Env } from "../types"
+import { createInteractionRouter } from "../interaction-router-client"
+import { type Env, INTERACTION_KIND } from "../types"
 
 interface TelegramUser {
   id: number
@@ -66,31 +67,11 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
     await tg.answerCallbackQuery(cq.id)
 
-    if (cq.data?.startsWith("confirm:") && cq.message) {
-      const workflowId = cq.data.slice("confirm:".length)
-      if (workflowId) {
-        const instance = await env.PIPELINE_WORKFLOW.get(workflowId)
-        await instance.sendEvent({ type: "telegram-reply", payload: { userId: cq.from.id, text: "__approve__" } })
-      }
-    } else if (cq.data?.startsWith("revise:") && cq.message) {
-      const workflowId = cq.data.slice("revise:".length)
-      if (workflowId) {
-        const chatId = cq.message.chat.id
-        const client = createGitHubClient(env)
-        await client.mutateFile("ideas.md", (c) => {
-          const all = parseIdeas(c)
-          const idx = all.findIndex((i) => i.correlation?.workflowInstanceId === workflowId)
-          if (idx !== -1) {
-            all[idx] = {
-              ...all[idx],
-              correlation: { ...all[idx].correlation, pendingRevision: String(chatId) },
-            }
-          }
-          return serializeIdeas(all)
-        })
-        await tg.sendMessage(chatId, "Type your revision feedback.")
-      }
-    }
+    if (cq.data && cq.message)
+      await dispatchRoutedInteraction(env, cq.message.chat.id, cq.from.id, {
+        telegramUpdateId: update.update_id,
+        callbackToken: cq.data,
+      })
 
     return new Response("OK")
   }
@@ -109,16 +90,11 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
   const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
 
   if (msg.reply_to_message?.from?.is_bot) {
-    const client = createGitHubClient(env)
-    const ideas = parseIdeas((await client.readFile("ideas.md")).content)
-    const idea = ideas.find((i) => i.correlation?.botMessageId === msg.reply_to_message?.message_id)
-    if (idea?.correlation?.workflowInstanceId) {
-      const instance = await env.PIPELINE_WORKFLOW.get(idea.correlation.workflowInstanceId)
-      await instance.sendEvent({
-        type: "telegram-reply",
-        payload: { userId: msg.from.id, text: msg.text },
-      })
-    }
+    await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
+      telegramUpdateId: msg.message_id,
+      replyToMessageId: msg.reply_to_message.message_id,
+      text: msg.text,
+    })
     return new Response("OK")
   }
 
@@ -167,27 +143,42 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
       return new Response("OK")
     }
 
-    const all = parseIdeas((await client.readFile("ideas.md")).content)
-    const pendingIdea = all.find((i) => i.correlation?.pendingRevision === String(msg.chat.id))
-
-    if (pendingIdea?.correlation?.workflowInstanceId) {
-      const instance = await env.PIPELINE_WORKFLOW.get(pendingIdea.correlation.workflowInstanceId)
-      await instance.sendEvent({ type: "telegram-reply", payload: { userId: msg.from.id, text } })
-      const ideaId = pendingIdea.id
-      await client.mutateFile("ideas.md", (c) => {
-        const items = parseIdeas(c)
-        const idx = items.findIndex((i) => i.id === ideaId)
-        if (idx !== -1) {
-          const corr = items[idx].correlation
-          const { pendingRevision: _, ...rest } = corr || {}
-          items[idx] = { ...items[idx], correlation: rest }
-        }
-        return serializeIdeas(items)
-      })
-      return new Response("OK")
-    }
+    const routed = await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
+      telegramUpdateId: msg.message_id,
+      text,
+    })
+    if (routed) return new Response("OK")
 
     await tg.sendMessage(msg.chat.id, "Unknown command. Use /add <text>, /generate, or tap inline buttons.")
     return new Response("OK")
   }
+}
+
+async function dispatchRoutedInteraction(
+  env: Env,
+  chatId: number,
+  userId: number,
+  input: { telegramUpdateId: number; callbackToken?: string; replyToMessageId?: number; text?: string },
+): Promise<boolean> {
+  const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
+  const { interaction } = await router.resolve(input)
+  if (!interaction) return false
+  const instance = await env.PIPELINE_WORKFLOW.get(interaction.workflowId)
+  await instance.sendEvent({
+    type: "telegram-reply",
+    payload: {
+      userId,
+      text:
+        interaction.kind === INTERACTION_KIND.APPROVE
+          ? "__approve__"
+          : interaction.kind === INTERACTION_KIND.REVISE
+            ? "__revise__"
+            : interaction.text,
+      interactionId: interaction.interactionId,
+      interactionVersion: interaction.version,
+      interactionKind: interaction.kind,
+      telegramUpdateId: interaction.telegramUpdateId,
+    },
+  })
+  return true
 }

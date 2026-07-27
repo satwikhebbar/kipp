@@ -221,7 +221,10 @@ describe("end-to-end OAuth/DO contract", () => {
 
   it("accepts request without content-length header via DO client", async () => {
     const storage = mockStorage()
-    const env = baseEnv({ ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true" }) as unknown as Env
+    const env = baseEnv({
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+      DEPLOYMENT_ENV: "development",
+    }) as unknown as Env
     const doInstance = new TokenVaultDO({ storage } as never, env)
     env.TOKEN_VAULT = makeNs(doInstance)
 

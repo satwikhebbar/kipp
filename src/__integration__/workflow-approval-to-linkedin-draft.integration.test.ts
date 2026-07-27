@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../types"
 import { PipelineWorkflow } from "../workflow"
-import { createFakeNetwork, createFakeStep } from "./setup"
+import { createFakeInteractionRouter, createFakeNetwork, createFakeStep } from "./setup"
 
 vi.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -33,12 +33,14 @@ function baseEnv(overrides?: Partial<Env>): Env {
     LINKEDIN_ACCESS_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
     ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+    DEPLOYMENT_ENV: "development",
     LLM_API_KEY: "key",
     LLM_PROVIDER: "deepseek",
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
     TOKEN_VAULT: mockDoNamespace(),
+    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
   } as never

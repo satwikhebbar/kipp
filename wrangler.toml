@@ -9,9 +9,17 @@ keep_vars = true
 name = "TOKEN_VAULT"
 class_name = "TokenVaultDO"
 
+[[durable_objects.bindings]]
+name = "INTERACTION_ROUTER"
+class_name = "InteractionRouterDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TokenVaultDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["InteractionRouterDO"]
 
 # Cloudflare Workflow binding
 [[workflows]]

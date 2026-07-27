@@ -61,6 +61,10 @@ function mockEnv(): Env {
       idFromName: () => "mock-do-id",
       get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ tokens: null }))) }),
     } as never,
+    INTERACTION_ROUTER: {
+      idFromName: () => "mock-router-id",
+      get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ ok: true }))) }),
+    } as never,
     TOKEN_ENCRYPTION_KEY_IDS: "test-key",
     ACCESS_TEAM: "test-team",
     ACCESS_AUDIENCE: "test-aud",
@@ -225,6 +229,7 @@ describe("PipelineWorkflow", () => {
       env: {
         ...mockEnv(),
         ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        DEPLOYMENT_ENV: "development",
         LINKEDIN_ACCESS_TOKEN: "valid-token",
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
@@ -391,7 +396,7 @@ describe("PipelineWorkflow", () => {
     expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "second feedback")).toBe(true)
   })
 
-  it("Revise More (__revise__) adds no synthetic transcript message; only a later real reply changes history", async () => {
+  it("Revise More (__revise__) adds no synthetic transcript message; the next real reply changes history", async () => {
     const responses = [
       { text: "Initial draft", usage: { inputTokens: 5, outputTokens: 3 } },
       {
@@ -430,15 +435,13 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    // genCalls: [draft, critique, revise after __revise__, revise after real reply]
+    // genCalls: [draft, critique, revise after real reply]; __revise__ only opens a feedback interaction.
+    expect(genCalls).toHaveLength(3)
     const firstReviseMessages = genCalls[2].messages
     expect(firstReviseMessages.some((m) => m.content === "__revise__")).toBe(false)
     const lastAssistantBeforeInstruction = [...firstReviseMessages].reverse().find((m) => m.role === "assistant")
     expect(lastAssistantBeforeInstruction?.content).toBe("Initial draft")
-
-    const secondReviseMessages = genCalls[3].messages
-    expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "actually make it shorter")).toBe(true)
-    expect(secondReviseMessages.some((m) => m.content === "__revise__")).toBe(false)
+    expect(firstReviseMessages.some((m) => m.role === "user" && m.content === "actually make it shorter")).toBe(true)
   })
 
   it("throws TranscriptTooLargeError before any ideas.md update when the generate transcript is oversized", async () => {
@@ -630,6 +633,7 @@ Body content`
       env: {
         ...mockEnv(),
         ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        DEPLOYMENT_ENV: "development",
         LINKEDIN_ACCESS_TOKEN: "valid-token",
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
@@ -743,6 +747,7 @@ Body`
       env: {
         ...mockEnv(),
         ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        DEPLOYMENT_ENV: "development",
         LINKEDIN_ACCESS_TOKEN: "valid-token",
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",

@@ -7,11 +7,16 @@ import { appendAssistant, appendHumanFeedback, assertStepOutputSize } from "./co
 import { createGitHubClient } from "./integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "./integrations/linkedin"
 import { createTelegramClient } from "./integrations/telegram"
+import { createInteractionRouter } from "./interaction-router-client"
 import { computeCost, formatCostLine } from "./pricing"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
 import { readPrompt } from "./prompts/resolver"
 import { createGenerator, type GenerateFn, resolveModel } from "./providers"
-import type { Env, LLMUsage, WorkflowParams } from "./types"
+import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "./types"
+
+function interactionId(): string {
+  return crypto.randomUUID()
+}
 
 function withUsageAccumulator(gen: GenerateFn): { gen: GenerateFn; getUsage: () => LLMUsage } {
   const cumulative: LLMUsage = { inputTokens: 0, outputTokens: 0 }
@@ -116,11 +121,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
       await stepDo("notify", async () => {
-        const client = createGitHubClient(this.env)
-        const manager = createBacklogManager(client)
-        const ideas = await manager.readIdeas()
-        const idea = ideas.find((i) => i.id === ideaId)
         const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+        const approveId = interactionId()
+        const reviseId = interactionId()
+        const feedbackId = interactionId()
+        const approveToken = interactionId()
+        const reviseToken = interactionId()
         const result = await tg.sendMessage(
           state.chatId,
           `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nReply with feedback or tap below.${state.costLine}`,
@@ -128,22 +134,41 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             replyMarkup: {
               inline_keyboard: [
                 [
-                  { text: "Approve \u2713", callback_data: `confirm:${event.instanceId}` },
-                  { text: "Revise More", callback_data: `revise:${event.instanceId}` },
+                  { text: "Approve \u2713", callback_data: approveToken },
+                  { text: "Revise More", callback_data: reviseToken },
                 ],
               ],
             },
           },
         )
-        if (idea) {
-          try {
-            await manager.updateIdea(ideaId, {
-              correlation: { ...idea.correlation, botMessageId: result.messageId },
-            })
-          } catch {
-            console.warn(`[workflow ${event.instanceId}] failed to save botMessageId for idea ${ideaId}`)
-          }
-        }
+        const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
+        const expiresAt = Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || "12") * 60 * 60 * 1000
+        await router.register({
+          interactionId: approveId,
+          version: 1,
+          workflowId: event.instanceId,
+          kind: INTERACTION_KIND.APPROVE,
+          callbackToken: approveToken,
+          botMessageId: result.messageId,
+          expiresAt,
+        })
+        await router.register({
+          interactionId: reviseId,
+          version: 1,
+          workflowId: event.instanceId,
+          kind: INTERACTION_KIND.REVISE,
+          callbackToken: reviseToken,
+          botMessageId: result.messageId,
+          expiresAt,
+        })
+        await router.register({
+          interactionId: feedbackId,
+          version: 1,
+          workflowId: event.instanceId,
+          kind: INTERACTION_KIND.REVISION_FEEDBACK,
+          botMessageId: result.messageId,
+          expiresAt,
+        })
       })
     }
 
@@ -166,6 +191,23 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       }
 
       const text = (reply.payload?.text as string) ?? ((reply as Record<string, unknown>)?.text as string) ?? ""
+      if (text === "__revise__") {
+        if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
+          await stepDo(`notify-revision-prompt-${i}`, async () => {
+            const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+            await tg.sendMessage(state.chatId, "Type your revision feedback.")
+            const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
+            await router.register({
+              interactionId: interactionId(),
+              version: i + 1,
+              workflowId: event.instanceId,
+              kind: INTERACTION_KIND.REVISION_FEEDBACK,
+              expiresAt: Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || "12") * 60 * 60 * 1000,
+            })
+          })
+        }
+        continue
+      }
       if (text === "__approve__") {
         const publishToken = await getLinkedInToken(this.env)
         if (publishToken && this.env.LINKEDIN_AUTHOR_URN) {
@@ -277,11 +319,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
         await stepDo(`notify-revised-${i}`, async () => {
-          const client = createGitHubClient(this.env)
-          const manager = createBacklogManager(client)
-          const ideas = await manager.readIdeas()
-          const idea = ideas.find((i) => i.id === ideaId)
           const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+          const approveId = interactionId()
+          const reviseId = interactionId()
+          const feedbackId = interactionId()
+          const approveToken = interactionId()
+          const reviseToken = interactionId()
           const result = await tg.sendMessage(
             state.chatId,
             `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nReply with feedback or tap below.${revised.costLine}`,
@@ -289,24 +332,41 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
               replyMarkup: {
                 inline_keyboard: [
                   [
-                    { text: "Approve \u2713", callback_data: `confirm:${event.instanceId}` },
-                    { text: "Revise More", callback_data: `revise:${event.instanceId}` },
+                    { text: "Approve \u2713", callback_data: approveToken },
+                    { text: "Revise More", callback_data: reviseToken },
                   ],
                 ],
               },
             },
           )
-          if (idea) {
-            try {
-              await manager.updateIdea(ideaId, {
-                correlation: { ...idea.correlation, botMessageId: result.messageId },
-              })
-            } catch {
-              console.warn(
-                `[workflow ${event.instanceId}] failed to save botMessageId for idea ${ideaId} (notify-revised)`,
-              )
-            }
-          }
+          const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
+          const expiresAt = Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || "12") * 60 * 60 * 1000
+          await router.register({
+            interactionId: approveId,
+            version: i + 2,
+            workflowId: event.instanceId,
+            kind: INTERACTION_KIND.APPROVE,
+            callbackToken: approveToken,
+            botMessageId: result.messageId,
+            expiresAt,
+          })
+          await router.register({
+            interactionId: feedbackId,
+            version: i + 2,
+            workflowId: event.instanceId,
+            kind: INTERACTION_KIND.REVISION_FEEDBACK,
+            botMessageId: result.messageId,
+            expiresAt,
+          })
+          await router.register({
+            interactionId: reviseId,
+            version: i + 2,
+            workflowId: event.instanceId,
+            kind: INTERACTION_KIND.REVISE,
+            callbackToken: reviseToken,
+            botMessageId: result.messageId,
+            expiresAt,
+          })
         })
       }
     }

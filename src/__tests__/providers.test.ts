@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { z } from "zod"
+import type { ToolConversationMessage } from "../providers/llm"
+import type { ToolDefinition, ToolRegistry } from "../runtime/tools"
 
 const mockFetch = vi.hoisted(() => vi.fn())
 vi.stubGlobal("fetch", mockFetch)
@@ -6,6 +9,18 @@ vi.stubGlobal("fetch", mockFetch)
 function userMsg(text: string) {
   return { messages: [{ role: "user", content: text } as const] }
 }
+
+const ECHO_TOOL: ToolDefinition = {
+  name: "echo",
+  description: "Echoes an input value.",
+  input: z.object({ value: z.string() }),
+  output: z.object({ value: z.string() }),
+  privacy: "private",
+  handler: async ({ value }) => ({ value }),
+}
+
+const TOOL_TEST_MESSAGES: ToolConversationMessage[] = [{ role: "user", text: "hello" }]
+const TOOL_TEST_REGISTRY: ToolRegistry = { echo: ECHO_TOOL }
 
 describe("DeepSeek provider", () => {
   beforeEach(() => mockFetch.mockReset())
@@ -86,6 +101,57 @@ describe("DeepSeek provider", () => {
     expect(result.text).toBe("hello")
     expect(result.usage.inputTokens).toBe(0)
     expect(result.usage.outputTokens).toBe(0)
+  })
+
+  it("maps native tool declarations and calls", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          choices: [
+            { message: { tool_calls: [{ id: "call-1", function: { name: "echo", arguments: '{"value":"hi"}' } }] } },
+          ],
+          usage: {},
+        }),
+    })
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    const client = createDeepseekToolClient("key")
+    const response = await client.generate({
+      messages: TOOL_TEST_MESSAGES,
+      tools: [TOOL_TEST_REGISTRY.echo],
+    })
+    expect(response.toolCalls).toEqual([{ id: "call-1", name: "echo", input: { value: "hi" } }])
+    expect(JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string).tools[0].function.name).toBe("echo")
+  })
+
+  it("retries transient native-tool failures but not malformed tool payloads", async () => {
+    const { createToolProvider } = await import("../providers")
+    const transient = createToolProvider("key", "deepseek", undefined, 1)
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503 }).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+    })
+    vi.useFakeTimers()
+    const transientResult = transient.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] })
+    await vi.advanceTimersByTimeAsync(2_000)
+    await expect(transientResult).resolves.toMatchObject({ text: "done" })
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
+
+    mockFetch.mockReset()
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          choices: [{ message: { tool_calls: [{ id: "bad", function: { name: "echo", arguments: "{" } }] } }],
+          usage: {},
+        }),
+    })
+    const malformed = createToolProvider("key", "deepseek", undefined, 3)
+    await expect(
+      malformed.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] }),
+    ).rejects.toThrow("malformed tool arguments")
+    expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 })
 

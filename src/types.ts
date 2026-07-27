@@ -1,6 +1,7 @@
 export interface Env {
   PIPELINE_WORKFLOW: Workflow
   TOKEN_VAULT: DurableObjectNamespace
+  INTERACTION_ROUTER: DurableObjectNamespace
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_WEBHOOK_SECRET: string
   TELEGRAM_ALLOWED_USER_ID: string
@@ -107,6 +108,31 @@ export interface WorkflowParams {
 export interface WorkflowEvent {
   type: "telegram-reply"
   userId: number
+  text?: string
+  interactionId?: string
+  interactionVersion?: number
+  interactionKind?: WorkflowInteractionKind
+  telegramUpdateId?: number
+}
+
+export const INTERACTION_KIND = {
+  APPROVE: "approve",
+  REVISE: "revise",
+  REVISION_FEEDBACK: "revision-feedback",
+} as const
+
+export type WorkflowInteractionKind = (typeof INTERACTION_KIND)[keyof typeof INTERACTION_KIND]
+
+/**
+ * A normalized, provider-neutral interaction delivered from Telegram to a
+ * workflow. The opaque id is deliberately the only identifier exposed in a
+ * Telegram callback.
+ */
+export interface WorkflowInteraction {
+  interactionId: string
+  version: number
+  telegramUpdateId: number
+  kind: WorkflowInteractionKind
   text?: string
 }
 

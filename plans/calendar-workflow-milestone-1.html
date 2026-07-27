@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp Calendar — Milestone 1 Implementation Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --code:#020617; }
+      * { box-sizing:border-box; }
+      body { max-width:1040px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; }
+      h1,h2,h3 { line-height:1.25; color:#f8fafc; }
+      h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; }
+      h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; }
+      h3 { margin-top:28px; font-size:1.12rem; }
+      p,li { max-width:90ch; }
+      .lede { color:var(--muted); font-size:1.1rem; }
+      .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; }
+      .note { border-left-color:var(--amber); }
+      .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; }
+      code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; }
+      pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); }
+      pre code { padding:0; color:var(--ink); }
+      table { width:100%; border-collapse:collapse; margin:20px 0; }
+      th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+      th { color:#cbd5e1; background:#1e293b; }
+      ol>li { margin:14px 0; }
+      a { color:#93c5fd; }
+      .status { color:var(--green); font-weight:700; }
+      @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp Calendar — Milestone 1 Implementation Plan</h1>
+    <p class="lede">Shared workflow foundation and strict LinkedIn parity. This is the implementation-ready plan for Phase 1 of the Calendar architecture roadmap.</p>
+
+    <div class="callout">
+      <strong>Status:</strong> Approved; ready for implementation.<br />
+      <strong>Outcome:</strong> introduce the smallest reusable agent runtime justified by two workflows, migrate LinkedIn’s Telegram interaction routing off GitHub-backed records, and retain its existing draft → critique → revise user experience.<br />
+      <span class="tag">Cloudflare Workflows</span><span class="tag">Durable Objects</span><span class="tag">Telegram</span><span class="tag">Zod</span><span class="tag">Native provider tools</span>
+    </div>
+
+    <h2>1. Scope and boundaries</h2>
+    <table>
+      <thead><tr><th>Included</th><th>Explicitly excluded</th></tr></thead>
+      <tbody>
+        <tr><td>Shared session, tool, guard, provider, context, interaction-router, and redacted logging contracts</td><td>Calendar OAuth, Google Calendar reads/writes, scheduling policy, recurrence, and generic memory</td></tr>
+        <tr><td>Native tool-call normalization for DeepSeek and Gemini</td><td>Model-directed LinkedIn tools or a LinkedIn tool loop</td></tr>
+        <tr><td>Telegram routing migration for all LinkedIn approval and revision interactions</td><td>Changing LinkedIn commands, visible copy, approval rules, publishing behavior, backlog format, or critique/revision logic</td></tr>
+        <tr><td>New SQLite-backed Interaction Router Durable Object</td><td>Analytics Engine, dashboards, alerts, ETag protection, or runtime-configurable tools</td></tr>
+        <tr><td>Repairing stale test fixtures so the baseline is green</td><td>Production authorization-policy changes or weakening security controls to make tests pass</td></tr>
+      </tbody>
+    </table>
+    <p>The migration is a clean cutover. Before deployment, the sole user will ensure no existing LinkedIn draft is awaiting feedback; no legacy GitHub-routing compatibility bridge will be retained.</p>
+
+    <h2>2. Target architecture and contracts</h2>
+    <h3>Session and interaction contract</h3>
+    <p>Cloudflare Workflow step results remain the durable state for an active LinkedIn session. Add a serializable, discriminated interaction event that carries an opaque interaction ID, version, action, Telegram update ID, and optional text. The workflow keeps the currently expected interaction ID and version; it ignores any delayed or duplicate event that does not match that current expectation.</p>
+    <pre><code>type WorkflowInteraction = {
+  interactionId: string
+  version: number
+  telegramUpdateId: number
+  kind: "approve" | "revise" | "revision-feedback"
+  text?: string
+}</code></pre>
+    <p>This type is internal, provider-neutral, and contains no Calendar or future-memory fields.</p>
+
+    <h3>Tool registry, guard, and context contracts</h3>
+    <p>Add <code>zod</code> as the single runtime-schema source. A source-controlled <code>ToolDefinition</code> has a stable name, description, Zod input/output schemas, privacy classification, and deterministic handler. A workflow’s allowlist is an explicit compile-time list of registry names. Configuration and model output cannot expand permissions.</p>
+    <p><code>ToolGuard.execute()</code> verifies the allowlist and input schema before invoking a handler, then verifies the output schema before returning a result to a provider conversation. It returns redacted, safe failure categories rather than raw integration failures. The handler remains the only code that can mutate an integration.</p>
+    <p>Add a named asynchronous <code>ContextProvider</code> interface that returns only redacted context. Register no persistence, memory, preference, or retrieval implementation in this milestone.</p>
+    <div class="callout note"><strong>LinkedIn permission decision:</strong> LinkedIn’s production allowlist is explicitly empty in Milestone 1. Its existing GitHub, Telegram, and LinkedIn integration calls remain deterministic workflow code. Only a later milestone may expose workflow-specific tools to the model.</div>
+
+    <h3>Provider contract</h3>
+    <p>Keep the existing <code>GenerateFn</code> text adapter so current LinkedIn agents do not need to change their orchestration API. Add a normalized provider client that supports canonical messages, declared tools, assistant tool-call parts, tool-result parts, text, usage, and provider-safe errors.</p>
+    <table>
+      <thead><tr><th>Provider</th><th>Adapter responsibility</th></tr></thead>
+      <tbody>
+        <tr><td>DeepSeek</td><td>Map canonical messages and Zod-derived JSON Schema to OpenAI-compatible <code>tools</code>; parse native assistant <code>tool_calls</code> and map tool result messages back to the provider wire format.</td></tr>
+        <tr><td>Gemini</td><td>Map declarations to native function declarations; parse native function calls and map function responses back to Gemini content parts.</td></tr>
+      </tbody>
+    </table>
+    <p>Provider modules remain the only layer that knows native provider shapes. In this milestone the new tool protocol is exercised by contract tests, not by LinkedIn production behavior.</p>
+
+    <h3>Privacy-safe observability</h3>
+    <p>Emit structured JSON to Worker console logs only. Records contain opaque correlation/session/interaction IDs, workflow name, event or tool name, outcome category, duration, and bounded retry count. They must omit raw Telegram text, draft content, Calendar content, provider payloads, OAuth material, tokens, and error bodies. Analytics Engine and dashboards are deferred.</p>
+
+    <h2>3. Interaction Router Durable Object</h2>
+    <p>Add <code>InteractionRouterDO</code> and bind it as <code>INTERACTION_ROUTER</code>. Keep the existing legacy Wrangler migration configuration and add a <code>v2</code> <code>new_sqlite_classes</code> migration for this class; do not migrate to Wrangler’s newer declarative Durable Object export model in this change.</p>
+    <p>Use one router object per Telegram chat, derived from the chat ID. This isolates future users while avoiding a global router bottleneck. It stores only:</p>
+    <ul>
+      <li>the Telegram chat ID and bot message ID;</li>
+      <li>an opaque callback/action token;</li>
+      <li>the target Workflow instance, expected interaction kind, version, expiry, and delivery state.</li>
+    </ul>
+    <p>It never stores request text, drafts, Calendar payloads, OAuth data, or long-term preferences.</p>
+    <table>
+      <thead><tr><th>Interaction</th><th>Registration and resolution</th></tr></thead>
+      <tbody>
+        <tr><td>Approve / Revise callback</td><td>Generate a random opaque token before the message is sent. After Telegram returns its bot message ID, register the token, message ID, action, and expiry. Callback data contains only the opaque token; the webhook verifies chat and message identity before dispatch.</td></tr>
+        <tr><td>Reply to bot message</td><td>Map the reply target bot-message ID to its registered interaction. This always takes precedence over chat-level plain-text routing.</td></tr>
+        <tr><td>Typed revision feedback</td><td>Maintain one active plain-text revision interaction per chat. Starting a newer revision atomically invalidates the prior active plain-text interaction. Ordinary text maps to that active interaction.</td></tr>
+      </tbody>
+    </table>
+    <p>Router registrations, claims, and acknowledgements are idempotent. A duplicate Telegram update reuses the same opaque event identity; expiry, consumed tokens, mismatched chats, stale versions, and unknown tokens perform no Workflow dispatch. A transient delivery failure leaves the interaction safely retryable without permitting a distinct action.</p>
+    <p><strong>Retention and cleanup:</strong> expiry is enforced when resolving an interaction, and the router must also perform bounded physical cleanup during normal registration and resolution: delete expired rows and consumed rows past a short retention period. This avoids an unbounded per-chat SQLite index without introducing alarms, cron, or a separate cleanup workflow in Milestone 1.</p>
+
+    <h2>4. LinkedIn migration sequence</h2>
+    <ol>
+      <li><strong>Restore baseline first.</strong> Diagnose every current red test against the documented authorization policy. Update only stale fixtures and expectations—for example, tests that expect the permitted insecure local fallback must explicitly use development mode. Preserve production authentication and failure behavior. The baseline gate is <code>pnpm check</code> green before the routing refactor begins.</li>
+      <li><strong>Add runtime modules and tests.</strong> Introduce Zod, the registry, guard, provider extensions, context interface, logger, router client, Durable Object class, binding, and <code>v2</code> migration. Use focused unit tests before wiring LinkedIn.</li>
+      <li><strong>Adapt workflow state.</strong> Keep the existing LinkedIn payload and visible state transitions, but hold the expected interaction ID/version in the Workflow’s serializable step state. Continue using bounded <code>step.do()</code> and <code>waitForEvent()</code> calls.</li>
+      <li><strong>Register interactions after notification.</strong> The Telegram notification step sends the existing draft and controls, receives the bot message ID, then a durable idempotent registration step stores the router mapping. Workflow retries must reuse the same opaque action values.</li>
+      <li><strong>Replace webhook routing.</strong> Resolve callbacks, replies, and active typed feedback through <code>INTERACTION_ROUTER</code>; dispatch the normalized event to the existing Pipeline Workflow. Remove GitHub reads/writes whose only purpose is <code>botMessageId</code> or <code>pendingRevision</code> routing.</li>
+      <li><strong>Preserve deterministic approval.</strong> On a matching approval event, use the existing deterministic token lookup and LinkedIn draft creation path. Model behavior does not control publication. Existing status updates, archive behavior, cost calculations, messages, and safe error responses remain unchanged.</li>
+      <li><strong>Harden router retention.</strong> Add bounded, idempotent deletion of expired and old consumed interaction rows on normal router operations. Cover both logical expiry (no dispatch) and physical removal; do not add a scheduler or alarm for this milestone.</li>
+      <li><strong>Document and validate.</strong> Update the architecture roadmap after validation to mark Milestone 1 complete, and document the interaction-router binding and clean-cutover deployment condition.</li>
+    </ol>
+
+    <h2>5. Test plan</h2>
+    <table>
+      <thead><tr><th>Layer</th><th>Required scenarios</th></tr></thead>
+      <tbody>
+        <tr><td>Baseline regression</td><td>Full current unit suite is green after stale test-fixture repair; production authorization denial remains covered.</td></tr>
+        <tr><td>Tool guard</td><td>Unknown tool, non-allowlisted tool, invalid input, invalid output, deterministic handler failure, and redacted failure handling. Assert the LinkedIn allowlist is empty.</td></tr>
+        <tr><td>Provider contracts</td><td>Existing text output compatibility; exact DeepSeek and Gemini native tool declaration/call/result mapping; malformed provider tool response has a safe error.</td></tr>
+        <tr><td>Router unit tests</td><td>Register/resolve callbacks; reply-to-message precedence; active typed revision replacement; logical expiry and bounded physical cleanup; wrong chat; unknown token; stale version; duplicate claim/acknowledgement; retry identity.</td></tr>
+        <tr><td>Webhook integration</td><td>Validate allowed Telegram user and secret; resolve router records; dispatch normalized events; do not read or mutate GitHub interaction-routing fields.</td></tr>
+        <tr><td>LinkedIn parity integration</td><td><code>/add</code>, <code>/generate</code>, approve, revise button, typed feedback, timeout, LinkedIn publish failure, archive, and cost paths preserve lifecycle and safety behavior.</td></tr>
+        <tr><td>Logging</td><td>Structured lifecycle events contain correlation metadata but never raw user text, drafts, secrets, token values, or provider error bodies.</td></tr>
+      </tbody>
+    </table>
+    <p>The only intentional user-facing edge-case change is that starting a newer typed revision request replaces the earlier active typed-revision target. Callback data becoming opaque is not user-visible.</p>
+
+    <h2>6. Acceptance and rollout</h2>
+    <ul>
+      <li><code>pnpm check</code> and the integration suite pass with no unrelated test failures.</li>
+      <li>Every new interaction is routed without GitHub-backed reply lookup or chat-level <code>pendingRevision</code> state.</li>
+      <li>Stale, mismatched, expired, and duplicate Telegram interactions cannot cause an approval, revision, or LinkedIn mutation.</li>
+      <li>LinkedIn remains fixed-orchestration with no production model tools and no visible regression in commands, draft lifecycle, approval, revision, publishing, privacy, or safe failures.</li>
+      <li>DeepSeek and Gemini expose the same normalized native-tool contract, ready for Calendar in Milestone 2.</li>
+      <li>Use the separate dev bot for a smoke flow: generate a draft, request and send revision feedback, approve it, and verify the existing LinkedIn draft outcome and Telegram messages.</li>
+      <li>Deploy only after confirming there are no existing LinkedIn drafts awaiting feedback; no legacy bridge is required.</li>
+    </ul>
+
+    <h2>7. Recorded decisions</h2>
+    <ul>
+      <li>Zod is the runtime schema source.</li>
+      <li>Router records live in a SQLite-backed Durable Object, partitioned by Telegram chat; Workflow state retains active session data.</li>
+      <li>Worker console logs are the initial observability sink.</li>
+      <li>One typed revision interaction may be active per chat; a newer one replaces it.</li>
+      <li>There is no in-flight compatibility bridge; the user performs a clean deployment cutover.</li>
+      <li>LinkedIn has an explicit empty tool allowlist until its later native-tool-loop milestone.</li>
+    </ul>
+  </body>
+</html>

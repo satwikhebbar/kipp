@@ -5,6 +5,7 @@ vi.stubGlobal("fetch", mockFetch)
 
 import { createTelegramClient } from "../integrations/telegram"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
+import { INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "../types"
 
 function b64(s: string): string {
   const bytes = new TextEncoder().encode(s)
@@ -27,6 +28,10 @@ function mockEnv() {
     LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
     PIPELINE_WORKFLOW: { create: vi.fn(), get: vi.fn() },
+    INTERACTION_ROUTER: {
+      idFromName: vi.fn(() => "router-id"),
+      get: vi.fn(() => ({ fetch: vi.fn(async () => Response.json({ interaction: null })) })),
+    },
   }
 }
 
@@ -140,58 +145,67 @@ describe("handleTelegramWebhook", () => {
     })
   }
 
-  function callbackEnv() {
+  type TestRoutedInteraction = WorkflowInteraction & { workflowId: string }
+  const APPROVE_KIND: WorkflowInteractionKind = INTERACTION_KIND.APPROVE
+  const REVISE_KIND: WorkflowInteractionKind = INTERACTION_KIND.REVISE
+
+  function callbackEnv(interaction?: TestRoutedInteraction) {
     const sendEvent = vi.fn()
     const get = vi.fn().mockResolvedValue({ sendEvent })
     const env = mockEnv()
     env.PIPELINE_WORKFLOW.get = get
+    env.INTERACTION_ROUTER = {
+      idFromName: vi.fn(() => "router-id"),
+      get: vi.fn(() => ({ fetch: vi.fn(async () => Response.json({ interaction: interaction ?? null })) })),
+    }
     return { env, sendEvent, get }
   }
 
   it("handles confirm callback_query", async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
-    const { env, sendEvent, get } = callbackEnv()
+    const { env, sendEvent, get } = callbackEnv({
+      interactionId: "i-1",
+      version: 1,
+      workflowId: "wf-abc",
+      kind: APPROVE_KIND,
+      telegramUpdateId: 1,
+    })
 
     const res = await handleTelegramWebhook(callbackRequest(callbackBody("confirm:wf-abc")), env as never)
     expect(res.status).toBe(200)
     expect(get).toHaveBeenCalledWith("wf-abc")
-    expect(sendEvent).toHaveBeenCalledWith({ type: "telegram-reply", payload: { userId: 42, text: "__approve__" } })
+    expect(sendEvent).toHaveBeenCalledWith({
+      type: "telegram-reply",
+      payload: expect.objectContaining({ userId: 42, text: "__approve__", interactionId: "i-1" }),
+    })
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("answerCallbackQuery"), expect.any(Object))
   })
 
-  it("handles revise callback_query by setting pendingRevision", async () => {
-    const REVISE_IDEAS = `---
-id: 1
-title: Test
-status: awaiting-feedback
-correlation:
-  workflowInstanceId: wf-xyz
----
-
-Body`
-
-    let putBody = ""
-    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (opts?.method === "PUT") {
-        putBody = opts.body as string
-        return { ok: true, json: () => Promise.resolve({}) }
-      }
+  it("routes revise callback through the interaction router without GitHub writes", async () => {
+    mockFetch.mockImplementation(async (url: string, _opts?: RequestInit) => {
       if (url?.includes?.("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 200 } }) }
-      return { ok: true, json: () => Promise.resolve({ content: b64(REVISE_IDEAS), sha: "s1" }) }
+      return { ok: true, json: () => Promise.resolve({}) }
     })
-    const { env, sendEvent, get } = callbackEnv()
+    const { env, sendEvent, get } = callbackEnv({
+      interactionId: "i-2",
+      version: 1,
+      workflowId: "wf-xyz",
+      kind: REVISE_KIND,
+      telegramUpdateId: 1,
+    })
 
     const res = await handleTelegramWebhook(callbackRequest(callbackBody("revise:wf-xyz")), env as never)
     expect(res.status).toBe(200)
-    expect(get).not.toHaveBeenCalled()
-    expect(sendEvent).not.toHaveBeenCalled()
-    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("sendMessage"), expect.any(Object))
-    const updated = JSON.parse(putBody)
-    expect(atob(updated.content)).toContain("pendingRevision: 100")
+    expect(get).toHaveBeenCalledWith("wf-xyz")
+    expect(sendEvent).toHaveBeenCalledWith({
+      type: "telegram-reply",
+      payload: expect.objectContaining({ text: "__revise__" }),
+    })
+    expect(mockFetch).not.toHaveBeenCalledWith(expect.stringContaining("api.github.com"), expect.any(Object))
   })
 
-  it("routes free-text reply to correct chat when multiple pending revisions exist", async () => {
+  it("routes plain revision feedback through the interaction router", async () => {
     const REVISIONS = `---
 id: 1
 status: awaiting-feedback
@@ -211,12 +225,7 @@ correlation:
 
 Idea 2`
 
-    const putBodies: string[] = []
-    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (opts?.method === "PUT") {
-        putBodies.push(JSON.parse(opts.body as string).content)
-        return { ok: true, json: () => Promise.resolve({}) }
-      }
+    mockFetch.mockImplementation(async (url: string, _opts?: RequestInit) => {
       if (url?.includes?.("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
       return { ok: true, json: () => Promise.resolve({ content: b64(REVISIONS), sha: "s1" }) }
@@ -230,6 +239,23 @@ Idea 2`
       if (id === "wf-two") return Promise.resolve({ sendEvent: sendEvent2 })
       return Promise.reject(new Error("unknown"))
     }) as never
+    env.INTERACTION_ROUTER = {
+      idFromName: vi.fn(() => "router-id"),
+      get: vi.fn(() => ({
+        fetch: vi.fn(async () =>
+          Response.json({
+            interaction: {
+              interactionId: "i-feedback",
+              version: 1,
+              workflowId: "wf-one",
+              kind: INTERACTION_KIND.REVISION_FEEDBACK,
+              telegramUpdateId: 3,
+              text: "Make it shorter",
+            },
+          }),
+        ),
+      })),
+    }
 
     const body = JSON.stringify({
       update_id: 3,
@@ -252,12 +278,12 @@ Idea 2`
     expect(res.status).toBe(200)
     expect(sendEvent1).toHaveBeenCalledWith({
       type: "telegram-reply",
-      payload: { userId: 42, text: "Make it shorter" },
+      payload: expect.objectContaining({ userId: 42, text: "Make it shorter", interactionId: "i-feedback" }),
     })
     expect(sendEvent2).not.toHaveBeenCalled()
   })
 
-  it("ignores callback_query with unknown prefix", async () => {
+  it("ignores callback_query with an unknown router token", async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true }) })
     const { env, sendEvent, get } = callbackEnv()
 

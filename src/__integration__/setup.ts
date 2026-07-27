@@ -1,4 +1,5 @@
 import { vi } from "vitest"
+import { INTERACTION_KIND, type WorkflowInteractionKind } from "../types"
 
 export interface FakeState {
   githubFiles: Map<string, string>
@@ -168,4 +169,81 @@ export function createFakeWorkflowBinding() {
       get.mockClear()
     },
   }
+}
+
+const REVISION_FEEDBACK_KIND = INTERACTION_KIND.REVISION_FEEDBACK
+
+export interface FakeInteractionRegistration {
+  interactionId: string
+  version: number
+  workflowId: string
+  kind: WorkflowInteractionKind
+  callbackToken?: string
+  botMessageId?: number
+  expiresAt?: number
+}
+
+export interface FakeInteractionRouter {
+  namespace: DurableObjectNamespace
+  register(chatId: number | string, registration: FakeInteractionRegistration): void
+}
+
+export function createFakeInteractionRouter(): FakeInteractionRouter {
+  type RouterRecord = {
+    interactionId: string
+    version: number
+    workflowId: string
+    kind: string
+    callbackToken?: string
+    botMessageId?: number
+    expiresAt: number
+    consumed?: number
+  }
+  const records = new Map<string, RouterRecord[]>()
+  const register = (chatId: number | string, registration: FakeInteractionRegistration) => {
+    const chat = `telegram-chat:${chatId}`
+    const list = records.get(chat) ?? []
+    if (registration.kind === REVISION_FEEDBACK_KIND) {
+      for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
+    }
+    list.push({ ...registration, expiresAt: registration.expiresAt ?? Date.now() + 60_000 })
+    records.set(chat, list)
+  }
+  const namespace = {
+    idFromName: (name: string) => name as never,
+    get: (id: { toString?: () => string } | string) => ({
+      fetch: async (url: string | Request, init?: RequestInit) => {
+        const chat = typeof id === "string" ? id : (id.toString?.() ?? "")
+        const list = records.get(chat) ?? []
+        records.set(chat, list)
+        const path = new URL(typeof url === "string" ? url : url.url).pathname
+        const body = JSON.parse(init?.body as string) as Record<string, unknown>
+        if (path === "/register") {
+          const registration = body as unknown as RouterRecord
+          if (registration.kind === REVISION_FEEDBACK_KIND) {
+            for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
+          }
+          list.push(registration)
+          return Response.json({ ok: true })
+        }
+        const found = body.callbackToken
+          ? list.find((item) => item.callbackToken === body.callbackToken)
+          : body.replyToMessageId !== undefined
+            ? list.find((item) => item.botMessageId === body.replyToMessageId)
+            : list.find((item) => item.kind === REVISION_FEEDBACK_KIND && !item.consumed)
+        if (!found) return Response.json({ interaction: null })
+        if (found.expiresAt <= Date.now() || (found.consumed && found.consumed !== body.telegramUpdateId))
+          return Response.json({ interaction: null })
+        found.consumed = body.telegramUpdateId as number
+        return Response.json({
+          interaction: {
+            ...found,
+            telegramUpdateId: body.telegramUpdateId,
+            ...(body.text !== undefined ? { text: body.text } : {}),
+          },
+        })
+      },
+    }),
+  } as unknown as DurableObjectNamespace
+  return { namespace, register }
 }
