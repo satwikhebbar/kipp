@@ -97,7 +97,7 @@ secret values in a committed Wrangler file.
 | --- | --- | --- |
 | Secret | `ACCESS_ADMIN_EMAILS` | Comma-separated emails allowed by Worker-side Access JWT validation. |
 | Secret | `DATA_REPO_NAME`, `DATA_REPO_OWNER`, `GITHUB_PAT` | Private GitHub data repository access. |
-| Secret | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | LinkedIn OAuth client credentials. |
+| Secret | `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | Google Calendar and LinkedIn OAuth client credentials. |
 | Secret | `LLM_API_KEY` | Gemini or DeepSeek API credential. |
 | Secret | `TELEGRAM_ALLOWED_USER_ID`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Telegram user allow-list, Bot API access, and webhook verification. |
 | Secret | `TOKEN_ENCRYPTION_KEY_<key-id>` | 32-byte base64url token-encryption key; the configured key ID determines its exact name. |
@@ -139,10 +139,10 @@ pnpm wrangler deploy --config wrangler.prod.toml # explicit equivalent
 The configuration files define the same runtime bindings and environment
 variables for their respective targets. Keep credentials out of both files.
 
-`LINKEDIN_REDIRECT_ORIGIN` and `PROMPT_STYLE_PATH` are optional overrides. The
-first overrides the OAuth callback origin; the second selects a style prompt in
-the data repository and otherwise falls back to `style-prompt.md` and then the
-built-in default.
+`GOOGLE_CALENDAR_REDIRECT_ORIGIN`, `LINKEDIN_REDIRECT_ORIGIN`, and
+`PROMPT_STYLE_PATH` are optional overrides. The first two override their OAuth
+callback origins; the third selects a style prompt in the data repository and
+otherwise falls back to `style-prompt.md` and then the built-in default.
 
 ### 8. LinkedIn OAuth setup
 
@@ -159,13 +159,34 @@ The worker verifies your Access JWT, initiates the OAuth flow:
 
 Tokens are automatically refreshed via a weekly cron (`handleTokenCheckCron`). A `POST /admin/rewrap` endpoint re-encrypts stored tokens with the current active key encryption key.
 
-### 9. Register Telegram webhook
+### 9. Google Calendar OAuth setup
+
+Create a Google OAuth **Web application** client, enable the Google Calendar
+API, and add the exact callback URL as an authorized redirect URI. For local
+development, that is usually `http://localhost:8787/auth/google-calendar/callback`.
+Set the matching client ID, secret, and optional `GOOGLE_CALENDAR_REDIRECT_ORIGIN`,
+then visit:
+
+```
+http://localhost:8787/setup/google-calendar
+```
+
+Once connected, send `/calendar <request>` to the dev bot. For example:
+
+```
+/calendar Call Jamie tomorrow at 7pm
+```
+
+The current milestone supports clear, safe one-off blocks only. The model sees
+only free candidate times; the worker performs the final Calendar write.
+
+### 10. Register Telegram webhook
 
 ```bash
 curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<worker>.workers.dev/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-### 10. Verify
+### 11. Verify
 
 - Send `/add <your idea text>` to your Telegram bot — it should appear in `ideas.md`
 - Send `/generate` — it should start the pipeline workflow
@@ -181,6 +202,9 @@ To test the Telegram flow locally without hijacking the production webhook, you 
    TELEGRAM_BOT_TOKEN="dev_bot_token_here"
    TELEGRAM_WEBHOOK_SECRET="some_random_secret"
    ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK="true"
+   GOOGLE_CALENDAR_CLIENT_ID="your_google_client_id"
+   GOOGLE_CALENDAR_CLIENT_SECRET="your_google_client_secret"
+   GOOGLE_CALENDAR_REDIRECT_ORIGIN="http://localhost:8787"
    LINKEDIN_ACCESS_TOKEN="your_linkedin_token"
    TOKEN_ENCRYPTION_KEY_IDS="k20260720a"
    TOKEN_ENCRYPTION_KEY_k20260720a="<base64url-32-byte-key>"

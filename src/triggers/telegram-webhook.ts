@@ -1,5 +1,6 @@
 import { nextId } from "../backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../backlog/parser"
+import { CALENDAR_HELP } from "../calendar-messages"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
 import { createInteractionRouter } from "../interaction-router-client"
@@ -120,6 +121,28 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     return new Response("OK")
   }
 
+  if (msg.text === "/calendar") {
+    await tg.sendMessage(msg.chat.id, CALENDAR_HELP)
+    return new Response("OK")
+  }
+
+  if (msg.text.startsWith("/calendar ")) {
+    const requestText = msg.text.slice("/calendar ".length).trim()
+    if (!requestText) {
+      await tg.sendMessage(msg.chat.id, CALENDAR_HELP)
+      return new Response("OK")
+    }
+    if (!env.CALENDAR_WORKFLOW) {
+      await tg.sendMessage(msg.chat.id, "Calendar scheduling is not configured yet.")
+      return new Response("OK")
+    }
+    await env.CALENDAR_WORKFLOW.create({
+      params: { chatId: String(msg.chat.id), requestText, telegramMessageId: msg.message_id },
+    })
+    await tg.sendMessage(msg.chat.id, "Scheduling that now.")
+    return new Response("OK")
+  }
+
   {
     const client = createGitHubClient(env)
     const text = msg.text
@@ -144,7 +167,10 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     }
 
     if (text.startsWith("/")) {
-      await tg.sendMessage(msg.chat.id, "Unknown command. Use /add <text>, /generate, or tap inline buttons.")
+      await tg.sendMessage(
+        msg.chat.id,
+        "Unknown command. Use /add <text>, /generate, /calendar <request>, or tap inline buttons.",
+      )
       return new Response("OK")
     }
 
@@ -154,7 +180,10 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     })
     if (routed) return new Response("OK")
 
-    await tg.sendMessage(msg.chat.id, "Unknown command. Use /add <text>, /generate, or tap inline buttons.")
+    await tg.sendMessage(
+      msg.chat.id,
+      "Unknown command. Use /add <text>, /generate, /calendar <request>, or tap inline buttons.",
+    )
     return new Response("OK")
   }
 }

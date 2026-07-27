@@ -28,6 +28,7 @@ function mockEnv() {
     LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
     PIPELINE_WORKFLOW: { create: vi.fn(), get: vi.fn() },
+    CALENDAR_WORKFLOW: undefined as Workflow | undefined,
     INTERACTION_ROUTER: {
       idFromName: vi.fn(() => "router-id"),
       get: vi.fn(() => ({ fetch: vi.fn(async () => Response.json({ interaction: null })) })),
@@ -369,5 +370,57 @@ Body text`
     )
     expect(res.status).toBe(200)
     expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalled()
+  })
+
+  it("shows Calendar help without invoking an LLM or workflow", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) })
+    const env = mockEnv()
+    const calendarWorkflow = { create: vi.fn() }
+    env.CALENDAR_WORKFLOW = calendarWorkflow as never
+    const body = JSON.stringify({
+      update_id: 4,
+      message: { message_id: 8, from: { id: 42 }, chat: { id: 100, type: "private" }, text: "/calendar" },
+    })
+
+    await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+
+    expect(calendarWorkflow.create).not.toHaveBeenCalled()
+    expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("sendMessage"), expect.any(Object))
+  })
+
+  it("starts the separate Calendar workflow for a Calendar request", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) })
+    const env = mockEnv()
+    const calendarWorkflow = { create: vi.fn().mockResolvedValue({ id: "calendar-1" }) }
+    env.CALENDAR_WORKFLOW = calendarWorkflow as never
+    const body = JSON.stringify({
+      update_id: 5,
+      message: {
+        message_id: 9,
+        from: { id: 42 },
+        chat: { id: 100, type: "private" },
+        text: "/calendar Call Jamie tomorrow at 7pm",
+      },
+    })
+
+    await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+
+    expect(calendarWorkflow.create).toHaveBeenCalledWith({
+      params: { chatId: "100", requestText: "Call Jamie tomorrow at 7pm", telegramMessageId: 9 },
+    })
   })
 })
