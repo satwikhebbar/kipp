@@ -4,7 +4,12 @@ const FM_RE = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 
 type FM = Record<string, string | Record<string, string>>
 
-/** Parses frontmatter YAML lines into a flat key-value map. */
+export function parseYamlLine(raw: string): [string, string] | null {
+  const m = raw.trim().match(/^(\w+):\s*(.*)/)
+  if (!m) return null
+  return [m[1], m[2].replace(/^"(.*)"$/, "$1")]
+}
+
 function parseYaml(lines: string): FM {
   const fm: FM = {}
   let currentKey: string | null = null
@@ -12,30 +17,24 @@ function parseYaml(lines: string): FM {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith("#")) continue
     const indent = line.match(/^(\s+)/)?.[1]?.length ?? 0
+    const parsed = parseYamlLine(line)
+    if (!parsed) continue
+    const [k, v] = parsed
+
     if (indent === 0) {
-      const m = trimmed.match(/^(\w+):\s*(.*)/)
-      if (m) {
-        currentKey = m[1]
-        fm[currentKey] = m[2].replace(/^"(.*)"$/, "$1")
-      }
-    } else if (currentKey && typeof fm[currentKey] === "string") {
-      const m = trimmed.match(/^(\w+):\s*(.*)/)
-      if (m) {
-        const inner: Record<string, string> = {}
-        inner[m[1]] = m[2].replace(/^"(.*)"$/, "$1")
-        fm[currentKey] = inner
-      }
-    } else if (currentKey && typeof fm[currentKey] === "object") {
-      const m = trimmed.match(/^(\w+):\s*(.*)/)
-      if (m) {
-        ;(fm[currentKey] as Record<string, string>)[m[1]] = m[2].replace(/^"(.*)"$/, "$1")
+      currentKey = k
+      fm[currentKey] = v
+    } else if (currentKey) {
+      if (typeof fm[currentKey] === "string") {
+        fm[currentKey] = { [k]: v }
+      } else {
+        ;(fm[currentKey] as Record<string, string>)[k] = v
       }
     }
   }
   return fm
 }
 
-/** Serializes a flat key-value map back to frontmatter YAML. */
 function serializeYaml(fm: FM): string {
   const lines: string[] = []
   for (const [k, v] of Object.entries(fm)) {
@@ -51,7 +50,6 @@ function serializeYaml(fm: FM): string {
   return lines.join("\n")
 }
 
-/** Extracts Draft and Critique sections from an idea body. */
 function extractSections(body: string): { preamble: string; draft?: string; critique?: string } {
   let draft: string | undefined
   let critique: string | undefined
@@ -65,7 +63,16 @@ function extractSections(body: string): { preamble: string; draft?: string; crit
   return { preamble: cleaned.trim(), draft, critique }
 }
 
-/** Parses a single idea from its frontmatter + body representation. */
+const OPTIONAL_IDEA_FIELDS: [string, (v: string) => unknown][] = [
+  ["substackUrl", String],
+  ["teaser", String],
+  ["finalized", String],
+  ["costUsd", Number],
+  ["costInputTokens", Number],
+  ["costOutputTokens", Number],
+  ["costModel", String],
+]
+
 export function parseIdea(text: string): Idea {
   const m = text.match(FM_RE)
   if (!m) throw new Error("Missing frontmatter")
@@ -95,18 +102,14 @@ export function parseIdea(text: string): Idea {
     }
   }
 
-  if (fm.substackUrl) idea.substackUrl = String(fm.substackUrl)
-  if (fm.teaser) idea.teaser = String(fm.teaser)
-  if (fm.finalized) idea.finalized = String(fm.finalized)
-  if (fm.costUsd) idea.costUsd = Number(fm.costUsd)
-  if (fm.costInputTokens) idea.costInputTokens = Number(fm.costInputTokens)
-  if (fm.costOutputTokens) idea.costOutputTokens = Number(fm.costOutputTokens)
-  if (fm.costModel) idea.costModel = String(fm.costModel)
+  for (const [k, fn] of OPTIONAL_IDEA_FIELDS) {
+    const v = fm[k]
+    if (v) (idea as unknown as Record<string, unknown>)[k] = fn(v as string)
+  }
 
   return idea
 }
 
-/** Reconstructs the body text from an idea's fields, including optional Draft/Critique sections. */
 function buildBody(idea: Idea): string {
   const parts = [idea.body]
   if (idea.draft) parts.push(`\n\n## Draft\n\n${idea.draft}`)
@@ -114,7 +117,6 @@ function buildBody(idea: Idea): string {
   return parts.join("")
 }
 
-/** Serializes a single idea to its frontmatter + body representation. */
 export function serializeIdea(idea: Idea): string {
   const fm: FM = {
     id: idea.id,
@@ -123,13 +125,11 @@ export function serializeIdea(idea: Idea): string {
     source: idea.source,
   }
   if (idea.title) fm.title = idea.title
-  if (idea.substackUrl) fm.substackUrl = idea.substackUrl
-  if (idea.teaser) fm.teaser = idea.teaser
-  if (idea.finalized) fm.finalized = idea.finalized
-  if (idea.costUsd !== undefined) fm.costUsd = String(idea.costUsd)
-  if (idea.costInputTokens !== undefined) fm.costInputTokens = String(idea.costInputTokens)
-  if (idea.costOutputTokens !== undefined) fm.costOutputTokens = String(idea.costOutputTokens)
-  if (idea.costModel) fm.costModel = idea.costModel
+
+  for (const [k] of OPTIONAL_IDEA_FIELDS) {
+    const v = (idea as unknown as Record<string, unknown>)[k]
+    if (v !== undefined) fm[k] = String(v)
+  }
 
   if (idea.correlation) {
     const c: Record<string, string> = {}
@@ -143,31 +143,27 @@ export function serializeIdea(idea: Idea): string {
   return `---\n${serializeYaml(fm)}\n---\n\n${buildBody(idea)}\n`
 }
 
-/** Parses a document containing multiple ideas separated by frontmatter blocks. */
+export function isIdeaStart(lines: string[], i: number): boolean {
+  return lines[i]?.trim() === "---" && /^\w+:(\s|$)/.test(lines[i + 1]?.trim() ?? "")
+}
+
 export function parseIdeas(text: string): Idea[] {
   const ideas: Idea[] = []
   const lines = text.split("\n")
   let i = 0
 
   while (i < lines.length) {
-    if (lines[i].trim() !== "---") {
-      i++
-      continue
-    }
-    const ideaStart = i
-
-    i++ // past opening ---
     while (i < lines.length && lines[i].trim() !== "---") i++
     if (i >= lines.length) break
-    i++ // past closing ---
 
-    while (i < lines.length) {
-      if (lines[i].trim() === "---") {
-        const next = lines[i + 1]?.trim()
-        if (next && /^\w+:(\s|$)/.test(next)) break
-      }
-      i++
-    }
+    const ideaStart = i
+    i++
+
+    while (i < lines.length && lines[i].trim() !== "---") i++
+    if (i >= lines.length) break
+    i++
+
+    while (i < lines.length && !isIdeaStart(lines, i)) i++
 
     ideas.push(parseIdea(lines.slice(ideaStart, i).join("\n")))
   }
@@ -175,7 +171,6 @@ export function parseIdeas(text: string): Idea[] {
   return ideas
 }
 
-/** Serializes an array of ideas into a single document. */
 export function serializeIdeas(ideas: Idea[]): string {
   return ideas.map(serializeIdea).join("\n")
 }
