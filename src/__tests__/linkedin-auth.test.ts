@@ -11,6 +11,7 @@ vi.mock("../token-vault-client", () => ({
     writeTokens: mockWriteTokens,
   }),
   verifyAccessJwt: vi.fn().mockResolvedValue(null),
+  isInsecureLocalAccessEnabled: () => true,
 }))
 
 const mockFetch = vi.hoisted(() => {

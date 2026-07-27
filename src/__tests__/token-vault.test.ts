@@ -226,6 +226,28 @@ describe("TokenVaultDO — encrypted read/write", () => {
     expect(res.status).toBe(400)
     expect(await res.json()).toEqual({ ok: false })
   })
+
+  it("does not overwrite LinkedIn credentials when Calendar credentials are stored", async () => {
+    const doObj = makeDO(keyEnv())
+    await callFetch(doObj, {
+      op: "writeTokens",
+      tokens: { access_token: "linkedin-token", expires_in: 3600, created_at: "now" },
+    })
+    await callFetch(doObj, {
+      op: "writeTokens",
+      provider: "google-calendar",
+      tokens: { access_token: "calendar-token", expires_in: 3600, created_at: "now" },
+    })
+
+    const linkedin = (await (await callFetch(doObj, { op: "readTokens" })).json()) as {
+      tokens: { access_token: string }
+    }
+    const calendar = (await (await callFetch(doObj, { op: "readTokens", provider: "google-calendar" })).json()) as {
+      tokens: { access_token: string }
+    }
+    expect(linkedin.tokens.access_token).toBe("linkedin-token")
+    expect(calendar.tokens.access_token).toBe("calendar-token")
+  })
 })
 
 describe("TokenVaultDO — key rotation", () => {
@@ -269,6 +291,34 @@ describe("TokenVaultDO — key rotation", () => {
     const res = await callFetch(makeDO(keyEnv()), { op: "rewrap" })
     expect(res.status).toBe(500)
   })
+
+  it("rewraps Calendar credentials in their namespaced token key", async () => {
+    const oldKeyB64 = makeKey()
+    const newKeyB64 = makeKey()
+    const storage = mockStorage()
+    const ctx = { storage }
+    const original = new TokenVaultDO(ctx as never, keyEnv("old", oldKeyB64) as never)
+    await callFetch(original, {
+      op: "writeTokens",
+      provider: "google-calendar",
+      tokens: { access_token: "calendar-at", expires_in: 3600, created_at: "now" },
+    })
+
+    const rotated = new TokenVaultDO(
+      ctx as never,
+      {
+        TOKEN_ENCRYPTION_KEY_IDS: "new,old",
+        TOKEN_ENCRYPTION_KEY_new: newKeyB64,
+        TOKEN_ENCRYPTION_KEY_old: oldKeyB64,
+      } as never,
+    )
+    expect((await callFetch(rotated, { op: "rewrap", provider: "google-calendar" })).status).toBe(200)
+    expect(((await storage.get("google-calendar:tokens")) as Envelope).kid).toBe("new")
+
+    const finalVault = new TokenVaultDO(ctx as never, keyEnv("new", newKeyB64) as never)
+    const read = await callFetch(finalVault, { op: "readTokens", provider: "google-calendar" })
+    expect(((await read.json()) as { tokens: { access_token: string } }).tokens.access_token).toBe("calendar-at")
+  })
 })
 
 describe("TokenVaultDO — state consumption", () => {
@@ -291,6 +341,23 @@ describe("TokenVaultDO — state consumption", () => {
 
     const res = await callFetch(doObj, { op: "consumeState", state, cookieId: "wrong" })
     expect(((await res.json()) as { valid: boolean }).valid).toBe(false)
+  })
+
+  it("isolates OAuth state by provider", async () => {
+    const doObj = makeDO(keyEnv())
+    const issued = await callFetch(doObj, { op: "issueState", provider: "google-calendar" })
+    const { state, cookieId } = (await issued.json()) as { state: string; cookieId: string }
+
+    const linkedinAttempt = await callFetch(doObj, { op: "consumeState", state, cookieId })
+    expect(await linkedinAttempt.json()).toEqual({ valid: false })
+
+    const calendarAttempt = await callFetch(doObj, {
+      op: "consumeState",
+      provider: "google-calendar",
+      state,
+      cookieId,
+    })
+    expect(await calendarAttempt.json()).toEqual({ valid: true })
   })
 
   it("consumeState rejects expired state", async () => {

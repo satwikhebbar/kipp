@@ -1,5 +1,6 @@
 export interface Env {
   PIPELINE_WORKFLOW: Workflow
+  CALENDAR_WORKFLOW?: Workflow
   TOKEN_VAULT: DurableObjectNamespace
   INTERACTION_ROUTER: DurableObjectNamespace
   TELEGRAM_BOT_TOKEN: string
@@ -10,6 +11,9 @@ export interface Env {
   LINKEDIN_CLIENT_SECRET: string
   LINKEDIN_ACCESS_TOKEN: string
   LINKEDIN_REDIRECT_ORIGIN?: string
+  GOOGLE_CALENDAR_CLIENT_ID?: string
+  GOOGLE_CALENDAR_CLIENT_SECRET?: string
+  GOOGLE_CALENDAR_REDIRECT_ORIGIN?: string
   LINKEDIN_AUTHOR_URN: string
   DEPLOYMENT_ENV?: string
   LOG_LEVEL?: string
@@ -28,6 +32,7 @@ export interface Env {
   SUBSTACK_RSS_URL: string
   POSTING_CADENCE_DAYS: string
   WAIT_FOR_FEEDBACK_HOURS: string
+  TIMEZONE?: string
 }
 
 export type IdeaStatus = "raw" | "drafted" | "awaiting-feedback" | "awaiting-feedback-expired" | "finalized" | "skipped"
@@ -157,3 +162,18 @@ export interface LinkedInTokens {
   refresh_token_expires_in?: number
   scope?: string
 }
+
+export interface GoogleCalendarTokens {
+  access_token: string
+  expires_in: number
+  created_at: string
+  refresh_token?: string
+  scope?: string
+}
+
+export const TOKEN_PROVIDER = {
+  LINKEDIN: "linkedin",
+  GOOGLE_CALENDAR: "google-calendar",
+} as const
+
+export type TokenProvider = (typeof TOKEN_PROVIDER)[keyof typeof TOKEN_PROVIDER]

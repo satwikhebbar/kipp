@@ -1,3 +1,5 @@
+import { isTransientServerError } from "../runtime/http"
+
 const GITHUB_API = "https://api.github.com"
 
 export class GithubError extends Error {
@@ -50,7 +52,7 @@ export function createGitHubClient(env: {
   async function fetchWithRetry(req: () => Promise<Response>, retries = 2): Promise<Response> {
     for (let attempt = 0; ; attempt++) {
       const res = await req()
-      if (res.ok || attempt >= retries || res.status < 500) return res
+      if (res.ok || attempt >= retries || !isTransientServerError(res.status)) return res
     }
   }
 

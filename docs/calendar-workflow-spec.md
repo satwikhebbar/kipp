@@ -31,7 +31,11 @@ screen, and protected redirect URI) is a deployment prerequisite. Kipp then
 provides an Access-protected `/setup/google-calendar` flow based on the
 existing OAuth-state and encrypted token-vault patterns.
 
-- Request only `https://www.googleapis.com/auth/calendar.events.owned`.
+- Request only the two narrow scopes required for the workflow:
+  `https://www.googleapis.com/auth/calendar.events.owned` to create and
+  manage events on owned calendars, and
+  `https://www.googleapis.com/auth/calendar.events.freebusy` for
+  availability-only reads. Do not request a broader Calendar scope.
 - Store access and refresh tokens encrypted and independently namespaced from
   LinkedIn credentials.
 - Refresh ordinary access-token expiry silently before a Calendar request, or

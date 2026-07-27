@@ -5,6 +5,7 @@ import { handleAuthCallback, handleAuthStart } from "../triggers/linkedin-auth"
 import type { Env } from "../types"
 
 vi.mock("../workflow", () => ({ PipelineWorkflow: class {} }))
+vi.mock("../calendar-workflow", () => ({ CalendarWorkflow: class {} }))
 
 import worker from "../index"
 
@@ -278,6 +279,8 @@ describe("Worker fetch — production-mode routes", () => {
     const env = {
       LINKEDIN_CLIENT_ID: "wrk-client-id",
       LINKEDIN_CLIENT_SECRET: "wrk-client-secret",
+      GOOGLE_CALENDAR_CLIENT_ID: "wrk-google-client-id",
+      GOOGLE_CALENDAR_CLIENT_SECRET: "wrk-google-client-secret",
       TOKEN_ENCRYPTION_KEY_IDS: "k20260720a",
       TOKEN_ENCRYPTION_KEY_k20260720a: makeKey(),
       ACCESS_TEAM: TEAM,
@@ -348,6 +351,19 @@ describe("Worker fetch — production-mode routes", () => {
     })
     const res = await worker.fetch(req, env, {} as ExecutionContext)
     expect(res.status).toBe(302)
+  })
+
+  it("setup/google-calendar returns the Google OAuth redirect with a valid JWT", async () => {
+    const env = makeVaultEnv(mockStorage())
+    setupJwksMock()
+    const jwt = await createJwt(validClaims())
+    const res = await worker.fetch(
+      new Request("https://example.com/setup/google-calendar", { headers: { "Cf-Access-Jwt-Assertion": jwt } }),
+      env,
+      {} as ExecutionContext,
+    )
+    expect(res.status).toBe(302)
+    expect(new URL(res.headers.get("location") ?? "").hostname).toBe("accounts.google.com")
   })
 
   it("callback returns 403 without JWT", async () => {

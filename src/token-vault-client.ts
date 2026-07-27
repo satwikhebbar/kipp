@@ -1,5 +1,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose"
-import type { Env, LinkedInTokens } from "./types"
+import { type Env, type GoogleCalendarTokens, type LinkedInTokens, TOKEN_PROVIDER, type TokenProvider } from "./types"
+
+export { TOKEN_PROVIDER, type TokenProvider } from "./types"
 
 interface AccessJwtClaims {
   email: string
@@ -25,7 +27,7 @@ function getResolver(domain: string) {
 }
 
 export async function verifyAccessJwt(request: Request, env: Env): Promise<AccessJwtClaims | null> {
-  if (env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development") return null
+  if (isInsecureLocalAccessEnabled(env)) return null
 
   try {
     const jwt = request.headers.get("Cf-Access-Jwt-Assertion")
@@ -50,7 +52,12 @@ export async function verifyAccessJwt(request: Request, env: Env): Promise<Acces
   }
 }
 
-export function createTokenVault(env: Env) {
+/** Never enables the development fallback outside an explicitly marked development deployment. */
+export function isInsecureLocalAccessEnabled(env: Env): boolean {
+  return env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development"
+}
+
+export function createTokenVault(env: Env, provider: TokenProvider = TOKEN_PROVIDER.LINKEDIN) {
   const doId = env.TOKEN_VAULT.idFromName("linkedin-token-vault")
   const doStub = env.TOKEN_VAULT.get(doId)
 
@@ -65,10 +72,12 @@ export function createTokenVault(env: Env) {
   }
 
   return {
-    issueState: () => cmd<{ state: string; cookieId: string }>("issueState"),
-    consumeState: (state: string, cookieId: string) => cmd<{ valid: boolean }>("consumeState", { state, cookieId }),
-    readTokens: () => cmd<{ tokens: LinkedInTokens | null }>("readTokens"),
-    writeTokens: (tokens: LinkedInTokens) => cmd<{ ok: boolean }>("writeTokens", { tokens }),
-    rewrap: () => cmd<{ success: boolean }>("rewrap"),
+    issueState: () => cmd<{ state: string; cookieId: string }>("issueState", { provider }),
+    consumeState: (state: string, cookieId: string) =>
+      cmd<{ valid: boolean }>("consumeState", { provider, state, cookieId }),
+    readTokens: () => cmd<{ tokens: LinkedInTokens | GoogleCalendarTokens | null }>("readTokens", { provider }),
+    writeTokens: (tokens: LinkedInTokens | GoogleCalendarTokens) =>
+      cmd<{ ok: boolean }>("writeTokens", { provider, tokens }),
+    rewrap: () => cmd<{ success: boolean }>("rewrap", { provider }),
   }
 }

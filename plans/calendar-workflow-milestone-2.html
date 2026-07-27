@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp Calendar — Milestone 2 Implementation Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --code:#020617; }
+      * { box-sizing:border-box; } body { max-width:1040px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; }
+      h1,h2,h3 { line-height:1.25; color:#f8fafc; } h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; } h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; } h3 { margin-top:28px; font-size:1.12rem; }
+      p,li { max-width:90ch; } .lede { color:var(--muted); font-size:1.1rem; } .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; } .note { border-left-color:var(--amber); }
+      .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; } code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; }
+      pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); } pre code { padding:0; color:var(--ink); } table { width:100%; border-collapse:collapse; margin:20px 0; } th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#cbd5e1; background:#1e293b; } ol>li { margin:14px 0; } a { color:#93c5fd; } @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp Calendar — Milestone 2 Implementation Plan</h1>
+    <p class="lede">Calendar core for safe, clear, conflict-free one-off personal blocks. This is the implementation-ready plan for Milestone 2 of the approved Calendar roadmap.</p>
+    <div class="callout"><strong>Status:</strong> Approved; implementation started.<br /><strong>Outcome:</strong> a Telegram <code>/calendar</code> request can create a well-bounded personal event on the authenticated user's primary Google Calendar, without exposing Calendar write authority or private calendar detail to the model.<br /><span class="tag">Google OAuth</span><span class="tag">Google Calendar</span><span class="tag">Cloudflare Workflows</span><span class="tag">Native tools</span><span class="tag">Idempotency</span></div>
+
+    <h2>1. Scope and boundaries</h2>
+    <table><thead><tr><th>Included</th><th>Deferred to later milestones</th></tr></thead><tbody>
+      <tr><td>Google Calendar OAuth, encrypted token storage, silent refresh, one connected account, and the primary calendar only</td><td>Reconnect and retry interaction, Calendar account management, additional calendars, event management, cancellation, and edits</td></tr>
+      <tr><td><code>TIMEZONE=Asia/Kolkata</code>, <code>/calendar &lt;natural language&gt;</code>, clear one-off blocks, availability-only reads, inferred-time alternative selection</td><td>Clarifying conversations, exact-time conflict choices, 15-minute edit window, and all Telegram interaction-router changes for Calendar</td></tr>
+      <tr><td>Bounded native-tool planning, deterministic scheduling/validation, private opaque event creation, reminders, Kipp metadata, retries, and idempotency</td><td>Recurring events, exceptions, renewal, generic memory/preferences, broader agent framework, and LinkedIn’s tool-loop migration</td></tr>
+    </tbody></table>
+    <p>A clear request is auto-booked only when all required event fields are confidently known or safely inferred and its proposed slot is conflict-free. The model never receives raw Calendar events, OAuth material, or a direct event-write capability.</p>
+
+    <h2>2. Target architecture</h2>
+    <h3>Workflow and Telegram entry point</h3>
+    <p>Add a separate <code>CalendarWorkflow</code>, bound as <code>CALENDAR_WORKFLOW</code>. The existing <code>PipelineWorkflow</code>, LinkedIn routes, and interaction-router behavior remain unchanged. The Telegram webhook recognizes <code>/calendar</code>: a bare command produces static help without an LLM call; a command with text starts the Calendar Workflow with the Telegram chat/message identity and request text.</p>
+    <p>Milestone 2 has no interactive wait state. Success, non-clear input, unavailable Calendar authorization, explicit-time conflict, and safe provider/integration failures return a single final Telegram message. This lets the Calendar workflow run to completion without changing the shared Interaction Router; Milestone 3 will generalize interactive routing.</p>
+
+    <h3>Bounded planning runtime</h3>
+    <p>Extract the smallest shared, workflow-scoped native-tool runner justified by Calendar: a serializable canonical conversation, static allowlist, maximum three provider turns and four tool calls, schema validation, and safe redacted errors. It is not a general autonomous agent framework.</p>
+    <pre><code>Telegram request → CalendarWorkflow
+  → deterministic request/time guard
+  → bounded model planning loop
+       ↳ get_available_slots (free candidate intervals only)
+       ↳ submit_one_off_proposal (structured proposal only)
+  → deterministic validation and Calendar write
+  → Telegram confirmation</code></pre>
+    <p><code>get_available_slots</code> is the sole model-visible Calendar read: it returns candidate free intervals, never event titles, attendees, descriptions, locations, or raw busy intervals. <code>submit_one_off_proposal</code> validates a structured candidate but does not write to Google. The workflow alone performs the final write after deterministic policy checks.</p>
+
+    <h3>LLM responsibility boundary</h3>
+    <table><thead><tr><th>Layer</th><th>Owns</th><th>Must not own</th></tr></thead><tbody>
+      <tr><td>Prompt</td><td>Natural-language interpretation, ambiguity detection, generic classification, concise user language, selection among validated candidates</td><td>Authority, secrets, raw integration data, final event writes, or policies where a plausible error could create, move, expose, or duplicate an event</td></tr>
+      <tr><td>Typed tool</td><td>Narrow, schema-checked capabilities such as availability candidates and a structured proposal</td><td>Broad integration access, arbitrary query execution, or policy discretion</td></tr>
+      <tr><td>Guard/scaffold</td><td>OAuth, scopes, timezone/date parsing, policy defaults, availability filtering, conflict detection, idempotency, retries, redaction, and writes</td><td>Open-ended interpretation of the request</td></tr>
+    </tbody></table>
+    <div class="callout note"><strong>Governing test:</strong> if a plausible model mistake could create, move, expose, or duplicate a real Calendar event, the decision belongs outside the prompt.</div>
+
+    <h2>3. Google authorization and token storage</h2>
+    <p>Add Cloudflare-Access-protected setup and callback routes: <code>/setup/google-calendar</code> and <code>/auth/google-calendar/callback</code>. The authorization code exchange requests only:</p>
+    <ul><li><code>https://www.googleapis.com/auth/calendar.events.owned</code> for managed events on owned calendars;</li><li><code>https://www.googleapis.com/auth/calendar.events.freebusy</code> for availability-only reads.</li></ul>
+    <p>Use offline access and securely state-bound authorization. Extend the existing encrypted Token Vault through a provider namespace so existing LinkedIn token/state keys and behavior remain intact. Calendar tokens, refresh state, and rewrap support live under a Calendar namespace; OAuth state is single-use and cannot cross providers. A Calendar client silently refreshes an expired access token. If authorization cannot be used, Milestone 2 sends a safe setup instruction; reconnect-and-resume belongs to Milestone 3.</p>
+    <p>Required deployment configuration: Google client ID/secret, an authorized redirect origin, and <code>TIMEZONE</code>. Update local/development configuration to <code>Asia/Kolkata</code>; configuration, not individual events, controls the user timezone.</p>
+
+    <h2>4. Calendar client and event contract</h2>
+    <table><thead><tr><th>Operation</th><th>Contract</th></tr></thead><tbody>
+      <tr><td><code>getBusyIntervals</code></td><td>Query the primary calendar's FreeBusy endpoint for bounded local-time windows; return only normalized busy intervals to deterministic code.</td></tr>
+      <tr><td><code>findManagedEvent</code></td><td>Retrieve the deterministic event ID after an ambiguous write result and verify Kipp metadata before treating the event as created.</td></tr>
+      <tr><td><code>createManagedEvent</code></td><td>Create exactly one primary-calendar event with an explicit safe ID; classify transient failures (network, rate limit, 5xx) for at most two short retries.</td></tr>
+    </tbody></table>
+    <p>Derive the Google event ID from a versioned Kipp namespace plus Telegram chat/message identity using a lower-case base32hex-safe hash. It must be stable across Workflow retries but unguessable in normal use. On a duplicate/ambiguous result, fetch the ID and require matching <code>kipp.requestId</code> before reporting success; never create a second event.</p>
+    <pre><code>{
+  visibility: "private", transparency: "opaque",
+  extendedProperties: { private: {
+    "kipp.managedBy": "calendar-agent",
+    "kipp.requestId": "&lt;opaque stable request id&gt;",
+    "kipp.schemaVersion": "1"
+  } }
+}</code></pre>
+    <p>No attendees, conference data, video links, colours, or guest-related fields are sent. The description and location are included only when meaningful and provided/inferred safely.</p>
+
+    <h2>5. Scheduling policy implemented in this milestone</h2>
+    <p>Introduce a runtime-safe timezone utility (not host-local <code>Date</code> interpretation) to represent local dates, times, and 15-minute slots. The LLM submits a typed proposal containing title, local date, time or window, duration, useful description/location, reminder class, and uncertainty flags. Deterministic code accepts it only if it satisfies the product specification.</p>
+    <table><thead><tr><th>Policy</th><th>Milestone 2 behavior</th></tr></thead><tbody>
+      <tr><td>Explicit time/date</td><td>Honor it when free. A conflict is reported safely; no event is moved or cancelled and no interactive choice is offered yet.</td></tr>
+      <tr><td>Inferred scheduling</td><td>Search 08:30–22:30, prefer 19:00–21:30, on a 15-minute grid. Today's slots begin no earlier than now + 30 minutes. For an inferred-time conflict, automatically select the closest suitable alternative on the requested date.</td></tr>
+      <tr><td>Duration and time confidence</td><td>Use generic sensible defaults (for example, personal call 30 minutes; professional call 15 minutes). Auto-select a time only up to 30 minutes. Longer or social/family requests without a usable time require clarification.</td></tr>
+      <tr><td>Buffers</td><td>For inferred blocks only, availability includes a 15-minute buffer before and after. The buffer does not create a second Calendar event and does not alter the event's visible duration.</td></tr>
+      <tr><td>Reminder</td><td>Ten minutes for ordinary blocks; one hour for family/social, school pickup, appointments, recurring maintenance, and physical activities; an explicit user instruction wins.</td></tr>
+    </tbody></table>
+    <p>Only a confidently inferred, conflict-free (or automatically shifted inferred) one-off is written. Non-inferable date/time, unclear intent, or a schedule outside policy produces a concise request for the missing detail.</p>
+
+    <h2>6. Implementation sequence</h2>
+    <ol>
+      <li><strong>Establish Calendar contracts.</strong> Add Calendar types, environment bindings, safe provider namespacing to Token Vault, shared timezone configuration, test fixtures, and Google OAuth route skeletons. Preserve every existing LinkedIn token path and test.</li>
+      <li><strong>Implement OAuth and client boundary.</strong> Add Access-gated setup/callback, state exchange, encrypted Calendar credentials, silent refresh, primary FreeBusy, primary event retrieval/insert, response validation, retry classification, and no-secret logs.</li>
+      <li><strong>Add deterministic scheduling primitives.</strong> Implement local-time parsing, date/window policy, slot generation, buffer-aware availability checks, generic duration/reminder defaults, deterministic IDs, Kipp event projection, and idempotent write recovery.</li>
+      <li><strong>Extract bounded planner.</strong> Add the reusable native-tool loop with exact limits and tests. Define the Calendar-only <code>get_available_slots</code> and <code>submit_one_off_proposal</code> tools; neither has write authority.</li>
+      <li><strong>Build CalendarWorkflow.</strong> Connect request classification, safe availability candidate generation, model planning, deterministic final validation, Calendar write, and confirmation. Ensure all completed steps produce stable retry inputs and outputs.</li>
+      <li><strong>Wire Telegram.</strong> Route <code>/calendar</code> to the new workflow, render static bare-command help, retain existing <code>/add</code> and <code>/generate</code> behavior, and extend unknown-command help.</li>
+      <li><strong>Document and smoke test.</strong> Add deployment prerequisites and a dev-bot procedure. Create a labeled, short-lived primary-calendar test event, verify its fields/reminder/metadata, and clean it up manually after the smoke test.</li>
+    </ol>
+
+    <h2>7. Test and acceptance plan</h2>
+    <table><thead><tr><th>Layer</th><th>Required coverage</th></tr></thead><tbody>
+      <tr><td>OAuth and tokens</td><td>Access protection, state single-use/provider isolation, callback errors, encrypted Calendar storage, silent refresh, and no regression to LinkedIn storage/rewrap.</td></tr>
+      <tr><td>Calendar client</td><td>Primary-only endpoint calls, scopes/configuration, FreeBusy normalization, metadata projection, retry limits, deterministic event ID, duplicate/ambiguous recovery, and secret-free errors/logs.</td></tr>
+      <tr><td>Scheduler</td><td>Timezone boundary cases, exact vs inferred policy, preference ordering, 15-minute grid, now + 30 minutes, buffer checks, generic durations, reminders, and no auto-write for ambiguity.</td></tr>
+      <tr><td>Planner runtime</td><td>Allowlist, input/output schema failures, provider tool messages, max turns/calls, free-candidate-only tool output, and no direct write tool.</td></tr>
+      <tr><td>Workflow / Telegram</td><td>Bare help without model invocation, clear one-off success, inferred-time alternative, exact conflict guidance, unavailable authorization guidance, idempotent retry, and no regression to LinkedIn webhook flows.</td></tr>
+    </tbody></table>
+    <ul>
+      <li><code>pnpm check</code> and integration tests pass.</li>
+      <li>A clear request creates one private, opaque primary-calendar event with only useful description/location, correct reminder, and the three Kipp metadata fields.</li>
+      <li>Workflow retries cannot duplicate an event; an uncertain Calendar result is verified by deterministic ID and metadata.</li>
+      <li>The model cannot receive raw Calendar data or directly write an event.</li>
+      <li>With the dev bot, create and verify a labeled short-lived event in the primary calendar. Do not treat the smoke test as authorization to alter unrelated Calendar events.</li>
+    </ul>
+
+    <h2>8. Recorded decisions</h2>
+    <ul><li>One connected Google account and primary calendar only.</li><li>Google scopes are <code>calendar.events.owned</code> and <code>calendar.events.freebusy</code>, with no broader Calendar scope.</li><li><code>TIMEZONE</code> is shared workflow configuration, initial value <code>Asia/Kolkata</code>.</li><li>M2 auto-books only clear safe one-off requests; all conversational resolution moves to M3.</li><li>The Calendar write remains deterministic workflow code, outside the LLM tool allowlist.</li><li>LinkedIn stays unchanged in this milestone.</li></ul>
+  </body>
+</html>

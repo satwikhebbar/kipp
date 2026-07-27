@@ -1,17 +1,9 @@
-import { createTokenVault, verifyAccessJwt } from "../token-vault-client"
+import { createTokenVault } from "../token-vault-client"
 import type { Env, LinkedInTokens } from "../types"
+import { extractCookie, hasSetupAccess } from "./oauth"
 
 const AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 const TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
-
-function extractCookie(cookieHeader: string | null, name: string): string | null {
-  if (!cookieHeader) return null
-  for (const part of cookieHeader.split(";")) {
-    const trimmed = part.trim()
-    if (trimmed.startsWith(`${name}=`)) return trimmed.slice(name.length + 1)
-  }
-  return null
-}
 
 function redirectUrl(env: Env, host: string): string {
   const origin = env.LINKEDIN_REDIRECT_ORIGIN || `https://${host}`
@@ -19,8 +11,7 @@ function redirectUrl(env: Env, host: string): string {
 }
 
 export async function handleAuthStart(request: Request, host: string, env: Env): Promise<Response> {
-  const claims = await verifyAccessJwt(request, env)
-  if (!claims && !(env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development")) {
+  if (!(await hasSetupAccess(request, env))) {
     return new Response("Setup requires authentication", { status: 403 })
   }
 
@@ -51,8 +42,7 @@ export async function handleAuthCallback(
   env: Env,
   request: Request,
 ): Promise<Response> {
-  const claims = await verifyAccessJwt(request, env)
-  if (!claims && !(env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development")) {
+  if (!(await hasSetupAccess(request, env))) {
     return new Response("OAuth setup failed", { status: 403 })
   }
 

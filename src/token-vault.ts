@@ -1,13 +1,25 @@
 import { base64urlDecode, decryptToken, type Envelope, encryptToken } from "./crypto"
-import type { Env, LinkedInTokens } from "./types"
+import { type Env, type GoogleCalendarTokens, type LinkedInTokens, TOKEN_PROVIDER, type TokenProvider } from "./types"
+
+type StoredTokens = LinkedInTokens | GoogleCalendarTokens
 
 interface StateEntry {
   cookieId: string
   expiresAt: number
 }
 
-function stateKey(state: string): string {
-  return `state:${state}`
+function tokenKey(provider: TokenProvider): string {
+  return provider === TOKEN_PROVIDER.LINKEDIN ? "tokens" : `${provider}:tokens`
+}
+
+function stateKey(provider: TokenProvider, state: string): string {
+  return provider === TOKEN_PROVIDER.LINKEDIN ? `state:${state}` : `state:${provider}:${state}`
+}
+
+function tokenProvider(value: unknown): TokenProvider | null {
+  if (value === undefined || value === TOKEN_PROVIDER.LINKEDIN) return TOKEN_PROVIDER.LINKEDIN
+  if (value === TOKEN_PROVIDER.GOOGLE_CALENDAR) return TOKEN_PROVIDER.GOOGLE_CALENDAR
+  return null
 }
 
 export class TokenVaultDO implements DurableObject {
@@ -42,17 +54,17 @@ export class TokenVaultDO implements DurableObject {
     try {
       switch (op) {
         case "issueState":
-          return this.#issueState()
+          return this.#issueState(tokenProvider(args.provider))
         case "consumeState":
-          return this.#consumeState(args.state as string, args.cookieId as string)
+          return this.#consumeState(tokenProvider(args.provider), args.state as string, args.cookieId as string)
         case "readTokens":
-          return this.#readTokens()
+          return this.#readTokens(tokenProvider(args.provider))
         case "writeTokens":
           if (typeof args.tokens !== "object" || args.tokens === null || Array.isArray(args.tokens))
             return new Response(JSON.stringify({ ok: false }), { status: 400 })
-          return this.#writeTokens(args.tokens as LinkedInTokens)
+          return this.#writeTokens(tokenProvider(args.provider), args.tokens as StoredTokens)
         case "rewrap":
-          return this.#rewrap()
+          return this.#rewrap(tokenProvider(args.provider))
         default:
           return new Response("unknown operation", { status: 400 })
       }
@@ -75,11 +87,12 @@ export class TokenVaultDO implements DurableObject {
     if (nextExpiry !== null) await this.ctx.storage.setAlarm(nextExpiry)
   }
 
-  async #issueState(): Promise<Response> {
+  async #issueState(provider: TokenProvider | null): Promise<Response> {
+    if (!provider) return new Response("invalid provider", { status: 400 })
     const state = crypto.randomUUID()
     const cookieId = crypto.randomUUID()
     const expiresAt = Date.now() + 5 * 60 * 1000
-    await this.ctx.storage.put<StateEntry>(stateKey(state), { cookieId, expiresAt })
+    await this.ctx.storage.put<StateEntry>(stateKey(provider, state), { cookieId, expiresAt })
     const currentAlarm = await this.ctx.storage.getAlarm()
     if (currentAlarm === null || expiresAt < currentAlarm) {
       await this.ctx.storage.setAlarm(expiresAt)
@@ -87,38 +100,44 @@ export class TokenVaultDO implements DurableObject {
     return Response.json({ state, cookieId })
   }
 
-  async #consumeState(state: string, cookieId: string): Promise<Response> {
-    const entry = await this.ctx.storage.get<StateEntry>(stateKey(state))
+  async #consumeState(provider: TokenProvider | null, state: string, cookieId: string): Promise<Response> {
+    if (!provider) return new Response("invalid provider", { status: 400 })
+    const key = stateKey(provider, state)
+    const entry = await this.ctx.storage.get<StateEntry>(key)
     if (!entry || entry.cookieId !== cookieId || Date.now() > entry.expiresAt) {
       return Response.json({ valid: false })
     }
-    await this.ctx.storage.delete(stateKey(state))
+    await this.ctx.storage.delete(key)
     return Response.json({ valid: true })
   }
 
-  async #readTokens(): Promise<Response> {
-    const raw = await this.ctx.storage.get<Envelope>("tokens")
+  async #readTokens(provider: TokenProvider | null): Promise<Response> {
+    if (!provider) return new Response("invalid provider", { status: 400 })
+    const raw = await this.ctx.storage.get<Envelope>(tokenKey(provider))
     if (!raw) return Response.json({ tokens: null })
     const result = await this.#decrypt(raw)
     if (!result) return Response.json({ tokens: null })
-    return Response.json({ tokens: result as unknown as LinkedInTokens })
+    return Response.json({ tokens: result as unknown as StoredTokens })
   }
 
-  async #writeTokens(tokens: LinkedInTokens): Promise<Response> {
+  async #writeTokens(provider: TokenProvider | null, tokens: StoredTokens): Promise<Response> {
+    if (!provider) return new Response("invalid provider", { status: 400 })
     if (!tokens.access_token || typeof tokens.access_token !== "string") return Response.json({ ok: false })
     const envelope = await this.#encrypt(tokens as unknown as Record<string, unknown>)
-    await this.ctx.storage.put("tokens", envelope)
+    await this.ctx.storage.put(tokenKey(provider), envelope)
     return Response.json({ ok: true })
   }
 
-  async #rewrap(): Promise<Response> {
-    const raw = await this.ctx.storage.get<Envelope>("tokens")
+  async #rewrap(provider: TokenProvider | null): Promise<Response> {
+    if (!provider) return new Response("invalid provider", { status: 400 })
+    const key = tokenKey(provider)
+    const raw = await this.ctx.storage.get<Envelope>(key)
     if (!raw) return new Response(JSON.stringify({ success: false, reason: "no tokens stored" }), { status: 500 })
     const decrypted = await this.#decrypt(raw)
     if (!decrypted)
       return new Response(JSON.stringify({ success: false, reason: "decryption failed" }), { status: 500 })
     const reencrypted = await this.#encrypt(decrypted)
-    await this.ctx.storage.put("tokens", reencrypted)
+    await this.ctx.storage.put(key, reencrypted)
     return Response.json({ success: true })
   }
 

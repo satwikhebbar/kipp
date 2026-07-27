@@ -87,6 +87,30 @@ than emulating calls with JSON embedded in model text. Provider adapters remain
 responsible for translating their native request and response shapes into the
 shared runtime contract.
 
+### LLM responsibility boundary
+
+Kipp divides agent behavior across three layers. This is a design rule for
+every workflow, not merely a Calendar implementation detail.
+
+| Layer | Responsibility | Must not contain |
+| --- | --- | --- |
+| Prompt | Natural-language interpretation, ambiguity detection, activity classification, concise user-facing language, and selection among already validated options. | Authority, secrets, raw private integration data, or rules whose failure could create, move, expose, or duplicate a real-world item. |
+| Typed tool | A narrow, schema-validated capability that supplies information needed for reasoning or accepts a structured, non-authoritative proposal. | Broad integration access, dynamic permissions, or policy decisions left to model judgment. |
+| Deterministic guard or workflow scaffold | Authentication, authorization, schema validation, time and date arithmetic, policy defaults, conflict handling, idempotency, retry and expiry bounds, integration writes, redaction, and lifecycle logging. | Open-ended natural-language interpretation. |
+
+The governing test is: if a plausible model mistake could create, move,
+expose, or duplicate a real-world item, the relevant decision belongs outside
+the prompt. The model may request an allowlisted tool, but a deterministic
+guard remains the only authority able to approve an external mutation.
+
+For Calendar, a prompt can interpret a request such as “call Amit next Tuesday
+evening”; an availability tool can return only validated free candidates; and
+deterministic code decides whether automatic scheduling is permitted, resolves
+the final slot, applies event policy, and writes the event. The workflow
+scaffold enforces bounded turns and calls, handles safe failure and retry
+behavior, and never places private Calendar data or credentials in model
+context.
+
 ### Session routing and persistence
 
 Cloudflare Workflows retain agent state and pending request details. A new
