@@ -13,6 +13,7 @@ export type RuntimeLogFields = {
   outcome: "started" | "succeeded" | "failed" | "ignored" | "not-configured"
   durationMs?: number
   retryCount?: number
+  failureCategory?: string
 }
 
 /** Emits metadata only; callers must never attach user/provider payloads. */

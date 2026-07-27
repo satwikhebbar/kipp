@@ -21,6 +21,20 @@ const ECHO_TOOL: ToolDefinition = {
 
 const TOOL_TEST_MESSAGES: ToolConversationMessage[] = [{ role: "user", text: "hello" }]
 const TOOL_TEST_REGISTRY: ToolRegistry = { echo: ECHO_TOOL }
+const SCHEDULING_TOOL: ToolDefinition = {
+  name: "submit_one_off_proposal",
+  description: "Submit a calendar proposal.",
+  input: z.object({
+    title: z.string(),
+    durationMinutes: z.number().int(),
+    description: z.string().optional(),
+    location: z.string().optional(),
+    reminderMinutes: z.number().int().optional(),
+  }),
+  output: z.object({ accepted: z.literal(true) }),
+  privacy: "private",
+  handler: async () => ({ accepted: true }),
+}
 
 describe("DeepSeek provider", () => {
   beforeEach(() => mockFetch.mockReset())
@@ -122,6 +136,20 @@ describe("DeepSeek provider", () => {
     })
     expect(response.toolCalls).toEqual([{ id: "call-1", name: "echo", input: { value: "hi" } }])
     expect(JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string).tools[0].function.name).toBe("echo")
+  })
+
+  it("does not mark optional calendar proposal details as required tool inputs", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+    })
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    await createDeepseekToolClient("key").generate({ messages: TOOL_TEST_MESSAGES, tools: [SCHEDULING_TOOL] })
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string) as {
+      tools: Array<{ function: { parameters: { required: string[] } } }>
+    }
+    expect(body.tools[0].function.parameters.required).toEqual(["title", "durationMinutes"])
   })
 
   it("retries transient native-tool failures but not malformed tool payloads", async () => {

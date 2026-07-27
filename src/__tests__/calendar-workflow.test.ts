@@ -87,4 +87,33 @@ describe("CalendarWorkflow", () => {
       expect.objectContaining({ body: expect.stringContaining("Added: Call Jamie") }),
     )
   })
+
+  it("sends the planner's focused clarification without reading or writing Calendar data", async () => {
+    mockGenerate
+      .mockResolvedValueOnce({
+        toolCalls: [
+          {
+            id: "clarification",
+            name: "request_clarification",
+            input: { message: "What date should I schedule your investment review for?" },
+          },
+        ],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      })
+      .mockResolvedValueOnce({ text: "", usage: { inputTokens: 0, outputTokens: 0 } })
+    const telegram = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ result: { message_id: 1 } }) })
+    vi.stubGlobal("fetch", telegram)
+    const step = { do: vi.fn(async (_name: string, fn: () => unknown) => fn()) }
+    const workflow = new CalendarWorkflow({} as never, {} as never)
+    Object.assign(workflow, { env: environment() })
+
+    await (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(workflowEvent(), step)
+
+    expect(mockBusyIntervals).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(telegram).toHaveBeenLastCalledWith(
+      expect.stringContaining("sendMessage"),
+      expect.objectContaining({ body: expect.stringContaining("What date should I schedule") }),
+    )
+  })
 })

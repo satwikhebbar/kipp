@@ -51,20 +51,45 @@ export function toolDeclaration(tool: ToolDefinition): {
 } {
   const schema = tool.input as unknown as { _def?: { typeName?: string; shape?: () => Record<string, unknown> } }
   const shape = schema._def?.shape?.() ?? {}
-  const properties = Object.fromEntries(Object.entries(shape).map(([name, value]) => [name, zodProperty(value)]))
+  const entries = Object.entries(shape)
+  const properties = Object.fromEntries(entries.map(([name, value]) => [name, zodProperty(value)]))
   return {
     name: tool.name,
     description: tool.description,
-    parameters: { type: "object", properties, required: Object.keys(properties) },
+    parameters: {
+      type: "object",
+      properties,
+      required: entries.filter(([, value]) => !isOptionalZodProperty(value)).map(([name]) => name),
+    },
   }
 }
 
 function zodProperty(schema: unknown): Record<string, unknown> {
-  const typeName = (schema as { _def?: { typeName?: string } })._def?.typeName
+  const unwrapped = unwrapZodProperty(schema)
+  const definition = unwrapped._def
+  const typeName = definition?.typeName
   if (typeName === "ZodNumber") return { type: "number" }
   if (typeName === "ZodBoolean") return { type: "boolean" }
   if (typeName === "ZodArray") return { type: "array" }
+  if (typeName === "ZodEnum") return { type: "string", enum: definition?.values }
   return { type: "string" }
+}
+
+type ZodProperty = { _def?: { typeName?: string; innerType?: ZodProperty; values?: readonly string[] } }
+
+/** Identifies fields callers may omit when invoking a tool. */
+function isOptionalZodProperty(schema: unknown): boolean {
+  const typeName = (schema as ZodProperty)._def?.typeName
+  return typeName === "ZodOptional" || typeName === "ZodDefault"
+}
+
+/** Removes optional/default wrappers before projecting a field's JSON Schema type. */
+function unwrapZodProperty(schema: unknown): ZodProperty {
+  const property = schema as ZodProperty
+  const typeName = property._def?.typeName
+  if ((typeName === "ZodOptional" || typeName === "ZodDefault") && property._def?.innerType)
+    return unwrapZodProperty(property._def.innerType)
+  return property
 }
 
 export function parseLLMJson<T>(text: string): T {
