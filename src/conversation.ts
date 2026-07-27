@@ -18,7 +18,7 @@ export function serializedByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length
 }
 
-/** Throws if the serialized value exceeds the step output byte limit. */
+/** Throws if the serialized value meets or exceeds the step output byte limit. */
 export function assertStepOutputSize<T>(value: T, limit = STEP_OUTPUT_BYTE_LIMIT): T {
   const bytes = serializedByteLength(value)
   if (bytes >= limit) {
