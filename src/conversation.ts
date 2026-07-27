@@ -1,6 +1,6 @@
 import type { LLMMessage } from "./providers/llm"
 
-export const STEP_OUTPUT_BYTE_LIMIT = 900 * 1024
+export const STEP_OUTPUT_BYTE_LIMIT = 921_600 // ponytail: 900 KiB
 
 export class TranscriptTooLargeError extends Error {
   constructor(

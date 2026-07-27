@@ -55,8 +55,13 @@ function stripHtml(html: string): string {
     .replace(/&#39;/g, "'")
 }
 
+const RSS_CONTENT_TRUNCATE_LENGTH = 6000
+const MAX_SECTION_IDEAS = 4
+const MAX_TITLE_LENGTH = 80
+const DEFAULT_RSS_RETRIES = 3
+
 async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<ExtractedIdeas> {
-  const text = stripHtml(item.contentHtml).slice(0, 6000)
+  const text = stripHtml(item.contentHtml).slice(0, RSS_CONTENT_TRUNCATE_LENGTH)
   const prompt = `Newsletter: "${item.title}"\nURL: ${item.link}\n\nContent:\n${text}`
   const res = await gen(messages(SYSTEM_PROMPT, prompt))
   const parsed = parseLLMJson<ExtractedIdeas>(res.text)
@@ -80,11 +85,11 @@ function buildIdeas(item: RssItem, extracted: ExtractedIdeas, existing: Idea[]):
     body: extracted.teaser,
   }
   const side: Idea[] = []
-  for (const sub of extracted.subIdeas.slice(0, 4)) {
+  for (const sub of extracted.subIdeas.slice(0, MAX_SECTION_IDEAS)) {
     id++
     side.push({
       id: String(id),
-      title: sub.slice(0, 80),
+      title: sub.slice(0, MAX_TITLE_LENGTH),
       status: "raw",
       created: now,
       source: "substack",
@@ -118,7 +123,7 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
     env.LLM_API_KEY,
     env.LLM_PROVIDER || "gemini",
     env.LLM_MODEL,
-    Number(env.LLM_MAX_RETRIES ?? 3),
+    Number(env.LLM_MAX_RETRIES ?? DEFAULT_RSS_RETRIES),
   )
   const extracted = await llmExtractIdeas(gen, newItem)
 

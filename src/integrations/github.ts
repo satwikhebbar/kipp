@@ -1,4 +1,4 @@
-import { isTransientServerError } from "../runtime/http"
+import { HTTP_STATUS, isTransientServerError } from "../runtime/http"
 
 const GITHUB_API = "https://api.github.com"
 
@@ -92,7 +92,7 @@ export function createGitHubClient(env: {
         await writeFile(path, newContent, sha)
         return
       } catch (err) {
-        if (err instanceof GithubError && err.status === 409 && attempt < 2) continue
+        if (err instanceof GithubError && err.status === HTTP_STATUS.CONFLICT && attempt < 2) continue
         throw err
       }
     }

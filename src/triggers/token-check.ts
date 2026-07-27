@@ -3,16 +3,19 @@ import { createTokenVault } from "../token-vault-client"
 import type { Env, LinkedInTokens } from "../types"
 
 const TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
+const SECONDS_TO_MS = 1000
+const MS_PER_DAY = 86_400_000
+const EXPIRY_ALERT_DAYS = 7
 
 export async function handleTokenCheckCron(env: Env): Promise<{ alerted: boolean; refreshed: boolean }> {
   const vault = createTokenVault(env)
   const { tokens } = await vault.readTokens()
   if (!tokens) return { alerted: false, refreshed: false }
 
-  const expiresAt = new Date(tokens.created_at).getTime() + tokens.expires_in * 1000
-  const daysUntilExpiry = (expiresAt - Date.now()) / (1000 * 60 * 60 * 24)
+  const expiresAt = new Date(tokens.created_at).getTime() + tokens.expires_in * SECONDS_TO_MS
+  const daysUntilExpiry = (expiresAt - Date.now()) / MS_PER_DAY
 
-  if (daysUntilExpiry > 7) return { alerted: false, refreshed: false }
+  if (daysUntilExpiry > EXPIRY_ALERT_DAYS) return { alerted: false, refreshed: false }
 
   if (tokens.refresh_token) {
     try {

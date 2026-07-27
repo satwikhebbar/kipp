@@ -46,7 +46,12 @@ const proposalSchema = z.object({
   needsClarification: z.boolean(),
 })
 
-const availabilityInputSchema = z.object({ localDate: z.string(), durationMinutes: z.number().int().min(15).max(240) })
+const MIN_DURATION_MINUTES = 15
+const MAX_AVAILABILITY_DURATION_MINUTES = 240
+const availabilityInputSchema = z.object({
+  localDate: z.string(),
+  durationMinutes: z.number().int().min(MIN_DURATION_MINUTES).max(MAX_AVAILABILITY_DURATION_MINUTES),
+})
 const availabilityOutputSchema = z.object({ slots: z.array(z.string()) })
 const proposalOutputSchema = z.object({ accepted: z.literal(true) })
 

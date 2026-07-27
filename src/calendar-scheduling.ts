@@ -2,11 +2,11 @@ import type { BusyInterval, ManagedCalendarEvent } from "./integrations/google-c
 
 export const CALENDAR_TIMEZONE_DEFAULT = "Asia/Kolkata"
 export const CALENDAR_SLOT_MINUTES = 15
-export const CALENDAR_SEARCH_START_MINUTES = 8 * 60 + 30
-export const CALENDAR_SEARCH_END_MINUTES = 22 * 60 + 30
-export const CALENDAR_PREFERRED_START_MINUTES = 19 * 60
-export const CALENDAR_PREFERRED_END_MINUTES = 21 * 60 + 30
-export const CALENDAR_MIN_LEAD_TIME_MS = 30 * 60 * 1000
+export const CALENDAR_SEARCH_START_MINUTES = 510 // ponytail: 8:30 AM
+export const CALENDAR_SEARCH_END_MINUTES = 1_350 // ponytail: 10:30 PM
+export const CALENDAR_PREFERRED_START_MINUTES = 1_140 // ponytail: 7:00 PM
+export const CALENDAR_PREFERRED_END_MINUTES = 1_290 // ponytail: 9:30 PM
+export const CALENDAR_MIN_LEAD_TIME_MS = 1_800_000 // ponytail: 30 minutes
 export const CALENDAR_INFERRED_BUFFER_MINUTES = 15
 export const CALENDAR_ORDINARY_REMINDER_MINUTES = 10
 export const CALENDAR_IMPORTANT_REMINDER_MINUTES = 60
@@ -41,8 +41,14 @@ const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 const MILLIS_PER_MINUTE = 60_000
 const EVENT_ID_PREFIX = "kipp"
 const BASE32HEX_ALPHABET = "0123456789abcdefghijklmnopqrstuv"
+const BITS_PER_BYTE = 8
+const BASE32_CHUNK_BITS = 5
+const BASE32_CHUNK_MASK = 31
+const EVENT_ID_ENCODED_SUFFIX_LENGTH = 40
+const REQUEST_ID_ENCODED_SUFFIX_LENGTH = 32
 const MAX_EVENT_TITLE_LENGTH = 120
 const TIME_ZONE_RESOLUTION_ATTEMPTS = 2
+const HHMM_COLON_OFFSET = 3
 const START_OF_DAY = "00:00"
 const END_OF_DAY = "23:59"
 
@@ -50,7 +56,7 @@ const END_OF_DAY = "23:59"
 function localMinutes(time: string): number | null {
   const matched = TIME_PATTERN.exec(time)
   if (!matched) return null
-  return Number(matched[1]) * 60 + Number(time.slice(3))
+  return Number(matched[1]) * 60 + Number(time.slice(HHMM_COLON_OFFSET))
 }
 
 /** Formats an instant in the supplied IANA time zone as named calendar parts. */
@@ -133,7 +139,7 @@ export function calendarDayBounds(localDate: string, timeZone: string): { timeMi
   const start = zonedDateTimeToMillis(localDate, START_OF_DAY, timeZone)
   const end = zonedDateTimeToMillis(localDate, END_OF_DAY, timeZone)
   if (start === null || end === null) return null
-  return { timeMin: new Date(start).toISOString(), timeMax: new Date(end + 60_000).toISOString() }
+  return { timeMin: new Date(start).toISOString(), timeMax: new Date(end + MILLIS_PER_MINUTE).toISOString() }
 }
 
 /** Returns an explicit reminder override or the policy default for the proposal's classification. */
@@ -215,14 +221,17 @@ export async function managedEventIdentity(
   let value = 0
   for (const byte of digest) {
     value = (value << 8) | byte
-    bits += 8
-    while (bits >= 5) {
-      encoded += BASE32HEX_ALPHABET[(value >>> (bits - 5)) & 31]
-      bits -= 5
+    bits += BITS_PER_BYTE
+    while (bits >= BASE32_CHUNK_BITS) {
+      encoded += BASE32HEX_ALPHABET[(value >>> (bits - BASE32_CHUNK_BITS)) & BASE32_CHUNK_MASK]
+      bits -= BASE32_CHUNK_BITS
     }
   }
-  if (bits) encoded += BASE32HEX_ALPHABET[(value << (5 - bits)) & 31]
-  return { id: `${EVENT_ID_PREFIX}${encoded.slice(0, 40)}`, requestId: `kipp-v1-${encoded.slice(0, 32)}` }
+  if (bits) encoded += BASE32HEX_ALPHABET[(value << (BASE32_CHUNK_BITS - bits)) & BASE32_CHUNK_MASK]
+  return {
+    id: `${EVENT_ID_PREFIX}${encoded.slice(0, EVENT_ID_ENCODED_SUFFIX_LENGTH)}`,
+    requestId: `kipp-v1-${encoded.slice(0, REQUEST_ID_ENCODED_SUFFIX_LENGTH)}`,
+  }
 }
 
 /** Projects a validated proposal and interval into Kipp's private Google Calendar event payload. */

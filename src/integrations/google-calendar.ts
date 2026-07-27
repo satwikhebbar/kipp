@@ -188,7 +188,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
 
   async function findManagedEvent(id: string, requestId: string): Promise<boolean> {
     const response = await request(`/calendars/primary/events/${encodeURIComponent(id)}`, { method: "GET" })
-    if (response.status === 404) return false
+    if (response.status === HTTP_STATUS.NOT_FOUND) return false
     if (!response.ok) throw new GoogleCalendarError("Calendar event could not be verified", "permanent")
     const data = (await response.json()) as GoogleCalendarEventResponse
     return data.id === id && data.extendedProperties?.private?.[REQUEST_ID_PROPERTY] === requestId

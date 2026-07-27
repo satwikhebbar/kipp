@@ -23,7 +23,7 @@ type InteractionRow = {
   consumed_update_id: number | null
 }
 
-export const CONSUMED_INTERACTION_RETENTION_MS = 60 * 60 * 1000
+export const CONSUMED_INTERACTION_RETENTION_MS = 3_600_000 // ponytail: 1 hour
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })

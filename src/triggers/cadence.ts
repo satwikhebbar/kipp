@@ -19,8 +19,10 @@ export async function handleCadenceCron(env: Env): Promise<{ started: boolean; i
     if (t > latestFinalized) latestFinalized = t
   }
 
-  const cadenceDays = Number(env.POSTING_CADENCE_DAYS) || 7
-  const cutoff = Date.now() - cadenceDays * 24 * 60 * 60 * 1000
+  const MS_PER_DAY = 86_400_000
+  const DEFAULT_POSTING_CADENCE_DAYS = 7
+  const cadenceDays = Number(env.POSTING_CADENCE_DAYS) || DEFAULT_POSTING_CADENCE_DAYS
+  const cutoff = Date.now() - cadenceDays * MS_PER_DAY
   if (latestFinalized > cutoff) return { started: false }
 
   const raw = ideas.filter((i) => i.status === "raw").sort((a, b) => Number(a.id) - Number(b.id))
