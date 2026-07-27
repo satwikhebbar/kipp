@@ -1,4 +1,9 @@
 #!/usr/bin/env sh
+# macOS does not provide the C.UTF-8 locale injected by some agent sandboxes.
+# Beads uses Perl as its portable timeout fallback, so run hooks in POSIX C.
+export LC_ALL=C
+export LANG=C
+
 # --- BEGIN BEADS INTEGRATION v1.1.0 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then

@@ -1,5 +1,10 @@
 #!/bin/sh
 
+# macOS does not provide the C.UTF-8 locale injected by some agent sandboxes.
+# Beads uses Perl as its portable timeout fallback, so run hooks in POSIX C.
+export LC_ALL=C
+export LANG=C
+
 if [ "$LEFTHOOK_VERBOSE" = "1" -o "$LEFTHOOK_VERBOSE" = "true" ]; then
   set -x
 fi
