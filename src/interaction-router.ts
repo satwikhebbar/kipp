@@ -23,6 +23,8 @@ type InteractionRow = {
   consumed_update_id: number | null
 }
 
+export const CONSUMED_INTERACTION_RETENTION_MS = 60 * 60 * 1000
+
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })
 }
@@ -41,7 +43,7 @@ export class InteractionRouterDO implements DurableObject {
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS interactions (
       interaction_id TEXT PRIMARY KEY, version INTEGER NOT NULL, workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL, callback_token TEXT UNIQUE, bot_message_id INTEGER,
-      expires_at INTEGER NOT NULL, consumed_update_id INTEGER
+      expires_at INTEGER NOT NULL, consumed_update_id INTEGER, consumed_at INTEGER
     )`)
   }
 
@@ -63,6 +65,7 @@ export class InteractionRouterDO implements DurableObject {
     const r = body as unknown as Registration
     if (!r.interactionId || !r.workflowId || !r.kind || !Number.isFinite(r.expiresAt))
       return new Response("invalid registration", { status: 400 })
+    this.removeExpiredOrOldConsumedInteractions()
     if (r.kind === INTERACTION_KIND.REVISION_FEEDBACK) this.removeActiveRevisionFeedback()
     this.saveRegistration(r)
     return json({ ok: true })
@@ -78,6 +81,14 @@ export class InteractionRouterDO implements DurableObject {
       registration.callbackToken ?? null,
       registration.botMessageId ?? null,
       registration.expiresAt,
+    )
+  }
+
+  private removeExpiredOrOldConsumedInteractions(now = Date.now()): void {
+    this.ctx.storage.sql.exec("DELETE FROM interactions WHERE expires_at <= ?", now)
+    this.ctx.storage.sql.exec(
+      "DELETE FROM interactions WHERE consumed_at IS NOT NULL AND consumed_at <= ?",
+      now - CONSUMED_INTERACTION_RETENTION_MS,
     )
   }
 
@@ -110,10 +121,11 @@ export class InteractionRouterDO implements DurableObject {
     return rows[0] as InteractionRow | undefined
   }
 
-  private claimInteraction(interactionId: string, telegramUpdateId: number): void {
+  private claimInteraction(interactionId: string, telegramUpdateId: number, now = Date.now()): void {
     this.ctx.storage.sql.exec(
-      "UPDATE interactions SET consumed_update_id = ? WHERE interaction_id = ?",
+      "UPDATE interactions SET consumed_update_id = ?, consumed_at = ? WHERE interaction_id = ?",
       telegramUpdateId,
+      now,
       interactionId,
     )
   }
@@ -125,6 +137,7 @@ export class InteractionRouterDO implements DurableObject {
     const token = typeof body.callbackToken === "string" ? body.callbackToken : undefined
     const replyTo = typeof body.replyToMessageId === "number" ? body.replyToMessageId : undefined
     const plainText = typeof body.text === "string" ? body.text : undefined
+    this.removeExpiredOrOldConsumedInteractions()
     const row = this.findInteraction({ token, replyTo, plainText })
     if (!row || row.expires_at <= Date.now()) return json({ interaction: null })
     if (row.consumed_update_id !== null && row.consumed_update_id !== numericUpdateId)

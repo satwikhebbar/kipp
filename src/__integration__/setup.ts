@@ -1,4 +1,5 @@
 import { vi } from "vitest"
+import { CONSUMED_INTERACTION_RETENTION_MS } from "../interaction-router"
 import { INTERACTION_KIND, type WorkflowInteractionKind } from "../types"
 
 export interface FakeState {
@@ -198,6 +199,7 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
     botMessageId?: number
     expiresAt: number
     consumed?: number
+    consumedAt?: number
   }
   const records = new Map<string, RouterRecord[]>()
   const register = (chatId: number | string, registration: FakeInteractionRegistration) => {
@@ -214,7 +216,11 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
     get: (id: { toString?: () => string } | string) => ({
       fetch: async (url: string | Request, init?: RequestInit) => {
         const chat = typeof id === "string" ? id : (id.toString?.() ?? "")
-        const list = records.get(chat) ?? []
+        const now = Date.now()
+        const list = (records.get(chat) ?? []).filter(
+          (item) =>
+            item.expiresAt > now && (!item.consumedAt || item.consumedAt > now - CONSUMED_INTERACTION_RETENTION_MS),
+        )
         records.set(chat, list)
         const path = new URL(typeof url === "string" ? url : url.url).pathname
         const body = JSON.parse(init?.body as string) as Record<string, unknown>
@@ -235,6 +241,7 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
         if (found.expiresAt <= Date.now() || (found.consumed && found.consumed !== body.telegramUpdateId))
           return Response.json({ interaction: null })
         found.consumed = body.telegramUpdateId as number
+        found.consumedAt = now
         return Response.json({
           interaction: {
             ...found,
