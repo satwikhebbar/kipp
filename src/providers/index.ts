@@ -26,8 +26,18 @@ export function resolveModel(provider: string, modelName?: string): string {
   }
 }
 
-export function createGenerator(apiKey: string, provider: string, modelName?: string, maxRetries = 3): GenerateFn {
-  const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : 3
+const DEFAULT_RETRIES = 3
+const BACKOFF_BASE_MS = 1_000
+const BACKOFF_JITTER_MS = 1_000
+const BACKOFF_MAX_MS = 16_000
+
+export function createGenerator(
+  apiKey: string,
+  provider: string,
+  modelName?: string,
+  maxRetries = DEFAULT_RETRIES,
+): GenerateFn {
+  const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : DEFAULT_RETRIES
   const inner = createInnerGenerator(apiKey, provider, modelName)
   return withRetry(inner, retries)
 }
@@ -36,9 +46,9 @@ export function createToolProvider(
   apiKey: string,
   provider: string,
   modelName?: string,
-  maxRetries = 3,
+  maxRetries = DEFAULT_RETRIES,
 ): ToolProviderClient {
-  const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : 3
+  const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : DEFAULT_RETRIES
   const inner = createInnerToolProvider(apiKey, provider, modelName)
   return {
     generate: withRetry(
@@ -85,7 +95,7 @@ function withRetry<TInput, TOutput>(
         lastErr = err
         if (!shouldRetry(err)) throw err
         if (attempt < maxRetries) {
-          const delay = Math.min(1000 * 2 ** attempt + Math.random() * 1000, 16000)
+          const delay = Math.min(BACKOFF_BASE_MS * 2 ** attempt + Math.random() * BACKOFF_JITTER_MS, BACKOFF_MAX_MS)
           await new Promise((r) => setTimeout(r, delay))
         }
       }

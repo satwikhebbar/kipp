@@ -1,5 +1,6 @@
 import { Hono } from "hono"
 import { CalendarWorkflow } from "./calendar-workflow"
+import { HTTP_STATUS } from "./runtime/http"
 import { createTokenVault } from "./token-vault-client"
 import { handleCadenceCron } from "./triggers/cadence"
 import { handleGoogleCalendarAuthCallback, handleGoogleCalendarAuthStart } from "./triggers/google-calendar-auth"
@@ -28,27 +29,27 @@ app.get("/setup/google-calendar", async (c) =>
 app.get("/auth/linkedin/callback", async (c) => {
   const code = c.req.query("code")
   const state = c.req.query("state") ?? ""
-  if (!code) return c.text("Missing code parameter", 400)
+  if (!code) return c.text("Missing code parameter", HTTP_STATUS.BAD_REQUEST)
   return handleAuthCallback(code, state, c.req.header("host") ?? "", c.env, c.req.raw)
 })
 
 app.get("/auth/google-calendar/callback", async (c) => {
   const code = c.req.query("code")
   const state = c.req.query("state") ?? ""
-  if (!code) return c.text("Missing code parameter", 400)
+  if (!code) return c.text("Missing code parameter", HTTP_STATUS.BAD_REQUEST)
   return handleGoogleCalendarAuthCallback(code, state, c.req.header("host") ?? "", c.env, c.req.raw)
 })
 
 app.post("/admin/rewrap", async (c) => {
   if (!(await hasSetupAccess(c.req.raw, c.env))) {
-    return c.text("Unauthorized", 403)
+    return c.text("Unauthorized", HTTP_STATUS.FORBIDDEN)
   }
   const vault = createTokenVault(c.env)
   try {
     const result = await vault.rewrap()
     return c.json(result)
   } catch {
-    return c.json({ success: false }, 500)
+    return c.json({ success: false }, HTTP_STATUS.INTERNAL_SERVER_ERROR)
   }
 })
 

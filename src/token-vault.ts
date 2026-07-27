@@ -1,5 +1,9 @@
-import { base64urlDecode, decryptToken, type Envelope, encryptToken } from "./crypto"
+import { AES_256_KEY_LENGTH, base64urlDecode, decryptToken, type Envelope, encryptToken } from "./crypto"
+import { HTTP_STATUS } from "./runtime/http"
 import { type Env, type GoogleCalendarTokens, type LinkedInTokens, TOKEN_PROVIDER, type TokenProvider } from "./types"
+
+const OAUTH_STATE_EXPIRY_MS = 300_000
+const MAX_REQUEST_BODY_BYTES = 10_000
 
 type StoredTokens = LinkedInTokens | GoogleCalendarTokens
 
@@ -40,7 +44,8 @@ export class TokenVaultDO implements DurableObject {
     } catch {
       return new Response("invalid body", { status: 400 })
     }
-    if (new TextEncoder().encode(raw).byteLength > 10_000) return new Response("request too large", { status: 413 })
+    if (new TextEncoder().encode(raw).byteLength > MAX_REQUEST_BODY_BYTES)
+      return new Response("request too large", { status: HTTP_STATUS.PAYLOAD_TOO_LARGE })
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
@@ -91,7 +96,7 @@ export class TokenVaultDO implements DurableObject {
     if (!provider) return new Response("invalid provider", { status: 400 })
     const state = crypto.randomUUID()
     const cookieId = crypto.randomUUID()
-    const expiresAt = Date.now() + 5 * 60 * 1000
+    const expiresAt = Date.now() + OAUTH_STATE_EXPIRY_MS
     await this.ctx.storage.put<StateEntry>(stateKey(provider, state), { cookieId, expiresAt })
     const currentAlarm = await this.ctx.storage.getAlarm()
     if (currentAlarm === null || expiresAt < currentAlarm) {
@@ -169,7 +174,7 @@ export class TokenVaultDO implements DurableObject {
       const keyB64 = env[`TOKEN_ENCRYPTION_KEY_${kid}`]
       if (!keyB64) continue
       const rawKey = base64urlDecode(keyB64).buffer as ArrayBuffer
-      if (rawKey.byteLength !== 32) continue
+      if (rawKey.byteLength !== AES_256_KEY_LENGTH) continue
       const result = await decryptToken(envelope, rawKey)
       if (result !== null) return result
     }

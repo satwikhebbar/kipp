@@ -5,7 +5,7 @@ import { extractCookie, hasSetupAccess } from "./oauth"
 const GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const OAUTH_COOKIE_NAME = "google-calendar-oauth-session"
-const OAUTH_STATE_MAX_AGE_SECONDS = 5 * 60
+const OAUTH_STATE_MAX_AGE_SECONDS = 300 // ponytail: 5 minutes
 
 export const GOOGLE_CALENDAR_SCOPES = [
   "https://www.googleapis.com/auth/calendar.events.owned",

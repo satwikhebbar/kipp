@@ -6,6 +6,12 @@ export interface Envelope {
   ct: string
 }
 
+export const AES_256_KEY_LENGTH = 32
+export const AES_GCM_IV_LENGTH = 12
+const AES_GCM_MIN_CT_LENGTH = 16
+const AES_GCM_MAX_CT_LENGTH = 10_048
+const BASE64_PADDING_ALIGNMENT = 4
+
 export function base64urlEncode(buf: Uint8Array): string {
   let binary = ""
   for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i])
@@ -14,7 +20,7 @@ export function base64urlEncode(buf: Uint8Array): string {
 
 export function base64urlDecode(str: string): Uint8Array {
   str = str.replace(/-/g, "+").replace(/_/g, "/")
-  while (str.length % 4) str += "="
+  while (str.length % BASE64_PADDING_ALIGNMENT) str += "="
   const binary = atob(str)
   const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
@@ -27,9 +33,9 @@ export async function encryptToken(
   rawKey: ArrayBuffer,
   aadString = "kipp:linkedin-token:v1",
 ): Promise<Envelope> {
-  if (rawKey.byteLength !== 32) throw new Error("invalid key length")
+  if (rawKey.byteLength !== AES_256_KEY_LENGTH) throw new Error("invalid key length")
   const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["encrypt"])
-  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const iv = crypto.getRandomValues(new Uint8Array(AES_GCM_IV_LENGTH))
   const aad = new TextEncoder().encode(aadString)
   const ct = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, additionalData: aad },
@@ -41,12 +47,12 @@ export async function encryptToken(
 
 export async function decryptToken(envelope: Envelope, rawKey: ArrayBuffer): Promise<Record<string, unknown> | null> {
   if (envelope.v !== 1) return null
-  if (rawKey.byteLength !== 32) return null
+  if (rawKey.byteLength !== AES_256_KEY_LENGTH) return null
   const aad = new TextEncoder().encode(envelope.aad)
   const iv = base64urlDecode(envelope.iv)
-  if (iv.byteLength !== 12) return null
+  if (iv.byteLength !== AES_GCM_IV_LENGTH) return null
   const ct = base64urlDecode(envelope.ct)
-  if (ct.byteLength < 16 || ct.byteLength > 10_048) return null
+  if (ct.byteLength < AES_GCM_MIN_CT_LENGTH || ct.byteLength > AES_GCM_MAX_CT_LENGTH) return null
   try {
     const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"])
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: aad }, key, ct)

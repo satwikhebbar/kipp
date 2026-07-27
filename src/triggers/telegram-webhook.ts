@@ -7,6 +7,9 @@ import { createInteractionRouter } from "../interaction-router-client"
 import { logRuntime } from "../runtime/logging"
 import { type Env, INTERACTION_KIND } from "../types"
 
+const LABEL_TRUNCATE_LENGTH = 80
+const ADD_COMMAND_PREFIX_LENGTH = 5
+
 interface TelegramUser {
   id: number
   is_bot?: boolean
@@ -115,7 +118,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     await env.PIPELINE_WORKFLOW.create({
       params: { ideaId: raw.id, ideaTitle: raw.title, ideaBody: raw.body },
     })
-    const label = raw.title ?? raw.body.slice(0, 80)
+    const label = raw.title ?? raw.body.slice(0, LABEL_TRUNCATE_LENGTH)
     await tg.sendMessage(msg.chat.id, `Started workflow for idea #${raw.id}: ${label}`)
     logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
     return new Response("OK")
@@ -157,7 +160,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
           status: "raw" as const,
           created: new Date().toISOString(),
           source: "telegram" as const,
-          body: text.slice(5).trim(),
+          body: text.slice(ADD_COMMAND_PREFIX_LENGTH).trim(),
           correlation: { telegramChatId: String(msg.chat.id) },
         })
         return serializeIdeas(items)

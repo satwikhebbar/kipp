@@ -16,6 +16,10 @@ import { logRuntime } from "./runtime/logging"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "./types"
 
 const DEFAULT_WAIT_FOR_FEEDBACK_HOURS = 12
+const MAX_CRITIQUE_ITERATIONS = 4
+const MAX_FEEDBACK_ROUNDS = 4
+const HOURS_TO_MS = 3_600_000 // ponytail: precomputed 60 * 60 * 1000
+const DEFAULT_LLM_RETRIES = 3
 
 function interactionId(): string {
   return crypto.randomUUID()
@@ -132,7 +136,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         this.env.LLM_API_KEY,
         this.env.LLM_PROVIDER,
         this.env.LLM_MODEL,
-        Number(this.env.LLM_MAX_RETRIES ?? 3),
+        Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
       )
       const { gen, getUsage } = withUsageAccumulator(rawGen)
       const model = resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
@@ -149,7 +153,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       let messages = createDraftConversation(stylePrompt, { title: ideaTitle, body: ideaBody, substackBody })
       let draft = await draftAgent({ title: ideaTitle, body: ideaBody, substackBody })
       messages = appendAssistant(messages, draft)
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < MAX_CRITIQUE_ITERATIONS; i++) {
         const items = await critiqueAgent(draft)
         if (items.every((c) => c.passed)) break
         draft = await reviseAgent({ messages, failedItems: items.filter((c) => !c.passed) })
@@ -195,7 +199,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const notification = await stepDo("notify", async () => {
         const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
         const expiresAt =
-          Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * 60 * 60 * 1000
+          Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * HOURS_TO_MS
         const interactions = createDraftInteractions(0, event.instanceId, 1, expiresAt)
         const result = await tg.sendMessage(
           state.chatId,
@@ -212,7 +216,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     let currentDraft = state.draft
     let currentMessages = state.messages
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < MAX_FEEDBACK_ROUNDS; i++) {
       const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || String(DEFAULT_WAIT_FOR_FEEDBACK_HOURS)
       const reply = await step.waitForEvent<{ text?: string }>(`feedback-${i}`, {
         type: "telegram-reply",
@@ -240,8 +244,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
               workflowId: event.instanceId,
               kind: INTERACTION_KIND.REVISION_FEEDBACK,
               expiresAt:
-                Date.now() +
-                Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * 60 * 60 * 1000,
+                Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * HOURS_TO_MS,
             }
           })
           await stepDo(`register-revision-feedback-${i}`, async () => {
@@ -337,7 +340,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           this.env.LLM_API_KEY,
           this.env.LLM_PROVIDER,
           this.env.LLM_MODEL,
-          Number(this.env.LLM_MAX_RETRIES ?? 3),
+          Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
         )
         const { gen, getUsage } = withUsageAccumulator(rawGen)
         const model = state.model ?? resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
@@ -383,7 +386,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const notification = await stepDo(`notify-revised-${i}`, async () => {
           const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
           const expiresAt =
-            Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * 60 * 60 * 1000
+            Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * HOURS_TO_MS
           const interactions = createDraftInteractions(0, event.instanceId, i + 2, expiresAt)
           const result = await tg.sendMessage(
             state.chatId,
