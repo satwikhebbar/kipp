@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { z } from "zod"
+import { logRuntime } from "../runtime/logging"
 import { ToolGuard, type ToolRegistry } from "../runtime/tools"
 
 const registry: ToolRegistry = {
@@ -38,5 +39,20 @@ describe("ToolGuard", () => {
   it("keeps LinkedIn's production tool allowlist empty", () => {
     const linkedinAllowedTools: readonly string[] = []
     expect(linkedinAllowedTools).toEqual([])
+  })
+})
+
+describe("runtime logging", () => {
+  it("emits metadata-only INFO logs only when explicitly enabled", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
+
+    logRuntime({}, { event: "workflow-run", outcome: "started", workflow: "workflow-1" })
+    logRuntime({ LOG_LEVEL: "info" }, { event: "workflow-run", outcome: "started", workflow: "workflow-1" })
+
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalledWith(
+      JSON.stringify({ component: "kipp-runtime", event: "workflow-run", outcome: "started", workflow: "workflow-1" }),
+    )
+    log.mockRestore()
   })
 })

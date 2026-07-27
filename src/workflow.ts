@@ -7,15 +7,68 @@ import { appendAssistant, appendHumanFeedback, assertStepOutputSize } from "./co
 import { createGitHubClient } from "./integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "./integrations/linkedin"
 import { createTelegramClient } from "./integrations/telegram"
-import { createInteractionRouter } from "./interaction-router-client"
+import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import { computeCost, formatCostLine } from "./pricing"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
 import { readPrompt } from "./prompts/resolver"
 import { createGenerator, type GenerateFn, resolveModel } from "./providers"
+import { logRuntime } from "./runtime/logging"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "./types"
+
+const DEFAULT_WAIT_FOR_FEEDBACK_HOURS = 12
 
 function interactionId(): string {
   return crypto.randomUUID()
+}
+
+function createDraftInteractions(
+  messageId: number,
+  workflowId: string,
+  version: number,
+  expiresAt: number,
+): InteractionRegistration[] {
+  return [
+    {
+      interactionId: interactionId(),
+      version,
+      workflowId,
+      kind: INTERACTION_KIND.APPROVE,
+      callbackToken: interactionId(),
+      botMessageId: messageId,
+      expiresAt,
+    },
+    {
+      interactionId: interactionId(),
+      version,
+      workflowId,
+      kind: INTERACTION_KIND.REVISE,
+      callbackToken: interactionId(),
+      botMessageId: messageId,
+      expiresAt,
+    },
+    {
+      interactionId: interactionId(),
+      version,
+      workflowId,
+      kind: INTERACTION_KIND.REVISION_FEEDBACK,
+      botMessageId: messageId,
+      expiresAt,
+    },
+  ]
+}
+
+function interactionKeyboard(interactions: InteractionRegistration[]): Record<string, unknown> {
+  const approve = interactions.find((interaction) => interaction.kind === INTERACTION_KIND.APPROVE)
+  const revise = interactions.find((interaction) => interaction.kind === INTERACTION_KIND.REVISE)
+  if (!approve?.callbackToken || !revise?.callbackToken) throw new Error("Missing draft interaction callback token")
+  return {
+    inline_keyboard: [
+      [
+        { text: "Approve ✓", callback_data: approve.callbackToken },
+        { text: "Revise More", callback_data: revise.callbackToken },
+      ],
+    ],
+  }
 }
 
 function withUsageAccumulator(gen: GenerateFn): { gen: GenerateFn; getUsage: () => LLMUsage } {
@@ -31,9 +84,13 @@ function withUsageAccumulator(gen: GenerateFn): { gen: GenerateFn; getUsage: () 
 
 export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
+    logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "started" })
     try {
-      return await this._run(event, step)
+      const result = await this._run(event, step)
+      logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "succeeded" })
+      return result
     } catch (err) {
+      logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "failed" })
       console.error(`[workflow ${event.instanceId}] unhandled error:`, err)
       throw err
     }
@@ -44,9 +101,24 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     const stepDo = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
       const wrapped: () => Promise<T> = async () => {
+        const startedAt = Date.now()
+        logRuntime(this.env, { workflow: event.instanceId, event: `step:${name}`, outcome: "started" })
         try {
-          return await fn()
+          const result = await fn()
+          logRuntime(this.env, {
+            workflow: event.instanceId,
+            event: `step:${name}`,
+            outcome: "succeeded",
+            durationMs: Date.now() - startedAt,
+          })
+          return result
         } catch (err) {
+          logRuntime(this.env, {
+            workflow: event.instanceId,
+            event: `step:${name}`,
+            outcome: "failed",
+            durationMs: Date.now() - startedAt,
+          })
           console.error(`[workflow ${event.instanceId}] step "${name}" failed:`, err)
           throw err
         }
@@ -120,62 +192,28 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     })
 
     if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-      await stepDo("notify", async () => {
+      const notification = await stepDo("notify", async () => {
         const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-        const approveId = interactionId()
-        const reviseId = interactionId()
-        const feedbackId = interactionId()
-        const approveToken = interactionId()
-        const reviseToken = interactionId()
+        const expiresAt =
+          Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * 60 * 60 * 1000
+        const interactions = createDraftInteractions(0, event.instanceId, 1, expiresAt)
         const result = await tg.sendMessage(
           state.chatId,
           `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nReply with feedback or tap below.${state.costLine}`,
-          {
-            replyMarkup: {
-              inline_keyboard: [
-                [
-                  { text: "Approve \u2713", callback_data: approveToken },
-                  { text: "Revise More", callback_data: reviseToken },
-                ],
-              ],
-            },
-          },
+          { replyMarkup: interactionKeyboard(interactions) },
         )
+        return { interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: result.messageId })) }
+      })
+      await stepDo("register-notify-interactions", async () => {
         const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
-        const expiresAt = Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || "12") * 60 * 60 * 1000
-        await router.register({
-          interactionId: approveId,
-          version: 1,
-          workflowId: event.instanceId,
-          kind: INTERACTION_KIND.APPROVE,
-          callbackToken: approveToken,
-          botMessageId: result.messageId,
-          expiresAt,
-        })
-        await router.register({
-          interactionId: reviseId,
-          version: 1,
-          workflowId: event.instanceId,
-          kind: INTERACTION_KIND.REVISE,
-          callbackToken: reviseToken,
-          botMessageId: result.messageId,
-          expiresAt,
-        })
-        await router.register({
-          interactionId: feedbackId,
-          version: 1,
-          workflowId: event.instanceId,
-          kind: INTERACTION_KIND.REVISION_FEEDBACK,
-          botMessageId: result.messageId,
-          expiresAt,
-        })
+        await Promise.all(notification.interactions.map((interaction) => router.register(interaction)))
       })
     }
 
     let currentDraft = state.draft
     let currentMessages = state.messages
     for (let i = 0; i < 4; i++) {
-      const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || "12"
+      const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || String(DEFAULT_WAIT_FOR_FEEDBACK_HOURS)
       const reply = await step.waitForEvent<{ text?: string }>(`feedback-${i}`, {
         type: "telegram-reply",
         // biome-ignore lint/suspicious/noExplicitAny: WorkflowSleepDuration doesn't accept computed strings
@@ -193,44 +231,56 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const text = (reply.payload?.text as string) ?? ((reply as Record<string, unknown>)?.text as string) ?? ""
       if (text === "__revise__") {
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-          await stepDo(`notify-revision-prompt-${i}`, async () => {
+          const feedbackInteraction = await stepDo(`notify-revision-prompt-${i}`, async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
             await tg.sendMessage(state.chatId, "Type your revision feedback.")
-            const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
-            await router.register({
+            return {
               interactionId: interactionId(),
               version: i + 1,
               workflowId: event.instanceId,
               kind: INTERACTION_KIND.REVISION_FEEDBACK,
-              expiresAt: Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || "12") * 60 * 60 * 1000,
-            })
+              expiresAt:
+                Date.now() +
+                Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * 60 * 60 * 1000,
+            }
+          })
+          await stepDo(`register-revision-feedback-${i}`, async () => {
+            const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
+            await router.register(feedbackInteraction)
           })
         }
         continue
       }
       if (text === "__approve__") {
-        const publishToken = await getLinkedInToken(this.env)
-        if (publishToken && this.env.LINKEDIN_AUTHOR_URN) {
-          try {
-            await stepDo("linkedin-publish", async () => {
-              const li = createLinkedInClient(publishToken)
-              await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
+        logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "started" })
+        const notifyPublishFailure = async (err: unknown): Promise<void> => {
+          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "failed" })
+          console.error(`[workflow ${event.instanceId}] linkedin-publish failed:`, err)
+          if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
+            await stepDo("notify-publish-failed", async () => {
+              const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+              const safe =
+                err instanceof LinkedInError
+                  ? `❌ LinkedIn publish failed (HTTP ${err.status})`
+                  : "❌ LinkedIn publish failed. Please try approving again."
+              await tg.sendMessage(state.chatId, safe)
             })
-          } catch (err) {
-            console.error(`[workflow ${event.instanceId}] linkedin-publish failed:`, err)
-            if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-              await stepDo("notify-publish-failed", async () => {
-                const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-                const safe =
-                  err instanceof LinkedInError
-                    ? `❌ LinkedIn publish failed (HTTP ${err.status})`
-                    : `❌ LinkedIn publish failed`
-                await tg.sendMessage(state.chatId, safe)
-              })
-            }
-            return
           }
-        } else {
+        }
+
+        let publishToken: string
+        try {
+          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-token-read", outcome: "started" })
+          publishToken = await getLinkedInToken(this.env)
+          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-token-read", outcome: "succeeded" })
+        } catch (err) {
+          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-token-read", outcome: "failed" })
+          await notifyPublishFailure(err)
+          return
+        }
+
+        if (!publishToken || !this.env.LINKEDIN_AUTHOR_URN) {
+          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "not-configured" })
           if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
             await stepDo("notify-not-configured", async () => {
               const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
@@ -242,6 +292,17 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           }
           return
         }
+
+        try {
+          await stepDo("linkedin-publish", async () => {
+            const li = createLinkedInClient(publishToken)
+            await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
+          })
+        } catch (err) {
+          await notifyPublishFailure(err)
+          return
+        }
+
         const finalCostLine = await stepDo("archive", async () => {
           const client = createGitHubClient(this.env)
           const manager = createBacklogManager(client)
@@ -267,6 +328,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${finalCostLine}`)
           })
         }
+        logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "succeeded" })
         return
       }
 
@@ -318,55 +380,23 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       currentMessages = revised.messages
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-        await stepDo(`notify-revised-${i}`, async () => {
+        const notification = await stepDo(`notify-revised-${i}`, async () => {
           const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-          const approveId = interactionId()
-          const reviseId = interactionId()
-          const feedbackId = interactionId()
-          const approveToken = interactionId()
-          const reviseToken = interactionId()
+          const expiresAt =
+            Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * 60 * 60 * 1000
+          const interactions = createDraftInteractions(0, event.instanceId, i + 2, expiresAt)
           const result = await tg.sendMessage(
             state.chatId,
             `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nReply with feedback or tap below.${revised.costLine}`,
-            {
-              replyMarkup: {
-                inline_keyboard: [
-                  [
-                    { text: "Approve \u2713", callback_data: approveToken },
-                    { text: "Revise More", callback_data: reviseToken },
-                  ],
-                ],
-              },
-            },
+            { replyMarkup: interactionKeyboard(interactions) },
           )
+          return {
+            interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: result.messageId })),
+          }
+        })
+        await stepDo(`register-notify-revised-interactions-${i}`, async () => {
           const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
-          const expiresAt = Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || "12") * 60 * 60 * 1000
-          await router.register({
-            interactionId: approveId,
-            version: i + 2,
-            workflowId: event.instanceId,
-            kind: INTERACTION_KIND.APPROVE,
-            callbackToken: approveToken,
-            botMessageId: result.messageId,
-            expiresAt,
-          })
-          await router.register({
-            interactionId: feedbackId,
-            version: i + 2,
-            workflowId: event.instanceId,
-            kind: INTERACTION_KIND.REVISION_FEEDBACK,
-            botMessageId: result.messageId,
-            expiresAt,
-          })
-          await router.register({
-            interactionId: reviseId,
-            version: i + 2,
-            workflowId: event.instanceId,
-            kind: INTERACTION_KIND.REVISE,
-            callbackToken: reviseToken,
-            botMessageId: result.messageId,
-            expiresAt,
-          })
+          await Promise.all(notification.interactions.map((interaction) => router.register(interaction)))
         })
       }
     }

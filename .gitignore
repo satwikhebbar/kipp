@@ -31,4 +31,5 @@ wrangler.prod.toml
 .dolt/
 *.db
 .beads-credential-key
+.beads/
 .beads/proxieddb/

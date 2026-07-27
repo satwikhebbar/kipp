@@ -253,6 +253,57 @@ describe("PipelineWorkflow", () => {
     expect(allErrorOutput).not.toContain("valid-token")
   })
 
+  it("reports a token vault failure safely when approving", async () => {
+    const responses = [
+      { text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+    ]
+    let callIdx = 0
+    let telegramText = ""
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        if (url?.includes?.("api.telegram.org")) {
+          const body = JSON.parse(opts?.body as string) as { text?: string }
+          telegramText = body.text ?? ""
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        TOKEN_VAULT: {
+          idFromName: () => "mock-do-id",
+          get: () => ({ fetch: () => Promise.resolve(new Response("unavailable", { status: 500 })) }),
+        } as never,
+      },
+    })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    consoleSpy.mockRestore()
+
+    expect(stepDo).not.toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("notify-publish-failed", expect.any(Function))
+    expect(telegramText).toBe("❌ LinkedIn publish failed. Please try approving again.")
+  })
+
   it("revises on feedback and notifies on second approval without LinkedIn", async () => {
     const responses = [
       { text: "First draft", usage: { inputTokens: 5, outputTokens: 3 } },
@@ -764,5 +815,66 @@ Body`
     expect(publishMsg).toContain("0 in")
     expect(publishMsg).toContain("60 out")
     expect(publishMsg).toContain("deepseek-v4-flash")
+  })
+
+  it("does not resend a draft when interaction registration is retried", async () => {
+    const completedSteps = new Map<string, unknown>()
+    const sendStep = vi.fn(async (name: string, fn: () => Promise<unknown>) => {
+      if (completedSteps.has(name)) return completedSteps.get(name)
+      const result = await fn()
+      completedSteps.set(name, result)
+      return result
+    })
+    const retryingStep = {
+      do: sendStep,
+      waitForEvent: vi.fn().mockResolvedValue({ type: "timeout" }),
+      sleep: vi.fn(),
+      sleepUntil: vi.fn(),
+    }
+    const responses = [
+      { text: "Draft content", usage: { inputTokens: 5, outputTokens: 3 } },
+      {
+        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
+        usage: { inputTokens: 5, outputTokens: 3 },
+      },
+    ]
+    let callIndex = 0
+    let telegramSends = 0
+    let registrationAttempts = 0
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIndex++])
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (url?.includes?.("api.telegram.org")) {
+          if (JSON.parse(opts?.body as string).text?.startsWith("*Draft")) telegramSends++
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        }
+        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+        const path = url.split("/contents/")[1]
+        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+    const router = {
+      idFromName: () => "router-id",
+      get: () => ({
+        fetch: async () => {
+          registrationAttempts++
+          return registrationAttempts === 1 ? new Response("failure", { status: 500 }) : Response.json({ ok: true })
+        },
+      }),
+    }
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: { ...mockEnv(), INTERACTION_ROUTER: router as never } })
+
+    await expect(
+      (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), retryingStep),
+    ).rejects.toThrow("Interaction router /register failed")
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), retryingStep)
+
+    expect(telegramSends).toBe(1)
+    expect(sendStep).toHaveBeenCalledWith("register-notify-interactions", expect.any(Function))
   })
 })

@@ -12,6 +12,7 @@ export interface Env {
   LINKEDIN_REDIRECT_ORIGIN?: string
   LINKEDIN_AUTHOR_URN: string
   DEPLOYMENT_ENV?: string
+  LOG_LEVEL?: string
   ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK?: string
   TOKEN_ENCRYPTION_KEY_IDS: string
   ACCESS_TEAM: string

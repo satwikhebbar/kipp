@@ -101,7 +101,7 @@ secret values in a committed Wrangler file.
 | Secret | `LLM_API_KEY` | Gemini or DeepSeek API credential. |
 | Secret | `TELEGRAM_ALLOWED_USER_ID`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Telegram user allow-list, Bot API access, and webhook verification. |
 | Secret | `TOKEN_ENCRYPTION_KEY_<key-id>` | 32-byte base64url token-encryption key; the configured key ID determines its exact name. |
-| Plaintext variable | `ACCESS_AUDIENCE`, `ACCESS_TEAM`, `DATA_REPO_BRANCH`, `DEPLOYMENT_ENV` | Access validation and deployment configuration. |
+| Plaintext variable | `ACCESS_AUDIENCE`, `ACCESS_TEAM`, `DATA_REPO_BRANCH`, `DEPLOYMENT_ENV`, `LOG_LEVEL` | Access validation and deployment configuration. `LOG_LEVEL=info` enables metadata-only local runtime logs; leave it unset in production. |
 | Plaintext variable | `LINKEDIN_AUTHOR_URN`, `LLM_MAX_RETRIES`, `LLM_MODEL`, `LLM_PROVIDER` | LinkedIn identity and LLM behavior. |
 | Plaintext variable | `POSTING_CADENCE_DAYS`, `SUBSTACK_RSS_URL`, `TIMEZONE`, `WAIT_FOR_FEEDBACK_HOURS` | Scheduled-trigger and feedback-timeout behavior. |
 | Plaintext variable | `TOKEN_ENCRYPTION_KEY_IDS` | Ordered, comma-separated encryption key IDs; the first encrypts and all listed keys can decrypt. |

@@ -3,6 +3,7 @@ import { parseIdeas, serializeIdeas } from "../backlog/parser"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
 import { createInteractionRouter } from "../interaction-router-client"
+import { logRuntime } from "../runtime/logging"
 import { type Env, INTERACTION_KIND } from "../types"
 
 interface TelegramUser {
@@ -59,6 +60,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
     return new Response("invalid body", { status: 400 })
   const update = parsed as TelegramUpdate
+  logRuntime(env, { event: "telegram-update", outcome: "started" })
 
   if (update.callback_query) {
     const cq = update.callback_query
@@ -73,6 +75,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
         callbackToken: cq.data,
       })
 
+    logRuntime(env, { event: "telegram-callback", outcome: "succeeded" })
     return new Response("OK")
   }
 
@@ -99,6 +102,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
   }
 
   if (msg.text === "/generate") {
+    logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
     const client = createGitHubClient(env)
     const ideas = parseIdeas((await client.readFile("ideas.md")).content)
     const rawIdeas = ideas.filter((i) => i.status === "raw")
@@ -112,6 +116,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     })
     const label = raw.title ?? raw.body.slice(0, 80)
     await tg.sendMessage(msg.chat.id, `Started workflow for idea #${raw.id}: ${label}`)
+    logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
     return new Response("OK")
   }
 
