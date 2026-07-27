@@ -24,6 +24,7 @@ export interface LinkedinClient {
   createDraftPost(authorUrn: string, text: string): Promise<{ urn: string }>
 }
 
+/** Retrieves the LinkedIn access token from the token vault or env fallback. */
 export async function getLinkedInToken(env: Env): Promise<string> {
   const vault = createTokenVault(env)
   const { tokens } = await vault.readTokens()
@@ -38,6 +39,7 @@ export async function getLinkedInToken(env: Env): Promise<string> {
   return ""
 }
 
+/** Creates a LinkedIn API client for posting drafts. */
 export function createLinkedInClient(accessToken: string): LinkedinClient {
   async function request(method: string, path: string, body?: Record<string, unknown>) {
     const res = await fetch(`${LINKEDIN_API}${path}`, {

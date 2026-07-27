@@ -20,6 +20,7 @@ Respond with a JSON array only, no explanation.`
 
 export type CritiqueFn = (draft: string) => Promise<ChecklistItem[]>
 
+/** Creates an agent that evaluates drafts against a LinkedIn post checklist. */
 export function createCritiqueAgent(generate: GenerateFn): CritiqueFn {
   return async (draft) => {
     const prompt = [

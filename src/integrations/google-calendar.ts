@@ -64,10 +64,12 @@ export interface GoogleCalendarClient {
   createManagedEvent(event: ManagedCalendarEvent): Promise<void>
 }
 
+/** Returns the epoch ms at which the token expires. */
 function tokenExpiry(tokens: GoogleCalendarTokens): number {
   return new Date(tokens.created_at).getTime() + tokens.expires_in * TOKEN_EXPIRY_UNIT_MS
 }
 
+/** Type guard that validates a token object has the expected Google Calendar shape. */
 function isGoogleCalendarTokens(tokens: GoogleCalendarTokens | null | unknown): tokens is GoogleCalendarTokens {
   return Boolean(
     tokens &&
@@ -78,6 +80,7 @@ function isGoogleCalendarTokens(tokens: GoogleCalendarTokens | null | unknown): 
   )
 }
 
+/** Builds the Google Calendar API event payload from a managed event. */
 function calendarEventBody(event: ManagedCalendarEvent): GoogleCalendarEventBody {
   return {
     id: event.id,
@@ -108,6 +111,7 @@ export class GoogleCalendarError extends Error {
   }
 }
 
+/** Creates a Google Calendar API client with automatic token refresh. */
 export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
   const vault = createTokenVault(env, TOKEN_PROVIDER.GOOGLE_CALENDAR)
 

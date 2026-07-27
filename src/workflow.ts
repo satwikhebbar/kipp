@@ -21,10 +21,12 @@ const MAX_FEEDBACK_ROUNDS = 4
 const HOURS_TO_MS = 3_600_000 // ponytail: precomputed 60 * 60 * 1000
 const DEFAULT_LLM_RETRIES = 3
 
+/** Generates a unique interaction ID. */
 function interactionId(): string {
   return crypto.randomUUID()
 }
 
+/** Creates approve/revise/revision-feedback interaction registrations for a draft message. */
 function createDraftInteractions(
   messageId: number,
   workflowId: string,
@@ -61,6 +63,7 @@ function createDraftInteractions(
   ]
 }
 
+/** Builds a Telegram inline keyboard markup from approve/revise interactions. */
 function interactionKeyboard(interactions: InteractionRegistration[]): Record<string, unknown> {
   const approve = interactions.find((interaction) => interaction.kind === INTERACTION_KIND.APPROVE)
   const revise = interactions.find((interaction) => interaction.kind === INTERACTION_KIND.REVISE)
@@ -75,6 +78,7 @@ function interactionKeyboard(interactions: InteractionRegistration[]): Record<st
   }
 }
 
+/** Wraps a GenerateFn to accumulate token usage across multiple calls. */
 function withUsageAccumulator(gen: GenerateFn): { gen: GenerateFn; getUsage: () => LLMUsage } {
   const cumulative: LLMUsage = { inputTokens: 0, outputTokens: 0 }
   const wrapped: GenerateFn = async (opts) => {

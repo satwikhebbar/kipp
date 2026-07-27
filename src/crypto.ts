@@ -12,12 +12,14 @@ const AES_GCM_MIN_CT_LENGTH = 16
 const AES_GCM_MAX_CT_LENGTH = 10_048
 const BASE64_PADDING_ALIGNMENT = 4
 
+/** Encodes a byte array as base64url (RFC 4648 §5, no padding). */
 export function base64urlEncode(buf: Uint8Array): string {
   let binary = ""
   for (let i = 0; i < buf.length; i++) binary += String.fromCharCode(buf[i])
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 }
 
+/** Decodes a base64url string back to bytes. */
 export function base64urlDecode(str: string): Uint8Array {
   str = str.replace(/-/g, "+").replace(/_/g, "/")
   while (str.length % BASE64_PADDING_ALIGNMENT) str += "="
@@ -27,6 +29,7 @@ export function base64urlDecode(str: string): Uint8Array {
   return bytes
 }
 
+/** Encrypts a JSON-serializable payload with AES-256-GCM and returns the envelope. */
 export async function encryptToken(
   plaintext: Record<string, unknown>,
   keyId: string,
@@ -45,6 +48,7 @@ export async function encryptToken(
   return { v: 1, kid: keyId, aad: aadString, iv: base64urlEncode(iv), ct: base64urlEncode(new Uint8Array(ct)) }
 }
 
+/** Decrypts an AES-256-GCM envelope, returning null on any failure. */
 export async function decryptToken(envelope: Envelope, rawKey: ArrayBuffer): Promise<Record<string, unknown> | null> {
   if (envelope.v !== 1) return null
   if (rawKey.byteLength !== AES_256_KEY_LENGTH) return null

@@ -14,6 +14,7 @@ export {
   type ToolProviderResponse,
 } from "./llm"
 
+/** Resolves a provider name to a default model if none is given. */
 export function resolveModel(provider: string, modelName?: string): string {
   if (modelName) return modelName
   switch (provider) {
@@ -31,6 +32,7 @@ const BACKOFF_BASE_MS = 1_000
 const BACKOFF_JITTER_MS = 1_000
 const BACKOFF_MAX_MS = 16_000
 
+/** Creates a retry-wrapped LLM text generator for the given provider. */
 export function createGenerator(
   apiKey: string,
   provider: string,
@@ -42,6 +44,7 @@ export function createGenerator(
   return withRetry(inner, retries)
 }
 
+/** Creates a retry-wrapped tool-calling provider client. */
 export function createToolProvider(
   apiKey: string,
   provider: string,
@@ -59,6 +62,7 @@ export function createToolProvider(
   }
 }
 
+/** Dispatches to the provider-specific tool client factory. */
 function createInnerToolProvider(apiKey: string, provider: string, modelName?: string): ToolProviderClient {
   switch (provider) {
     case "gemini":
@@ -70,6 +74,7 @@ function createInnerToolProvider(apiKey: string, provider: string, modelName?: s
   }
 }
 
+/** Dispatches to the provider-specific generator factory. */
 function createInnerGenerator(apiKey: string, provider: string, modelName?: string): GenerateFn {
   switch (provider) {
     case "gemini":
@@ -81,6 +86,7 @@ function createInnerGenerator(apiKey: string, provider: string, modelName?: stri
   }
 }
 
+/** Wraps an async function with exponential-backoff retry logic. */
 function withRetry<TInput, TOutput>(
   fn: (input: TInput) => Promise<TOutput>,
   maxRetries: number,

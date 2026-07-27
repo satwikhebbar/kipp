@@ -12,14 +12,17 @@ interface StateEntry {
   expiresAt: number
 }
 
+/** Returns the storage key for a provider's token envelope. */
 function tokenKey(provider: TokenProvider): string {
   return provider === TOKEN_PROVIDER.LINKEDIN ? "tokens" : `${provider}:tokens`
 }
 
+/** Returns the storage key for a provider's OAuth state entry. */
 function stateKey(provider: TokenProvider, state: string): string {
   return provider === TOKEN_PROVIDER.LINKEDIN ? `state:${state}` : `state:${provider}:${state}`
 }
 
+/** Parses a token provider value, defaulting to LINKEDIN when undefined. */
 function tokenProvider(value: unknown): TokenProvider | null {
   if (value === undefined || value === TOKEN_PROVIDER.LINKEDIN) return TOKEN_PROVIDER.LINKEDIN
   if (value === TOKEN_PROVIDER.GOOGLE_CALENDAR) return TOKEN_PROVIDER.GOOGLE_CALENDAR

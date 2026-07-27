@@ -64,6 +64,7 @@ export function toolDeclaration(tool: ToolDefinition): {
   }
 }
 
+/** Maps a Zod property to a JSON Schema type descriptor. */
 function zodProperty(schema: unknown): Record<string, unknown> {
   const unwrapped = unwrapZodProperty(schema)
   const definition = unwrapped._def
@@ -92,11 +93,13 @@ function unwrapZodProperty(schema: unknown): ZodProperty {
   return property
 }
 
+/** Parses JSON from an LLM response, stripping markdown code fences if present. */
 export function parseLLMJson<T>(text: string): T {
   const cleaned = text.replace(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/m, "$1").trim()
   return JSON.parse(cleaned) as T
 }
 
+/** Builds a GenerateOptions with optional system message and a single user message. */
 export function messages(system: string | undefined, user: string): GenerateOptions {
   const out: LLMMessage[] = []
   if (system) out.push({ role: "system", content: system })

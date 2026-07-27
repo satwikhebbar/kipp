@@ -13,10 +13,12 @@ export class TranscriptTooLargeError extends Error {
   }
 }
 
+/** Returns the JSON-serialized byte length of a value. */
 export function serializedByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length
 }
 
+/** Throws if the serialized value exceeds the step output byte limit. */
 export function assertStepOutputSize<T>(value: T, limit = STEP_OUTPUT_BYTE_LIMIT): T {
   const bytes = serializedByteLength(value)
   if (bytes >= limit) {
@@ -29,10 +31,12 @@ export function assertStepOutputSize<T>(value: T, limit = STEP_OUTPUT_BYTE_LIMIT
   return value
 }
 
+/** Appends an assistant message to the conversation. */
 export function appendAssistant(messages: LLMMessage[], content: string): LLMMessage[] {
   return [...messages, { role: "assistant", content }]
 }
 
+/** Appends a human feedback message to the conversation. */
 export function appendHumanFeedback(messages: LLMMessage[], feedback: string): LLMMessage[] {
   return [...messages, { role: "user", content: feedback }]
 }

@@ -3,6 +3,7 @@ import type { Idea, IdeaStatus } from "../types"
 import { appendToArchive, cleanupArchive } from "./archive"
 import { parseIdeas, serializeIdeas } from "./parser"
 
+/** Creates a backlog manager for CRUD operations on ideas stored in GitHub. */
 export function createBacklogManager(client: GithubClient) {
   async function readIdeas(): Promise<Idea[]> {
     const file = await client.readFile("ideas.md")

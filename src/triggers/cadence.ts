@@ -2,6 +2,7 @@ import { parseIdeas } from "../backlog/parser"
 import { createGitHubClient } from "../integrations/github"
 import type { Env } from "../types"
 
+/** Checks posting cadence and starts a workflow if enough time has passed since the last publish. */
 export async function handleCadenceCron(env: Env): Promise<{ started: boolean; ideaId?: string }> {
   const client = createGitHubClient(env)
 

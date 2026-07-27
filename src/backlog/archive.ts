@@ -4,6 +4,7 @@ import { parseIdeas, serializeIdea, serializeIdeas } from "./parser"
 
 export const ARCHIVE_RETENTION_MS = 2_592_000_000 // ponytail: precomputed 30 * 24 * 60 * 60 * 1000
 
+/** Archives a finalized idea to the archive file. */
 export async function appendToArchive(client: GithubClient, idea: Idea): Promise<void> {
   await client.mutateFile("archive.md", (content) => {
     const archived = { ...idea, status: "finalized" as const, finalized: new Date().toISOString() }
@@ -13,6 +14,7 @@ export async function appendToArchive(client: GithubClient, idea: Idea): Promise
   })
 }
 
+/** Removes archived entries older than the retention period. */
 export async function cleanupArchive(client: GithubClient): Promise<void> {
   await client.mutateFile("archive.md", (content) => {
     const entries = parseIdeas(content)

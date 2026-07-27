@@ -25,6 +25,7 @@ type InteractionRow = {
 
 export const CONSUMED_INTERACTION_RETENTION_MS = 3_600_000 // ponytail: 1 hour
 
+/** Returns a JSON response with the given status code. */
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })
 }
