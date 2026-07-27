@@ -229,7 +229,6 @@ describe("PipelineWorkflow", () => {
       env: {
         ...mockEnv(),
         ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
-        DEPLOYMENT_ENV: "development",
         LINKEDIN_ACCESS_TOKEN: "valid-token",
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
@@ -684,7 +683,6 @@ Body content`
       env: {
         ...mockEnv(),
         ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
-        DEPLOYMENT_ENV: "development",
         LINKEDIN_ACCESS_TOKEN: "valid-token",
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
@@ -798,7 +796,6 @@ Body`
       env: {
         ...mockEnv(),
         ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
-        DEPLOYMENT_ENV: "development",
         LINKEDIN_ACCESS_TOKEN: "valid-token",
         LINKEDIN_AUTHOR_URN: "urn:li:person:123",
         LINKEDIN_CLIENT_ID: "client-id",
