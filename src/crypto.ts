@@ -52,12 +52,12 @@ export async function encryptToken(
 export async function decryptToken(envelope: Envelope, rawKey: ArrayBuffer): Promise<Record<string, unknown> | null> {
   if (envelope.v !== 1) return null
   if (rawKey.byteLength !== AES_256_KEY_LENGTH) return null
-  const aad = new TextEncoder().encode(envelope.aad)
-  const iv = base64urlDecode(envelope.iv)
-  if (iv.byteLength !== AES_GCM_IV_LENGTH) return null
-  const ct = base64urlDecode(envelope.ct)
-  if (ct.byteLength < AES_GCM_MIN_CT_LENGTH || ct.byteLength > AES_GCM_MAX_CT_LENGTH) return null
   try {
+    const aad = new TextEncoder().encode(envelope.aad)
+    const iv = base64urlDecode(envelope.iv)
+    if (iv.byteLength !== AES_GCM_IV_LENGTH) return null
+    const ct = base64urlDecode(envelope.ct)
+    if (ct.byteLength < AES_GCM_MIN_CT_LENGTH || ct.byteLength > AES_GCM_MAX_CT_LENGTH) return null
     const key = await crypto.subtle.importKey("raw", rawKey, "AES-GCM", false, ["decrypt"])
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: aad }, key, ct)
     return JSON.parse(new TextDecoder().decode(plain)) as Record<string, unknown>
