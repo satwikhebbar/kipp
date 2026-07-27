@@ -5,11 +5,13 @@ import { extractCookie, hasSetupAccess } from "./oauth"
 const AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 const TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 
+/** Builds the OAuth redirect URI for LinkedIn. */
 function redirectUrl(env: Env, host: string): string {
   const origin = env.LINKEDIN_REDIRECT_ORIGIN || `https://${host}`
   return `${origin}/auth/linkedin/callback`
 }
 
+/** Initiates the LinkedIn OAuth flow, redirecting to LinkedIn's consent page. */
 export async function handleAuthStart(request: Request, host: string, env: Env): Promise<Response> {
   if (!(await hasSetupAccess(request, env))) {
     return new Response("Setup requires authentication", { status: 403 })
@@ -35,6 +37,7 @@ export async function handleAuthStart(request: Request, host: string, env: Env):
   return new Response(null, { status: 302, headers })
 }
 
+/** Handles the LinkedIn OAuth callback, exchanging the code for tokens. */
 export async function handleAuthCallback(
   code: string,
   state: string,

@@ -21,6 +21,7 @@ export interface InteractionResolveInput {
   text?: string
 }
 
+/** Creates a client for the per-chat interaction router Durable Object. */
 export function createInteractionRouter(namespace: DurableObjectNamespace, chatId: number | string) {
   const stub = namespace.get(namespace.idFromName(`telegram-chat:${chatId}`))
   async function post<T>(path: string, body: unknown): Promise<T> {

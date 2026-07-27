@@ -12,10 +12,12 @@ export const HTTP_STATUS = {
   SERVICE_UNAVAILABLE: 503,
 } as const
 
+/** Returns true when the HTTP status indicates a transient server error (5xx). */
 export function isTransientServerError(status: number): boolean {
   return status >= HTTP_STATUS.SERVER_ERROR_START
 }
 
+/** Returns true when the status is retryable (429 or 5xx). */
 export function isTransientHttpStatus(status: number): boolean {
   return status === HTTP_STATUS.TOO_MANY_REQUESTS || isTransientServerError(status)
 }

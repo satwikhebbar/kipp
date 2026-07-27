@@ -11,6 +11,7 @@ const PRICING: Record<string, ModelPricing> = {
 const TOKENS_PER_MILLION = 1_000_000
 const COST_DECIMAL_PLACES = 4
 
+/** Computes the estimated USD cost for an LLM usage record against known model pricing. */
 export function computeCost(usage: LLMUsage, model: string): WorkflowCost {
   const p = PRICING[model]
   const totalCostUsd = p
@@ -25,6 +26,7 @@ export function computeCost(usage: LLMUsage, model: string): WorkflowCost {
   }
 }
 
+/** Formats a cost object as a Markdown line for display. */
 export function formatCostLine(cost: WorkflowCost): string {
   if (cost.totalCostUsd === null) return `\n\n_Model "${cost.model}" not in pricing table — no cost estimate_`
   return (

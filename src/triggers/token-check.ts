@@ -7,6 +7,7 @@ const SECONDS_TO_MS = 1000
 const MS_PER_DAY = 86_400_000
 const EXPIRY_ALERT_DAYS = 7
 
+/** Checks LinkedIn token expiry, attempts refresh if close to expiry, and alerts via Telegram if needed. */
 export async function handleTokenCheckCron(env: Env): Promise<{ alerted: boolean; refreshed: boolean }> {
   const vault = createTokenVault(env)
   const { tokens } = await vault.readTokens()

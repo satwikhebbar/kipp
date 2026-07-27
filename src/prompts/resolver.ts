@@ -1,6 +1,7 @@
 import { type GithubClient, GithubError } from "../integrations/github"
 import { HTTP_STATUS } from "../runtime/http"
 
+/** Reads the first existing prompt file from a list of paths, falling back to a default. */
 export async function readPrompt(client: GithubClient, paths: string[], fallback: string): Promise<string> {
   for (const path of paths) {
     try {

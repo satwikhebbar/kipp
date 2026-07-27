@@ -17,6 +17,7 @@ const JWKS_URL_TEMPLATE = "https://{domain}.cloudflareaccess.com/cdn-cgi/access/
 
 const jwksResolvers = new Map<string, ReturnType<typeof createRemoteJWKSet>>()
 
+/** Returns a cached JWKS resolver for the given Cloudflare Access domain. */
 function getResolver(domain: string) {
   let r = jwksResolvers.get(domain)
   if (!r) {
@@ -26,6 +27,7 @@ function getResolver(domain: string) {
   return r
 }
 
+/** Verifies a Cloudflare Access JWT assertion from the request headers. */
 export async function verifyAccessJwt(request: Request, env: Env): Promise<AccessJwtClaims | null> {
   if (isInsecureLocalAccessEnabled(env)) return null
 
@@ -57,6 +59,7 @@ export function isInsecureLocalAccessEnabled(env: Env): boolean {
   return env.ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK === "true" && env.DEPLOYMENT_ENV === "development"
 }
 
+/** Creates a client for the token vault Durable Object. */
 export function createTokenVault(env: Env, provider: TokenProvider = TOKEN_PROVIDER.LINKEDIN) {
   const doId = env.TOKEN_VAULT.idFromName("linkedin-token-vault")
   const doStub = env.TOKEN_VAULT.get(doId)

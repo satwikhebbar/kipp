@@ -23,6 +23,7 @@ export interface GithubClient {
   mutateFile(path: string, mutate: (content: string) => string): Promise<void>
 }
 
+/** Base64-encodes a string for GitHub API content fields. */
 function b64encode(s: string): string {
   const bytes = new TextEncoder().encode(s)
   let binary = ""
@@ -30,10 +31,12 @@ function b64encode(s: string): string {
   return btoa(binary)
 }
 
+/** Decodes base64-encoded GitHub API content back to a string. */
 function b64decode(s: string): string {
   return new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0)))
 }
 
+/** Creates a GitHub API client for reading/writing files in the data repo. */
 export function createGitHubClient(env: {
   GITHUB_PAT: string
   DATA_REPO_OWNER: string

@@ -11,6 +11,7 @@ export type ReviseFn = (input: ReviseInput) => Promise<string>
 
 const REVISION_INSTRUCTION = `Revise the latest draft in this conversation. Preserve the established style and topic. Fix only the issues listed below. Output the revised draft text only — no preamble, no JSON, no commentary.`
 
+/** Builds the conversation messages for revision with feedback. */
 export function buildReviseConversation(input: ReviseInput): LLMMessage[] {
   const out: LLMMessage[] = [...input.messages]
   const parts = [REVISION_INSTRUCTION]
@@ -25,6 +26,7 @@ export function buildReviseConversation(input: ReviseInput): LLMMessage[] {
   return out
 }
 
+/** Creates a revision agent that revises drafts based on checklist feedback. */
 export function createReviseAgent(generate: GenerateFn): ReviseFn {
   return async (input) => {
     const res = await generate({ messages: buildReviseConversation(input) })

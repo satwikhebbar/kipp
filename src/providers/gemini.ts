@@ -4,6 +4,7 @@ import { type GenerateOptions, type ToolProviderClient, ToolProviderProtocolErro
 
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
 
+/** Creates a Gemini text generation client (non-tool-calling). */
 export function createGeminiGenerator(apiKey: string, modelName = GEMINI_DEFAULT_MODEL) {
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: modelName })
@@ -42,6 +43,7 @@ export function createGeminiGenerator(apiKey: string, modelName = GEMINI_DEFAULT
   }
 }
 
+/** Creates a Gemini tool-calling client. */
 export function createGeminiToolClient(apiKey: string, modelName = GEMINI_DEFAULT_MODEL): ToolProviderClient {
   const genAI = new GoogleGenerativeAI(apiKey)
   const model = genAI.getGenerativeModel({ model: modelName })

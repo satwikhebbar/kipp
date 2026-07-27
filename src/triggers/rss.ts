@@ -22,6 +22,7 @@ Return ONLY a JSON object with:
 - "teaser": a one-line hook for a LinkedIn post (max 200 chars)
 - "subIdeas": an array of 2-4 LinkedIn post ideas based on this content (each max 300 chars)`
 
+/** Parses RSS XML into structured items. */
 export function parseRssFeed(xml: string): RssItem[] {
   const items: RssItem[] = []
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi
@@ -45,6 +46,7 @@ export function parseRssFeed(xml: string): RssItem[] {
   return items
 }
 
+/** Strips HTML tags and decodes common HTML entities. */
 function stripHtml(html: string): string {
   return html
     .replace(/<[^>]*>/g, "")
@@ -60,6 +62,7 @@ const MAX_SECTION_IDEAS = 4
 const MAX_TITLE_LENGTH = 80
 const DEFAULT_RSS_RETRIES = 3
 
+/** Uses LLM to extract a teaser and sub-ideas from an RSS item's content. */
 async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<ExtractedIdeas> {
   const text = stripHtml(item.contentHtml).slice(0, RSS_CONTENT_TRUNCATE_LENGTH)
   const prompt = `Newsletter: "${item.title}"\nURL: ${item.link}\n\nContent:\n${text}`
@@ -71,6 +74,7 @@ async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<Extracte
   return parsed
 }
 
+/** Builds main and side Idea objects from an RSS item and extracted content. */
 function buildIdeas(item: RssItem, extracted: ExtractedIdeas, existing: Idea[]): { main: Idea; side: Idea[] } {
   const now = new Date().toISOString()
   let id = nextId(existing)
@@ -100,6 +104,7 @@ function buildIdeas(item: RssItem, extracted: ExtractedIdeas, existing: Idea[]):
   return { main, side }
 }
 
+/** Writes ideas to the ideas.md file, appending to existing entries. */
 async function writeIdeas(client: GithubClient, ideas: Idea[]): Promise<void> {
   await client.mutateFile("ideas.md", (content) => {
     const existing = parseIdeas(content)
@@ -108,6 +113,7 @@ async function writeIdeas(client: GithubClient, ideas: Idea[]): Promise<void> {
   })
 }
 
+/** Checks the RSS feed for new items and starts a workflow for the first unseen item. */
 export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaId?: string }> {
   const client = createGitHubClient(env)
 
@@ -137,6 +143,7 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
   return { started: true, ideaId: instance.id }
 }
 
+/** Fetches and parses an RSS feed from a URL. */
 async function fetchRssItems(url: string): Promise<RssItem[]> {
   const res = await fetch(url)
   if (!res.ok) throw new Error(`RSS fetch error ${res.status} for ${url}`)

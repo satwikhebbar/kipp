@@ -70,6 +70,7 @@ const proposalOutputSchema = z.object({ accepted: z.literal(true) })
 const clarificationInputSchema = z.object({ message: z.string().trim().min(1).max(240) })
 const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
+/** Builds the system prompt for the calendar planner agent. */
 function plannerPrompt(requestText: string, now: number, timeZone: string): string {
   const todayParts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" })
     .formatToParts(new Date(now))
@@ -78,6 +79,7 @@ function plannerPrompt(requestText: string, now: number, timeZone: string): stri
   return `You are Kipp's personal calendar planner. Interpret the user request, but do not invent facts. Today is ${localToday.year}-${localToday.month}-${localToday.day} in ${timeZone}.\n\nUse exactly one terminal action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. Use get_available_slots only when you need to choose a time. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit, and needsClarification must be false. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence.\n\nUser request: ${requestText}`
 }
 
+/** Returns calendar day bounds for a date, used by the planner's availability tool. */
 function dateTimeForTool(localDate: string, timeZone: string): { timeMin: string; timeMax: string } | null {
   return calendarDayBounds(localDate, timeZone)
 }

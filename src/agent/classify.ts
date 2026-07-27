@@ -11,6 +11,7 @@ Respond with JSON only: {"action": "approve"|"feedback", "feedbackText": string|
 
 export type ClassifyFn = (replyText: string) => Promise<ClassificationResult>
 
+/** Creates an agent that classifies author intent (approve/feedback) from a reply. */
 export function createClassifyAgent(generate: GenerateFn): ClassifyFn {
   return async (replyText) => {
     const res = await generate(messages(SYSTEM_PROMPT, `Author's reply: ${replyText}`))

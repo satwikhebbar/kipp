@@ -12,16 +12,19 @@ export const GOOGLE_CALENDAR_SCOPES = [
   "https://www.googleapis.com/auth/calendar.events.freebusy",
 ] as const
 
+/** Builds the OAuth redirect URI for Google Calendar. */
 function redirectUrl(env: Env, host: string): string {
   const origin = env.GOOGLE_CALENDAR_REDIRECT_ORIGIN || `https://${host}`
   return `${origin}/auth/google-calendar/callback`
 }
 
+/** Returns Google Calendar OAuth client credentials or null if not configured. */
 function googleClientCredentials(env: Env): { clientId: string; clientSecret: string } | null {
   if (!env.GOOGLE_CALENDAR_CLIENT_ID || !env.GOOGLE_CALENDAR_CLIENT_SECRET) return null
   return { clientId: env.GOOGLE_CALENDAR_CLIENT_ID, clientSecret: env.GOOGLE_CALENDAR_CLIENT_SECRET }
 }
 
+/** Initiates the Google Calendar OAuth flow, redirecting to Google's consent page. */
 export async function handleGoogleCalendarAuthStart(request: Request, host: string, env: Env): Promise<Response> {
   if (!(await hasSetupAccess(request, env))) return new Response("Setup requires authentication", { status: 403 })
   const credentials = googleClientCredentials(env)
@@ -46,6 +49,7 @@ export async function handleGoogleCalendarAuthStart(request: Request, host: stri
   return new Response(null, { status: 302, headers })
 }
 
+/** Handles the Google Calendar OAuth callback, exchanging the code for tokens. */
 export async function handleGoogleCalendarAuthCallback(
   code: string,
   state: string,

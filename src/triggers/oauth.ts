@@ -6,6 +6,7 @@ export async function hasSetupAccess(request: Request, env: Env): Promise<boolea
   return Boolean(await verifyAccessJwt(request, env)) || isInsecureLocalAccessEnabled(env)
 }
 
+/** Extracts a named cookie value from a Cookie header string. */
 export function extractCookie(cookieHeader: string | null, name: string): string | null {
   if (!cookieHeader) return null
   for (const part of cookieHeader.split(";")) {

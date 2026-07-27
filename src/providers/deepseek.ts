@@ -21,6 +21,7 @@ interface DeepseekToolResponse {
   usage?: { prompt_tokens?: number; completion_tokens?: number }
 }
 
+/** Creates a DeepSeek chat completion generator (non-tool-calling). */
 export function createDeepseekGenerator(apiKey: string, modelName = DEEPSEEK_DEFAULT_MODEL) {
   return async ({ messages }: GenerateOptions): Promise<LLMResponse> => {
     const res = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
@@ -56,6 +57,7 @@ export function createDeepseekGenerator(apiKey: string, modelName = DEEPSEEK_DEF
   }
 }
 
+/** Creates a DeepSeek tool-calling client. */
 export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DEFAULT_MODEL): ToolProviderClient {
   return {
     async generate({ messages, tools }) {

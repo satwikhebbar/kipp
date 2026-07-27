@@ -40,11 +40,13 @@ interface TelegramUpdate {
   callback_query?: TelegramCallbackQuery
 }
 
+/** Checks if a Telegram user ID is allowed, or allows all if no restriction is configured. */
 function verifyUser(env: Env, userId: number): boolean {
   if (!env.TELEGRAM_ALLOWED_USER_ID) return true
   return String(userId) === env.TELEGRAM_ALLOWED_USER_ID
 }
 
+/** Handles an incoming Telegram webhook update. */
 export async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
   const secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
   if (secret !== env.TELEGRAM_WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 })
@@ -90,6 +92,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   return new Response("OK")
 }
 
+/** Processes a Telegram message: commands, replies, and routed interactions. */
 async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> {
   if (!msg.text || !msg.from || msg.from.is_bot) return new Response("OK")
   if (!verifyUser(env, msg.from.id)) return new Response("Forbidden", { status: 403 })
@@ -191,6 +194,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
   }
 }
 
+/** Resolves a routed interaction and sends an event to the workflow instance. */
 async function dispatchRoutedInteraction(
   env: Env,
   chatId: number,

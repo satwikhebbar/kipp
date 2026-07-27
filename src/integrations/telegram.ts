@@ -1,5 +1,6 @@
 const TELEGRAM_API = "https://api.telegram.org"
 
+/** Creates a Telegram Bot API client. */
 export function createTelegramClient(token: string) {
   async function call<T = unknown>(method: string, body: Record<string, unknown>): Promise<T> {
     const res = await fetch(`${TELEGRAM_API}/bot${token}/${method}`, {

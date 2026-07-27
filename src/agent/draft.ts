@@ -11,6 +11,7 @@ export type DraftFn = (input: DraftInput) => Promise<string>
 const FORMAT_DIRECTIVE =
   "Write a concise LinkedIn post (150-300 words) with an engaging hook, a short personal angle, a clear takeaway, and a question or prompt to drive engagement."
 
+/** Builds the conversation messages for draft generation. */
 export function createDraftConversation(stylePrompt: string, input: DraftInput): LLMMessage[] {
   const parts = [
     input.title ? `Write a LinkedIn post about: ${input.title}` : "Write a LinkedIn post",
@@ -24,6 +25,7 @@ export function createDraftConversation(stylePrompt: string, input: DraftInput):
   ]
 }
 
+/** Creates a draft-generation agent that produces LinkedIn posts. */
 export function createDraftAgent(generate: GenerateFn, stylePrompt: string): DraftFn {
   return async (input) => {
     const res = await generate({ messages: createDraftConversation(stylePrompt, input) })
