@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { nextId } from "../backlog/id-generator"
-import { parseIdea, parseIdeas, serializeIdea, serializeIdeas } from "../backlog/parser"
+import { isIdeaStart, parseIdea, parseIdeas, parseYamlLine, serializeIdea, serializeIdeas } from "../backlog/parser"
 
 const RAW_IDEA = `---
 id: 1
@@ -271,6 +271,62 @@ describe("duplicate ID handling", () => {
     const serialized = serializeIdeas(ideas)
     const reparsed = parseIdeas(serialized)
     expect(reparsed).toHaveLength(2)
+  })
+})
+
+describe("parseYamlLine", () => {
+  it("parses key: value", () => {
+    expect(parseYamlLine("foo: bar")).toEqual(["foo", "bar"])
+  })
+
+  it("strips quotes from value", () => {
+    expect(parseYamlLine('foo: "bar"')).toEqual(["foo", "bar"])
+  })
+
+  it("handles colon in value", () => {
+    expect(parseYamlLine("url: https://example.com/path")).toEqual(["url", "https://example.com/path"])
+  })
+
+  it("returns null for non-matching line", () => {
+    expect(parseYamlLine("not a key value pair")).toBeNull()
+  })
+
+  it("returns null for empty line", () => {
+    expect(parseYamlLine("")).toBeNull()
+  })
+
+  it("returns null for comment line", () => {
+    expect(parseYamlLine("# comment")).toBeNull()
+  })
+
+  it("trims leading whitespace", () => {
+    expect(parseYamlLine("  key: value")).toEqual(["key", "value"])
+  })
+})
+
+describe("isIdeaStart", () => {
+  it("detects --- followed by a yaml key", () => {
+    expect(isIdeaStart(["---", "id: 1"], 0)).toBe(true)
+  })
+
+  it("detects --- followed by indented yaml key", () => {
+    expect(isIdeaStart(["---", "  correlation:"], 0)).toBe(true)
+  })
+
+  it("returns false for --- followed by non-key text", () => {
+    expect(isIdeaStart(["---", "body text"], 0)).toBe(false)
+  })
+
+  it("returns false at a non --- line", () => {
+    expect(isIdeaStart(["some text", "---"], 0)).toBe(false)
+  })
+
+  it("returns false for --- at end of file", () => {
+    expect(isIdeaStart(["---"], 0)).toBe(false)
+  })
+
+  it("returns false for --- with missing next line", () => {
+    expect(isIdeaStart(["---", undefined as unknown as string], 0)).toBe(false)
   })
 })
 
