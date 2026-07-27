@@ -67,7 +67,8 @@ const availabilityInputSchema = z.object({
 })
 const availabilityOutputSchema = z.object({ slots: z.array(z.string()) })
 const proposalOutputSchema = z.object({ accepted: z.literal(true) })
-const clarificationInputSchema = z.object({ message: z.string().trim().min(1).max(240) })
+const MAX_CLARIFICATION_LENGTH = 240
+const clarificationInputSchema = z.object({ message: z.string().trim().min(1).max(MAX_CLARIFICATION_LENGTH) })
 const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
 /** Builds the system prompt for the calendar planner agent. */
