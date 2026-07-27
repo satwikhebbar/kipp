@@ -8,6 +8,7 @@ export interface InteractionRegistration {
   callbackToken?: string
   botMessageId?: number
   expiresAt: number
+  interactionGroup?: string
 }
 
 export interface RoutedInteraction extends WorkflowInteraction {

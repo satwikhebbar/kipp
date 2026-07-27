@@ -125,6 +125,14 @@ export const INTERACTION_KIND = {
   APPROVE: "approve",
   REVISE: "revise",
   REVISION_FEEDBACK: "revision-feedback",
+  CALENDAR_CLARIFICATION: "calendar-clarification",
+  CALENDAR_CONFLICT_ALTERNATIVE: "calendar-conflict-alternative",
+  CALENDAR_CONFLICT_REPLACE: "calendar-conflict-replace",
+  CALENDAR_CONFLICT_CANCEL: "calendar-conflict-cancel",
+  CALENDAR_EDIT: "calendar-edit",
+  CALENDAR_EDIT_FEEDBACK: "calendar-edit-feedback",
+  CALENDAR_RETRY: "calendar-retry",
+  CALENDAR_CANCEL: "calendar-cancel",
 } as const
 
 export type WorkflowInteractionKind = (typeof INTERACTION_KIND)[keyof typeof INTERACTION_KIND]

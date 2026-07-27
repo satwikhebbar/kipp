@@ -9,6 +9,7 @@ import {
   type OneOffProposal,
   reminderMinutes,
   scheduleOneOff,
+  suggestOneOffAlternative,
   validateProposal,
   zonedDateTimeToMillis,
 } from "../calendar-scheduling"
@@ -53,6 +54,41 @@ describe("Calendar scheduling policy", () => {
       TIME_ZONE,
     )
     expect(scheduled).toEqual({ conflict: true })
+  })
+
+  it("offers a same-day privacy-safe alternative for an explicit conflict", () => {
+    const alternative = suggestOneOffAlternative(
+      EXPLICIT_CALL,
+      [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }],
+      TIME_ZONE,
+    )
+    expect(alternative).toMatchObject({ localStartTime: "19:45", reminderMinutes: CALENDAR_ORDINARY_REMINDER_MINUTES })
+  })
+
+  it("chooses the nearest viable alternative, including one before the requested time", () => {
+    const alternative = suggestOneOffAlternative(
+      { ...EXPLICIT_CALL, startTime: "21:15" },
+      [{ start: "2026-07-28T15:45:00.000Z", end: "2026-07-28T16:15:00.000Z" }],
+      TIME_ZONE,
+    )
+
+    expect(alternative).toMatchObject({ localStartTime: "20:30" })
+  })
+
+  it("keeps the inferred safety buffer and returns no alternative when the day is full", () => {
+    const buffered = suggestOneOffAlternative(
+      EXPLICIT_CALL,
+      [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }],
+      TIME_ZONE,
+    )
+    const noAlternative = suggestOneOffAlternative(
+      EXPLICIT_CALL,
+      [{ start: "2026-07-28T03:00:00.000Z", end: "2026-07-28T17:30:00.000Z" }],
+      TIME_ZONE,
+    )
+
+    expect(buffered).toMatchObject({ localStartTime: "19:45" })
+    expect(noAlternative).toBeNull()
   })
 
   it("uses a preferred inferred slot and applies a one-hour important reminder", () => {

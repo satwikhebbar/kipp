@@ -62,6 +62,7 @@ export interface GoogleCalendarClient {
   getBusyIntervals(timeMin: string, timeMax: string): Promise<BusyInterval[]>
   findManagedEvent(id: string, requestId: string): Promise<boolean>
   createManagedEvent(event: ManagedCalendarEvent): Promise<void>
+  updateManagedEvent(event: ManagedCalendarEvent): Promise<void>
 }
 
 /** Returns the epoch ms at which the token expires. */
@@ -217,5 +218,14 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     }
   }
 
-  return { getBusyIntervals, findManagedEvent, createManagedEvent }
+  async function updateManagedEvent(event: ManagedCalendarEvent): Promise<void> {
+    const response = await request(`/calendars/primary/events/${encodeURIComponent(event.id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(calendarEventBody(event)),
+    })
+    if (!response.ok) throw new GoogleCalendarError("Calendar event could not be updated", "permanent")
+  }
+
+  return { getBusyIntervals, findManagedEvent, createManagedEvent, updateManagedEvent }
 }

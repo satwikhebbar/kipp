@@ -209,6 +209,38 @@ export function scheduleOneOff(
   return { conflict: true }
 }
 
+/** Finds the nearest safe same-day alternative for an explicit-time conflict without changing the event duration. */
+export function suggestOneOffAlternative(
+  proposal: OneOffProposal,
+  busy: BusyInterval[],
+  timeZone: string,
+  now = Date.now(),
+): ScheduledOneOff | null {
+  if (!proposal.localDate || !proposal.startTime || !proposal.timeIsExplicit) return null
+  const requested = localMinutes(proposal.startTime)
+  if (requested === null) return null
+  const inferred = { ...proposal, timeIsExplicit: false }
+  const durationMs = proposal.durationMinutes * MILLIS_PER_MINUTE
+  const minStart =
+    proposal.localDate === localDateAt(now, timeZone) ? now + CALENDAR_MIN_LEAD_TIME_MS : Number.NEGATIVE_INFINITY
+  for (const minute of candidateMinutes(requested).sort(
+    (left, right) => Math.abs(left - requested) - Math.abs(right - requested),
+  )) {
+    if (minute + proposal.durationMinutes > CALENDAR_SEARCH_END_MINUTES) continue
+    const time = `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`
+    const start = zonedDateTimeToMillis(proposal.localDate, time, timeZone)
+    if (start === null || start < minStart || isBusy(start, start + durationMs, busy, CALENDAR_INFERRED_BUFFER_MINUTES))
+      continue
+    return {
+      start: new Date(start).toISOString(),
+      end: new Date(start + durationMs).toISOString(),
+      reminderMinutes: reminderMinutes(inferred),
+      localStartTime: localTimeAt(start, timeZone),
+    }
+  }
+  return null
+}
+
 /** Derives stable Google-safe event and opaque request IDs from a Telegram chat/message pair. */
 export async function managedEventIdentity(
   chatId: string,

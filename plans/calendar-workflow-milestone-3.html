@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp Calendar — Milestone 3 Implementation Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --code:#020617; } * { box-sizing:border-box; } body { max-width:1040px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; } h1,h2,h3 { line-height:1.25; color:#f8fafc; } h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; } h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; } h3 { margin-top:28px; font-size:1.12rem; } p,li { max-width:90ch; } .lede { color:var(--muted); font-size:1.1rem; } .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; } .note { border-left-color:var(--amber); } .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; } code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; } pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); } table { width:100%; border-collapse:collapse; margin:20px 0; } th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#cbd5e1; background:#1e293b; } ol>li { margin:14px 0; } @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp Calendar — Milestone 3 Implementation Plan</h1>
+    <p class="lede">Complete the one-off conversational contract: bounded Calendar interactions, immediate correction, and reconnect-and-Retry. Recurrence is explicitly excluded.</p>
+    <div class="callout"><strong>Outcome:</strong> one Calendar request can safely pause and resume for a focused clarification, private conflict choice, correction, or authorization recovery. Every state is bound to one chat, interaction version, workflow instance, and 15-minute expiry.<br /><span class="tag">Telegram</span><span class="tag">Cloudflare Workflows</span><span class="tag">Durable Objects</span><span class="tag">Calendar safety</span></div>
+
+    <h2>1. Scope and invariants</h2>
+    <table><thead><tr><th>Included</th><th>Excluded</th></tr></thead><tbody>
+      <tr><td>Focused date/time/duration clarification; explicit-conflict actions; natural-language replacement; defaulted reminder/description; confirmation with 15-minute Edit and reconfirmation; expired authorization reconnect plus user-initiated one-shot Retry.</td><td>Recurrence, post-window management/cancellation, multi-calendar access, Calendar details in prompts/messages, long-term memory, ETags, and LinkedIn behavior changes.</td></tr>
+    </tbody></table>
+    <ul><li>Calendar writes remain deterministic code and retain the original Telegram-message identity, so resumption cannot duplicate an event.</li><li>Every interaction expires after 15 minutes. Old controls and unrelated messages are ignored.</li><li>Conflict text never names an existing event. The model never sees event details, OAuth data, or write authority.</li><li>A reconnect creates a new OAuth attempt; only the explicit Retry control resumes one retained request, and makes one attempt.</li></ul>
+
+    <h2>2. Interaction model</h2>
+    <pre>CalendarWorkflow
+  plan / validate / availability
+  → notify + register opaque interaction(s)
+  → waitForEvent (15 minutes)
+  → revalidate retained proposal or correction
+  → deterministic write → confirmation + Edit registration</pre>
+    <p>Extend the existing router with Calendar-specific interaction kinds, without weakening LinkedIn revision routing. Router rows carry only opaque IDs, kind, version, workflow id, callback token/message id, and expiry; retained request/proposal data stays in the Workflow step output. A router resolution dispatches to <code>CALENDAR_WORKFLOW</code> for Calendar interactions and keeps <code>PIPELINE_WORKFLOW</code> for LinkedIn.</p>
+    <table><thead><tr><th>State</th><th>User input</th><th>Result</th></tr></thead><tbody>
+      <tr><td>Clarification</td><td>Reply to prompt</td><td>Merge as a bounded conversational turn, re-plan and validate.</td></tr>
+      <tr><td>Explicit conflict</td><td>Best alternative / Choose another time / Cancel</td><td>Use deterministic candidate, request natural-language replacement, or stop.</td></tr>
+      <tr><td>Confirmation</td><td>Edit button, then reply to that confirmation</td><td>Re-plan the correction against the current calendar and write a fresh managed event identity only when the resulting request is distinct.</td></tr>
+      <tr><td>Auth recovery</td><td>Reconnect, then Retry / Cancel</td><td>New OAuth session; Retry re-runs exactly once using retained request data.</td></tr>
+    </tbody></table>
+
+    <h2>3. Calendar workflow and scheduling changes</h2>
+    <ol>
+      <li>Refactor planning into a testable operation that accepts the original request plus a narrowly scoped follow-up/correction, while retaining exactly one terminal planner action.</li>
+      <li>Return structured scheduling outcomes: clarification, conflict with a safe best alternative when one exists, authorization recovery, failure, or a write-ready proposal. Add deterministic validation for the one-off date horizon, past dates, explicit-time constraints, duration grid, reminder bounds, and permitted description/location fields.</li>
+      <li>Render compact messages that label chosen/estimated values and include reminder details. Use inline buttons only for fixed safe alternatives/actions; replacement and correction always require a reply to the registered bot message.</li>
+      <li>After each successful write, register a single newest Edit action. Reconfirmation replaces prior active Calendar edit state. An expired or stale button must be harmless.</li>
+      <li>For auth failures, send setup/reconnect guidance and retain the original request only for 15 minutes. The OAuth callback does not automatically create anything; it exposes a Retry action.</li>
+    </ol>
+
+    <h2>4. Telegram and router integration</h2>
+    <p>Add Calendar kinds for clarification, replacement-time, edit feedback, conflict choices, reconnect retry/cancel, and edit. Generalize router replacement so a new active Calendar interaction invalidates its predecessor without removing LinkedIn’s active revision flow. Dispatch by workflow kind/binding, preserving existing callback acknowledgement and allow-user checks.</p>
+    <div class="callout note"><strong>Privacy guard:</strong> callback payloads remain opaque; outgoing conflict messages may state only that the requested time is unavailable and a computed alternative. No Calendar title, participant, or event field from an existing event crosses this boundary.</div>
+
+    <h2>5. Verification plan</h2>
+    <table><thead><tr><th>Area</th><th>Coverage</th></tr></thead><tbody>
+      <tr><td>Router/webhook</td><td>Correct binding dispatch, callback/reply routing, opaque payloads, stale versions, expiry, unrelated replies, and no LinkedIn regression.</td></tr>
+      <tr><td>Workflow</td><td>Missing date/time/duration, defaults, past/far-date constraints, exact conflict alternatives/cancel/replacement, no duplicate create after resume, confirmation/reconfirmation/Edit expiry, and failure messages.</td></tr>
+      <tr><td>Auth recovery</td><td>Authorization failure retains request, reconnect starts fresh OAuth, Retry is explicit/one-shot/15-minute-bounded, cancellation and failed retry are safe.</td></tr>
+      <tr><td>System</td><td><code>pnpm check</code>, full unit/integration suite, and controlled dev-bot checks for clarification, conflict, edit, and reconnect without altering unrelated calendar data.</td></tr>
+    </tbody></table>
+
+    <h2>6. Delivery sequence</h2>
+    <ol><li>Claim the Milestone 3 Beads issue and add its plan reference.</li><li>Introduce typed Calendar interaction contracts and router dispatch tests.</li><li>Implement the workflow’s bounded wait-state helpers and structured outcomes.</li><li>Add conflict/clarification, confirmation/Edit, then reconnect/Retry paths with branch tests.</li><li>Run full checks, inspect the diff, and record validation/remaining controlled smoke work in Beads.</li></ol>
+  </body>
+</html>

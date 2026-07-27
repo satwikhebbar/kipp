@@ -204,17 +204,21 @@ async function dispatchRoutedInteraction(
   const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
   const { interaction } = await router.resolve(input)
   if (!interaction) return false
-  const instance = await env.PIPELINE_WORKFLOW.get(interaction.workflowId)
+  const workflow = interaction.kind.startsWith("calendar-") ? env.CALENDAR_WORKFLOW : env.PIPELINE_WORKFLOW
+  if (!workflow) return false
+  const instance = await workflow.get(interaction.workflowId)
+  const interactionText =
+    interaction.text ??
+    (interaction.kind === INTERACTION_KIND.APPROVE
+      ? "__approve__"
+      : interaction.kind === INTERACTION_KIND.REVISE
+        ? "__revise__"
+        : `__${interaction.kind}__`)
   await instance.sendEvent({
     type: "telegram-reply",
     payload: {
       userId,
-      text:
-        interaction.kind === INTERACTION_KIND.APPROVE
-          ? "__approve__"
-          : interaction.kind === INTERACTION_KIND.REVISE
-            ? "__revise__"
-            : interaction.text,
+      text: interactionText,
       interactionId: interaction.interactionId,
       interactionVersion: interaction.version,
       interactionKind: interaction.kind,

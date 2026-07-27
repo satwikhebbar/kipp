@@ -8,6 +8,7 @@ interface Registration {
   callbackToken?: string
   botMessageId?: number
   expiresAt: number
+  interactionGroup?: string
 }
 
 interface ResolvedInteraction extends WorkflowInteraction {
@@ -44,8 +45,13 @@ export class InteractionRouterDO implements DurableObject {
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS interactions (
       interaction_id TEXT PRIMARY KEY, version INTEGER NOT NULL, workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL, callback_token TEXT UNIQUE, bot_message_id INTEGER,
-      expires_at INTEGER NOT NULL, consumed_update_id INTEGER, consumed_at INTEGER
+      expires_at INTEGER NOT NULL, consumed_update_id INTEGER, consumed_at INTEGER, interaction_group TEXT
     )`)
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE interactions ADD COLUMN interaction_group TEXT")
+    } catch {
+      // Existing Durable Object databases already have this optional column.
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -68,13 +74,14 @@ export class InteractionRouterDO implements DurableObject {
       return new Response("invalid registration", { status: 400 })
     this.removeExpiredOrOldConsumedInteractions()
     if (r.kind === INTERACTION_KIND.REVISION_FEEDBACK) this.removeActiveRevisionFeedback()
+    if (r.interactionGroup) this.removeOlderGroupInteractions(r.interactionGroup, r.version)
     this.saveRegistration(r)
     return json({ ok: true })
   }
 
   private saveRegistration(registration: Registration): void {
     this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO interactions (interaction_id, version, workflow_id, kind, callback_token, bot_message_id, expires_at, consumed_update_id) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+      "INSERT OR REPLACE INTO interactions (interaction_id, version, workflow_id, kind, callback_token, bot_message_id, expires_at, consumed_update_id, interaction_group) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
       registration.interactionId,
       registration.version,
       registration.workflowId,
@@ -82,6 +89,7 @@ export class InteractionRouterDO implements DurableObject {
       registration.callbackToken ?? null,
       registration.botMessageId ?? null,
       registration.expiresAt,
+      registration.interactionGroup ?? null,
     )
   }
 
@@ -97,6 +105,14 @@ export class InteractionRouterDO implements DurableObject {
     this.ctx.storage.sql.exec(
       "DELETE FROM interactions WHERE kind = ? AND consumed_update_id IS NULL",
       INTERACTION_KIND.REVISION_FEEDBACK,
+    )
+  }
+
+  private removeOlderGroupInteractions(interactionGroup: string, version: number): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM interactions WHERE interaction_group = ? AND version < ? AND consumed_update_id IS NULL",
+      interactionGroup,
+      version,
     )
   }
 

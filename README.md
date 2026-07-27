@@ -177,7 +177,10 @@ Once connected, send `/calendar <request>` to the dev bot. For example:
 /calendar Call Jamie tomorrow at 7pm
 ```
 
-The current milestone supports clear, safe one-off blocks only. The model sees
+Calendar supports bounded one-off conversations: it asks focused follow-ups,
+offers privacy-safe conflict choices, and keeps an **Edit** action active for
+15 minutes after confirmation. If authorization expires, reconnect through the
+setup route and use the explicit Retry action within 15 minutes. The model sees
 only free candidate times; the worker performs the final Calendar write.
 
 ### 10. Register Telegram webhook
