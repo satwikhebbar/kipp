@@ -51,7 +51,9 @@ const CALENDAR_UNDERSTANDING_FALLBACK =
 const CALENDAR_PLANNER_UNAVAILABLE = "I couldn't reach the calendar planner. Please try again shortly."
 const CALENDAR_CONFLICT = "That time is not free. Please send another time that works."
 const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try again shortly."
-const CALENDAR_INTERACTION_TTL_MS = 15 * 60 * 1000
+const CALENDAR_INTERACTION_TTL_MINUTES = 15
+const MILLISECONDS_PER_MINUTE = 60_000
+const CALENDAR_INTERACTION_TTL_MS = CALENDAR_INTERACTION_TTL_MINUTES * MILLISECONDS_PER_MINUTE
 /** Maximum user interaction cycles for one Calendar workflow execution. */
 const MAX_CALENDAR_INTERACTION_TURNS = 4
 
@@ -71,6 +73,7 @@ const proposalSchema = z.object({
 
 const MIN_DURATION_MINUTES = 15
 const MAX_AVAILABILITY_DURATION_MINUTES = 240
+const MAX_CLARIFICATION_MESSAGE_LENGTH = 240
 const availabilityInputSchema = z.object({
   localDate: z.string(),
   durationMinutes: z.number().int().min(MIN_DURATION_MINUTES).max(MAX_AVAILABILITY_DURATION_MINUTES),

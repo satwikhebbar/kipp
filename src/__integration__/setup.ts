@@ -182,6 +182,7 @@ export interface FakeInteractionRegistration {
   callbackToken?: string
   botMessageId?: number
   expiresAt?: number
+  interactionGroup?: string
 }
 
 export interface FakeInteractionRouter {
@@ -198,6 +199,7 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
     callbackToken?: string
     botMessageId?: number
     expiresAt: number
+    interactionGroup?: string
     consumed?: number
     consumedAt?: number
   }
@@ -207,6 +209,16 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
     const list = records.get(chat) ?? []
     if (registration.kind === REVISION_FEEDBACK_KIND) {
       for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
+    }
+    if (registration.interactionGroup) {
+      for (const item of list) {
+        if (
+          item.interactionGroup === registration.interactionGroup &&
+          item.version < registration.version &&
+          !item.consumed
+        )
+          item.consumed = -1
+      }
     }
     list.push({ ...registration, expiresAt: registration.expiresAt ?? Date.now() + 60_000 })
     records.set(chat, list)
@@ -228,6 +240,16 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
           const registration = body as unknown as RouterRecord
           if (registration.kind === REVISION_FEEDBACK_KIND) {
             for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
+          }
+          if (registration.interactionGroup) {
+            for (const item of list) {
+              if (
+                item.interactionGroup === registration.interactionGroup &&
+                item.version < registration.version &&
+                !item.consumed
+              )
+                item.consumed = -1
+            }
           }
           list.push(registration)
           return Response.json({ ok: true })
