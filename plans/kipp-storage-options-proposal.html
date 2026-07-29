@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kipp storage options — decision proposal</title>
+  <style>
+    :root { --ink:#172033; --muted:#536176; --paper:#fbfcff; --line:#dbe3f0; --blue:#2859c5; --blue-bg:#edf3ff; --green:#0d7852; --green-bg:#e9f8f1; --amber:#865600; --amber-bg:#fff6df; --red:#9d3242; --red-bg:#fff0f2; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:#eef2f8; font:16px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width:1180px; margin:32px auto; padding:44px clamp(24px,5vw,72px); background:var(--paper); box-shadow:0 8px 32px #24334d1a; }
+    h1,h2,h3 { line-height:1.18; letter-spacing:-.025em; } h1 { font-size:2.35rem; margin:0 0 12px; } h2 { margin-top:48px; font-size:1.55rem; } h3 { margin:28px 0 8px; font-size:1.1rem; }
+    p,li { max-width:900px; } .lede { font-size:1.16rem; color:var(--muted); } .meta { color:var(--muted); font-size:.9rem; }
+    .callout { border-left:4px solid var(--blue); background:var(--blue-bg); padding:16px 20px; margin:24px 0; } .recommend { border-left-color:var(--green); background:var(--green-bg); }
+    table { width:100%; border-collapse:collapse; margin:18px 0 28px; font-size:.91rem; } th,td { border:1px solid var(--line); padding:10px; vertical-align:top; text-align:left; } th { background:#f1f5fb; } .wide { overflow-x:auto; } .score { font-weight:700; white-space:nowrap; }
+    .good { color:var(--green); } .mixed { color:var(--amber); } .poor { color:var(--red); } code { background:#eef2f8; padding:1px 4px; border-radius:3px; } a { color:var(--blue); } .tag { display:inline-block; padding:2px 8px; border-radius:999px; background:#e8eefb; color:#254b9e; font-size:.8rem; font-weight:650; } ul { padding-left:22px; } .source li { margin:8px 0; }
+    @media print { body { background:#fff; } main { margin:0; box-shadow:none; max-width:none; } }
+  </style>
+</head>
+<body><main>
+  <header>
+    <span class="tag">Decision proposal · research only</span>
+    <h1>Storage for Kipp’s ideas, knowledge, and future tasks</h1>
+    <p class="lede">A comparison of ten credible homes for Kipp data, with a recommendation that preserves Markdown and makes each idea independently addressable.</p>
+    <p class="meta">Prepared 29 July 2026 · Scope: exploration for GitHub issue #7; no implementation work is proposed or performed.</p>
+  </header>
+
+  <section>
+    <h2>Executive recommendation</h2>
+    <div class="callout recommend"><strong>Recommend Notion as the primary human-facing store:</strong> model Ideas, Tasks, Projects, and Sources as related databases/pages, and have Kipp use a bounded queued integration. Keep scheduled Markdown exports as a portable backup and agent-ingestion source—not as the transactional write path.</div>
+    <p>The earlier Git-first recommendation was incorrect for this deployment model. Kipp currently writes through GitHub’s Contents API; each write creates a commit. A capture, status transition, generated draft, or archive action would therefore produce repository-history noise, and a multi-record change has no database transaction. This is a material ergonomic and operational cost, not a minor footnote.</p>
+    <p>Notion best satisfies the combined personal-productivity brief: a usable inbox, relational organization, external TODO tracking, and a knowledge base in one place. Its average 3 request/second API limit is acceptable for an individual workflow if Kipp queues and batches work. If long-term runtime correctness, transactions, and high-volume agent retrieval later outrank the all-in-one UI, make a separate database-backend decision and project tasks into Notion or Linear. Choose <strong>Obsidian</strong> only when open local Markdown/offline ownership is the deciding requirement and accept a separate task system.</p>
+  </section>
+
+  <section>
+    <h2>What the issue is really asking the store to do</h2>
+    <p>Kipp’s current architecture keeps active ideas in <code>ideas.md</code> and finalized ideas in <code>archive.md</code>, read and written through GitHub’s Contents API. That is a sound small-system baseline, but each file is both a human document and a mutable database table. As it grows, finding or mutating one idea requires parsing the whole collection and risks unrelated write conflicts.</p>
+    <ul>
+      <li><strong>Addressability:</strong> retrieve, update, or link one idea without scanning a giant document.</li>
+      <li><strong>Human usability:</strong> capture and browse ideas, drafts, sources, and status comfortably.</li>
+      <li><strong>Agent readiness:</strong> provide stable IDs, metadata filters, full text, and an export/indexing path for search or vectors.</li>
+      <li><strong>Future task system:</strong> support externally visible TODOs, reminders, status, and links back to the source idea.</li>
+      <li><strong>Personal ownership:</strong> avoid locking years of notes into an opaque, difficult-to-export format.</li>
+      <li><strong>Operational fit:</strong> keep Cloudflare Worker integration reliable, bounded, and secure.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Comparison at a glance</h2>
+    <p><strong>Scoring:</strong> 5 is strongest for Kipp’s stated needs; it is a fit score, not a claim of universal product quality. “Cost” favors predictable low personal cost. Integration assumes a Cloudflare Worker and an unattended agent process. The new Free-tier column records whether the alternative is usable at $0 today and the constraint most likely to matter; all SaaS terms should be rechecked when making the final choice.</p>
+    <div class="wide"><table>
+      <thead><tr><th>Alternative</th><th>Free-tier viability</th><th>Cost</th><th>Worker integration</th><th>Markdown / portability</th><th>External TODOs</th><th>KB + agent retrieval</th><th>Organization / random access</th><th>Security &amp; ownership</th><th>Limits / scale</th><th>Fit</th></tr></thead>
+      <tbody>
+        <tr><td><strong>1. Notion databases + pages</strong><br>Recommended</td><td><strong>Yes.</strong> Unlimited blocks for one person; Markdown API works. Upgrade for 2+ members (1,000-block cap), &gt;5 MB files, &gt;7-day history, more guests, or offline pages.</td><td class="score good">4</td><td class="score good">4</td><td class="score good">5</td><td class="score good">5</td><td class="score good">5</td><td class="score good">5</td><td class="score mixed">3</td><td class="score mixed">3</td><td><strong>4.6</strong></td></tr>
+        <tr><td><strong>2. Git-backed Markdown vault + GitHub Issues</strong></td><td><strong>Yes.</strong> Private repo, Issues, and Projects are free; API quotas and commit-per-write remain the caveat.</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">5</td><td class="score good">5</td><td class="score good">5</td><td class="score good">5</td><td class="score good">4</td><td class="score mixed">3</td><td><strong>3.8</strong></td></tr>
+        <tr><td><strong>3. Obsidian vault + Git/Sync</strong></td><td><strong>Yes.</strong> Local app and files are free; cross-device Sync, hosted publishing, and large-file handling need a separate solution.</td><td class="score good">5</td><td class="score good">4</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">5</td><td class="score good">5</td><td class="score good">5</td><td class="score mixed">3</td><td><strong>4.4</strong></td></tr>
+        <tr><td><strong>4. Linear</strong></td><td><strong>Yes.</strong> Free plan exists; validate its current team, issue, and advanced-feature ceilings before migration.</td><td class="score mixed">3</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">4</td><td><strong>3.8</strong></td></tr>
+        <tr><td><strong>5. Coda</strong></td><td><strong>Yes, solo.</strong> An unshared Free doc has no page/object cap. Upgrade when sharing (50 objects / 1,000 rows), needing &gt;7-day history, larger files, or more automation.</td><td class="score good">4</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">4</td><td class="score good">4</td><td class="score good">5</td><td class="score mixed">3</td><td class="score mixed">3</td><td><strong>3.8</strong></td></tr>
+        <tr><td><strong>6. ClickUp</strong></td><td><strong>Yes.</strong> Free Forever includes the API; limited-use features do not reset, so advanced Docs/automation can force an upgrade.</td><td class="score good">4</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">4</td><td><strong>3.9</strong></td></tr>
+        <tr><td><strong>7. Airtable</strong></td><td><strong>Yes.</strong> Free allows 1,000 records/base, 1 GB attachments/base, 1,000 API calls/workspace/month, and two-week history. These caps can constrain automated KB use.</td><td class="score good">4</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">4</td><td><strong>3.8</strong></td></tr>
+        <tr><td><strong>8. Plane</strong></td><td><strong>Conditional.</strong> Self-hosting can avoid licence fees; do not assume a continuing free Cloud work-management tier without confirming it.</td><td class="score good">4</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">4</td><td class="score good">4</td><td class="score good">4</td><td><strong>3.9</strong></td></tr>
+        <tr><td><strong>9. OpenProject</strong></td><td><strong>Yes.</strong> Community Edition is free and self-hosted; hosting, maintenance, backups, and enterprise-only features are the trade-off.</td><td class="score mixed">3</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">5</td><td class="score good">4</td><td class="score good">4</td><td class="score good">4</td><td class="score good">4</td><td><strong>3.9</strong></td></tr>
+        <tr><td><strong>10. Trello</strong></td><td><strong>Yes.</strong> Free allows 10 open boards, 10 collaborators, 10 MB attachments, and 250 automation runs/month.</td><td class="score good">5</td><td class="score good">4</td><td class="score mixed">3</td><td class="score good">5</td><td class="score mixed">3</td><td class="score good">4</td><td class="score mixed">3</td><td class="score mixed">3</td><td><strong>3.8</strong></td></tr>
+      </tbody>
+    </table></div>
+    <p class="meta"><strong>Threshold applied:</strong> every candidate above has a score of at least 3 in every dimension. Anytype and Supabase were removed because their direct integration/task-or-Markdown fit did not meet that bar. Git’s score is intentionally reduced for Kipp’s current Contents API write path: every remote mutation is a commit, and multi-file changes are not transactional.</p>
+  </section>
+
+  <section>
+    <h2>Focused choice: Notion vs Coda vs Airtable for Kipp’s knowledge base</h2>
+    <p>All three can hold an Ideas/Tasks/Sources model. They are <em>not</em> equivalent for an agent-maintained knowledge base: Notion is page-first with a native Markdown API; Coda is a document-and-table application whose API uses HTML for canvas content; Airtable is record-first and supports a constrained Markdown dialect inside rich-text fields. For Kipp’s mix of long-form knowledge, linked tasks, and eventual retrieval, <strong>Notion is the strongest default.</strong></p>
+    <div class="wide"><table>
+      <thead><tr><th>Question</th><th>Notion</th><th>Coda</th><th>Airtable</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Agent Markdown contract</strong></td><td><strong>Native enhanced Markdown read, create, and update endpoints.</strong> It is Markdown plus XML-like tags for Notion-only blocks; properties/schema remain API objects.</td><td><strong>No equivalent Markdown API contract.</strong> Coda imports/pastes basic Markdown in the UI, but API page-content writes use HTML/rich text. Markdown is an ingestion convenience, not the canonical agent interface.</td><td><strong>Markdown is available in rich-text long-text fields and via the API</strong>, but only as a restricted Airtable dialect. It is field content, not a page/document model; unsupported syntax and API-normalized output require testing.</td></tr>
+        <tr><td><strong>Long-form KB ergonomics</strong></td><td>First-class pages, nested hierarchy, database views, backlinks/relations, and full-page bodies. One idea can be a queryable record <em>and</em> a proper note.</td><td>Very capable canvases, tables, formulas, and pages—but a KB can turn into a complex “doc app,” with logic coupled to one document.</td><td>Excellent structured records, linked tables, and views; weaker reading/writing experience for substantial research notes. A long text field is not a full knowledge page.</td></tr>
+        <tr><td><strong>Free plan for a solo KB</strong></td><td><strong>Strong:</strong> unlimited pages/blocks for one member and the Markdown API is available. Practical upgrade triggers: a second member, files over 5 MB, history beyond 7 days, more guests, or offline pages.</td><td><strong>Strong only while unshared:</strong> no page/object cap for a personal doc. Sharing invokes 50-object / 1,000-row limits; Free also has 7-day history, 1 GB/doc attachments, 10 MB/file, and 35 scheduled + 100 event automations/month.</td><td><strong>Usable but tight for an agent:</strong> 1,000 records/base, 1 GB attachments/base, two-week history, and 1,000 API calls/workspace/month. At 5 requests/second, instantaneous rate is fine; the monthly call allowance is the real ceiling.</td></tr>
+        <tr><td><strong>Retrieval shape</strong></td><td>Search and property filters find candidate pages; fetch exactly the selected page as enhanced Markdown; index stable page IDs and content externally if vectors become useful.</td><td>Excellent table queries and row operations, but content retrieval is less Markdown-native and document API access stops above 125 MB.</td><td>Very good filters and linked-record traversal; an external index must concatenate fields and retain record IDs. The limited rich-text field is a less natural source document.</td></tr>
+        <tr><td><strong>Write/limit concern</strong></td><td>Average 3 requests/second: queue, batch, and make writes idempotent.</td><td>Content writes are only 3 per 10 seconds, and API access can stop once a doc exceeds 125 MB.</td><td>5 requests/second per base on every tier, plus the Free plan’s 1,000 calls/workspace/month; polling is unsuitable.</td></tr>
+      </tbody>
+    </table></div>
+    <h3>Why Notion wins for Kipp</h3>
+    <ul>
+      <li><strong>It preserves the agent’s natural document interface.</strong> Kipp can round-trip a page through Notion’s supported enhanced-Markdown endpoints, rather than converting Markdown to Coda HTML or squeezing it into Airtable field values. This is not perfect CommonMark portability—Notion extensions must be handled—but it is a real, documented read/write contract.</li>
+      <li><strong>It combines a real KB with a real task system.</strong> An Idea can have a long-form page body while also relating to Tasks, Projects, and Sources. Airtable wins at structured tracking but loses the page-shaped knowledge experience; Coda is flexible but its document logic and page-content API are a poorer durable agent contract.</li>
+      <li><strong>Its Free plan fails later for this specific solo start.</strong> A one-member Notion workspace has unlimited blocks and its integration API is usable. Coda is also generous for an unshared document, but collaboration abruptly constrains its doc shape; Airtable’s 1,000 monthly API calls are especially easy for an automated capture/retrieval loop to exhaust.</li>
+      <li><strong>The operational trade-off is manageable.</strong> Notion’s 3 rps rate requires a queue, but Kipp is a personal tool and does not need high throughput. Store Kipp IDs, use property filters before fetching bodies, cache/index asynchronously, and export Markdown periodically.</li>
+    </ul>
+    <div class="callout"><strong>Important caveat:</strong> choose Airtable instead only if Kipp becomes primarily a structured tracker with short notes and form-driven capture. Choose Coda instead only if the main value is programmable personal dashboards/formulas and you accept HTML-based canvas writes. Neither condition is the current “personal KB that an agent can read and maintain” brief.</div>
+  </section>
+
+  <section>
+    <h2>Alternatives: benefits and trade-offs</h2>
+    <h3>1. Notion databases + pages <span class="tag">Recommended for this brief</span></h3>
+    <p><strong>Model:</strong> an Ideas database with relations to Projects, Tasks, Sources, and a knowledge-page hierarchy. Kipp maps the current idea schema to database properties and block children.</p>
+    <p><strong>Pros:</strong> the best polished all-in-one experience here for notes, database views, filters, relations, and personal task/project tracking; mobile and sharing are excellent; users can reorganize without asking Kipp to change filesystem paths; an API and integrations make it viable for agent ingestion.</p>
+    <p><strong>Cons:</strong> Notion now has native enhanced-Markdown create/read/update endpoints, but its format extends CommonMark with XML-like tags for Notion-only constructs; properties and database schema remain API objects rather than Markdown frontmatter. Unsupported blocks appear as <code>&lt;unknown&gt;</code>, and extremely large pages can be truncated. The documented API average is 3 requests/second, so a background ingestion queue is still essential.</p>
+    <p><strong>Free plan—confirmed usable for Kipp:</strong> one-person workspaces have unlimited pages and blocks. The enhanced-Markdown endpoints are available to public, internal, and personal integrations, so Kipp can create, read, and update content without a paid plan. The ordinary API limit (about 3 requests/second) still applies, so Kipp should queue and retry.</p>
+    <p><strong>What forces a paid upgrade:</strong> add a second workspace member and the Free workspace is capped at 1,000 blocks; need uploads larger than 5 MB (including a bot’s direct FileUploads, capped at 5 MiB in Free workspaces); need restoration beyond 7 days; need more guest capacity; or need the paid offline-page capability. These are product limits, not agent-integration limits. Kipp’s own LLM/API cost is separate from the Notion subscription.</p>
+    <p><strong>Cost/limits:</strong> a one-person Free workspace is intended for personal projects/tasks; paid plans add history, collaboration, and controls. Avoid depending on bundled AI pricing for Kipp. Workspace-level cloud permissions are convenient, but the data and encryption keys are vendor-managed.</p>
+
+    <h3>2. Private Git-backed Markdown vault + GitHub Issues/Projects</h3>
+    <p><strong>Model:</strong> <code>ideas/{id}.md</code>, <code>notes/{slug}.md</code>, and <code>archive/{id}.md</code>, each with YAML frontmatter (<code>id</code>, <code>status</code>, <code>tags</code>, <code>created_at</code>, <code>task_url</code>). GitHub Issues is the action ledger; a GitHub Project is the view. Kipp writes a single record at a time and can link the issue URL in frontmatter.</p>
+    <p><strong>Pros:</strong> native Markdown; no new runtime vendor; every item has a stable path and Git history; works with <code>rg</code>, a static index, embeddings, or a vector service; GitHub Issues are externally trackable with API, comments, status, labels, and reminders/automation; private repository permissions and PAT scoping are already understood by the codebase.</p>
+    <p><strong>Cons:</strong> for the current remote implementation, every Contents API mutation produces a Git commit—routine capture and workflow state updates would pollute history. The API is rate-limited and not transactional across multiple files; GitHub’s issue UI is developer-flavored; file semantics require a clear naming/metadata convention; GitHub is not end-to-end encrypted; a large vault needs an indexing job rather than one database query.</p>
+    <p><strong>Cost/limits:</strong> GitHub Free includes private repositories, Issues, and Projects. Treat the authenticated REST API’s standard quota and secondary abuse limits as a design constraint: batch reads, cache, and retry with backoff. It is viable for deliberately batched or human-authored notes—not a good default event store for Kipp’s frequent mutable state.</p>
+
+    <h3>3. Obsidian vault + Git or Obsidian Sync</h3>
+    <p><strong>Model:</strong> the vault is the canonical folder of one-file-per-idea/knowledge note. Kipp accesses the Git remote (or a small service that owns the vault); Obsidian supplies human authoring, links, search, and database-like views. GitHub Issues or another task tool is still recommended for externally tracked TODOs.</p>
+    <p><strong>Pros:</strong> strongest fit for long-lived personal knowledge and future vector/search retrieval: notes are local, plain Markdown files with no required database; folders, tags, links, and properties solve random access; no API rate limit on the file format; easy exit and backup; Obsidian’s app is free for personal use.</p>
+    <p><strong>Cons:</strong> not a hosted API platform by itself—remote writes must go through Git or a self-hosted bridge; task management is plugin-driven and weaker for external tracking; plugin quality/security is variable; Git sync is awkward for binary attachments and simultaneous edits; Obsidian Sync has plan-specific storage/file-size caps.</p>
+    <p><strong>Cost/limits:</strong> local use is free. Optional Sync is a subscription; its published plans cap per-file size and total vault storage, while a Git remote or other sync method changes those limits. This is the best human knowledge-base option, but it should be treated as a client—not a backend SDK.</p>
+
+    <h3>4. Linear</h3>
+    <p><strong>Model:</strong> Ideas become issues with templates, labels, project/cycle relationships, and long-form descriptions; a separate knowledge system retains durable reference notes.</p>
+    <p><strong>Pros:</strong> exceptionally good operational TODO discipline, triage, statuses, projects, and external visibility; strong GraphQL API, webhooks, and predictable entity model; a good choice if “Kipp as a personal work manager” matters more than “Kipp as a second brain.”</p>
+    <p><strong>Cons:</strong> poor canonical knowledge-base fit—rich issue bodies are not portable Markdown files and long research/drafts become awkward; requires a second system for documents and semantic retrieval; paid tiers become relevant sooner; not local-first.</p>
+    <p><strong>Cost/limits:</strong> use its Free plan only to validate the workflow, then price the paid personal seat deliberately. OAuth requests are documented at 5,000/hour per user, with endpoint/complexity limits; API-key access is lower. Webhooks—not polling—are the intended integration pattern.</p>
+
+    <h3>5. Coda</h3>
+    <p><strong>Model:</strong> a document combines pages, tables, buttons, formulas, and related task/idea rows. Kipp uses the Coda API to create and update rows and page content.</p>
+    <p><strong>Pros:</strong> unusually flexible all-in-one document/database model; strong views and formulas make idea triage pleasant; tasks can link directly to source rows; it imports/pastes basic Markdown in the UI and has both an API and MCP path for agent work.</p>
+    <p><strong>Cons:</strong> Coda does not offer Notion-style Markdown read/write endpoints: its API creates canvas content as HTML/rich text, so Markdown would require Kipp-side conversion and is not the canonical agent interface. Complex formulas can become an application inside an application; API access stops for docs above 125 MB; content writes are relatively slow (3 per 10 seconds).</p>
+    <p><strong>Free plan:</strong> a personal, unshared Free doc has no page/object-count cap. Sharing changes that to 50 objects and 1,000 table rows per doc. Upgrade for more than 7 days of history, files above 10 MB (or more than 1 GB/doc total), more than 35 scheduled or 100 event automations/month, or a larger shared workspace. General API writes are 10 per 6 seconds; content writes are 3 per 10 seconds on every plan.</p>
+
+    <h3>6. ClickUp</h3>
+    <p><strong>Model:</strong> ideas are tasks or Docs linked to tasks, organized in Spaces/Folders/Lists; Kipp writes through the public REST API and can subscribe to webhooks.</p>
+    <p><strong>Pros:</strong> strongest all-in-one task execution option; Docs, wikis, task views, custom fields, and automations cover a broad personal system; API is available on all plans, and Docs supports import/export of core Markdown constructs.</p>
+    <p><strong>Cons:</strong> feature breadth can be overwhelming for a single-person knowledge base; Docs’ Markdown import/export drops some rich constructs; the canonical data model is cloud/vendor-owned, so export discipline matters.</p>
+    <p><strong>Cost/limits:</strong> Free Forever exists, with feature usage limits; the public API is 100 requests/minute per token on Free, Unlimited, and Business plans. A solid choice when task management is central rather than incidental.</p>
+
+    <h3>7. Airtable</h3>
+    <p><strong>Model:</strong> structured bases for Ideas, Tasks, Sources, and Projects, with linked records and interfaces; long-text/rich-text fields carry drafts and references.</p>
+    <p><strong>Pros:</strong> excellent record-level organization, filtering, linked relations, forms, and automation; API integration is straightforward; an agent can query exactly the records it needs rather than parse a document; external tasks can be first-class records.</p>
+    <p><strong>Cons:</strong> it is a database/workspace rather than a pleasurable long-form writing tool. Its rich-text long-text fields and API use a limited Airtable Markdown dialect—not a full page-level Markdown import/export API—so complex knowledge needs field mapping and syntax testing. Full semantic retrieval needs a separate index; paid limits can surface as the base grows.</p>
+    <p><strong>Free plan:</strong> credible for a small personal base, but an agent must be frugal: 1,000 records per base, 1 GB attachment storage per base, 1,000 API calls per workspace per month, and two-week revision/snapshot history. The API rate is 5 requests/second per base on all tiers. Upgrade when record/attachment capacity, history, automations/features, or especially monthly API calls become binding. Best for users who prefer views, fields, and forms to a document hierarchy.</p>
+
+    <h3>8. Plane</h3>
+    <p><strong>Model:</strong> work items hold ideas and tasks, while projects, cycles, modules, and pages provide planning and knowledge context. Kipp uses Plane’s REST API and webhooks, or a self-hosted instance.</p>
+    <p><strong>Pros:</strong> modern issue/task workflow, documented REST API, webhooks, cursor pagination, and a direct self-hosting route; good security story through scoped/expiring API keys or OAuth; more purpose-built for agent-driven work management than a generic note tool.</p>
+    <p><strong>Cons:</strong> project-management-first rather than a mature personal knowledge base; Markdown portability is service-level rather than file-native; it can be heavier than needed for one person; Cloud-vs-self-host choice adds an operational decision.</p>
+    <p><strong>Cost/limits:</strong> the available cloud/self-hosted tiers should be verified at selection. Its API has 180+ endpoints and webhooks, giving Kipp enough surface area without polling.</p>
+
+    <h3>9. OpenProject</h3>
+    <p><strong>Model:</strong> work packages represent ideas/tasks, with projects, wiki pages, relations, and custom fields; Kipp integrates through its REST API or a self-managed deployment.</p>
+    <p><strong>Pros:</strong> open-source, self-hostable project/knowledge environment with mature permissions; strong work-package tracking, wiki documentation, and relationship organization; avoids SaaS lock-in and suits a future shared system.</p>
+    <p><strong>Cons:</strong> materially heavier and less polished for casual personal capture; deployment, upgrades, backups, and search are the owner’s responsibility when self-hosted; Markdown/wiki formatting is less portable than a vault.</p>
+    <p><strong>Cost/limits:</strong> Community self-hosting can keep software cost low, while managed plans buy operational convenience. Scale is more than adequate; the practical cost is administrative attention.</p>
+
+    <h3>10. Trello</h3>
+    <p><strong>Model:</strong> a board serves as an idea inbox/task system; cards hold Markdown-formatted descriptions, checklists, labels, due dates, attachments, and links to longer knowledge material.</p>
+    <p><strong>Pros:</strong> the quickest low-friction external TODO tracker; cards are independently addressable, searchable, and easily automated; robust REST API and webhooks make Kipp integration simple; Free is useful for personal boards.</p>
+    <p><strong>Cons:</strong> weak for deep, interlinked knowledge and long-form drafting; board/list structure can become a visual filing cabinet; Markdown is card-content formatting, not a portable knowledge corpus; export automation is a paid/experimental capability.</p>
+    <p><strong>Cost/limits:</strong> its documented API allowance is 100 requests per 10 seconds per token and 300 per 10 seconds per key. Board/card object limits exist, but are far beyond this personal use case.</p>
+  </section>
+
+  <section>
+    <h2>Decision matrix by dimension</h2>
+    <div class="wide"><table>
+      <thead><tr><th>Dimension</th><th>What it means for Kipp</th><th>Leading options</th><th>Key caution</th></tr></thead>
+      <tbody>
+        <tr><td>Price / predictability</td><td>Low recurring spend and no surprise metering for a personal system.</td><td>Git-backed vault, Obsidian, Notion Free, Supabase Free.</td><td>Free tiers change; factor backup/sync and agent-model costs separately.</td></tr>
+        <tr><td>Integration</td><td>Worker-safe auth, writes, retries, webhooks, and a stable API.</td><td>GitHub, Supabase, Linear.</td><td>Notion’s block model and 3 rps limit make bulk access slower.</td></tr>
+        <tr><td>Markdown &amp; exit</td><td>Human-readable records remain usable outside Kipp.</td><td>Vault / Git first; Obsidian is a client, not a proprietary format.</td><td>Database and block tools require export/mapping to preserve portability.</td></tr>
+        <tr><td>External TODOs</td><td>Tasks are independently trackable and linkable from an idea.</td><td>GitHub Issues/Projects, Linear, Notion.</td><td>Do not make raw Markdown checkboxes the only external task ledger.</td></tr>
+        <tr><td>Agent KB</td><td>Search/filter first; vectors are an optional second-stage index.</td><td>Vault/Git, Obsidian, Notion/Coda.</td><td>Never treat embeddings as canonical storage; retain source text and stable IDs.</td></tr>
+        <tr><td>Organization</td><td>Reach one item by stable ID/path/property, not a positional parse of one file.</td><td>All options except the current two-file shape.</td><td>Adopt a required schema; tool choice alone will not create order.</td></tr>
+        <tr><td>Security</td><td>Least-privilege service credentials, backup, deletion, and human privacy.</td><td>Anytype (privacy), vault/Git (ownership), Supabase (RLS).</td><td>End-to-end encryption makes server-side indexing intentionally harder.</td></tr>
+        <tr><td>Scale</td><td>Thousands of notes / tasks, not a multi-tenant SaaS target.</td><td>OpenProject, Plane, Notion.</td><td>Scale is secondary; ergonomics and export matter more here.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>Recommended target design (not an implementation plan)</h2>
+    <ol>
+      <li><strong>Canonical records:</strong> use a Notion Ideas database with a stable Kipp ID and relations to Tasks, Projects, Sources, and other notes. Model workflow status as a select/status property; retain the free-form body in the page.</li>
+      <li><strong>Task responsibility:</strong> start with a related Notion Tasks database so every future TODO is visible independently, can carry a due date/status, and links back to its source idea. Reconsider Linear only if task operations become the dominant workflow.</li>
+      <li><strong>Agent retrieval:</strong> use Notion property filters and search to identify candidates, then retrieve selected pages through the native enhanced-Markdown endpoint. Maintain an export-derived local search/vector index as a cache, never as the canonical record.</li>
+      <li><strong>Portability:</strong> schedule Markdown export/backups to a private location. A Git repository is appropriate here as a periodic immutable snapshot/history, not as the hot path for every capture or status transition.</li>
+      <li><strong>Guardrails:</strong> use a dedicated Notion integration with access only to the intended pages/databases, queue writes below the published API rate, make operations idempotent with the Kipp ID, and log/retry failures without duplicating pages.</li>
+    </ol>
+    <div class="callout"><strong>Decision checkpoint:</strong> choose Obsidian instead when local Markdown/offline ownership matters more than integrated external task tracking. If Kipp later requires cross-record transactions or high-volume retrieval, conduct a separate database-backend design; it is not one of these ten all-round productivity candidates because it fails the Markdown/TODO threshold. Git remains a strong backup/export path, but not the default primary store for Kipp.</div>
+  </section>
+
+  <section>
+    <h2>Research sources</h2>
+    <p class="meta">Product facts, limits, and free-tier caveats below were checked on 29 July 2026. Product terms and prices can change; verify at selection time. The scoring and recommendation are independent analysis.</p>
+    <ul class="source">
+      <li><a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28">GitHub REST API rate limits</a> and <a href="https://github.com/pricing">GitHub pricing</a>.</li>
+      <li><a href="https://developers.notion.com/guides/get-started/quick-start">Notion API quickstart / rate limit</a>, <a href="https://developers.notion.com/guides/data-apis/working-with-markdown-content">Notion enhanced Markdown API</a>, <a href="https://developers.notion.com/guides/data-apis/enhanced-markdown">Notion-flavored Markdown reference</a>, <a href="https://developers.notion.com/guides/data-apis/working-with-files-and-media">Notion API file limits</a>, <a href="https://www.notion.com/pricing">Notion Free/Plus feature comparison</a>, <a href="https://www.notion.com/help/upgrade-or-downgrade-your-plan">Notion plan guidance</a>, and <a href="https://www.notion.com/help/whos-who-in-a-workspace">Notion Free workspace block rules</a>.</li>
+      <li><a href="https://obsidian.md/help/data-storage">How Obsidian stores data</a>, <a href="https://obsidian.md/help/sync/plans">Obsidian Sync plan limits</a>, and <a href="https://obsidian.md/pricing.html">Obsidian pricing</a>.</li>
+      <li><a href="https://linear.app/developers/rate-limiting">Linear API rate limiting</a>, <a href="https://linear.app/docs/exporting-data">Linear Markdown copy/export</a>, and <a href="https://linear.app/docs/billing-and-plans">Linear plans</a>.</li>
+      <li><a href="https://help.coda.io/hc/en-us/articles/39555760015757-Overview-Doc-limits">Coda document/API and Free-plan limits</a>, <a href="https://help.coda.io/hc/en-us/articles/39555724729869-Import-Markdown-into-Coda">Coda Markdown import</a>, <a href="https://coda.io/developers/apis/v1">Coda API page-content reference (HTML canvas content)</a>, and <a href="https://help.coda.io/hc/en-us/articles/39555725230989-Billing-and-pricing-basics">Coda billing model</a>.</li>
+      <li><a href="https://developer.clickup.com/docs/rate-limits">ClickUp API rate limits</a>, <a href="https://developer.clickup.com/docs/docsimportexportlimitations">ClickUp Docs Markdown import/export limits</a>, and <a href="https://developer.clickup.com/docs/apis-available-by-plan">ClickUp API plan availability</a>.</li>
+      <li><a href="https://support.airtable.com/using-markdown-in-airtable">Airtable Markdown syntax/support</a>, <a href="https://support.airtable.com/using-rich-text-with-airtable">Airtable rich-text API Markdown output</a>, <a href="https://support.airtable.com/getting-started-with-airtables-web-api">Airtable API limits</a>, <a href="https://support.airtable.com/docs/en/airtable-plans">Airtable Free-plan limits</a>, and <a href="https://airtable.com/pricing">Airtable pricing</a>.</li>
+      <li><a href="https://developers.plane.so/api-reference/introduction">Plane REST API</a>, <a href="https://developers.plane.so/">Plane developer, webhook, and self-hosting overview</a>, and <a href="https://plane.com/pricing">Plane pricing</a> (current public pricing should be verified, as the site is not presently a clear work-management free-tier page).</li>
+      <li><a href="https://www.openproject.org/docs/api/">OpenProject REST API</a>, <a href="https://www.openproject.org/docs/user-guide/wiki/">OpenProject wiki</a>, and <a href="https://www.openproject.org/pricing/">OpenProject pricing</a>.</li>
+      <li><a href="https://developer.atlassian.com/cloud/trello/guides/rest-api/rate-limits/">Trello API rate limits</a>, <a href="https://developer.atlassian.com/cloud/trello/guides/rest-api/api-introduction/">Trello API and webhooks</a>, and <a href="https://developer.atlassian.com/cloud/trello/guides/rest-api/automating-exports/">Trello export API</a>.</li>
+    </ul>
+  </section>
+</main></body></html>
