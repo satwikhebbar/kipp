@@ -12,6 +12,8 @@ export interface ToolExecutionSummary {
   validationPaths?: string[]
   /** Safe schema expectations only; excludes values and provider text. */
   validationErrors?: string[]
+  /** Safe upstream HTTP status when explicitly surfaced by the handler. */
+  status?: number
 }
 
 export interface ToolRunResult {
@@ -99,6 +101,7 @@ export async function runTools(
               failureCategory: result.category,
               ...(result.validationPaths?.length ? { validationPaths: result.validationPaths } : {}),
               ...(result.validationErrors?.length ? { validationErrors: result.validationErrors } : {}),
+              ...(result.status === undefined ? {} : { status: result.status }),
             },
       )
       toolCalls++

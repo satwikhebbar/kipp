@@ -2,6 +2,18 @@ import type { z } from "zod"
 
 export type PrivacyClassification = "public" | "private" | "sensitive"
 
+/** A handler may expose a safe, machine-readable failure category to its caller. */
+export class ToolHandlerError extends Error {
+  constructor(
+    message: string,
+    readonly category: "authorization-failed",
+    /** HTTP status only; never a provider response body or user-supplied value. */
+    readonly status?: number,
+  ) {
+    super(message)
+  }
+}
+
 export interface ToolDefinition<TInput extends z.ZodType = z.ZodType, TOutput extends z.ZodType = z.ZodType> {
   name: string
   description: string
@@ -17,11 +29,19 @@ export type ToolResult =
   | { ok: true; output: unknown }
   | {
       ok: false
-      category: "unknown-tool" | "not-allowed" | "invalid-input" | "invalid-output" | "handler-failed"
+      category:
+        | "unknown-tool"
+        | "not-allowed"
+        | "invalid-input"
+        | "invalid-output"
+        | "handler-failed"
+        | "authorization-failed"
       /** Schema paths only: these never include submitted values or provider text. */
       validationPaths?: string[]
       /** Safe schema expectations (for example, "title: expected object"); never includes submitted values. */
       validationErrors?: string[]
+      /** Safe upstream HTTP status when a handler explicitly exposes one. */
+      status?: number
     }
 
 /** Deterministic permission and schema boundary around every future tool call. */
@@ -55,7 +75,9 @@ export class ToolGuard {
       const output = await definition.handler(parsedInput.data)
       if (!definition.output.safeParse(output).success) return { ok: false, category: "invalid-output" }
       return { ok: true, output }
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolHandlerError)
+        return { ok: false, category: error.category, ...(error.status === undefined ? {} : { status: error.status }) }
       return { ok: false, category: "handler-failed" }
     }
   }

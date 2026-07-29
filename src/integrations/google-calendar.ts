@@ -107,6 +107,8 @@ export class GoogleCalendarError extends Error {
   constructor(
     message: string,
     readonly kind: "authorization" | "transient" | "permanent",
+    /** Safe HTTP status when Google returned a response; response contents are never retained. */
+    readonly status?: number,
   ) {
     super(message)
   }
@@ -168,6 +170,8 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
           ...init,
           headers: { Authorization: `Bearer ${token}`, ...init.headers },
         })
+        if (response.status === HTTP_STATUS.UNAUTHORIZED || response.status === HTTP_STATUS.FORBIDDEN)
+          throw new GoogleCalendarError("Google Calendar requires reconnection", "authorization", response.status)
         if (response.ok || !isTransientHttpStatus(response.status)) return response
         lastFailure = new GoogleCalendarError("Google Calendar is temporarily unavailable", "transient")
       } catch (error) {

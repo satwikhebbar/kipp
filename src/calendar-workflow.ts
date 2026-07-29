@@ -9,14 +9,14 @@ import {
   scheduleOneOff,
   suggestOneOffAlternative,
 } from "./calendar-scheduling"
-import { createGoogleCalendarClient, GoogleCalendarError } from "./integrations/google-calendar"
+import { type BusyInterval, createGoogleCalendarClient, GoogleCalendarError } from "./integrations/google-calendar"
 import { createTelegramClient } from "./integrations/telegram"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import { createToolProvider } from "./providers"
 import { ToolProviderHttpError, ToolProviderProtocolError } from "./providers/llm"
 import { logRuntime } from "./runtime/logging"
 import { runTools, type ToolExecutionSummary } from "./runtime/tool-runner"
-import type { ToolRegistry } from "./runtime/tools"
+import { ToolHandlerError, type ToolRegistry } from "./runtime/tools"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "./types"
 
 export interface CalendarWorkflowParams {
@@ -29,6 +29,7 @@ type CalendarPlanningFailureCategory =
   | "no-submitted-proposal"
   | "no-decision"
   | "provider-or-tool-failure"
+  | "calendar-authorization"
   | "provider-protocol"
   | `provider-http-${number}`
 
@@ -49,6 +50,7 @@ type CalendarPlanningDecision =
 
 interface CalendarPlanningAttempt {
   decision: CalendarPlanningDecision | null
+  authorizationError?: GoogleCalendarError
   providerTurns: number
   toolCallCount: number
   toolRunCompleted: boolean
@@ -63,6 +65,7 @@ type CalendarActionResponse =
 
 /** Maps a provider failure to a safe, metadata-only Calendar planning category. */
 function plannerFailureCategory(error: unknown): CalendarPlanningFailureCategory {
+  if (error instanceof GoogleCalendarError && error.kind === "authorization") return "calendar-authorization"
   if (error instanceof ToolProviderHttpError) return `provider-http-${error.status}`
   if (error instanceof ToolProviderProtocolError) return "provider-protocol"
   return "provider-or-tool-failure"
@@ -73,8 +76,19 @@ const CALENDAR_TOOL = {
   SUBMIT_ONE_OFF_PROPOSAL: "submit_one_off_proposal",
   REQUEST_CLARIFICATION: "request_clarification",
 } as const
-const CALENDAR_UNAVAILABLE =
-  "Google Calendar is not connected. Open /setup/google-calendar to connect it, then try again."
+/**
+ * Returns the browser URL for the Calendar OAuth setup route. The configured
+ * redirect origin is also the public origin that serves this route. Workflows
+ * have no request URL of their own, so they cannot otherwise derive it.
+ */
+function calendarSetupUrl(env: Env): string {
+  const origin = env.GOOGLE_CALENDAR_REDIRECT_ORIGIN?.replace(/\/+$/, "")
+  return origin ? `${origin}/setup/google-calendar` : "/setup/google-calendar"
+}
+
+function calendarUnavailableMessage(env: Env): string {
+  return `Google Calendar is not connected. Open ${calendarSetupUrl(env)} to connect it, then try again.`
+}
 const CALENDAR_UNDERSTANDING_FALLBACK =
   "I couldn't work out the scheduling details. Please say what you want to do and when."
 const CALENDAR_PLANNER_UNAVAILABLE = "I couldn't reach the calendar planner. Please try again shortly."
@@ -193,6 +207,7 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
   const calendar = createGoogleCalendarClient(env)
   let decision: CalendarPlanningDecision | null = null
+  let availabilityAuthorizationError: GoogleCalendarError | null = null
   function recordDecision(next: CalendarPlanningDecision): void {
     if (decision) throw new Error("Calendar planner attempted multiple decision actions")
     decision = next
@@ -208,7 +223,16 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
       handler: async ({ localDate, durationMinutes }) => {
         const bounds = dateTimeForTool(localDate, timeZone)
         if (!bounds) return { slots: [] }
-        const busy = await calendar.getBusyIntervals(bounds.timeMin, bounds.timeMax)
+        let busy: BusyInterval[]
+        try {
+          busy = await calendar.getBusyIntervals(bounds.timeMin, bounds.timeMax)
+        } catch (error) {
+          if (error instanceof GoogleCalendarError && error.kind === "authorization") {
+            availabilityAuthorizationError = error
+            throw new ToolHandlerError("Calendar authorization failed", "authorization-failed", error.status)
+          }
+          throw error
+        }
         const synthetic: OneOffProposal = {
           title: "Availability search",
           localDate,
@@ -285,7 +309,8 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
     ],
   )
   return {
-    decision: result.completed ? decision : null,
+    decision: availabilityAuthorizationError ? null : result.completed ? decision : null,
+    ...(availabilityAuthorizationError ? { authorizationError: availabilityAuthorizationError } : {}),
     providerTurns: result.providerTurns,
     toolCallCount: result.toolCallCount,
     toolRunCompleted: result.completed,
@@ -323,6 +348,8 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
             toolNames: attempt.toolNames,
             toolExecutions: attempt.toolExecutions,
           }
+          if (attempt.authorizationError)
+            return { proposal: null, failureCategory: "calendar-authorization", ...metrics }
           if (!attempt.decision) return { proposal: null, failureCategory: "no-decision", ...metrics }
           return attempt.decision.kind === "proposal"
             ? { proposal: attempt.decision.proposal, ...metrics }
@@ -348,6 +375,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
                   ...(toolExecution.validationErrors?.length
                     ? { validationErrors: toolExecution.validationErrors.join(";") }
                     : {}),
+                  ...(toolExecution.status === undefined ? {} : { httpStatus: toolExecution.status }),
                 },
               }
             : {}),
@@ -389,6 +417,24 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         continue
       }
       if (!planning.proposal) {
+        if (planning.failureCategory === "calendar-authorization" && !retryUsed) {
+          const retry = await this.promptForActions(
+            step,
+            event,
+            ++interactionVersion,
+            `calendar-reconnect-${interactionTurn}`,
+            `${calendarUnavailableMessage(this.env)}\n\nReconnect, then tap Retry within 15 minutes.`,
+            [
+              ["Retry", INTERACTION_KIND.CALENDAR_RETRY],
+              ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],
+            ],
+          )
+          if (retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY) {
+            retryUsed = true
+            continue
+          }
+          return
+        }
         await this.notify(
           step,
           event.payload.chatId,
@@ -502,7 +548,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
             event,
             ++interactionVersion,
             `calendar-reconnect-${interactionTurn}`,
-            `${CALENDAR_UNAVAILABLE}\n\nReconnect, then tap Retry within 15 minutes.`,
+            `${calendarUnavailableMessage(this.env)}\n\nReconnect, then tap Retry within 15 minutes.`,
             [
               ["Retry", INTERACTION_KIND.CALENDAR_RETRY],
               ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],

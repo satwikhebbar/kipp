@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { createGoogleCalendarClient } from "../integrations/google-calendar"
+import { createGoogleCalendarClient, type GoogleCalendarError } from "../integrations/google-calendar"
 import { TokenVaultDO } from "../token-vault"
 import { createTokenVault } from "../token-vault-client"
 import type { Env } from "../types"
@@ -118,5 +118,16 @@ describe("Google Calendar client", () => {
     await expect(
       createGoogleCalendarClient(await environment()).getBusyIntervals(EVENT.start, EVENT.end),
     ).resolves.toEqual(busy)
+  })
+
+  it.each([401, 403])("classifies a revoked Calendar authorization response (%i) for reconnection", async (status) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(status)))
+
+    const result = createGoogleCalendarClient(await environment()).getBusyIntervals(EVENT.start, EVENT.end)
+
+    await expect(result).rejects.toMatchObject({
+      kind: "authorization",
+      status,
+    } satisfies Partial<GoogleCalendarError>)
   })
 })

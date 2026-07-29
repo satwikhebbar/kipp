@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { z } from "zod"
 import { logRuntime } from "../runtime/logging"
-import { ToolGuard, type ToolRegistry } from "../runtime/tools"
+import { ToolGuard, ToolHandlerError, type ToolRegistry } from "../runtime/tools"
 
 const registry: ToolRegistry = {
   echo: {
@@ -39,6 +39,27 @@ describe("ToolGuard", () => {
   it("reports invalid handler output without exposing handler details", async () => {
     const guard = new ToolGuard(registry, ["brokenOutput"])
     await expect(guard.execute("brokenOutput", {})).resolves.toEqual({ ok: false, category: "invalid-output" })
+  })
+
+  it("carries an explicitly safe handler failure category without exposing the error message", async () => {
+    const guarded: ToolRegistry = {
+      calendar: {
+        name: "calendar",
+        description: "Calendar availability.",
+        input: z.object({}),
+        output: z.object({}),
+        privacy: "private",
+        handler: async () => {
+          throw new ToolHandlerError("Google response body must not escape", "authorization-failed", 401)
+        },
+      },
+    }
+
+    await expect(new ToolGuard(guarded, ["calendar"]).execute("calendar", {})).resolves.toEqual({
+      ok: false,
+      category: "authorization-failed",
+      status: 401,
+    })
   })
 
   it("keeps LinkedIn's production tool allowlist empty", () => {

@@ -70,6 +70,7 @@ function environment(): Env {
     LLM_PROVIDER: "deepseek",
     LLM_MAX_RETRIES: "0",
     TIMEZONE: "Asia/Kolkata",
+    GOOGLE_CALENDAR_REDIRECT_ORIGIN: "https://dev.kipp.example/",
     INTERACTION_ROUTER: {
       idFromName: () => "calendar-chat",
       get: () => ({ fetch: async () => new Response(JSON.stringify({ ok: true })) }),
@@ -346,6 +347,38 @@ describe("CalendarWorkflow", () => {
 
     expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("offers reconnect when the planner's availability read discovers revoked authorization", async () => {
+    mockGenerate
+      .mockResolvedValueOnce({
+        toolCalls: [
+          {
+            id: "availability-with-revoked-auth",
+            name: "get_available_slots",
+            input: { localDate: "2026-07-28", durationMinutes: 30 },
+          },
+        ],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "proposal-after-failure", name: "submit_one_off_proposal", input: proposal() }],
+        usage: {},
+      })
+    queueProposal()
+    mockBusyIntervals.mockRejectedValueOnce(new MockGoogleCalendarError("authorization"))
+    mockBusyIntervals.mockResolvedValueOnce([])
+    const telegram = telegramMock()
+
+    await run(createStep({ type: "event", payload: { text: "__calendar-retry__" } }, { type: "timeout" }))
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(telegram).toHaveBeenCalledWith(
+      expect.stringContaining("sendMessage"),
+      expect.objectContaining({
+        body: expect.stringContaining("https://dev.kipp.example/setup/google-calendar"),
+      }),
+    )
   })
 
   it("allows a fifth planning cycle to complete a natural clarification conversation", async () => {
