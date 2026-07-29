@@ -133,7 +133,6 @@ const proposalSchema = z.object({
 })
 type SubmittedOneOffProposal = z.infer<typeof proposalSchema>
 
-const MAX_CLARIFICATION_MESSAGE_LENGTH = 240
 const proposalOutputSchema = z.object({ accepted: z.literal(true) })
 const MAX_CLARIFICATION_LENGTH = 240
 const clarificationInputSchema = z.object({ message: z.string().trim().min(1).max(MAX_CLARIFICATION_LENGTH) })
@@ -548,6 +547,13 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
           }
           return
         }
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          event: "calendar-workflow-failure",
+          outcome: "failed",
+          failureCategory: "calendar-operation-failed",
+          details: { stage: "availability-or-write" },
+        })
         await this.notify(step, event.payload.chatId, CALENDAR_FAILURE)
         return
       }
@@ -652,92 +658,106 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
     actions: Array<[string, WorkflowInteractionKind]>,
     keyboard = true,
   ): Promise<CalendarActionResponse> {
+    let stage: "notify" | "register" | "wait" = "notify"
     const prepared = actions.map(([label, kind]) => ({
       label,
       kind,
       interactionId: crypto.randomUUID(),
       callbackToken: keyboard ? crypto.randomUUID() : undefined,
     }))
-    const sent = await step.do(`${name}-notify`, async () =>
-      createTelegramClient(this.env.TELEGRAM_BOT_TOKEN).sendMessage(
-        event.payload.chatId,
-        message,
-        keyboard
-          ? {
-              replyMarkup: {
-                inline_keyboard: [
-                  prepared
-                    .filter((action) => action.callbackToken)
-                    .map((action) => ({ text: action.label, callback_data: action.callbackToken })),
-                ],
-              },
-            }
-          : { replyMarkup: { force_reply: true } },
-      ),
-    )
-    await step.do(`${name}-register`, async () => {
-      const router = createInteractionRouter(this.env.INTERACTION_ROUTER, event.payload.chatId)
-      const expiresAt = Date.now() + CALENDAR_INTERACTION_TTL_MS
-      await Promise.all(
-        prepared.map(
-          (action): Promise<{ ok: boolean }> =>
-            router.register({
-              interactionId: action.interactionId,
-              version,
-              workflowId: event.instanceId,
-              kind: action.kind,
-              callbackToken: action.callbackToken,
-              botMessageId: sent.messageId,
-              expiresAt,
-              interactionGroup: "calendar",
-            } satisfies InteractionRegistration),
+    try {
+      const sent = await step.do(`${name}-notify`, async () =>
+        createTelegramClient(this.env.TELEGRAM_BOT_TOKEN).sendMessage(
+          event.payload.chatId,
+          message,
+          keyboard
+            ? {
+                replyMarkup: {
+                  inline_keyboard: [
+                    prepared
+                      .filter((action) => action.callbackToken)
+                      .map((action) => ({ text: action.label, callback_data: action.callbackToken })),
+                  ],
+                },
+              }
+            : { replyMarkup: { force_reply: true } },
         ),
       )
-    })
-    for (const action of prepared) {
+      stage = "register"
+      await step.do(`${name}-register`, async () => {
+        const router = createInteractionRouter(this.env.INTERACTION_ROUTER, event.payload.chatId)
+        const expiresAt = Date.now() + CALENDAR_INTERACTION_TTL_MS
+        await Promise.all(
+          prepared.map(
+            (action): Promise<{ ok: boolean }> =>
+              router.register({
+                interactionId: action.interactionId,
+                version,
+                workflowId: event.instanceId,
+                kind: action.kind,
+                callbackToken: action.callbackToken,
+                botMessageId: sent.messageId,
+                expiresAt,
+                interactionGroup: "calendar",
+              } satisfies InteractionRegistration),
+          ),
+        )
+      })
+      for (const action of prepared) {
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          interactionId: action.interactionId,
+          event: "calendar-interaction",
+          outcome: "started",
+          details: { interactionKind: action.kind, mode: action.callbackToken ? "callback" : "reply", version },
+        })
+      }
+      stage = "wait"
+      const reply = await step.waitForEvent<{ text?: string }>(`${name}-wait`, {
+        type: "telegram-reply",
+        timeout: "15 minutes" as never,
+      })
+      if (reply.type === "timeout") {
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          event: "calendar-interaction",
+          outcome: "ignored",
+          details: { reason: "timeout", version },
+        })
+        return { type: "timeout" }
+      }
+      const text = reply.payload?.text
+      if (!text) {
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          event: "calendar-interaction",
+          outcome: "ignored",
+          details: { reason: "empty-event", version },
+        })
+        return { type: "timeout" }
+      }
+      const matchedAction = prepared.find((action) => text === `__${action.kind}__`)
       logRuntime(this.env, {
         workflow: event.instanceId,
-        interactionId: action.interactionId,
+        interactionId: (reply.payload as { interactionId?: string } | undefined)?.interactionId,
         event: "calendar-interaction",
-        outcome: "started",
-        details: { interactionKind: action.kind, mode: action.callbackToken ? "callback" : "reply", version },
+        outcome: "succeeded",
+        details: {
+          response: matchedAction ? "action" : "reply",
+          ...(matchedAction ? { interactionKind: matchedAction.kind } : {}),
+          version,
+        },
       })
-    }
-    const reply = await step.waitForEvent<{ text?: string }>(`${name}-wait`, {
-      type: "telegram-reply",
-      timeout: "15 minutes" as never,
-    })
-    if (reply.type === "timeout") {
+      return matchedAction ? { type: "action", kind: matchedAction.kind } : { type: "reply", text }
+    } catch {
       logRuntime(this.env, {
         workflow: event.instanceId,
         event: "calendar-interaction",
-        outcome: "ignored",
-        details: { reason: "timeout", version },
+        outcome: "failed",
+        failureCategory: "interaction-operation-failed",
+        details: { stage, version },
       })
-      return { type: "timeout" }
+      throw new Error("Calendar interaction operation failed")
     }
-    const text = reply.payload?.text
-    if (!text) {
-      logRuntime(this.env, {
-        workflow: event.instanceId,
-        event: "calendar-interaction",
-        outcome: "ignored",
-        details: { reason: "empty-event", version },
-      })
-      return { type: "timeout" }
-    }
-    const matchedAction = prepared.find((action) => text === `__${action.kind}__`)
-    logRuntime(this.env, {
-      workflow: event.instanceId,
-      interactionId: (reply.payload as { interactionId?: string } | undefined)?.interactionId,
-      event: "calendar-interaction",
-      outcome: "succeeded",
-      details: {
-        response: matchedAction ? "action" : "reply",
-        ...(matchedAction ? { interactionKind: matchedAction.kind } : {}),
-        version,
-      },
-    })
-    return matchedAction ? { type: "action", kind: matchedAction.kind } : { type: "reply", text }
   }
 }

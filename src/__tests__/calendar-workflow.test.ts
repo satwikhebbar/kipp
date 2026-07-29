@@ -171,6 +171,25 @@ describe("CalendarWorkflow", () => {
     expect(initialMessages[1].text).toContain("Today is")
   })
 
+  it("logs the interaction stage when waiting for a clarification reply fails", async () => {
+    queueClarification()
+    telegramMock()
+    const log = vitest.spyOn(console, "log").mockImplementation(() => undefined)
+    const step = createStep()
+    step.waitForEvent.mockRejectedValueOnce(new Error("workflow wait failed"))
+
+    await expect(run(step, { ...environment(), LOG_LEVEL: "info" })).rejects.toThrow(
+      "Calendar interaction operation failed",
+    )
+
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '"failureCategory":"interaction-operation-failed","details":{"stage":"wait","version":1}',
+      ),
+    )
+    log.mockRestore()
+  })
+
   it("retries prose without a required decision action before returning a distinct safe failure", async () => {
     mockGenerate.mockResolvedValue({ text: "I need more details.", usage: { inputTokens: 0, outputTokens: 0 } })
     const telegram = telegramMock()
