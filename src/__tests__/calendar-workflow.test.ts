@@ -348,8 +348,28 @@ describe("CalendarWorkflow", () => {
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 
-  it("stops after four clarification cycles and asks for a new request", async () => {
+  it("allows a fifth planning cycle to complete a natural clarification conversation", async () => {
     for (let i = 0; i < 4; i++) queueClarification(`What detail ${i + 1} is missing?`)
+    queueProposal()
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "one" } },
+        { type: "event", payload: { text: "two" } },
+        { type: "event", payload: { text: "three" } },
+        { type: "event", payload: { text: "four" } },
+        { type: "timeout" },
+      ),
+    )
+
+    expect(mockGenerate).toHaveBeenCalledTimes(5)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("stops after eight clarification cycles and asks for a new request", async () => {
+    for (let i = 0; i < 8; i++) queueClarification(`What detail ${i + 1} is missing?`)
     const telegram = telegramMock()
 
     await run(
@@ -358,10 +378,14 @@ describe("CalendarWorkflow", () => {
         { type: "event", payload: { text: "two" } },
         { type: "event", payload: { text: "three" } },
         { type: "event", payload: { text: "four" } },
+        { type: "event", payload: { text: "five" } },
+        { type: "event", payload: { text: "six" } },
+        { type: "event", payload: { text: "seven" } },
+        { type: "event", payload: { text: "eight" } },
       ),
     )
 
-    expect(mockGenerate).toHaveBeenCalledTimes(4)
+    expect(mockGenerate).toHaveBeenCalledTimes(8)
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()
     expect(telegram).toHaveBeenLastCalledWith(
       expect.stringContaining("sendMessage"),

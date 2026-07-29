@@ -22,5 +22,5 @@ export type RuntimeLogFields = {
 /** Emits metadata only; callers must never attach user/provider payloads. */
 export function logRuntime(env: Pick<Env, "LOG_LEVEL">, fields: RuntimeLogFields): void {
   if (env.LOG_LEVEL !== LOG_LEVEL.INFO) return
-  console.log(JSON.stringify({ component: "kipp-runtime", ...fields }))
+  console.log(JSON.stringify({ timestamp: new Date().toISOString(), component: "kipp-runtime", ...fields }))
 }

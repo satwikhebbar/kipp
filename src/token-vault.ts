@@ -77,7 +77,7 @@ export class TokenVaultDO implements DurableObject {
           return new Response("unknown operation", { status: 400 })
       }
     } catch (err) {
-      console.error("[TokenVaultDO] operation failed:", err)
+      console.error(new Date().toISOString(), "[TokenVaultDO] operation failed:", err)
       return new Response("internal error", { status: 500 })
     }
   }

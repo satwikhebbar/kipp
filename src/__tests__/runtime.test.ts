@@ -55,9 +55,15 @@ describe("runtime logging", () => {
     logRuntime({ LOG_LEVEL: "info" }, { event: "workflow-run", outcome: "started", workflow: "workflow-1" })
 
     expect(log).toHaveBeenCalledTimes(1)
-    expect(log).toHaveBeenCalledWith(
-      JSON.stringify({ component: "kipp-runtime", event: "workflow-run", outcome: "started", workflow: "workflow-1" }),
-    )
+    const logged = JSON.parse(log.mock.calls[0]?.[0] as string)
+    expect(logged).toEqual({
+      timestamp: expect.any(String),
+      component: "kipp-runtime",
+      event: "workflow-run",
+      outcome: "started",
+      workflow: "workflow-1",
+    })
+    expect(Number.isNaN(Date.parse(logged.timestamp))).toBe(false)
     log.mockRestore()
   })
 
@@ -72,15 +78,14 @@ describe("runtime logging", () => {
         details: { validationPaths: "title.source,localDate.value" },
       },
     )
-    expect(log).toHaveBeenCalledWith(
-      JSON.stringify({
-        component: "kipp-runtime",
-        event: "tool-execution",
-        outcome: "failed",
-        failureCategory: "invalid-input",
-        details: { validationPaths: "title.source,localDate.value" },
-      }),
-    )
+    expect(JSON.parse(log.mock.calls[0]?.[0] as string)).toEqual({
+      timestamp: expect.any(String),
+      component: "kipp-runtime",
+      event: "tool-execution",
+      outcome: "failed",
+      failureCategory: "invalid-input",
+      details: { validationPaths: "title.source,localDate.value" },
+    })
     log.mockRestore()
   })
 })

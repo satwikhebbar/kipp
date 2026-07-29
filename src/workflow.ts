@@ -99,7 +99,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       return result
     } catch (err) {
       logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "failed" })
-      console.error(`[workflow ${event.instanceId}] unhandled error:`, err)
+      console.error(new Date().toISOString(), `[workflow ${event.instanceId}] unhandled error:`, err)
       throw err
     }
   }
@@ -127,7 +127,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             outcome: "failed",
             durationMs: Date.now() - startedAt,
           })
-          console.error(`[workflow ${event.instanceId}] step "${name}" failed:`, err)
+          console.error(new Date().toISOString(), `[workflow ${event.instanceId}] step "${name}" failed:`, err)
           throw err
         }
       }
@@ -175,6 +175,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const chatId = idea.correlation?.telegramChatId ?? this.env.TELEGRAM_ALLOWED_USER_ID
       if (!chatId)
         console.log(
+          new Date().toISOString(),
           `[workflow ${event.instanceId}] no chatId resolved for idea ${ideaId} — notify/approval steps will be silent`,
         )
 
@@ -262,7 +263,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "started" })
         const notifyPublishFailure = async (err: unknown): Promise<void> => {
           logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "failed" })
-          console.error(`[workflow ${event.instanceId}] linkedin-publish failed:`, err)
+          console.error(new Date().toISOString(), `[workflow ${event.instanceId}] linkedin-publish failed:`, err)
           if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
             await stepDo("notify-publish-failed", async () => {
               const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)

@@ -85,8 +85,12 @@ const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try agai
 const CALENDAR_INTERACTION_TTL_MINUTES = 15
 const MILLISECONDS_PER_MINUTE = 60_000
 const CALENDAR_INTERACTION_TTL_MS = CALENDAR_INTERACTION_TTL_MINUTES * MILLISECONDS_PER_MINUTE
-/** Maximum user interaction cycles for one Calendar workflow execution. */
-const MAX_CALENDAR_INTERACTION_TURNS = 4
+/**
+ * Maximum user interaction cycles for one Calendar workflow execution.
+ * Eight is a temporary conversation budget while typed Calendar dialogue
+ * state is introduced; expiry and per-tool limits remain independently bound.
+ */
+const MAX_CALENDAR_INTERACTION_TURNS = 8
 
 const fieldSourceSchema = z.enum(["explicit", "inferred"])
 const sourcedField = <Value extends z.ZodTypeAny>(value: Value) => z.object({ value, source: fieldSourceSchema })
