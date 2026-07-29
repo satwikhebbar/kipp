@@ -99,9 +99,9 @@ function telegramMock() {
   return telegram
 }
 
-async function run(step: ReturnType<typeof createStep>): Promise<void> {
+async function run(step: ReturnType<typeof createStep>, env = environment()): Promise<void> {
   const workflow = new CalendarWorkflow({} as never, {} as never)
-  Object.assign(workflow, { env: environment() })
+  Object.assign(workflow, { env })
   await (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(workflowEvent(), step)
 }
 
@@ -151,18 +151,22 @@ describe("CalendarWorkflow", () => {
     expect(initialMessages[1].text).toContain("Today is")
   })
 
-  it("does not write and asks for a retry when the provider returns prose without a decision action", async () => {
+  it("retries prose without a required decision action before returning a distinct safe failure", async () => {
     mockGenerate.mockResolvedValue({ text: "I need more details.", usage: { inputTokens: 0, outputTokens: 0 } })
     const telegram = telegramMock()
+    const log = vitest.spyOn(console, "log").mockImplementation(() => undefined)
 
-    await run(createStep())
+    await run(createStep(), { ...environment(), LOG_LEVEL: "info" })
 
+    expect(mockGenerate).toHaveBeenCalledTimes(3)
     expect(mockBusyIntervals).not.toHaveBeenCalled()
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()
     expect(telegram).toHaveBeenLastCalledWith(
       expect.stringContaining("sendMessage"),
       expect.objectContaining({ body: expect.stringContaining("didn't return a scheduling decision") }),
     )
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('"failureCategory":"missing-required-handoff"'))
+    log.mockRestore()
   })
 
   it("does not create an event when the model marks a date as inferred", async () => {
@@ -190,18 +194,8 @@ describe("CalendarWorkflow", () => {
     )
   })
 
-  it("returns a schema-safe correction to the planner and does not repeat availability after a legacy proposal", async () => {
+  it("returns a schema-safe correction to the planner after a legacy proposal", async () => {
     mockGenerate
-      .mockResolvedValueOnce({
-        toolCalls: [
-          {
-            id: "availability",
-            name: "get_available_slots",
-            input: { localDate: "2026-07-28", durationMinutes: 30 },
-          },
-        ],
-        usage: {},
-      })
       .mockResolvedValueOnce({
         toolCalls: [
           {
@@ -227,15 +221,15 @@ describe("CalendarWorkflow", () => {
 
     await run(createStep({ type: "timeout" }))
 
-    expect(mockGenerate.mock.calls[2]?.[0]).toEqual(
+    expect(mockGenerate.mock.calls[1]?.[0]).toEqual(
       expect.objectContaining({
         tools: expect.arrayContaining([expect.objectContaining({ name: "submit_one_off_proposal" })]),
       }),
     )
-    expect(mockGenerate.mock.calls[2]?.[0].tools).not.toEqual(
+    expect(mockGenerate.mock.calls[1]?.[0].tools).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "get_available_slots" })]),
     )
-    expect(mockGenerate.mock.calls[2]?.[0].messages).toContainEqual(
+    expect(mockGenerate.mock.calls[1]?.[0].messages).toContainEqual(
       expect.objectContaining({
         role: "tool",
         name: "submit_one_off_proposal",
@@ -271,7 +265,9 @@ describe("CalendarWorkflow", () => {
     expect(mockGenerate.mock.calls[1]?.[0].messages[1].text).toContain(
       "Calendar planner asked: The only available slot on July 30 is at 19:00. Would you like that time?\nUser replied: Proceed",
     )
-    expect(mockGenerate.mock.calls[1]?.[0].messages[0].text).toContain("do not look up availability again")
+    expect(mockGenerate.mock.calls[1]?.[0].messages[0].text).toContain(
+      "Availability is checked by deterministic workflow code",
+    )
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 
@@ -341,43 +337,15 @@ describe("CalendarWorkflow", () => {
     queueProposal()
     mockBusyIntervals.mockRejectedValueOnce(new MockGoogleCalendarError("authorization"))
     mockBusyIntervals.mockResolvedValueOnce([])
-    telegramMock()
+    const telegram = telegramMock()
 
     await run(createStep({ type: "event", payload: { text: "__calendar-retry__" } }, { type: "timeout" }))
 
     expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
-  })
-
-  it("offers reconnect when the planner's availability read discovers revoked authorization", async () => {
-    mockGenerate
-      .mockResolvedValueOnce({
-        toolCalls: [
-          {
-            id: "availability-with-revoked-auth",
-            name: "get_available_slots",
-            input: { localDate: "2026-07-28", durationMinutes: 30 },
-          },
-        ],
-        usage: {},
-      })
-      .mockResolvedValueOnce({
-        toolCalls: [{ id: "proposal-after-failure", name: "submit_one_off_proposal", input: proposal() }],
-        usage: {},
-      })
-    queueProposal()
-    mockBusyIntervals.mockRejectedValueOnce(new MockGoogleCalendarError("authorization"))
-    mockBusyIntervals.mockResolvedValueOnce([])
-    const telegram = telegramMock()
-
-    await run(createStep({ type: "event", payload: { text: "__calendar-retry__" } }, { type: "timeout" }))
-
-    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(telegram).toHaveBeenCalledWith(
       expect.stringContaining("sendMessage"),
-      expect.objectContaining({
-        body: expect.stringContaining("https://dev.kipp.example/setup/google-calendar"),
-      }),
+      expect.objectContaining({ body: expect.stringContaining("https://dev.kipp.example/setup/google-calendar") }),
     )
   })
 
@@ -426,12 +394,12 @@ describe("CalendarWorkflow", () => {
     )
   })
 
-  it("requires a decision action after a single availability lookup", async () => {
+  it("does not give the planner availability authority for an explicit requested time", async () => {
     mockGenerate
       .mockResolvedValueOnce({
         toolCalls: [
           {
-            id: "availability",
+            id: "unavailable-tool",
             name: "get_available_slots",
             input: { localDate: "2026-07-28", durationMinutes: 30 },
           },
@@ -439,7 +407,7 @@ describe("CalendarWorkflow", () => {
         usage: {},
       })
       .mockResolvedValueOnce({
-        toolCalls: [{ id: "proposal", name: "submit_one_off_proposal", input: proposal() }],
+        toolCalls: [{ id: "proposal", name: "submit_one_off_proposal", input: proposal("14:30") }],
         usage: {},
       })
     mockBusyIntervals.mockResolvedValue([])
@@ -451,18 +419,11 @@ describe("CalendarWorkflow", () => {
     expect(mockGenerate.mock.calls[0][0]).toEqual(
       expect.objectContaining({ toolChoice: "required", reasoning: "disabled" }),
     )
-    expect(mockGenerate.mock.calls[1][0]).toEqual(
-      expect.objectContaining({
-        toolChoice: "required",
-        tools: expect.arrayContaining([
-          expect.objectContaining({ name: "submit_one_off_proposal" }),
-          expect.objectContaining({ name: "request_clarification" }),
-        ]),
-      }),
-    )
-    expect(mockGenerate.mock.calls[1][0].tools).not.toEqual(
+    expect(mockGenerate.mock.calls[0][0].tools).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "get_available_slots" })]),
     )
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-28T09:00:00.000Z" }))
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 })

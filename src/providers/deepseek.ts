@@ -69,6 +69,7 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
         if ("toolCalls" in message)
           return {
             role: "assistant",
+            content: message.text ?? "",
             tool_calls: message.toolCalls.map((call) => ({
               id: call.id,
               type: FUNCTION_TOOL_TYPE,

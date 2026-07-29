@@ -80,6 +80,65 @@ describe("runTools", () => {
     )
   })
 
+  it("repairs a missing required handoff within the provider-turn budget", async () => {
+    const generate = vi
+      .fn()
+      .mockResolvedValueOnce({ text: "I need more details.", usage: {} })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "one", name: "echo", input: { value: "hello" } }],
+        usage: {},
+      })
+
+    const result = await runTools(
+      { generate },
+      registry,
+      {
+        allowedTools: ["echo"],
+        handoffTools: ["echo"],
+        requireHandoff: true,
+        maxToolCallsPerTurn: 1,
+        toolChoice: "required",
+      },
+      [{ role: "user", text: "start" }],
+    )
+
+    expect(result).toMatchObject({ completed: true, providerTurns: 2, toolCallCount: 1 })
+    expect(generate.mock.calls[1][0].messages).toEqual(
+      expect.arrayContaining([
+        { role: "assistant", text: "I need more details." },
+        {
+          role: "user",
+          text: expect.stringContaining("did not invoke a required handoff action"),
+        },
+      ]),
+    )
+  })
+
+  it("reports an exhausted missing required handoff distinctly", async () => {
+    const generate = vi.fn().mockResolvedValue({ text: "I need more details.", usage: {} })
+
+    const result = await runTools(
+      { generate },
+      registry,
+      {
+        allowedTools: ["echo"],
+        handoffTools: ["echo"],
+        requireHandoff: true,
+        maxToolCallsPerTurn: 1,
+        toolChoice: "required",
+      },
+      [{ role: "user", text: "start" }],
+    )
+
+    expect(result).toMatchObject({
+      completed: false,
+      failureReason: "missing-required-handoff",
+      providerTurns: 3,
+      toolCallCount: 0,
+    })
+    expect(generate).toHaveBeenCalledTimes(3)
+  })
+
   it("narrows the next turn to handoff tools after an availability action", async () => {
     const availability = {
       ...registry.echo,

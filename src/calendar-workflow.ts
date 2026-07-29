@@ -9,14 +9,14 @@ import {
   scheduleOneOff,
   suggestOneOffAlternative,
 } from "./calendar-scheduling"
-import { type BusyInterval, createGoogleCalendarClient, GoogleCalendarError } from "./integrations/google-calendar"
+import { createGoogleCalendarClient, GoogleCalendarError } from "./integrations/google-calendar"
 import { createTelegramClient } from "./integrations/telegram"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import { createToolProvider } from "./providers"
 import { ToolProviderHttpError, ToolProviderProtocolError } from "./providers/llm"
 import { logRuntime } from "./runtime/logging"
-import { runTools, type ToolExecutionSummary } from "./runtime/tool-runner"
-import { ToolHandlerError, type ToolRegistry } from "./runtime/tools"
+import { runTools, type ToolExecutionSummary, type ToolRunFailureReason } from "./runtime/tool-runner"
+import type { ToolRegistry } from "./runtime/tools"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "./types"
 
 export interface CalendarWorkflowParams {
@@ -28,8 +28,8 @@ export interface CalendarWorkflowParams {
 type CalendarPlanningFailureCategory =
   | "no-submitted-proposal"
   | "no-decision"
+  | "missing-required-handoff"
   | "provider-or-tool-failure"
-  | "calendar-authorization"
   | "provider-protocol"
   | `provider-http-${number}`
 
@@ -48,9 +48,9 @@ type CalendarPlanningDecision =
   | { kind: "proposal"; proposal: OneOffProposal }
   | { kind: "clarification"; message: string }
 
-interface CalendarPlanningAttempt {
+export interface CalendarPlanningAttempt {
   decision: CalendarPlanningDecision | null
-  authorizationError?: GoogleCalendarError
+  failureReason?: ToolRunFailureReason
   providerTurns: number
   toolCallCount: number
   toolRunCompleted: boolean
@@ -65,14 +65,12 @@ type CalendarActionResponse =
 
 /** Maps a provider failure to a safe, metadata-only Calendar planning category. */
 function plannerFailureCategory(error: unknown): CalendarPlanningFailureCategory {
-  if (error instanceof GoogleCalendarError && error.kind === "authorization") return "calendar-authorization"
   if (error instanceof ToolProviderHttpError) return `provider-http-${error.status}`
   if (error instanceof ToolProviderProtocolError) return "provider-protocol"
   return "provider-or-tool-failure"
 }
 
 const CALENDAR_TOOL = {
-  GET_AVAILABLE_SLOTS: "get_available_slots",
   SUBMIT_ONE_OFF_PROPOSAL: "submit_one_off_proposal",
   REQUEST_CLARIFICATION: "request_clarification",
 } as const
@@ -128,14 +126,7 @@ const proposalSchema = z.object({
 })
 type SubmittedOneOffProposal = z.infer<typeof proposalSchema>
 
-const MIN_DURATION_MINUTES = 15
-const MAX_AVAILABILITY_DURATION_MINUTES = 240
 const MAX_CLARIFICATION_MESSAGE_LENGTH = 240
-const availabilityInputSchema = z.object({
-  localDate: z.string(),
-  durationMinutes: z.number().int().min(MIN_DURATION_MINUTES).max(MAX_AVAILABILITY_DURATION_MINUTES),
-})
-const availabilityOutputSchema = z.object({ slots: z.array(z.string()) })
 const proposalOutputSchema = z.object({ accepted: z.literal(true) })
 const MAX_CLARIFICATION_LENGTH = 240
 const clarificationInputSchema = z.object({ message: z.string().trim().min(1).max(MAX_CLARIFICATION_LENGTH) })
@@ -143,7 +134,7 @@ const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
 /** Builds the static system prompt for the calendar planner agent. */
 function plannerPrompt(): string {
-  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. Use get_available_slots only when you need to choose a time. There are no other actions. Every submitted proposal field has a source: use explicit only when the user supplied or unambiguously confirmed that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. If a prior clarification offered a specific available date and time, and the user clearly accepts it, do not look up availability again: submit that offered date and time with source explicit. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. After get_available_slots, use only submit_one_off_proposal or request_clarification. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
+  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. There are no other actions. Every submitted proposal field has a source: use explicit only when the user supplied or unambiguously confirmed that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. Availability is checked by deterministic workflow code after a proposal is submitted; never claim that a requested time is free or unavailable. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
 }
 
 /** Builds the dynamic user context for the calendar planner agent. */
@@ -158,11 +149,6 @@ function plannerUserMessage(requestText: string, now: number, timeZone: string):
 /** Preserves the immediately preceding Calendar question so concise replies such as “Proceed” retain their referent. */
 function appendClarificationReply(requestText: string, question: string, reply: string): string {
   return `${requestText}\n\nCalendar planner asked: ${question}\nUser replied: ${reply}`
-}
-
-/** Returns calendar day bounds for a date, used by the planner's availability tool. */
-function dateTimeForTool(localDate: string, timeZone: string): { timeMin: string; timeMax: string } | null {
-  return calendarDayBounds(localDate, timeZone)
 }
 
 /** Converts source-tagged model extraction into a policy-approved proposal, or a focused clarification. */
@@ -203,49 +189,14 @@ function normalizeSubmittedProposal(
 }
 
 /** Uses the planner's bounded tool session to return either a proposal or one focused clarification question. */
-async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanningAttempt> {
+export async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanningAttempt> {
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
-  const calendar = createGoogleCalendarClient(env)
   let decision: CalendarPlanningDecision | null = null
-  let availabilityAuthorizationError: GoogleCalendarError | null = null
   function recordDecision(next: CalendarPlanningDecision): void {
     if (decision) throw new Error("Calendar planner attempted multiple decision actions")
     decision = next
   }
   const registry: ToolRegistry = {
-    [CALENDAR_TOOL.GET_AVAILABLE_SLOTS]: {
-      name: CALENDAR_TOOL.GET_AVAILABLE_SLOTS,
-      description:
-        "Return safe free start-time candidates for a local date and duration. It never returns Calendar event details.",
-      input: availabilityInputSchema,
-      output: availabilityOutputSchema,
-      privacy: "private",
-      handler: async ({ localDate, durationMinutes }) => {
-        const bounds = dateTimeForTool(localDate, timeZone)
-        if (!bounds) return { slots: [] }
-        let busy: BusyInterval[]
-        try {
-          busy = await calendar.getBusyIntervals(bounds.timeMin, bounds.timeMax)
-        } catch (error) {
-          if (error instanceof GoogleCalendarError && error.kind === "authorization") {
-            availabilityAuthorizationError = error
-            throw new ToolHandlerError("Calendar authorization failed", "authorization-failed", error.status)
-          }
-          throw error
-        }
-        const synthetic: OneOffProposal = {
-          title: "Availability search",
-          localDate,
-          durationMinutes,
-          dateIsExplicit: true,
-          timeIsExplicit: false,
-          classification: "ordinary",
-          needsClarification: false,
-        }
-        const scheduled = scheduleOneOff(synthetic, busy, timeZone)
-        return { slots: "localStartTime" in scheduled ? [scheduled.localStartTime] : [] }
-      },
-    },
     [CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL]: {
       name: CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL,
       description:
@@ -281,27 +232,19 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
     env.LLM_MODEL,
     Number(env.LLM_MAX_RETRIES || "3"),
   )
-  const handoffTools = [CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL, CALENDAR_TOOL.REQUEST_CLARIFICATION]
+  const decisionTools = [CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL, CALENDAR_TOOL.REQUEST_CLARIFICATION]
   const result = await runTools(
     provider,
     registry,
     {
-      allowedTools: Object.values(CALENDAR_TOOL),
-      handoffTools,
+      allowedTools: decisionTools,
+      handoffTools: decisionTools,
+      requireHandoff: true,
       maxToolCallsPerTurn: 1,
       // DeepSeek V4 defaults to thinking mode. Calendar uses a bounded non-thinking native-tool session instead.
       reasoning: "disabled",
-      // A Calendar turn must either read availability or produce a decision; prose is not an action.
+      // A Calendar turn must produce a decision; prose is not an action.
       toolChoice: "required",
-      // After an availability lookup, expose only the two handoff actions and require one of them.
-      // An availability result or a rejected proposal is enough context to finish this decision.
-      // Do not let the model repeat a private availability read after either one.
-      nextAllowedTools: (executedTools) =>
-        executedTools.some(
-          (tool) => tool === CALENDAR_TOOL.GET_AVAILABLE_SLOTS || tool === CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL,
-        )
-          ? handoffTools
-          : Object.values(CALENDAR_TOOL),
     },
     [
       { role: "system", text: plannerPrompt() },
@@ -309,8 +252,8 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
     ],
   )
   return {
-    decision: availabilityAuthorizationError ? null : result.completed ? decision : null,
-    ...(availabilityAuthorizationError ? { authorizationError: availabilityAuthorizationError } : {}),
+    decision: result.completed ? decision : null,
+    failureReason: result.failureReason,
     providerTurns: result.providerTurns,
     toolCallCount: result.toolCallCount,
     toolRunCompleted: result.completed,
@@ -348,9 +291,13 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
             toolNames: attempt.toolNames,
             toolExecutions: attempt.toolExecutions,
           }
-          if (attempt.authorizationError)
-            return { proposal: null, failureCategory: "calendar-authorization", ...metrics }
-          if (!attempt.decision) return { proposal: null, failureCategory: "no-decision", ...metrics }
+          if (!attempt.decision)
+            return {
+              proposal: null,
+              failureCategory:
+                attempt.failureReason === "missing-required-handoff" ? "missing-required-handoff" : "no-decision",
+              ...metrics,
+            }
           return attempt.decision.kind === "proposal"
             ? { proposal: attempt.decision.proposal, ...metrics }
             : { proposal: null, clarification: attempt.decision.message, ...metrics }
@@ -417,30 +364,12 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         continue
       }
       if (!planning.proposal) {
-        if (planning.failureCategory === "calendar-authorization" && !retryUsed) {
-          const retry = await this.promptForActions(
-            step,
-            event,
-            ++interactionVersion,
-            `calendar-reconnect-${interactionTurn}`,
-            `${calendarUnavailableMessage(this.env)}\n\nReconnect, then tap Retry within 15 minutes.`,
-            [
-              ["Retry", INTERACTION_KIND.CALENDAR_RETRY],
-              ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],
-            ],
-          )
-          if (retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY) {
-            retryUsed = true
-            continue
-          }
-          return
-        }
         await this.notify(
           step,
           event.payload.chatId,
           planning.failureCategory === "no-submitted-proposal"
             ? CALENDAR_UNDERSTANDING_FALLBACK
-            : planning.failureCategory === "no-decision"
+            : planning.failureCategory === "no-decision" || planning.failureCategory === "missing-required-handoff"
               ? CALENDAR_PLANNER_NO_DECISION
               : CALENDAR_PLANNER_UNAVAILABLE,
         )

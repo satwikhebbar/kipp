@@ -159,6 +159,7 @@ describe("DeepSeek provider", () => {
             choices: [
               {
                 message: {
+                  content: "Calling echo.",
                   reasoning_content: "internal reasoning",
                   tool_calls: [{ id: "call-1", function: { name: "echo", arguments: '{"value":"hi"}' } }],
                 },
@@ -182,7 +183,12 @@ describe("DeepSeek provider", () => {
     await client.generate({
       messages: [
         ...TOOL_TEST_MESSAGES,
-        { role: "assistant", toolCalls: first.toolCalls ?? [], reasoningContent: first.reasoningContent },
+        {
+          role: "assistant",
+          toolCalls: first.toolCalls ?? [],
+          text: first.text,
+          reasoningContent: first.reasoningContent,
+        },
         { role: "tool", toolCallId: "call-1", name: "echo", output: { ok: true, output: { value: "hi" } } },
       ],
       tools: [TOOL_TEST_REGISTRY.echo],
@@ -192,7 +198,11 @@ describe("DeepSeek provider", () => {
     const secondBody = JSON.parse((mockFetch.mock.calls[1][1] as RequestInit).body as string)
     expect(firstBody).toMatchObject({ tool_choice: "required", thinking: { type: "disabled" } })
     expect(secondBody.messages).toContainEqual(
-      expect.objectContaining({ role: "assistant", reasoning_content: "internal reasoning" }),
+      expect.objectContaining({
+        role: "assistant",
+        content: "Calling echo.",
+        reasoning_content: "internal reasoning",
+      }),
     )
   })
 

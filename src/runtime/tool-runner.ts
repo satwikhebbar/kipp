@@ -3,6 +3,10 @@ import { ToolGuard, type ToolRegistry, type ToolResult } from "./tools"
 
 export const MAX_TOOL_PROVIDER_TURNS = 3
 export const MAX_TOOL_CALLS = 4
+const REQUIRED_HANDOFF_REPAIR_MESSAGE =
+  "The previous response did not invoke a required handoff action. Call exactly one provided tool now; do not answer with prose."
+
+export type ToolRunFailureReason = "missing-required-handoff" | "tool-call-limit" | "provider-turn-limit"
 
 export interface ToolExecutionSummary {
   tool: string
@@ -20,6 +24,7 @@ export interface ToolRunResult {
   messages: ToolConversationMessage[]
   finalText?: string
   completed: boolean
+  failureReason?: ToolRunFailureReason
   providerTurns: number
   toolCallCount: number
   toolNames: string[]
@@ -31,6 +36,8 @@ export interface ToolRunOptions {
   allowedTools: readonly string[]
   /** A successful call to one of these tools hands control away from the model loop immediately. */
   handoffTools?: readonly string[]
+  /** Requires a successful handoff tool call; prose-only responses receive bounded repair turns. */
+  requireHandoff?: boolean
   /** Restricts a provider turn to one action, preventing mixed availability and handoff batches. */
   maxToolCallsPerTurn?: number
   toolChoice?: ToolChoice
@@ -63,7 +70,21 @@ export async function runTools(
       toolChoice: options.toolChoice,
       reasoning: options.reasoning,
     })
-    if (!response.toolCalls?.length)
+    if (!response.toolCalls?.length) {
+      if (options.requireHandoff) {
+        if (response.text) messages.push({ role: "assistant", text: response.text })
+        messages.push({ role: "user", text: REQUIRED_HANDOFF_REPAIR_MESSAGE })
+        if (turn + 1 < MAX_TOOL_PROVIDER_TURNS) continue
+        return {
+          messages,
+          completed: false,
+          failureReason: "missing-required-handoff",
+          providerTurns: turn + 1,
+          toolCallCount: toolCalls,
+          toolNames,
+          toolExecutions,
+        }
+      }
       return {
         messages,
         finalText: response.text,
@@ -73,6 +94,7 @@ export async function runTools(
         toolNames,
         toolExecutions,
       }
+    }
     if (
       toolCalls + response.toolCalls.length > MAX_TOOL_CALLS ||
       (options.maxToolCallsPerTurn !== undefined && response.toolCalls.length > options.maxToolCallsPerTurn)
@@ -80,12 +102,18 @@ export async function runTools(
       return {
         messages,
         completed: false,
+        failureReason: "tool-call-limit",
         providerTurns: turn + 1,
         toolCallCount: toolCalls,
         toolNames,
         toolExecutions,
       }
-    messages.push({ role: "assistant", toolCalls: response.toolCalls, reasoningContent: response.reasoningContent })
+    messages.push({
+      role: "assistant",
+      toolCalls: response.toolCalls,
+      text: response.text,
+      reasoningContent: response.reasoningContent,
+    })
     const executedTools: string[] = []
     let handoffActionCompleted = false
     for (const call of response.toolCalls) {
@@ -123,6 +151,7 @@ export async function runTools(
   return {
     messages,
     completed: false,
+    failureReason: "provider-turn-limit",
     providerTurns: MAX_TOOL_PROVIDER_TURNS,
     toolCallCount: toolCalls,
     toolNames,

@@ -19,6 +19,8 @@ export type ToolConversationMessage =
   | {
       role: "assistant"
       toolCalls: Array<{ id: string; name: string; input: unknown }>
+      /** Assistant content accompanying a native tool call; some providers require it on continuation. */
+      text?: string
       /** Provider reasoning carried forward only when its native API requires it. */
       reasoningContent?: string
     }

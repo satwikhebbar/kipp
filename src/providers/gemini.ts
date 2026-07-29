@@ -56,6 +56,14 @@ export function createGeminiToolClient(apiKey: string, modelName = GEMINI_DEFAUL
       const contents = messages
         .filter((m) => !("text" in m && m.role === "system"))
         .map((message) => {
+          if ("toolCalls" in message)
+            return {
+              role: "model",
+              parts: [
+                ...(message.text ? [{ text: message.text }] : []),
+                ...message.toolCalls.map((call) => ({ functionCall: { name: call.name, args: call.input } })),
+              ],
+            }
           if ("text" in message)
             return { role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.text }] }
           if (message.role === "tool")
@@ -63,10 +71,7 @@ export function createGeminiToolClient(apiKey: string, modelName = GEMINI_DEFAUL
               role: "user",
               parts: [{ functionResponse: { name: message.name, response: { result: message.output } } }],
             }
-          return {
-            role: "model",
-            parts: message.toolCalls.map((call) => ({ functionCall: { name: call.name, args: call.input } })),
-          }
+          return message satisfies never
         })
       const result = await model.generateContent({
         systemInstruction: system ? { role: "system", parts: [{ text: system }] } : undefined,
