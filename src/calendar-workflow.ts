@@ -17,7 +17,7 @@ import { createToolProvider } from "./providers"
 import { ToolProviderHttpError, ToolProviderProtocolError } from "./providers/llm"
 import { logRuntime } from "./runtime/logging"
 import { runTools, type ToolExecutionSummary, type ToolRunFailureReason } from "./runtime/tool-runner"
-import type { ToolRegistry } from "./runtime/tools"
+import { ToolHandlerError, type ToolRegistry } from "./runtime/tools"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "./types"
 
 export interface CalendarWorkflowParams {
@@ -37,6 +37,7 @@ type CalendarPlanningFailureCategory =
 interface CalendarPlanningResult {
   proposal: OneOffProposal | null
   clarification?: string
+  dialogueFields?: CalendarDialogueFields
   failureCategory?: CalendarPlanningFailureCategory
   providerTurns?: number
   toolCallCount?: number
@@ -46,8 +47,8 @@ interface CalendarPlanningResult {
 }
 
 type CalendarPlanningDecision =
-  | { kind: "proposal"; proposal: OneOffProposal }
-  | { kind: "clarification"; message: string }
+  | { kind: "proposal"; proposal: OneOffProposal; dialogueFields: CalendarDialogueFields }
+  | { kind: "clarification"; message: string; dialogueFields: CalendarDialogueFields }
 
 export interface CalendarPlanningAttempt {
   decision: CalendarPlanningDecision | null
@@ -68,6 +69,18 @@ type CalendarActionResponse =
 interface CalendarEditBaseline {
   proposal: OneOffProposal
   scheduled: ScheduledOneOff
+}
+
+interface CalendarPendingConflict {
+  localDate?: string
+  requestedStartTime?: string
+  offeredStartTime?: string
+}
+
+interface CalendarDialogueState {
+  fields: CalendarDialogueFields
+  pendingQuestion?: string
+  pendingConflict?: CalendarPendingConflict
 }
 
 /** Maps a provider failure to a safe, metadata-only Calendar planning category. */
@@ -91,6 +104,7 @@ function calendarSetupUrl(env: Env): string {
   return origin ? `${origin}/setup/google-calendar` : "/setup/google-calendar"
 }
 
+/** Builds the user-facing Calendar authorization recovery message. */
 function calendarUnavailableMessage(env: Env): string {
   return `Google Calendar is not connected. Open ${calendarSetupUrl(env)} to connect it, then try again.`
 }
@@ -104,11 +118,7 @@ const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try agai
 const CALENDAR_INTERACTION_TTL_MINUTES = 15
 const MILLISECONDS_PER_MINUTE = 60_000
 const CALENDAR_INTERACTION_TTL_MS = CALENDAR_INTERACTION_TTL_MINUTES * MILLISECONDS_PER_MINUTE
-/**
- * Maximum user interaction cycles for one Calendar workflow execution.
- * Eight is a temporary conversation budget while typed Calendar dialogue
- * state is introduced; expiry and per-tool limits remain independently bound.
- */
+/** Maximum user interaction cycles for one Calendar workflow execution. */
 const MAX_CALENDAR_INTERACTION_TURNS = 8
 
 const fieldSourceSchema = z.enum(["explicit", "inferred"])
@@ -132,24 +142,68 @@ const proposalSchema = z.object({
   reminderMinutes: sourcedField(z.number().int()).optional(),
 })
 type SubmittedOneOffProposal = z.infer<typeof proposalSchema>
+const dialogueFieldsSchema = proposalSchema.partial()
+type CalendarDialogueFields = z.infer<typeof dialogueFieldsSchema>
+const dialogueSnapshotField = <Value extends z.ZodTypeAny>(value: Value) =>
+  z.object({
+    source: z.enum(["missing", "explicit", "inferred"]),
+    value: value.optional(),
+  })
+const dialogueSnapshotSchema = z.object({
+  title: dialogueSnapshotField(z.string()),
+  localDate: dialogueSnapshotField(z.string()),
+  startTime: dialogueSnapshotField(z.string()),
+  durationMinutes: dialogueSnapshotField(z.number().int()),
+  classification: dialogueSnapshotField(
+    z.enum(["ordinary", "family-social", "school-pickup", "appointment", "maintenance", "physical"]),
+  ),
+  description: dialogueSnapshotField(z.string()),
+  location: dialogueSnapshotField(z.string()),
+  reminderMinutes: dialogueSnapshotField(z.number().int()),
+})
+type CalendarDialogueSnapshot = z.infer<typeof dialogueSnapshotSchema>
+const calendarFieldNameSchema = z.enum([
+  "title",
+  "localDate",
+  "startTime",
+  "durationMinutes",
+  "classification",
+  "description",
+  "location",
+  "reminderMinutes",
+])
 
 const proposalOutputSchema = z.object({ accepted: z.literal(true) })
 const MAX_CLARIFICATION_LENGTH = 240
-const clarificationInputSchema = z.object({ message: z.string().trim().min(1).max(MAX_CLARIFICATION_LENGTH) })
+const clarificationInputSchema = z.object({
+  message: z.string().trim().min(1).max(MAX_CLARIFICATION_LENGTH),
+  missingField: calendarFieldNameSchema,
+  fields: dialogueSnapshotSchema,
+})
 const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
 /** Builds the static system prompt for the calendar planner agent. */
 function plannerPrompt(): string {
-  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. There are no other actions. Every submitted proposal field has a source: use explicit only when the user supplied or unambiguously confirmed that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. During an Edit, the current scheduled date and time are context only: treat them as changed only when the correction explicitly supplies a new date or time, and otherwise omit those fields. Availability is checked by deterministic workflow code after a proposal is submitted; never claim that a requested time is free or unavailable. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
+  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. There are no other actions. Every decision must preserve all calendar fields learned so far with their source: submit_one_off_proposal carries the complete proposal, while request_clarification carries a complete field snapshot and names the one missingField being requested. In a clarification snapshot, every field must be marked missing, explicit, or inferred; include value for explicit or inferred fields. Treat the accumulated dialogue fields supplied by the workflow as authoritative context. Use explicit when the user's words supplied the fact, even when you normalized it. For example, when the user says Tonight, normalize localDate using the current date in the dynamic user context and mark its source explicit, not inferred. Use inferred only for facts you chose without user words. A startTime clarification is invalid unless its snapshot preserves an explicit localDate; when the user just supplied a date or relative-date phrase, extract that date before asking for the time. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. During an Edit, the current scheduled date and time are context only: treat them as changed only when the correction explicitly supplies a new date or time, and otherwise omit those fields. Availability is checked by deterministic workflow code after a proposal is submitted; never claim that a requested time is free or unavailable. A pending conflict means only that the requested interval is occupied and may include a privacy-safe offered time; it contains no event details. If the user asks why a time is unavailable, explain that only occupancy is visible and ask whether to use the offered time or provide another. Do not treat a question about a conflict as a replacement time. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
 }
 
 /** Builds the dynamic user context for the calendar planner agent. */
-function plannerUserMessage(requestText: string, now: number, timeZone: string): string {
+function plannerUserMessage(
+  requestText: string,
+  now: number,
+  timeZone: string,
+  dialogueState?: CalendarDialogueState,
+): string {
   const todayParts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" })
     .formatToParts(new Date(now))
     .filter((part) => part.type !== "literal")
   const localToday = Object.fromEntries(todayParts.map((part) => [part.type, part.value]))
-  return `Today is ${localToday.year}-${localToday.month}-${localToday.day} in ${timeZone}.\n\nUser request: ${requestText}`
+  const state =
+    dialogueState &&
+    (Object.keys(dialogueState.fields).length || dialogueState.pendingQuestion || dialogueState.pendingConflict)
+      ? `\n\nAccumulated Calendar dialogue state: ${JSON.stringify(dialogueState)}`
+      : ""
+  return `Today is ${localToday.year}-${localToday.month}-${localToday.day} in ${timeZone}.\n\nUser request: ${requestText}${state}`
 }
 
 /** Preserves the immediately preceding Calendar question so concise replies such as “Proceed” retain their referent. */
@@ -157,9 +211,38 @@ function appendClarificationReply(requestText: string, question: string, reply: 
   return `${requestText}\n\nCalendar planner asked: ${question}\nUser replied: ${reply}`
 }
 
+/** Keeps a free-text response to a deterministic conflict neutral so the planner can infer its intent. */
+function appendConflictReply(requestText: string, conflictMessage: string, reply: string): string {
+  return `${requestText}\n\nCalendar workflow reported: ${conflictMessage}\nUser replied: ${reply}`
+}
+
 /** Preserves the persisted Calendar block as edit context without treating it as new user input. */
 function appendEditCorrection(requestText: string, baseline: CalendarEditBaseline, correction: string): string {
   return `${requestText}\n\nCurrent scheduled Calendar block (retain its date and time unless the correction changes them): ${baseline.proposal.localDate} at ${baseline.scheduled.localStartTime} for ${baseline.proposal.durationMinutes} min.\nUser correction: ${correction}`
+}
+
+/** Keeps earlier explicit facts when a later model turn merely infers or omits them. */
+function mergeDialogueFields(current: CalendarDialogueFields, next: CalendarDialogueFields): CalendarDialogueFields {
+  const merged: Record<string, unknown> = { ...current }
+  for (const [name, value] of Object.entries(next)) {
+    if (!value) continue
+    const previous = merged[name] as { source?: string } | undefined
+    if (previous?.source === "explicit" && value.source === "inferred") continue
+    merged[name] = value
+  }
+  return dialogueFieldsSchema.parse(merged)
+}
+
+/** Converts a complete model snapshot into present, source-tagged Calendar fields. */
+function snapshotDialogueFields(snapshot: CalendarDialogueSnapshot): CalendarDialogueFields {
+  const fields: Record<string, unknown> = {}
+  for (const [name, observation] of Object.entries(snapshot)) {
+    if (observation.source === "missing") continue
+    if (observation.value === undefined)
+      throw new ToolHandlerError("Calendar dialogue snapshot omitted a known value", "invalid-state")
+    fields[name] = { value: observation.value, source: observation.source }
+  }
+  return dialogueFieldsSchema.parse(fields)
 }
 
 /** Converts source-tagged model extraction into a policy-approved proposal, or a focused clarification. */
@@ -210,6 +293,7 @@ export async function planOneOff(
   env: Env,
   requestText: string,
   editBaseline?: CalendarEditBaseline | null,
+  dialogueState: CalendarDialogueState = { fields: {} },
 ): Promise<CalendarPlanningAttempt> {
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
   let decision: CalendarPlanningDecision | null = null
@@ -226,23 +310,35 @@ export async function planOneOff(
       output: proposalOutputSchema,
       privacy: "private",
       handler: async (submitted) => {
-        const normalized = normalizeSubmittedProposal(submitted, editBaseline)
+        const dialogueFields = mergeDialogueFields(dialogueState.fields, submitted)
+        const normalized = normalizeSubmittedProposal(proposalSchema.parse(dialogueFields), editBaseline)
         recordDecision(
           "proposal" in normalized
-            ? { kind: "proposal", proposal: normalized.proposal }
-            : { kind: "clarification", message: normalized.clarification },
+            ? { kind: "proposal", proposal: normalized.proposal, dialogueFields }
+            : { kind: "clarification", message: normalized.clarification, dialogueFields },
         )
         return { accepted: true }
       },
     },
     [CALENDAR_TOOL.REQUEST_CLARIFICATION]: {
       name: CALENDAR_TOOL.REQUEST_CLARIFICATION,
-      description: "Ask one concise question for the specific missing or ambiguous scheduling detail.",
+      description:
+        "Ask one concise question for the specific missing or ambiguous scheduling detail. The fields object must preserve every calendar field learned so far, including fields extracted from the latest user reply, together with each field's explicit or inferred source.",
       input: clarificationInputSchema,
       output: clarificationOutputSchema,
       privacy: "private",
-      handler: async ({ message }) => {
-        recordDecision({ kind: "clarification", message })
+      handler: async ({ message, missingField, fields }) => {
+        const dialogueFields = mergeDialogueFields(dialogueState.fields, snapshotDialogueFields(fields))
+        if (missingField === "startTime" && dialogueFields.localDate?.source !== "explicit")
+          throw new ToolHandlerError(
+            "A time clarification must preserve the explicit date it refers to",
+            "invalid-state",
+          )
+        recordDecision({
+          kind: "clarification",
+          message,
+          dialogueFields,
+        })
         return { accepted: true }
       },
     },
@@ -269,7 +365,7 @@ export async function planOneOff(
     },
     [
       { role: "system", text: plannerPrompt() },
-      { role: "user", text: plannerUserMessage(requestText, Date.now(), timeZone) },
+      { role: "user", text: plannerUserMessage(requestText, Date.now(), timeZone, dialogueState) },
     ],
   )
   return {
@@ -312,6 +408,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
     let retryUsed = false
     let editing = false
     let editBaseline: CalendarEditBaseline | null = null
+    const dialogueState: CalendarDialogueState = { fields: {} }
     // Keep Calendar's state transitions explicit; revisit a shared feedback-loop wrapper once its semantics align with LinkedIn.
     for (let interactionTurn = 0; interactionTurn < MAX_CALENDAR_INTERACTION_TURNS; interactionTurn++) {
       logRuntime(this.env, {
@@ -322,7 +419,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
       })
       const planning = await step.do(`calendar-plan-${interactionTurn}`, async (): Promise<CalendarPlanningResult> => {
         try {
-          const attempt = await planOneOff(this.env, requestText, editBaseline)
+          const attempt = await planOneOff(this.env, requestText, editBaseline, dialogueState)
           const metrics = {
             providerTurns: attempt.providerTurns,
             toolCallCount: attempt.toolCallCount,
@@ -338,8 +435,17 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
               ...metrics,
             }
           return attempt.decision.kind === "proposal"
-            ? { proposal: attempt.decision.proposal, ...metrics }
-            : { proposal: null, clarification: attempt.decision.message, ...metrics }
+            ? {
+                proposal: attempt.decision.proposal,
+                dialogueFields: attempt.decision.dialogueFields,
+                ...metrics,
+              }
+            : {
+                proposal: null,
+                clarification: attempt.decision.message,
+                dialogueFields: attempt.decision.dialogueFields,
+                ...metrics,
+              }
         } catch (error) {
           return { proposal: null, failureCategory: plannerFailureCategory(error) }
         }
@@ -383,7 +489,9 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
               },
             }),
       })
+      if (planning.dialogueFields) dialogueState.fields = planning.dialogueFields
       if (planning.clarification) {
+        dialogueState.pendingQuestion = planning.clarification
         logRuntime(this.env, {
           workflow: event.instanceId,
           event: "calendar-transition",
@@ -415,6 +523,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         return
       }
       const proposal = planning.proposal
+      dialogueState.pendingQuestion = undefined
       logRuntime(this.env, {
         workflow: event.instanceId,
         event: "calendar-transition",
@@ -480,6 +589,11 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
             details: { from: "availability", to: "conflict" },
           })
           const alternative = suggestOneOffAlternative(proposal, busy, timeZone)
+          dialogueState.pendingConflict = {
+            localDate: proposal.localDate,
+            requestedStartTime: proposal.startTime,
+            offeredStartTime: alternative?.localStartTime,
+          }
           const response = await this.promptForConflict(
             step,
             event,
@@ -494,6 +608,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
             response.kind === INTERACTION_KIND.CALENDAR_CONFLICT_ALTERNATIVE &&
             alternative
           ) {
+            dialogueState.pendingConflict = undefined
             const correction = await this.writeAndConfirm(
               step,
               event,
@@ -510,7 +625,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
           }
           const replacement =
             response.type === "reply"
-              ? response.text
+              ? appendConflictReply(requestText, this.conflictMessage(alternative?.localStartTime), response.text)
               : await this.promptForReply(
                   step,
                   event,
@@ -520,9 +635,10 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
                   INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
                 )
           if (!replacement) return
-          requestText = `${requestText}\n\nReplacement time: ${replacement}`
+          requestText = response.type === "reply" ? replacement : `${requestText}\n\nReplacement time: ${replacement}`
           continue
         }
+        dialogueState.pendingConflict = undefined
         const correction = await this.writeAndConfirm(step, event, proposal, scheduled, editing, ++interactionVersion)
         if (!correction) return
         editBaseline = { proposal, scheduled }
@@ -644,9 +760,13 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
       event,
       version,
       `calendar-conflict-${turn}`,
-      alternative ? `That time is not free. ${alternative} is available instead.` : CALENDAR_CONFLICT,
+      this.conflictMessage(alternative),
       actions,
     )
+  }
+
+  private conflictMessage(alternative?: string): string {
+    return alternative ? `That time is not free. ${alternative} is available instead.` : CALENDAR_CONFLICT
   }
 
   private async promptForActions(

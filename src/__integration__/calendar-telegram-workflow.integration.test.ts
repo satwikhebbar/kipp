@@ -65,9 +65,34 @@ function queueUntimedProposal(durationMinutes = 30): void {
   })
 }
 
-function queueClarification(message = "What date should I schedule this for?"): void {
+const SNAPSHOT_FIELD_NAMES = [
+  "title",
+  "localDate",
+  "startTime",
+  "durationMinutes",
+  "classification",
+  "description",
+  "location",
+  "reminderMinutes",
+] as const
+
+function dialogueSnapshot(fields: Record<string, { value: unknown; source: "explicit" | "inferred" }>) {
+  return Object.fromEntries(SNAPSHOT_FIELD_NAMES.map((name) => [name, fields[name] ?? { source: "missing" }]))
+}
+
+function queueClarification(
+  message = "What date should I schedule this for?",
+  fields: Record<string, { value: unknown; source: "explicit" | "inferred" }> = {},
+  missingField = "localDate",
+): void {
   mockGenerate.mockResolvedValueOnce({
-    toolCalls: [{ id: "clarify", name: "request_clarification", input: { message } }],
+    toolCalls: [
+      {
+        id: "clarify",
+        name: "request_clarification",
+        input: { message, missingField, fields: dialogueSnapshot(fields) },
+      },
+    ],
     usage: { inputTokens: 0, outputTokens: 0 },
   })
 }
@@ -152,6 +177,7 @@ function liveWorkflowBinding() {
         resolve({ type: "timeout" })
       } else events.push({ type: "timeout" })
     },
+    isWaiting: () => Boolean(waiter),
     created,
   }
 }
@@ -160,10 +186,33 @@ async function waitForMessages(network: ReturnType<typeof createFakeNetwork>, co
   await vitest.waitFor(() => expect(network.getState().telegramMessages.length).toBeGreaterThanOrEqual(count))
 }
 
-function callbackToken(network: ReturnType<typeof createFakeNetwork>, messageIndex: number): string {
+async function waitForWorkflowWait(calendar: ReturnType<typeof liveWorkflowBinding>): Promise<void> {
+  await vitest.waitFor(() => expect(calendar.isWaiting()).toBe(true))
+}
+
+async function waitForMessageText(
+  network: ReturnType<typeof createFakeNetwork>,
+  text: string,
+  count = 1,
+): Promise<void> {
+  try {
+    await vitest.waitFor(() =>
+      expect(network.getState().telegramMessages.filter((message) => message.text?.includes(text))).toHaveLength(count),
+    )
+  } catch {
+    const observed = network
+      .getState()
+      .telegramMessages.map((message) => message.text)
+      .filter(Boolean)
+      .join(" | ")
+    throw new Error(`Expected ${count} Telegram message(s) containing "${text}". Observed: ${observed}`)
+  }
+}
+
+function callbackToken(network: ReturnType<typeof createFakeNetwork>, messageIndex: number, buttonIndex = 0): string {
   const markup = network.getState().telegramMessages[messageIndex]?.replyMarkup
   const keyboard = markup?.inline_keyboard as Array<Array<{ callback_data: string }>>
-  return keyboard[0][0].callback_data
+  return keyboard[0][buttonIndex].callback_data
 }
 
 describe("calendar Telegram workflow integration", () => {
@@ -347,6 +396,63 @@ describe("calendar Telegram workflow integration", () => {
       "Calendar planner asked: The only available slot on July 30 is at 19:00. Would you like that time?\nUser replied: Proceed",
     )
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("preserves typed conflict state through confirmation, explanation, and another replacement", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    const initialFields = PROPOSAL("11:30")
+    const replacementFields = PROPOSAL("14:30")
+    queueProposal("11:30")
+    queueClarification("Should I use 2:30pm tomorrow instead?", replacementFields)
+    queueProposal("14:30")
+    queueClarification("I can only see that 2:30pm is occupied. Would you like another time?", replacementFields)
+    queueProposal("17:00")
+    mockBusyIntervals
+      .mockResolvedValueOnce([{ start: "2026-07-28T06:00:00.000Z", end: "2026-07-28T06:30:00.000Z" }])
+      .mockResolvedValueOnce([{ start: "2026-07-28T09:00:00.000Z", end: "2026-07-28T09:30:00.000Z" }])
+      .mockResolvedValueOnce([])
+
+    await handleTelegramWebhook(message("/calendar Do laundry on 2026-07-28 at 11:30am", 1), runtimeEnv)
+    const workflow = new CalendarWorkflow({} as never, {} as never)
+    Object.assign(workflow, { env: runtimeEnv })
+    const run = (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(
+      { instanceId: "calendar-wf-1", payload: (calendar.created[0].params as { params: unknown }).params },
+      { do: vitest.fn(async (_: string, fn: () => unknown) => fn()), waitForEvent: calendar.waitForEvent },
+    )
+
+    await waitForMessages(network, 2)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, 1, 1)), runtimeEnv)
+    await waitForMessageText(network, "Reply with a replacement time")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(message("2:30pm", 2), runtimeEnv)
+    await waitForMessageText(network, "Should I use 2:30pm")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(message("Yes", 3), runtimeEnv)
+    await waitForMessageText(network, "That time is not free", 2)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(message("Why is 2:30pm not free?", 4), runtimeEnv)
+    await waitForMessageText(network, "I can only see that 2:30pm is occupied")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(message("Can we try 5pm then?", 5), runtimeEnv)
+    await waitForMessageText(network, "Added: Call Jamie")
+    await waitForWorkflowWait(calendar)
+    calendar.timeout()
+    await run
+
+    expect(mockGenerate.mock.calls[1]?.[0].messages[1].text).toContain(
+      `"pendingConflict":{"localDate":"${initialFields.localDate.value}","requestedStartTime":"11:30"`,
+    )
+    expect(mockGenerate.mock.calls[3]?.[0].messages[1].text).toContain("Why is 2:30pm not free?")
+    expect(mockGenerate.mock.calls[3]?.[0].messages[1].text).not.toContain("Replacement time: Why")
+    expect(mockGenerate.mock.calls[4]?.[0].messages[1].text).toContain(
+      '"startTime":{"value":"14:30","source":"explicit"}',
+    )
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-28T11:30:00.000Z" }))
   })
 
   it("routes a Calendar conflict alternative callback through the router and never through LinkedIn", async () => {

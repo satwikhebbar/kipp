@@ -6,7 +6,7 @@ export type PrivacyClassification = "public" | "private" | "sensitive"
 export class ToolHandlerError extends Error {
   constructor(
     message: string,
-    readonly category: "authorization-failed",
+    readonly category: "authorization-failed" | "invalid-state",
     /** HTTP status only; never a provider response body or user-supplied value. */
     readonly status?: number,
   ) {
@@ -36,6 +36,7 @@ export type ToolResult =
         | "invalid-output"
         | "handler-failed"
         | "authorization-failed"
+        | "invalid-state"
       /** Schema paths only: these never include submitted values or provider text. */
       validationPaths?: string[]
       /** Safe schema expectations (for example, "title: expected object"); never includes submitted values. */

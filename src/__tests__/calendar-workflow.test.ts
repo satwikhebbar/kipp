@@ -74,10 +74,33 @@ function queueUntimedProposal(durationMinutes = 30): void {
   })
 }
 
-function queueClarification(message = "What date should I schedule this for?"): void {
+const SNAPSHOT_FIELD_NAMES = [
+  "title",
+  "localDate",
+  "startTime",
+  "durationMinutes",
+  "classification",
+  "description",
+  "location",
+  "reminderMinutes",
+] as const
+
+function dialogueSnapshot(fields: Record<string, { value: unknown; source: "explicit" | "inferred" }>) {
+  return Object.fromEntries(SNAPSHOT_FIELD_NAMES.map((name) => [name, fields[name] ?? { source: "missing" }]))
+}
+
+function queueClarification(
+  message = "What date should I schedule this for?",
+  fields: Record<string, { value: unknown; source: "explicit" | "inferred" }> = {},
+  missingField = "localDate",
+): void {
   mockGenerate.mockResolvedValueOnce({
     toolCalls: [
-      { id: `clarification-${mockGenerate.mock.calls.length}`, name: "request_clarification", input: { message } },
+      {
+        id: `clarification-${mockGenerate.mock.calls.length}`,
+        name: "request_clarification",
+        input: { message, missingField, fields: dialogueSnapshot(fields) },
+      },
     ],
     usage: { inputTokens: 0, outputTokens: 0 },
   })
@@ -119,10 +142,10 @@ function telegramMock() {
   return telegram
 }
 
-async function run(step: ReturnType<typeof createStep>, env = environment()): Promise<void> {
+async function run(step: ReturnType<typeof createStep>, env = environment(), event = workflowEvent()): Promise<void> {
   const workflow = new CalendarWorkflow({} as never, {} as never)
   Object.assign(workflow, { env })
-  await (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(workflowEvent(), step)
+  await (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(event, step)
 }
 
 describe("CalendarWorkflow", () => {
@@ -291,6 +314,76 @@ describe("CalendarWorkflow", () => {
 
     expect(mockGenerate).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("retains an explicit date extracted before a later time-only reply", async () => {
+    const knownTitle = { title: { value: "Call dad", source: "explicit" as const } }
+    queueClarification("What date would you like?", knownTitle)
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [
+        {
+          id: "invalid-time-clarification",
+          name: "request_clarification",
+          input: {
+            message: "What time would you like?",
+            missingField: "startTime",
+            fields: dialogueSnapshot(knownTitle),
+          },
+        },
+      ],
+      usage: {},
+    })
+    queueClarification(
+      "What time would you like?",
+      {
+        ...knownTitle,
+        localDate: { value: "2026-07-01", source: "explicit" as const },
+      },
+      "startTime",
+    )
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [
+        {
+          id: "time-only-proposal",
+          name: "submit_one_off_proposal",
+          input: {
+            ...knownTitle,
+            localDate: { value: "2026-07-02", source: "inferred" },
+            startTime: { value: "20:00", source: "explicit" },
+            durationMinutes: { value: 30, source: "inferred" },
+            classification: { value: "family-social", source: "inferred" },
+          },
+        },
+      ],
+      usage: {},
+    })
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "Tonight" } },
+        { type: "event", payload: { text: "8pm" } },
+        { type: "timeout" },
+      ),
+      environment(),
+      {
+        instanceId: "calendar-workflow-1",
+        payload: { chatId: "123", requestText: "Call dad", telegramMessageId: 456 },
+      },
+    )
+
+    expect(mockGenerate.mock.calls[2]?.[0].messages).toContainEqual(
+      expect.objectContaining({
+        role: "tool",
+        name: "request_clarification",
+        output: expect.objectContaining({ category: "invalid-state" }),
+      }),
+    )
+    expect(mockGenerate.mock.calls[3]?.[0].messages[1].text).toContain(
+      '"localDate":{"value":"2026-07-01","source":"explicit"}',
+    )
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-01T14:30:00.000Z" }))
   })
 
   it("keeps an offered available time in context when the user accepts it concisely", async () => {
