@@ -6,10 +6,11 @@ import {
   managedEvent,
   managedEventIdentity,
   type OneOffProposal,
+  type ScheduledOneOff,
   scheduleOneOff,
   suggestOneOffAlternative,
 } from "./calendar-scheduling"
-import { createGoogleCalendarClient, GoogleCalendarError } from "./integrations/google-calendar"
+import { type BusyInterval, createGoogleCalendarClient, GoogleCalendarError } from "./integrations/google-calendar"
 import { createTelegramClient } from "./integrations/telegram"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import { createToolProvider } from "./providers"
@@ -62,6 +63,12 @@ type CalendarActionResponse =
   | { type: "timeout" }
   | { type: "action"; kind: WorkflowInteractionKind }
   | { type: "reply"; text: string }
+
+/** The persisted block that an Edit correction may retain without re-scheduling it. */
+interface CalendarEditBaseline {
+  proposal: OneOffProposal
+  scheduled: ScheduledOneOff
+}
 
 /** Maps a provider failure to a safe, metadata-only Calendar planning category. */
 function plannerFailureCategory(error: unknown): CalendarPlanningFailureCategory {
@@ -134,7 +141,7 @@ const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
 /** Builds the static system prompt for the calendar planner agent. */
 function plannerPrompt(): string {
-  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. There are no other actions. Every submitted proposal field has a source: use explicit only when the user supplied or unambiguously confirmed that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. Availability is checked by deterministic workflow code after a proposal is submitted; never claim that a requested time is free or unavailable. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
+  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. There are no other actions. Every submitted proposal field has a source: use explicit only when the user supplied or unambiguously confirmed that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. During an Edit, the current scheduled date and time are context only: treat them as changed only when the correction explicitly supplies a new date or time, and otherwise omit those fields. Availability is checked by deterministic workflow code after a proposal is submitted; never claim that a requested time is free or unavailable. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
 }
 
 /** Builds the dynamic user context for the calendar planner agent. */
@@ -151,18 +158,24 @@ function appendClarificationReply(requestText: string, question: string, reply: 
   return `${requestText}\n\nCalendar planner asked: ${question}\nUser replied: ${reply}`
 }
 
+/** Preserves the persisted Calendar block as edit context without treating it as new user input. */
+function appendEditCorrection(requestText: string, baseline: CalendarEditBaseline, correction: string): string {
+  return `${requestText}\n\nCurrent scheduled Calendar block (retain its date and time unless the correction changes them): ${baseline.proposal.localDate} at ${baseline.scheduled.localStartTime} for ${baseline.proposal.durationMinutes} min.\nUser correction: ${correction}`
+}
+
 /** Converts source-tagged model extraction into a policy-approved proposal, or a focused clarification. */
 function normalizeSubmittedProposal(
   submitted: SubmittedOneOffProposal,
+  editBaseline?: CalendarEditBaseline | null,
 ): { proposal: OneOffProposal } | { clarification: string } {
   // The model may normalize an explicit phrase such as “next Friday” to ISO,
   // but it may never choose a calendar date the user did not supply.
-  if (submitted.localDate?.source !== "explicit") {
+  if (!editBaseline && submitted.localDate?.source !== "explicit") {
     return { clarification: "What date should I schedule this for?" }
   }
   // A missing time is allowed: deterministic scheduling can choose a slot.
   // A supplied time, however, must come from the user's words.
-  if (submitted.startTime && submitted.startTime.source !== "explicit")
+  if (!editBaseline && submitted.startTime && submitted.startTime.source !== "explicit")
     return { clarification: "What time would you like?" }
   // These fields are copied into the Calendar event, so never accept model-invented content.
   if (submitted.description && submitted.description.source !== "explicit")
@@ -171,14 +184,19 @@ function normalizeSubmittedProposal(
     return { clarification: "Please provide the location you want included." }
   if (submitted.reminderMinutes && submitted.reminderMinutes.source !== "explicit")
     return { clarification: "What reminder would you like?" }
+  const localDate =
+    submitted.localDate?.source === "explicit" ? submitted.localDate.value : editBaseline?.proposal.localDate
+  if (!localDate) return { clarification: "What date should I schedule this for?" }
+  const startTime =
+    submitted.startTime?.source === "explicit" ? submitted.startTime.value : editBaseline?.scheduled.localStartTime
   return {
     proposal: {
       title: submitted.title.value,
-      localDate: submitted.localDate.value,
-      startTime: submitted.startTime?.value,
+      localDate,
+      startTime,
       durationMinutes: submitted.durationMinutes.value,
       dateIsExplicit: true,
-      timeIsExplicit: Boolean(submitted.startTime),
+      timeIsExplicit: Boolean(startTime),
       classification: submitted.classification.value,
       description: submitted.description?.value,
       location: submitted.location?.value,
@@ -189,7 +207,11 @@ function normalizeSubmittedProposal(
 }
 
 /** Uses the planner's bounded tool session to return either a proposal or one focused clarification question. */
-export async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanningAttempt> {
+export async function planOneOff(
+  env: Env,
+  requestText: string,
+  editBaseline?: CalendarEditBaseline | null,
+): Promise<CalendarPlanningAttempt> {
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
   let decision: CalendarPlanningDecision | null = null
   function recordDecision(next: CalendarPlanningDecision): void {
@@ -205,7 +227,7 @@ export async function planOneOff(env: Env, requestText: string): Promise<Calenda
       output: proposalOutputSchema,
       privacy: "private",
       handler: async (submitted) => {
-        const normalized = normalizeSubmittedProposal(submitted)
+        const normalized = normalizeSubmittedProposal(submitted, editBaseline)
         recordDecision(
           "proposal" in normalized
             ? { kind: "proposal", proposal: normalized.proposal }
@@ -262,6 +284,23 @@ export async function planOneOff(env: Env, requestText: string): Promise<Calenda
   }
 }
 
+/** Returns whether a proposed edit retains the exact persisted start instant. */
+function retainsScheduledStart(scheduled: ScheduledOneOff, baseline: CalendarEditBaseline): boolean {
+  return scheduled.start === baseline.scheduled.start
+}
+
+/** Checks only the extra tail added by a duration extension, excluding the existing managed interval. */
+function conflictsWithExtension(busy: BusyInterval[], current: ScheduledOneOff, proposed: ScheduledOneOff): boolean {
+  const currentEnd = Date.parse(current.end)
+  const proposedEnd = Date.parse(proposed.end)
+  if (!Number.isFinite(currentEnd) || !Number.isFinite(proposedEnd) || proposedEnd <= currentEnd) return false
+  return busy.some((interval) => {
+    const busyStart = Date.parse(interval.start)
+    const busyEnd = Date.parse(interval.end)
+    return Number.isFinite(busyStart) && Number.isFinite(busyEnd) && busyStart < proposedEnd && busyEnd > currentEnd
+  })
+}
+
 /**
  * The Calendar workflow is deliberately separate from LinkedIn. Its planning
  * and deterministic write stages are added incrementally in this milestone.
@@ -273,6 +312,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
     let interactionVersion = 0
     let retryUsed = false
     let editing = false
+    let editBaseline: CalendarEditBaseline | null = null
     // Keep Calendar's state transitions explicit; revisit a shared feedback-loop wrapper once its semantics align with LinkedIn.
     for (let interactionTurn = 0; interactionTurn < MAX_CALENDAR_INTERACTION_TURNS; interactionTurn++) {
       logRuntime(this.env, {
@@ -283,7 +323,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
       })
       const planning = await step.do(`calendar-plan-${interactionTurn}`, async (): Promise<CalendarPlanningResult> => {
         try {
-          const attempt = await planOneOff(this.env, requestText)
+          const attempt = await planOneOff(this.env, requestText, editBaseline)
           const metrics = {
             providerTurns: attempt.providerTurns,
             toolCallCount: attempt.toolCallCount,
@@ -399,10 +439,27 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
       }
       try {
         const calendar = createGoogleCalendarClient(this.env)
-        const busy = await step.do(`calendar-availability-${interactionTurn}`, () =>
-          calendar.getBusyIntervals(bounds.timeMin, bounds.timeMax),
-        )
-        const scheduled = scheduleOneOff(proposal, busy, timeZone)
+        const provisional: ReturnType<typeof scheduleOneOff> | null = editBaseline
+          ? scheduleOneOff(proposal, [], timeZone)
+          : null
+        let busy: BusyInterval[] = []
+        let scheduled: ReturnType<typeof scheduleOneOff>
+        if (provisional && "start" in provisional && editBaseline && retainsScheduledStart(provisional, editBaseline)) {
+          if (Date.parse(provisional.end) <= Date.parse(editBaseline.scheduled.end)) scheduled = provisional
+          else {
+            busy = await step.do(`calendar-availability-${interactionTurn}`, () =>
+              calendar.getBusyIntervals(bounds.timeMin, bounds.timeMax),
+            )
+            scheduled = conflictsWithExtension(busy, editBaseline.scheduled, provisional)
+              ? { conflict: true }
+              : provisional
+          }
+        } else {
+          busy = await step.do(`calendar-availability-${interactionTurn}`, () =>
+            calendar.getBusyIntervals(bounds.timeMin, bounds.timeMax),
+          )
+          scheduled = scheduleOneOff(proposal, busy, timeZone)
+        }
         if ("clarification" in scheduled) {
           const reply = await this.promptForReply(
             step,
@@ -447,7 +504,8 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
               ++interactionVersion,
             )
             if (!correction) return
-            requestText = `${event.payload.requestText}\n\nCorrection: ${correction}`
+            editBaseline = { proposal, scheduled: alternative }
+            requestText = appendEditCorrection(event.payload.requestText, editBaseline, correction)
             editing = true
             continue
           }
@@ -468,7 +526,8 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         }
         const correction = await this.writeAndConfirm(step, event, proposal, scheduled, editing, ++interactionVersion)
         if (!correction) return
-        requestText = `${event.payload.requestText}\n\nCorrection: ${correction}`
+        editBaseline = { proposal, scheduled }
+        requestText = appendEditCorrection(event.payload.requestText, editBaseline, correction)
         editing = true
       } catch (error) {
         if (error instanceof GoogleCalendarError && error.kind === "authorization" && !retryUsed) {

@@ -41,6 +41,13 @@ const proposal = (startTime = "19:00") => ({
   classification: { value: "ordinary", source: "inferred" as const },
 })
 
+const untimedProposal = (durationMinutes = 30) => ({
+  title: { value: "Call Jamie", source: "explicit" as const },
+  localDate: { value: "2026-07-28", source: "explicit" as const },
+  durationMinutes: { value: durationMinutes, source: "explicit" as const },
+  classification: { value: "ordinary", source: "inferred" as const },
+})
+
 function queueProposal(startTime = "19:00"): void {
   mockGenerate.mockResolvedValueOnce({
     toolCalls: [
@@ -48,6 +55,19 @@ function queueProposal(startTime = "19:00"): void {
         id: `proposal-${mockGenerate.mock.calls.length}`,
         name: "submit_one_off_proposal",
         input: proposal(startTime),
+      },
+    ],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })
+}
+
+function queueUntimedProposal(durationMinutes = 30): void {
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [
+      {
+        id: `untimed-proposal-${mockGenerate.mock.calls.length}`,
+        name: "submit_one_off_proposal",
+        input: untimedProposal(durationMinutes),
       },
     ],
     usage: { inputTokens: 0, outputTokens: 0 },
@@ -330,6 +350,53 @@ describe("CalendarWorkflow", () => {
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockUpdateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-28T14:30:00.000Z" }))
+  })
+
+  it("retains the scheduled time when an Edit changes only the duration", async () => {
+    queueUntimedProposal(30)
+    queueUntimedProposal(15)
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-edit__" } },
+        { type: "event", payload: { text: "Make this a 15 min call please" } },
+        { type: "timeout" },
+      ),
+    )
+
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }),
+    )
+    expect(mockUpdateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T13:45:00.000Z" }),
+    )
+    expect(mockGenerate.mock.calls[1]?.[0].messages[1].text).toContain(
+      "Current scheduled Calendar block (retain its date and time unless the correction changes them): 2026-07-28 at 19:00 for 30 min.",
+    )
+  })
+
+  it("checks only the added tail when an Edit extends the retained duration", async () => {
+    queueUntimedProposal(30)
+    queueUntimedProposal(45)
+    mockBusyIntervals.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" },
+      { start: "2026-07-28T14:00:00.000Z", end: "2026-07-28T14:30:00.000Z" },
+    ])
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-edit__" } },
+        { type: "event", payload: { text: "Make this a 45 min call please" } },
+        { type: "timeout" },
+      ),
+    )
+
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
   })
 
   it("permits exactly one authorization retry", async () => {

@@ -44,9 +44,23 @@ const PROPOSAL = (startTime = "19:00") => ({
   classification: { value: "ordinary", source: "inferred" as const },
 })
 
+const UNTIMED_PROPOSAL = (durationMinutes = 30) => ({
+  title: { value: "Call Jamie", source: "explicit" as const },
+  localDate: { value: "2026-07-28", source: "explicit" as const },
+  durationMinutes: { value: durationMinutes, source: "explicit" as const },
+  classification: { value: "ordinary", source: "inferred" as const },
+})
+
 function queueProposal(startTime = "19:00"): void {
   mockGenerate.mockResolvedValueOnce({
     toolCalls: [{ id: "proposal", name: "submit_one_off_proposal", input: PROPOSAL(startTime) }],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })
+}
+
+function queueUntimedProposal(durationMinutes = 30): void {
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [{ id: "untimed-proposal", name: "submit_one_off_proposal", input: UNTIMED_PROPOSAL(durationMinutes) }],
     usage: { inputTokens: 0, outputTokens: 0 },
   })
 }
@@ -273,6 +287,37 @@ describe("calendar Telegram workflow integration", () => {
       ]),
     )
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the scheduled time when a Telegram Edit changes only duration", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    queueUntimedProposal(30)
+    queueUntimedProposal(15)
+    mockBusyIntervals.mockResolvedValue([])
+
+    await handleTelegramWebhook(message("/calendar Call Jamie on 2026-07-28 for 30 minutes", 1), runtimeEnv)
+    const workflow = new CalendarWorkflow({} as never, {} as never)
+    Object.assign(workflow, { env: runtimeEnv })
+    const run = (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(
+      { instanceId: "calendar-wf-1", payload: (calendar.created[0].params as { params: unknown }).params },
+      { do: vitest.fn(async (_: string, fn: () => unknown) => fn()), waitForEvent: calendar.waitForEvent },
+    )
+    await waitForMessages(network, 2)
+    await handleTelegramWebhook(callback(callbackToken(network, 1)), runtimeEnv)
+    await waitForMessages(network, 3)
+    await handleTelegramWebhook(message("Make this a 15 min call please", 2), runtimeEnv)
+    await waitForMessages(network, 4)
+    calendar.timeout()
+    await run
+
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T13:45:00.000Z" }),
+    )
   })
 
   it("retains an offered slot when Telegram binds a concise confirmation reply", async () => {
