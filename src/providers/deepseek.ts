@@ -3,6 +3,7 @@ import {
   type DeepseekToolWireMessage,
   type GenerateOptions,
   type ToolProviderClient,
+  ToolProviderHttpError,
   ToolProviderProtocolError,
   toolDeclaration,
 } from "./llm"
@@ -14,7 +15,8 @@ const FUNCTION_TOOL_TYPE = "function"
 interface DeepseekToolResponse {
   choices?: Array<{
     message?: {
-      content?: string
+      content?: string | null
+      reasoning_content?: string | null
       tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
     }
   }>
@@ -60,18 +62,23 @@ export function createDeepseekGenerator(apiKey: string, modelName = DEEPSEEK_DEF
 /** Creates a DeepSeek tool-calling client. */
 export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DEFAULT_MODEL): ToolProviderClient {
   return {
-    async generate({ messages, tools }) {
+    async generate({ messages, tools, toolChoice, reasoning }) {
       const wireMessages: DeepseekToolWireMessage[] = messages.map((message) => {
-        if ("text" in message) return { role: message.role, content: message.text }
         if (message.role === "tool")
           return { role: "tool", tool_call_id: message.toolCallId, content: JSON.stringify(message.output) }
+        if ("toolCalls" in message)
+          return {
+            role: "assistant",
+            tool_calls: message.toolCalls.map((call) => ({
+              id: call.id,
+              type: FUNCTION_TOOL_TYPE,
+              function: { name: call.name, arguments: JSON.stringify(call.input) },
+            })),
+            ...(message.reasoningContent ? { reasoning_content: message.reasoningContent } : {}),
+          }
         return {
-          role: "assistant",
-          tool_calls: message.toolCalls.map((call) => ({
-            id: call.id,
-            type: FUNCTION_TOOL_TYPE,
-            function: { name: call.name, arguments: JSON.stringify(call.input) },
-          })),
+          role: message.role,
+          content: message.text,
         }
       })
       const response = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
@@ -81,9 +88,11 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
           model: modelName,
           messages: wireMessages,
           tools: tools.map((tool) => ({ type: FUNCTION_TOOL_TYPE, function: toolDeclaration(tool) })),
+          ...(toolChoice ? { tool_choice: toolChoice } : {}),
+          ...(reasoning ? { thinking: { type: reasoning } } : {}),
         }),
       })
-      if (!response.ok) throw new Error(`DeepSeek tool request failed (${response.status})`)
+      if (!response.ok) throw new ToolProviderHttpError("DeepSeek", response.status)
       const data = (await response.json()) as DeepseekToolResponse
       const message = data.choices?.[0]?.message
       if (!message) throw new ToolProviderProtocolError("DeepSeek returned empty choices")
@@ -97,6 +106,7 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
       return {
         text: message.content ?? undefined,
         toolCalls,
+        reasoningContent: message.reasoning_content ?? undefined,
         usage: { inputTokens: data.usage?.prompt_tokens ?? 0, outputTokens: data.usage?.completion_tokens ?? 0 },
       }
     },

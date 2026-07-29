@@ -138,6 +138,52 @@ describe("DeepSeek provider", () => {
     expect(JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string).tools[0].function.name).toBe("echo")
   })
 
+  it("uses DeepSeek's non-thinking required-tool mode and preserves native reasoning across tool turns", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            choices: [
+              {
+                message: {
+                  reasoning_content: "internal reasoning",
+                  tool_calls: [{ id: "call-1", function: { name: "echo", arguments: '{"value":"hi"}' } }],
+                },
+              },
+            ],
+            usage: {},
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+      })
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    const client = createDeepseekToolClient("key")
+    const first = await client.generate({
+      messages: TOOL_TEST_MESSAGES,
+      tools: [TOOL_TEST_REGISTRY.echo],
+      toolChoice: "required",
+      reasoning: "disabled",
+    })
+    await client.generate({
+      messages: [
+        ...TOOL_TEST_MESSAGES,
+        { role: "assistant", toolCalls: first.toolCalls ?? [], reasoningContent: first.reasoningContent },
+        { role: "tool", toolCallId: "call-1", name: "echo", output: { ok: true, output: { value: "hi" } } },
+      ],
+      tools: [TOOL_TEST_REGISTRY.echo],
+    })
+
+    const firstBody = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string)
+    const secondBody = JSON.parse((mockFetch.mock.calls[1][1] as RequestInit).body as string)
+    expect(firstBody).toMatchObject({ tool_choice: "required", thinking: { type: "disabled" } })
+    expect(secondBody.messages).toContainEqual(
+      expect.objectContaining({ role: "assistant", reasoning_content: "internal reasoning" }),
+    )
+  })
+
   it("does not mark optional calendar proposal details as required tool inputs", async () => {
     mockFetch.mockResolvedValue({
       ok: true,

@@ -14,6 +14,7 @@ export type RuntimeLogFields = {
   durationMs?: number
   retryCount?: number
   failureCategory?: string
+  metrics?: Readonly<Record<string, number | boolean>>
 }
 
 /** Emits metadata only; callers must never attach user/provider payloads. */

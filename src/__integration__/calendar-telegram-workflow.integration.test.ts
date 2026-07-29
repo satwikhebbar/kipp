@@ -37,32 +37,25 @@ import { INTERACTION_KIND } from "../types"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 const PROPOSAL = (startTime = "19:00") => ({
-  title: "Call Jamie",
-  localDate: "2026-07-28",
-  startTime,
-  durationMinutes: 30,
-  dateIsExplicit: true,
-  timeIsExplicit: true,
-  classification: "ordinary",
-  needsClarification: false,
+  title: { value: "Call Jamie", source: "explicit" as const },
+  localDate: { value: "2026-07-28", source: "explicit" as const },
+  startTime: { value: startTime, source: "explicit" as const },
+  durationMinutes: { value: 30, source: "inferred" as const },
+  classification: { value: "ordinary", source: "inferred" as const },
 })
 
 function queueProposal(startTime = "19:00"): void {
-  mockGenerate
-    .mockResolvedValueOnce({
-      toolCalls: [{ id: "proposal", name: "submit_one_off_proposal", input: PROPOSAL(startTime) }],
-      usage: { inputTokens: 0, outputTokens: 0 },
-    })
-    .mockResolvedValueOnce({ text: "", usage: { inputTokens: 0, outputTokens: 0 } })
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [{ id: "proposal", name: "submit_one_off_proposal", input: PROPOSAL(startTime) }],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })
 }
 
 function queueClarification(message = "What date should I schedule this for?"): void {
-  mockGenerate
-    .mockResolvedValueOnce({
-      toolCalls: [{ id: "clarify", name: "request_clarification", input: { message } }],
-      usage: { inputTokens: 0, outputTokens: 0 },
-    })
-    .mockResolvedValueOnce({ text: "", usage: { inputTokens: 0, outputTokens: 0 } })
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [{ id: "clarify", name: "request_clarification", input: { message } }],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })
 }
 
 function request(body: Record<string, unknown>): Request {
@@ -161,12 +154,17 @@ function callbackToken(network: ReturnType<typeof createFakeNetwork>, messageInd
 
 describe("calendar Telegram workflow integration", () => {
   beforeEach(() => {
+    vitest.useFakeTimers()
+    vitest.setSystemTime(new Date("2026-07-01T00:00:00.000Z"))
     mockGenerate.mockReset()
     mockBusyIntervals.mockReset()
     mockCreateManagedEvent.mockReset()
     mockUpdateManagedEvent.mockReset()
   })
-  afterEach(() => vitest.unstubAllGlobals())
+  afterEach(() => {
+    vitest.useRealTimers()
+    vitest.unstubAllGlobals()
+  })
 
   it("binds a clarification reply from Telegram to Calendar, then creates the proposed block", async () => {
     const network = createFakeNetwork()
@@ -190,8 +188,8 @@ describe("calendar Telegram workflow integration", () => {
       { do: vitest.fn(async (_: string, fn: () => unknown) => fn()), waitForEvent: calendar.waitForEvent },
     )
     await waitForMessages(network, 2)
-    const clarificationMessageId = 101
-    await handleTelegramWebhook(message("tomorrow at 7pm", 2, clarificationMessageId), runtimeEnv)
+    expect(network.getState().telegramMessages[1]?.replyMarkup).toEqual({ force_reply: true })
+    await handleTelegramWebhook(message("tomorrow at 7pm", 2), runtimeEnv)
     await waitForMessages(network, 3)
     calendar.timeout()
     await run
@@ -218,7 +216,7 @@ describe("calendar Telegram workflow integration", () => {
     const run = (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(
       {
         instanceId: "calendar-wf-1",
-        payload: { chatId: "100", requestText: "Call Jamie at 7pm", telegramMessageId: 1 },
+        payload: { chatId: "100", requestText: "Call Jamie on 2026-07-28 at 7pm", telegramMessageId: 1 },
       },
       { do: vitest.fn(async (_: string, fn: () => unknown) => fn()), waitForEvent: calendar.waitForEvent },
     )

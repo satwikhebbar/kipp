@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
 import {
   CALENDAR_IMPORTANT_REMINDER_MINUTES,
   CALENDAR_MAX_DURATION_MINUTES,
@@ -28,6 +28,12 @@ const EXPLICIT_CALL: OneOffProposal = {
 }
 
 describe("Calendar scheduling policy", () => {
+  beforeEach(() => {
+    vitest.useFakeTimers()
+    vitest.setSystemTime(new Date("2026-07-01T00:00:00.000Z"))
+  })
+  afterEach(() => vitest.useRealTimers())
+
   it("converts local time independently of the host timezone", () => {
     const timestamp = zonedDateTimeToMillis(DATE, "19:00", TIME_ZONE)
     expect(timestamp).not.toBeNull()

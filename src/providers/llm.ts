@@ -16,20 +16,43 @@ export type GenerateFn = (opts: GenerateOptions) => Promise<LLMResponse>
 
 export type ToolConversationMessage =
   | { role: "system" | "user" | "assistant"; text: string }
-  | { role: "assistant"; toolCalls: Array<{ id: string; name: string; input: unknown }> }
+  | {
+      role: "assistant"
+      toolCalls: Array<{ id: string; name: string; input: unknown }>
+      /** Provider reasoning carried forward only when its native API requires it. */
+      reasoningContent?: string
+    }
   | { role: "tool"; toolCallId: string; name: string; output: unknown }
 
 export interface ToolProviderResponse {
   text?: string
   toolCalls?: Array<{ id: string; name: string; input: unknown }>
+  /** Opaque native reasoning state; never log this field. */
+  reasoningContent?: string
   usage: LLMResponse["usage"]
 }
+
+export type ToolChoice = "auto" | "required"
+export type ToolReasoningMode = "enabled" | "disabled"
 
 export interface ToolProviderClient {
   generate(input: {
     messages: ToolConversationMessage[]
     tools: readonly ToolDefinition[]
+    toolChoice?: ToolChoice
+    reasoning?: ToolReasoningMode
   }): Promise<ToolProviderResponse>
+}
+
+/** Non-sensitive provider failure metadata for runtime observability. */
+export class ToolProviderHttpError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly status: number,
+  ) {
+    super(`${provider} tool request failed (${status})`)
+    this.name = "ToolProviderHttpError"
+  }
 }
 
 export type DeepseekToolWireMessage =
@@ -38,6 +61,8 @@ export type DeepseekToolWireMessage =
   | {
       role: "assistant"
       tool_calls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
+      content?: string | null
+      reasoning_content?: string
     }
 
 /** Non-retriable malformed provider response. */

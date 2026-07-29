@@ -139,6 +139,13 @@ pnpm wrangler deploy --config wrangler.prod.toml # explicit equivalent
 The configuration files define the same runtime bindings and environment
 variables for their respective targets. Keep credentials out of both files.
 
+To validate DeepSeek V4's native Calendar-tool contract against the configured
+provider (it makes three external model calls and does not access Calendar), run:
+
+```bash
+LLM_API_KEY=<key> pnpm test:provider-contract
+```
+
 `GOOGLE_CALENDAR_REDIRECT_ORIGIN`, `LINKEDIN_REDIRECT_ORIGIN`, and
 `PROMPT_STYLE_PATH` are optional overrides. The first two override their OAuth
 callback origins; the third selects a style prompt in the data repository and

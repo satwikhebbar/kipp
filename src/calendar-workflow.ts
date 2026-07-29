@@ -13,8 +13,9 @@ import { createGoogleCalendarClient, GoogleCalendarError } from "./integrations/
 import { createTelegramClient } from "./integrations/telegram"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import { createToolProvider } from "./providers"
+import { ToolProviderHttpError, ToolProviderProtocolError } from "./providers/llm"
 import { logRuntime } from "./runtime/logging"
-import { runTools } from "./runtime/tool-runner"
+import { runTools, type ToolExecutionSummary } from "./runtime/tool-runner"
 import type { ToolRegistry } from "./runtime/tools"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "./types"
 
@@ -24,20 +25,48 @@ export interface CalendarWorkflowParams {
   telegramMessageId: number
 }
 
+type CalendarPlanningFailureCategory =
+  | "no-submitted-proposal"
+  | "no-decision"
+  | "provider-or-tool-failure"
+  | "provider-protocol"
+  | `provider-http-${number}`
+
 interface CalendarPlanningResult {
   proposal: OneOffProposal | null
   clarification?: string
-  failureCategory?: "no-submitted-proposal" | "provider-or-tool-failure"
+  failureCategory?: CalendarPlanningFailureCategory
+  providerTurns?: number
+  toolCallCount?: number
+  toolRunCompleted?: boolean
+  toolNames?: string[]
+  toolExecutions?: ToolExecutionSummary[]
 }
 
 type CalendarPlanningDecision =
   | { kind: "proposal"; proposal: OneOffProposal }
   | { kind: "clarification"; message: string }
 
+interface CalendarPlanningAttempt {
+  decision: CalendarPlanningDecision | null
+  providerTurns: number
+  toolCallCount: number
+  toolRunCompleted: boolean
+  toolNames: string[]
+  toolExecutions: ToolExecutionSummary[]
+}
+
 type CalendarActionResponse =
   | { type: "timeout" }
   | { type: "action"; kind: WorkflowInteractionKind }
   | { type: "reply"; text: string }
+
+/** Maps a provider failure to a safe, metadata-only Calendar planning category. */
+function plannerFailureCategory(error: unknown): CalendarPlanningFailureCategory {
+  if (error instanceof ToolProviderHttpError) return `provider-http-${error.status}`
+  if (error instanceof ToolProviderProtocolError) return "provider-protocol"
+  return "provider-or-tool-failure"
+}
 
 const CALENDAR_TOOL = {
   GET_AVAILABLE_SLOTS: "get_available_slots",
@@ -49,6 +78,8 @@ const CALENDAR_UNAVAILABLE =
 const CALENDAR_UNDERSTANDING_FALLBACK =
   "I couldn't work out the scheduling details. Please say what you want to do and when."
 const CALENDAR_PLANNER_UNAVAILABLE = "I couldn't reach the calendar planner. Please try again shortly."
+const CALENDAR_PLANNER_NO_DECISION =
+  "The calendar planner didn't return a scheduling decision. Please retry your /calendar request."
 const CALENDAR_CONFLICT = "That time is not free. Please send another time that works."
 const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try again shortly."
 const CALENDAR_INTERACTION_TTL_MINUTES = 15
@@ -57,19 +88,27 @@ const CALENDAR_INTERACTION_TTL_MS = CALENDAR_INTERACTION_TTL_MINUTES * MILLISECO
 /** Maximum user interaction cycles for one Calendar workflow execution. */
 const MAX_CALENDAR_INTERACTION_TURNS = 4
 
+const fieldSourceSchema = z.enum(["explicit", "inferred"])
+const sourcedField = <Value extends z.ZodTypeAny>(value: Value) => z.object({ value, source: fieldSourceSchema })
+
+/**
+ * The model submits extracted values together with their provenance. This is
+ * deliberately separate from OneOffProposal: deterministic policy decides
+ * which inferred values are permitted before a Calendar read or write.
+ */
 const proposalSchema = z.object({
-  title: z.string(),
-  localDate: z.string().optional(),
-  startTime: z.string().optional(),
-  durationMinutes: z.number().int(),
-  dateIsExplicit: z.boolean(),
-  timeIsExplicit: z.boolean(),
-  classification: z.enum(["ordinary", "family-social", "school-pickup", "appointment", "maintenance", "physical"]),
-  description: z.string().optional(),
-  location: z.string().optional(),
-  reminderMinutes: z.number().int().optional(),
-  needsClarification: z.boolean(),
+  title: sourcedField(z.string()),
+  localDate: sourcedField(z.string()).optional(),
+  startTime: sourcedField(z.string()).optional(),
+  durationMinutes: sourcedField(z.number().int()),
+  classification: sourcedField(
+    z.enum(["ordinary", "family-social", "school-pickup", "appointment", "maintenance", "physical"]),
+  ),
+  description: sourcedField(z.string()).optional(),
+  location: sourcedField(z.string()).optional(),
+  reminderMinutes: sourcedField(z.number().int()).optional(),
 })
+type SubmittedOneOffProposal = z.infer<typeof proposalSchema>
 
 const MIN_DURATION_MINUTES = 15
 const MAX_AVAILABILITY_DURATION_MINUTES = 240
@@ -84,13 +123,18 @@ const MAX_CLARIFICATION_LENGTH = 240
 const clarificationInputSchema = z.object({ message: z.string().trim().min(1).max(MAX_CLARIFICATION_LENGTH) })
 const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
-/** Builds the system prompt for the calendar planner agent. */
-function plannerPrompt(requestText: string, now: number, timeZone: string): string {
+/** Builds the static system prompt for the calendar planner agent. */
+function plannerPrompt(): string {
+  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. Use get_available_slots only when you need to choose a time. Every submitted proposal field has a source: use explicit only when the user supplied that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
+}
+
+/** Builds the dynamic user context for the calendar planner agent. */
+function plannerUserMessage(requestText: string, now: number, timeZone: string): string {
   const todayParts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" })
     .formatToParts(new Date(now))
     .filter((part) => part.type !== "literal")
   const localToday = Object.fromEntries(todayParts.map((part) => [part.type, part.value]))
-  return `You are Kipp's personal calendar planner. Interpret the user request, but do not invent facts. Today is ${localToday.year}-${localToday.month}-${localToday.day} in ${timeZone}.\n\nUse exactly one terminal action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. Use get_available_slots only when you need to choose a time. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit, and needsClarification must be false. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence.\n\nUser request: ${requestText}`
+  return `Today is ${localToday.year}-${localToday.month}-${localToday.day} in ${timeZone}.\n\nUser request: ${requestText}`
 }
 
 /** Returns calendar day bounds for a date, used by the planner's availability tool. */
@@ -98,13 +142,50 @@ function dateTimeForTool(localDate: string, timeZone: string): { timeMin: string
   return calendarDayBounds(localDate, timeZone)
 }
 
+/** Converts source-tagged model extraction into a policy-approved proposal, or a focused clarification. */
+function normalizeSubmittedProposal(
+  submitted: SubmittedOneOffProposal,
+): { proposal: OneOffProposal } | { clarification: string } {
+  // The model may normalize an explicit phrase such as “next Friday” to ISO,
+  // but it may never choose a calendar date the user did not supply.
+  if (submitted.localDate?.source !== "explicit") {
+    return { clarification: "What date should I schedule this for?" }
+  }
+  // A missing time is allowed: deterministic scheduling can choose a slot.
+  // A supplied time, however, must come from the user's words.
+  if (submitted.startTime && submitted.startTime.source !== "explicit")
+    return { clarification: "What time would you like?" }
+  // These fields are copied into the Calendar event, so never accept model-invented content.
+  if (submitted.description && submitted.description.source !== "explicit")
+    return { clarification: "Please provide the description you want included." }
+  if (submitted.location && submitted.location.source !== "explicit")
+    return { clarification: "Please provide the location you want included." }
+  if (submitted.reminderMinutes && submitted.reminderMinutes.source !== "explicit")
+    return { clarification: "What reminder would you like?" }
+  return {
+    proposal: {
+      title: submitted.title.value,
+      localDate: submitted.localDate.value,
+      startTime: submitted.startTime?.value,
+      durationMinutes: submitted.durationMinutes.value,
+      dateIsExplicit: true,
+      timeIsExplicit: Boolean(submitted.startTime),
+      classification: submitted.classification.value,
+      description: submitted.description?.value,
+      location: submitted.location?.value,
+      reminderMinutes: submitted.reminderMinutes?.value,
+      needsClarification: false,
+    },
+  }
+}
+
 /** Uses the planner's bounded tool session to return either a proposal or one focused clarification question. */
-async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanningDecision | null> {
+async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanningAttempt> {
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
   const calendar = createGoogleCalendarClient(env)
   let decision: CalendarPlanningDecision | null = null
   function recordDecision(next: CalendarPlanningDecision): void {
-    if (decision) throw new Error("Calendar planner attempted multiple terminal actions")
+    if (decision) throw new Error("Calendar planner attempted multiple decision actions")
     decision = next
   }
   const registry: ToolRegistry = {
@@ -138,8 +219,13 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
       input: proposalSchema,
       output: proposalOutputSchema,
       privacy: "private",
-      handler: async (proposal) => {
-        recordDecision({ kind: "proposal", proposal })
+      handler: async (submitted) => {
+        const normalized = normalizeSubmittedProposal(submitted)
+        recordDecision(
+          "proposal" in normalized
+            ? { kind: "proposal", proposal: normalized.proposal }
+            : { kind: "clarification", message: normalized.clarification },
+        )
         return { accepted: true }
       },
     },
@@ -161,10 +247,35 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
     env.LLM_MODEL,
     Number(env.LLM_MAX_RETRIES || "3"),
   )
-  const result = await runTools(provider, registry, Object.values(CALENDAR_TOOL), [
-    { role: "system", text: plannerPrompt(requestText, Date.now(), timeZone) },
-  ])
-  return result.completed ? decision : null
+  const handoffTools = [CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL, CALENDAR_TOOL.REQUEST_CLARIFICATION]
+  const result = await runTools(
+    provider,
+    registry,
+    {
+      allowedTools: Object.values(CALENDAR_TOOL),
+      handoffTools,
+      maxToolCallsPerTurn: 1,
+      // DeepSeek V4 defaults to thinking mode. Calendar uses a bounded non-thinking native-tool session instead.
+      reasoning: "disabled",
+      // A Calendar turn must either read availability or produce a decision; prose is not an action.
+      toolChoice: "required",
+      // After an availability lookup, expose only the two handoff actions and require one of them.
+      nextAllowedTools: (executedTools) =>
+        executedTools.includes(CALENDAR_TOOL.GET_AVAILABLE_SLOTS) ? handoffTools : Object.values(CALENDAR_TOOL),
+    },
+    [
+      { role: "system", text: plannerPrompt() },
+      { role: "user", text: plannerUserMessage(requestText, Date.now(), timeZone) },
+    ],
+  )
+  return {
+    decision: result.completed ? decision : null,
+    providerTurns: result.providerTurns,
+    toolCallCount: result.toolCallCount,
+    toolRunCompleted: result.completed,
+    toolNames: result.toolNames,
+    toolExecutions: result.toolExecutions,
+  }
 }
 
 /**
@@ -182,14 +293,47 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
     for (let interactionTurn = 0; interactionTurn < MAX_CALENDAR_INTERACTION_TURNS; interactionTurn++) {
       const planning = await step.do(`calendar-plan-${interactionTurn}`, async (): Promise<CalendarPlanningResult> => {
         try {
-          const decision = await planOneOff(this.env, requestText)
-          if (!decision) return { proposal: null, failureCategory: "no-submitted-proposal" }
-          return decision.kind === "proposal"
-            ? { proposal: decision.proposal }
-            : { proposal: null, clarification: decision.message }
-        } catch {
-          return { proposal: null, failureCategory: "provider-or-tool-failure" }
+          const attempt = await planOneOff(this.env, requestText)
+          const metrics = {
+            providerTurns: attempt.providerTurns,
+            toolCallCount: attempt.toolCallCount,
+            toolRunCompleted: attempt.toolRunCompleted,
+            toolNames: attempt.toolNames,
+            toolExecutions: attempt.toolExecutions,
+          }
+          if (!attempt.decision) return { proposal: null, failureCategory: "no-decision", ...metrics }
+          return attempt.decision.kind === "proposal"
+            ? { proposal: attempt.decision.proposal, ...metrics }
+            : { proposal: null, clarification: attempt.decision.message, ...metrics }
+        } catch (error) {
+          return { proposal: null, failureCategory: plannerFailureCategory(error) }
         }
+      })
+      const plannerDecision = planning.proposal ? "proposal" : planning.clarification ? "clarification" : "none"
+      for (const toolExecution of planning.toolExecutions ?? []) {
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          event: "calendar-planner-tool",
+          tool: toolExecution.tool,
+          outcome: toolExecution.outcome,
+          failureCategory: toolExecution.failureCategory,
+        })
+      }
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: `calendar-planner:${plannerDecision}`,
+        outcome: planning.proposal || planning.clarification ? "succeeded" : "failed",
+        failureCategory: planning.failureCategory,
+        ...(planning.toolNames?.length ? { tool: planning.toolNames.join(",") } : {}),
+        ...(planning.providerTurns === undefined
+          ? {}
+          : {
+              metrics: {
+                providerTurns: planning.providerTurns,
+                toolCallCount: planning.toolCallCount ?? 0,
+                toolRunCompleted: planning.toolRunCompleted ?? false,
+              },
+            }),
       })
       if (planning.clarification) {
         const reply = await this.promptForReply(
@@ -208,9 +352,11 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         await this.notify(
           step,
           event.payload.chatId,
-          planning.failureCategory === "provider-or-tool-failure"
-            ? CALENDAR_PLANNER_UNAVAILABLE
-            : CALENDAR_UNDERSTANDING_FALLBACK,
+          planning.failureCategory === "no-submitted-proposal"
+            ? CALENDAR_UNDERSTANDING_FALLBACK
+            : planning.failureCategory === "no-decision"
+              ? CALENDAR_PLANNER_NO_DECISION
+              : CALENDAR_PLANNER_UNAVAILABLE,
         )
         return
       }
@@ -434,7 +580,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
                 ],
               },
             }
-          : undefined,
+          : { replyMarkup: { force_reply: true } },
       ),
     )
     await step.do(`${name}-register`, async () => {

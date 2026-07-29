@@ -25,6 +25,12 @@ type InteractionRow = {
 }
 
 export const CONSUMED_INTERACTION_RETENTION_MS = 3_600_000 // ponytail: 1 hour
+const PLAIN_TEXT_INTERACTION_KINDS = [
+  INTERACTION_KIND.REVISION_FEEDBACK,
+  INTERACTION_KIND.CALENDAR_CLARIFICATION,
+  INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
+  INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+] as const
 
 /** Returns a JSON response with the given status code. */
 function json(data: unknown, status = 200): Response {
@@ -130,8 +136,8 @@ export class InteractionRouterDO implements DurableObject {
         : input.plainText !== undefined
           ? this.ctx.storage.sql
               .exec(
-                "SELECT * FROM interactions WHERE kind = ? AND consumed_update_id IS NULL ORDER BY rowid DESC LIMIT 1",
-                INTERACTION_KIND.REVISION_FEEDBACK,
+                "SELECT * FROM interactions WHERE kind IN (?, ?, ?, ?) AND consumed_update_id IS NULL ORDER BY rowid DESC LIMIT 1",
+                ...PLAIN_TEXT_INTERACTION_KINDS,
               )
               .toArray()
           : []

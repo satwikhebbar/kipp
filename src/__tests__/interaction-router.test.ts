@@ -54,4 +54,18 @@ describe("InteractionRouterDO retention", () => {
       NOW - CONSUMED_INTERACTION_RETENTION_MS,
     )
   })
+
+  it("accepts plain text for active Calendar reply prompts", async () => {
+    const { router, exec } = createRouter()
+
+    await router.fetch(post("/resolve", { telegramUpdateId: 12, text: "2026-08-03 at 11:00" }))
+
+    expect(exec).toHaveBeenCalledWith(
+      expect.stringContaining("kind IN (?, ?, ?, ?)"),
+      INTERACTION_KIND.REVISION_FEEDBACK,
+      INTERACTION_KIND.CALENDAR_CLARIFICATION,
+      INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
+      INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+    )
+  })
 })

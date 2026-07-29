@@ -9,9 +9,11 @@ export {
   type LLMRole,
   messages,
   parseLLMJson,
+  type ToolChoice,
   type ToolConversationMessage,
   type ToolProviderClient,
   type ToolProviderResponse,
+  type ToolReasoningMode,
 } from "./llm"
 
 /** Resolves a provider name to a default model if none is given. */

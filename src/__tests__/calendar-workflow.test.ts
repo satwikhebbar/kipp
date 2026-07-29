@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi as vitest } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
 import type { Env } from "../types"
 
 vitest.mock("cloudflare:workers", () => {
@@ -34,40 +34,33 @@ vitest.mock("../integrations/google-calendar", () => ({
 import { CalendarWorkflow } from "../calendar-workflow"
 
 const proposal = (startTime = "19:00") => ({
-  title: "Call Jamie",
-  localDate: "2026-07-28",
-  startTime,
-  durationMinutes: 30,
-  dateIsExplicit: true,
-  timeIsExplicit: true,
-  classification: "ordinary",
-  needsClarification: false,
+  title: { value: "Call Jamie", source: "explicit" as const },
+  localDate: { value: "2026-07-28", source: "explicit" as const },
+  startTime: { value: startTime, source: "explicit" as const },
+  durationMinutes: { value: 30, source: "inferred" as const },
+  classification: { value: "ordinary", source: "inferred" as const },
 })
 
 function queueProposal(startTime = "19:00"): void {
-  mockGenerate
-    .mockResolvedValueOnce({
-      toolCalls: [
-        {
-          id: `proposal-${mockGenerate.mock.calls.length}`,
-          name: "submit_one_off_proposal",
-          input: proposal(startTime),
-        },
-      ],
-      usage: { inputTokens: 0, outputTokens: 0 },
-    })
-    .mockResolvedValueOnce({ text: "", usage: { inputTokens: 0, outputTokens: 0 } })
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [
+      {
+        id: `proposal-${mockGenerate.mock.calls.length}`,
+        name: "submit_one_off_proposal",
+        input: proposal(startTime),
+      },
+    ],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })
 }
 
 function queueClarification(message = "What date should I schedule this for?"): void {
-  mockGenerate
-    .mockResolvedValueOnce({
-      toolCalls: [
-        { id: `clarification-${mockGenerate.mock.calls.length}`, name: "request_clarification", input: { message } },
-      ],
-      usage: { inputTokens: 0, outputTokens: 0 },
-    })
-    .mockResolvedValueOnce({ text: "", usage: { inputTokens: 0, outputTokens: 0 } })
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [
+      { id: `clarification-${mockGenerate.mock.calls.length}`, name: "request_clarification", input: { message } },
+    ],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })
 }
 
 function environment(): Env {
@@ -113,11 +106,14 @@ async function run(step: ReturnType<typeof createStep>): Promise<void> {
 
 describe("CalendarWorkflow", () => {
   beforeEach(() => {
+    vitest.useFakeTimers()
+    vitest.setSystemTime(new Date("2026-07-01T00:00:00.000Z"))
     mockGenerate.mockReset()
     mockBusyIntervals.mockReset()
     mockCreateManagedEvent.mockReset()
     mockUpdateManagedEvent.mockReset()
   })
+  afterEach(() => vitest.useRealTimers())
 
   it("creates exactly one deterministic Calendar event from a bounded proposal", async () => {
     queueProposal()
@@ -135,6 +131,64 @@ describe("CalendarWorkflow", () => {
     )
   })
 
+  it("keeps static planner instructions separate from dynamic user context", async () => {
+    queueClarification()
+    telegramMock()
+
+    await run(createStep({ type: "timeout" }))
+
+    const initialMessages = mockGenerate.mock.calls[0][0].messages.slice(0, 2)
+    expect(initialMessages).toEqual([
+      expect.objectContaining({ role: "system", text: expect.stringContaining("calendar planner") }),
+      expect.objectContaining({
+        role: "user",
+        text: expect.stringContaining("User request: Call Jamie tomorrow at 7pm"),
+      }),
+    ])
+    expect(initialMessages[0].text).not.toContain("Call Jamie tomorrow at 7pm")
+    expect(initialMessages[0].text).not.toContain("Today is")
+    expect(initialMessages[1].text).toContain("Today is")
+  })
+
+  it("does not write and asks for a retry when the provider returns prose without a decision action", async () => {
+    mockGenerate.mockResolvedValue({ text: "I need more details.", usage: { inputTokens: 0, outputTokens: 0 } })
+    const telegram = telegramMock()
+
+    await run(createStep())
+
+    expect(mockBusyIntervals).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(telegram).toHaveBeenLastCalledWith(
+      expect.stringContaining("sendMessage"),
+      expect.objectContaining({ body: expect.stringContaining("didn't return a scheduling decision") }),
+    )
+  })
+
+  it("does not create an event when the model marks a date as inferred", async () => {
+    const telegram = telegramMock()
+
+    // The planner can normalize an explicit date, but it cannot choose one.
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [
+        {
+          id: "proposal-with-inferred-date",
+          name: "submit_one_off_proposal",
+          input: { ...proposal(), localDate: { value: "2026-07-29", source: "inferred" } },
+        },
+      ],
+      usage: {},
+    })
+
+    await run(createStep({ type: "timeout" }))
+
+    expect(mockBusyIntervals).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(telegram).toHaveBeenLastCalledWith(
+      expect.stringContaining("sendMessage"),
+      expect.objectContaining({ body: expect.stringContaining("What date should I schedule this for?") }),
+    )
+  })
+
   it("replans after a focused clarification without reading Calendar data before the reply", async () => {
     queueClarification("What date should I schedule your investment review for?")
     queueProposal()
@@ -143,7 +197,7 @@ describe("CalendarWorkflow", () => {
 
     await run(createStep({ type: "event", payload: { text: "tomorrow" } }, { type: "timeout" }))
 
-    expect(mockGenerate).toHaveBeenCalledTimes(4)
+    expect(mockGenerate).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 
@@ -174,7 +228,7 @@ describe("CalendarWorkflow", () => {
       ),
     )
 
-    expect(mockGenerate.mock.calls[2]?.[0].messages[0].text).toContain("Replacement time: 8pm")
+    expect(mockGenerate.mock.calls[1]?.[0].messages[1].text).toContain("Replacement time: 8pm")
     expect(mockCreateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-28T14:30:00.000Z" }))
   })
 
@@ -234,11 +288,51 @@ describe("CalendarWorkflow", () => {
       ),
     )
 
-    expect(mockGenerate).toHaveBeenCalledTimes(8)
+    expect(mockGenerate).toHaveBeenCalledTimes(4)
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()
     expect(telegram).toHaveBeenLastCalledWith(
       expect.stringContaining("sendMessage"),
       expect.objectContaining({ body: expect.stringContaining("Please start a new /calendar request") }),
     )
+  })
+
+  it("requires a decision action after a single availability lookup", async () => {
+    mockGenerate
+      .mockResolvedValueOnce({
+        toolCalls: [
+          {
+            id: "availability",
+            name: "get_available_slots",
+            input: { localDate: "2026-07-28", durationMinutes: 30 },
+          },
+        ],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "proposal", name: "submit_one_off_proposal", input: proposal() }],
+        usage: {},
+      })
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(createStep({ type: "timeout" }))
+
+    expect(mockGenerate).toHaveBeenCalledTimes(2)
+    expect(mockGenerate.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ toolChoice: "required", reasoning: "disabled" }),
+    )
+    expect(mockGenerate.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        toolChoice: "required",
+        tools: expect.arrayContaining([
+          expect.objectContaining({ name: "submit_one_off_proposal" }),
+          expect.objectContaining({ name: "request_clarification" }),
+        ]),
+      }),
+    )
+    expect(mockGenerate.mock.calls[1][0].tools).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "get_available_slots" })]),
+    )
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 })

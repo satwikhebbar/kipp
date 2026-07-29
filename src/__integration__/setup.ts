@@ -173,6 +173,12 @@ export function createFakeWorkflowBinding() {
 }
 
 const REVISION_FEEDBACK_KIND = INTERACTION_KIND.REVISION_FEEDBACK
+const PLAIN_TEXT_INTERACTION_KINDS = new Set<string>([
+  REVISION_FEEDBACK_KIND,
+  INTERACTION_KIND.CALENDAR_CLARIFICATION,
+  INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
+  INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+])
 
 export interface FakeInteractionRegistration {
   interactionId: string
@@ -258,7 +264,7 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
           ? list.find((item) => item.callbackToken === body.callbackToken)
           : body.replyToMessageId !== undefined
             ? list.find((item) => item.botMessageId === body.replyToMessageId)
-            : list.find((item) => item.kind === REVISION_FEEDBACK_KIND && !item.consumed)
+            : [...list].reverse().find((item) => PLAIN_TEXT_INTERACTION_KINDS.has(item.kind) && !item.consumed)
         if (!found) return Response.json({ interaction: null })
         if (found.expiresAt <= Date.now() || (found.consumed && found.consumed !== body.telegramUpdateId))
           return Response.json({ interaction: null })
