@@ -31,6 +31,7 @@ describe("ToolGuard", () => {
       ok: false,
       category: "invalid-input",
       validationPaths: ["value"],
+      validationErrors: ["value: expected string"],
     })
     await expect(guard.execute("echo", { value: "safe" })).resolves.toEqual({ ok: true, output: { value: "safe" } })
   })

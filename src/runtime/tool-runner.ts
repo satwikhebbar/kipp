@@ -10,6 +10,8 @@ export interface ToolExecutionSummary {
   failureCategory?: Extract<ToolResult, { ok: false }>["category"]
   /** Input-schema paths only; excludes values and provider text. */
   validationPaths?: string[]
+  /** Safe schema expectations only; excludes values and provider text. */
+  validationErrors?: string[]
 }
 
 export interface ToolRunResult {
@@ -96,6 +98,7 @@ export async function runTools(
               outcome: "failed",
               failureCategory: result.category,
               ...(result.validationPaths?.length ? { validationPaths: result.validationPaths } : {}),
+              ...(result.validationErrors?.length ? { validationErrors: result.validationErrors } : {}),
             },
       )
       toolCalls++

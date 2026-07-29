@@ -20,6 +20,8 @@ export type ToolResult =
       category: "unknown-tool" | "not-allowed" | "invalid-input" | "invalid-output" | "handler-failed"
       /** Schema paths only: these never include submitted values or provider text. */
       validationPaths?: string[]
+      /** Safe schema expectations (for example, "title: expected object"); never includes submitted values. */
+      validationErrors?: string[]
     }
 
 /** Deterministic permission and schema boundary around every future tool call. */
@@ -39,6 +41,15 @@ export class ToolGuard {
         ok: false,
         category: "invalid-input",
         validationPaths: [...new Set(parsedInput.error.issues.map((issue) => issue.path.join(".") || "<root>"))],
+        validationErrors: [
+          ...new Set(
+            parsedInput.error.issues.map((issue) => {
+              const path = issue.path.join(".") || "<root>"
+              // Do not use Zod's human message here: it may echo an untrusted submitted value.
+              return issue.code === "invalid_type" ? `${path}: expected ${issue.expected}` : `${path}: ${issue.code}`
+            }),
+          ),
+        ],
       }
     try {
       const output = await definition.handler(parsedInput.data)

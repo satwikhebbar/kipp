@@ -220,7 +220,8 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
     },
     [CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL]: {
       name: CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL,
-      description: "Submit the single structured one-off proposal. This does not create a Calendar event.",
+      description:
+        'Submit the single structured one-off proposal. This does not create a Calendar event. Every supplied proposal field MUST be an object, never a bare value: { value: <field value>, source: "explicit" | "inferred" }. For example, use title: { value: "Call Jamie", source: "explicit" }, localDate: { value: "2026-08-03", source: "explicit" }, and startTime: { value: "15:00", source: "explicit" }.',
       input: proposalSchema,
       output: proposalOutputSchema,
       privacy: "private",
@@ -265,8 +266,14 @@ async function planOneOff(env: Env, requestText: string): Promise<CalendarPlanni
       // A Calendar turn must either read availability or produce a decision; prose is not an action.
       toolChoice: "required",
       // After an availability lookup, expose only the two handoff actions and require one of them.
+      // An availability result or a rejected proposal is enough context to finish this decision.
+      // Do not let the model repeat a private availability read after either one.
       nextAllowedTools: (executedTools) =>
-        executedTools.includes(CALENDAR_TOOL.GET_AVAILABLE_SLOTS) ? handoffTools : Object.values(CALENDAR_TOOL),
+        executedTools.some(
+          (tool) => tool === CALENDAR_TOOL.GET_AVAILABLE_SLOTS || tool === CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL,
+        )
+          ? handoffTools
+          : Object.values(CALENDAR_TOOL),
     },
     [
       { role: "system", text: plannerPrompt() },
@@ -328,8 +335,17 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
           tool: toolExecution.tool,
           outcome: toolExecution.outcome,
           failureCategory: toolExecution.failureCategory,
-          ...(toolExecution.validationPaths?.length
-            ? { details: { validationPaths: toolExecution.validationPaths.join(",") } }
+          ...(toolExecution.validationPaths?.length || toolExecution.validationErrors?.length
+            ? {
+                details: {
+                  ...(toolExecution.validationPaths?.length
+                    ? { validationPaths: toolExecution.validationPaths.join(",") }
+                    : {}),
+                  ...(toolExecution.validationErrors?.length
+                    ? { validationErrors: toolExecution.validationErrors.join(";") }
+                    : {}),
+                },
+              }
             : {}),
         })
       }

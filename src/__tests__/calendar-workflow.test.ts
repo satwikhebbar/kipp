@@ -189,6 +189,64 @@ describe("CalendarWorkflow", () => {
     )
   })
 
+  it("returns a schema-safe correction to the planner and does not repeat availability after a legacy proposal", async () => {
+    mockGenerate
+      .mockResolvedValueOnce({
+        toolCalls: [
+          {
+            id: "availability",
+            name: "get_available_slots",
+            input: { localDate: "2026-07-28", durationMinutes: 30 },
+          },
+        ],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [
+          {
+            id: "legacy-proposal",
+            name: "submit_one_off_proposal",
+            input: {
+              title: "Call Jamie",
+              localDate: "2026-07-28",
+              startTime: "19:00",
+              durationMinutes: 30,
+              classification: "ordinary",
+            },
+          },
+        ],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "corrected-proposal", name: "submit_one_off_proposal", input: proposal() }],
+        usage: {},
+      })
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(createStep({ type: "timeout" }))
+
+    expect(mockGenerate.mock.calls[2]?.[0]).toEqual(
+      expect.objectContaining({
+        tools: expect.arrayContaining([expect.objectContaining({ name: "submit_one_off_proposal" })]),
+      }),
+    )
+    expect(mockGenerate.mock.calls[2]?.[0].tools).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "get_available_slots" })]),
+    )
+    expect(mockGenerate.mock.calls[2]?.[0].messages).toContainEqual(
+      expect.objectContaining({
+        role: "tool",
+        name: "submit_one_off_proposal",
+        output: expect.objectContaining({
+          category: "invalid-input",
+          validationErrors: expect.arrayContaining(["title: expected object"]),
+        }),
+      }),
+    )
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
   it("replans after a focused clarification without reading Calendar data before the reply", async () => {
     queueClarification("What date should I schedule your investment review for?")
     queueProposal()

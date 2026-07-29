@@ -25,7 +25,8 @@ function registry(): ToolRegistry {
     },
     submit_one_off_proposal: {
       name: "submit_one_off_proposal",
-      description: "Submit a single Calendar proposal without writing to Calendar.",
+      description:
+        'Submit a single Calendar proposal without writing to Calendar. Every proposal field MUST be { value: <field value>, source: "explicit" | "inferred" }, never a bare value.',
       input: z.object({
         title: sourced(z.string()),
         localDate: sourced(z.string()),
@@ -61,7 +62,10 @@ async function runContract(prompt: string) {
       maxToolCallsPerTurn: 1,
       reasoning: "disabled",
       toolChoice: "required",
-      nextAllowedTools: (executed) => (executed.includes("get_available_slots") ? handoffTools : Object.keys(tools)),
+      nextAllowedTools: (executed) =>
+        executed.some((tool) => tool === "get_available_slots" || tool === "submit_one_off_proposal")
+          ? handoffTools
+          : Object.keys(tools),
     },
     [
       {
