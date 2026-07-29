@@ -47,6 +47,16 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## GitHub Issues
+
+When the user explicitly asks to create a GitHub issue for this repository, use the GitHub CLI outside the sandbox. The local `gh` credential is available only there.
+
+```bash
+rtk gh issue create --repo satwikhebbar/kipp --title "..." --body "..."
+```
+
+Request scoped escalation for that command and use the narrow `rtk gh issue create` approval prefix. Do not put GitHub tokens in the repository, shell profiles, command output, or runtime logs.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->
 ## Issue Tracking with bd (beads)
 

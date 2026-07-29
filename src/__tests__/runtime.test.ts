@@ -27,7 +27,11 @@ describe("ToolGuard", () => {
     const guard = new ToolGuard(registry, ["echo"])
     await expect(guard.execute("missing", {})).resolves.toEqual({ ok: false, category: "unknown-tool" })
     await expect(guard.execute("brokenOutput", {})).resolves.toEqual({ ok: false, category: "not-allowed" })
-    await expect(guard.execute("echo", { value: 1 })).resolves.toEqual({ ok: false, category: "invalid-input" })
+    await expect(guard.execute("echo", { value: 1 })).resolves.toEqual({
+      ok: false,
+      category: "invalid-input",
+      validationPaths: ["value"],
+    })
     await expect(guard.execute("echo", { value: "safe" })).resolves.toEqual({ ok: true, output: { value: "safe" } })
   })
 
@@ -52,6 +56,29 @@ describe("runtime logging", () => {
     expect(log).toHaveBeenCalledTimes(1)
     expect(log).toHaveBeenCalledWith(
       JSON.stringify({ component: "kipp-runtime", event: "workflow-run", outcome: "started", workflow: "workflow-1" }),
+    )
+    log.mockRestore()
+  })
+
+  it("supports safe diagnostic labels without accepting payloads", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    logRuntime(
+      { LOG_LEVEL: "info" },
+      {
+        event: "tool-execution",
+        outcome: "failed",
+        failureCategory: "invalid-input",
+        details: { validationPaths: "title.source,localDate.value" },
+      },
+    )
+    expect(log).toHaveBeenCalledWith(
+      JSON.stringify({
+        component: "kipp-runtime",
+        event: "tool-execution",
+        outcome: "failed",
+        failureCategory: "invalid-input",
+        details: { validationPaths: "title.source,localDate.value" },
+      }),
     )
     log.mockRestore()
   })

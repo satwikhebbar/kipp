@@ -36,6 +36,18 @@ const SCHEDULING_TOOL: ToolDefinition = {
   handler: async () => ({ accepted: true }),
 }
 
+const PROVENANCE_TOOL: ToolDefinition = {
+  name: "submit_sourced_proposal",
+  description: "Submit a proposal whose fields include provenance.",
+  input: z.object({
+    title: z.object({ value: z.string(), source: z.enum(["explicit", "inferred"]) }),
+    localDate: z.object({ value: z.string(), source: z.enum(["explicit", "inferred"]) }).optional(),
+  }),
+  output: z.object({ accepted: z.literal(true) }),
+  privacy: "private",
+  handler: async () => ({ accepted: true }),
+}
+
 describe("DeepSeek provider", () => {
   beforeEach(() => mockFetch.mockReset())
 
@@ -196,6 +208,33 @@ describe("DeepSeek provider", () => {
       tools: Array<{ function: { parameters: { required: string[] } } }>
     }
     expect(body.tools[0].function.parameters.required).toEqual(["title", "durationMinutes"])
+  })
+
+  it("preserves nested provenance objects in native tool declarations", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+    })
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    await createDeepseekToolClient("key").generate({ messages: TOOL_TEST_MESSAGES, tools: [PROVENANCE_TOOL] })
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string) as {
+      tools: Array<{
+        function: {
+          parameters: {
+            properties: { title: { type: string; properties: Record<string, unknown>; required: string[] } }
+          }
+        }
+      }>
+    }
+    expect(body.tools[0].function.parameters.properties.title).toEqual({
+      type: "object",
+      properties: {
+        value: { type: "string" },
+        source: { type: "string", enum: ["explicit", "inferred"] },
+      },
+      required: ["value", "source"],
+    })
   })
 
   it("retries transient native-tool failures but not malformed tool payloads", async () => {

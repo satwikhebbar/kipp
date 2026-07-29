@@ -125,7 +125,7 @@ const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
 /** Builds the static system prompt for the calendar planner agent. */
 function plannerPrompt(): string {
-  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. Use get_available_slots only when you need to choose a time. Every submitted proposal field has a source: use explicit only when the user supplied that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
+  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. Use get_available_slots only when you need to choose a time. There are no other actions. Every submitted proposal field has a source: use explicit only when the user supplied or unambiguously confirmed that fact, and inferred only when you derived it. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. If a prior clarification offered a specific available date and time, and the user clearly accepts it, do not look up availability again: submit that offered date and time with source explicit. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. After get_available_slots, use only submit_one_off_proposal or request_clarification. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
 }
 
 /** Builds the dynamic user context for the calendar planner agent. */
@@ -135,6 +135,11 @@ function plannerUserMessage(requestText: string, now: number, timeZone: string):
     .filter((part) => part.type !== "literal")
   const localToday = Object.fromEntries(todayParts.map((part) => [part.type, part.value]))
   return `Today is ${localToday.year}-${localToday.month}-${localToday.day} in ${timeZone}.\n\nUser request: ${requestText}`
+}
+
+/** Preserves the immediately preceding Calendar question so concise replies such as “Proceed” retain their referent. */
+function appendClarificationReply(requestText: string, question: string, reply: string): string {
+  return `${requestText}\n\nCalendar planner asked: ${question}\nUser replied: ${reply}`
 }
 
 /** Returns calendar day bounds for a date, used by the planner's availability tool. */
@@ -291,6 +296,12 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
     let editing = false
     // Keep Calendar's state transitions explicit; revisit a shared feedback-loop wrapper once its semantics align with LinkedIn.
     for (let interactionTurn = 0; interactionTurn < MAX_CALENDAR_INTERACTION_TURNS; interactionTurn++) {
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "calendar-planner-turn",
+        outcome: "started",
+        metrics: { turn: interactionTurn + 1 },
+      })
       const planning = await step.do(`calendar-plan-${interactionTurn}`, async (): Promise<CalendarPlanningResult> => {
         try {
           const attempt = await planOneOff(this.env, requestText)
@@ -317,6 +328,9 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
           tool: toolExecution.tool,
           outcome: toolExecution.outcome,
           failureCategory: toolExecution.failureCategory,
+          ...(toolExecution.validationPaths?.length
+            ? { details: { validationPaths: toolExecution.validationPaths.join(",") } }
+            : {}),
         })
       }
       logRuntime(this.env, {
@@ -336,6 +350,12 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
             }),
       })
       if (planning.clarification) {
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          event: "calendar-transition",
+          outcome: "succeeded",
+          details: { from: "planning", to: "clarification" },
+        })
         const reply = await this.promptForReply(
           step,
           event,
@@ -345,7 +365,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
           INTERACTION_KIND.CALENDAR_CLARIFICATION,
         )
         if (!reply) return
-        requestText = `${requestText}\n\nClarification: ${reply}`
+        requestText = appendClarificationReply(requestText, planning.clarification, reply)
         continue
       }
       if (!planning.proposal) {
@@ -361,6 +381,12 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         return
       }
       const proposal = planning.proposal
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "calendar-transition",
+        outcome: "succeeded",
+        details: { from: "planning", to: "availability" },
+      })
       const timeZone = this.env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
       const bounds = proposal.localDate ? calendarDayBounds(proposal.localDate, timeZone) : null
       if (!bounds) {
@@ -373,7 +399,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
           INTERACTION_KIND.CALENDAR_CLARIFICATION,
         )
         if (!reply) return
-        requestText = `${requestText}\n\nClarification: ${reply}`
+        requestText = appendClarificationReply(requestText, "What date should I schedule this for?", reply)
         continue
       }
       try {
@@ -392,10 +418,16 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
             INTERACTION_KIND.CALENDAR_CLARIFICATION,
           )
           if (!reply) return
-          requestText = `${requestText}\n\nClarification: ${reply}`
+          requestText = appendClarificationReply(requestText, scheduled.clarification, reply)
           continue
         }
         if ("conflict" in scheduled) {
+          logRuntime(this.env, {
+            workflow: event.instanceId,
+            event: "calendar-transition",
+            outcome: "succeeded",
+            details: { from: "availability", to: "conflict" },
+          })
           const alternative = suggestOneOffAlternative(proposal, busy, timeZone)
           const response = await this.promptForConflict(
             step,
@@ -489,6 +521,12 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
       const managed = managedEvent(identity, proposal, scheduled, timeZone)
       if (editing) await calendar.updateManagedEvent(managed)
       else await calendar.createManagedEvent(managed)
+    })
+    logRuntime(this.env, {
+      workflow: event.instanceId,
+      event: "calendar-write",
+      outcome: "succeeded",
+      details: { operation: editing ? "update" : "create" },
     })
     const edit = await this.promptForActions(
       step,
@@ -602,14 +640,50 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         ),
       )
     })
+    for (const action of prepared) {
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        interactionId: action.interactionId,
+        event: "calendar-interaction",
+        outcome: "started",
+        details: { interactionKind: action.kind, mode: action.callbackToken ? "callback" : "reply", version },
+      })
+    }
     const reply = await step.waitForEvent<{ text?: string }>(`${name}-wait`, {
       type: "telegram-reply",
       timeout: "15 minutes" as never,
     })
-    if (reply.type === "timeout") return { type: "timeout" }
+    if (reply.type === "timeout") {
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "calendar-interaction",
+        outcome: "ignored",
+        details: { reason: "timeout", version },
+      })
+      return { type: "timeout" }
+    }
     const text = reply.payload?.text
-    if (!text) return { type: "timeout" }
+    if (!text) {
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "calendar-interaction",
+        outcome: "ignored",
+        details: { reason: "empty-event", version },
+      })
+      return { type: "timeout" }
+    }
     const matchedAction = prepared.find((action) => text === `__${action.kind}__`)
+    logRuntime(this.env, {
+      workflow: event.instanceId,
+      interactionId: (reply.payload as { interactionId?: string } | undefined)?.interactionId,
+      event: "calendar-interaction",
+      outcome: "succeeded",
+      details: {
+        response: matchedAction ? "action" : "reply",
+        ...(matchedAction ? { interactionKind: matchedAction.kind } : {}),
+        version,
+      },
+    })
     return matchedAction ? { type: "action", kind: matchedAction.kind } : { type: "reply", text }
   }
 }

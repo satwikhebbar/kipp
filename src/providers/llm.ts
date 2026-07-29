@@ -74,18 +74,10 @@ export function toolDeclaration(tool: ToolDefinition): {
   description: string
   parameters: Record<string, unknown>
 } {
-  const schema = tool.input as unknown as { _def?: { typeName?: string; shape?: () => Record<string, unknown> } }
-  const shape = schema._def?.shape?.() ?? {}
-  const entries = Object.entries(shape)
-  const properties = Object.fromEntries(entries.map(([name, value]) => [name, zodProperty(value)]))
   return {
     name: tool.name,
     description: tool.description,
-    parameters: {
-      type: "object",
-      properties,
-      required: entries.filter(([, value]) => !isOptionalZodProperty(value)).map(([name]) => name),
-    },
+    parameters: zodProperty(tool.input),
   }
 }
 
@@ -94,14 +86,32 @@ function zodProperty(schema: unknown): Record<string, unknown> {
   const unwrapped = unwrapZodProperty(schema)
   const definition = unwrapped._def
   const typeName = definition?.typeName
+  if (typeName === "ZodObject") {
+    const entries = Object.entries(definition?.shape?.() ?? {})
+    return {
+      type: "object",
+      properties: Object.fromEntries(entries.map(([name, value]) => [name, zodProperty(value)])),
+      required: entries.filter(([, value]) => !isOptionalZodProperty(value)).map(([name]) => name),
+    }
+  }
   if (typeName === "ZodNumber") return { type: "number" }
   if (typeName === "ZodBoolean") return { type: "boolean" }
-  if (typeName === "ZodArray") return { type: "array" }
+  if (typeName === "ZodArray") return { type: "array", items: zodProperty(definition?.type) }
   if (typeName === "ZodEnum") return { type: "string", enum: definition?.values }
+  if (typeName === "ZodLiteral") return { const: definition?.value }
   return { type: "string" }
 }
 
-type ZodProperty = { _def?: { typeName?: string; innerType?: ZodProperty; values?: readonly string[] } }
+type ZodProperty = {
+  _def?: {
+    typeName?: string
+    innerType?: ZodProperty
+    values?: readonly string[]
+    value?: unknown
+    type?: ZodProperty
+    shape?: () => Record<string, ZodProperty>
+  }
+}
 
 /** Identifies fields callers may omit when invoking a tool. */
 function isOptionalZodProperty(schema: unknown): boolean {

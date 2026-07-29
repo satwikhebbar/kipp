@@ -15,6 +15,8 @@ export type RuntimeLogFields = {
   retryCount?: number
   failureCategory?: string
   metrics?: Readonly<Record<string, number | boolean>>
+  /** Safe, non-payload labels that identify a state transition or validation boundary. */
+  details?: Readonly<Record<string, string | number | boolean>>
 }
 
 /** Emits metadata only; callers must never attach user/provider payloads. */

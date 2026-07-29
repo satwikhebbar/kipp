@@ -201,6 +201,21 @@ describe("CalendarWorkflow", () => {
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 
+  it("keeps an offered available time in context when the user accepts it concisely", async () => {
+    queueClarification("The only available slot on July 30 is at 19:00. Would you like that time?")
+    queueProposal("19:00")
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(createStep({ type: "event", payload: { text: "Proceed" } }, { type: "timeout" }))
+
+    expect(mockGenerate.mock.calls[1]?.[0].messages[1].text).toContain(
+      "Calendar planner asked: The only available slot on July 30 is at 19:00. Would you like that time?\nUser replied: Proceed",
+    )
+    expect(mockGenerate.mock.calls[1]?.[0].messages[0].text).toContain("do not look up availability again")
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
   it("creates the deterministic safe alternative after the user chooses it", async () => {
     queueProposal()
     mockBusyIntervals.mockResolvedValue([{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }])

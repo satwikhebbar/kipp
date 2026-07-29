@@ -198,6 +198,35 @@ describe("calendar Telegram workflow integration", () => {
     expect(calendar.get).toHaveBeenCalledWith("calendar-wf-1")
   })
 
+  it("retains an offered slot when Telegram binds a concise confirmation reply", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    queueClarification("The only available slot on July 30 is at 19:00. Would you like that time?")
+    queueProposal("19:00")
+    mockBusyIntervals.mockResolvedValue([])
+
+    await handleTelegramWebhook(message("/calendar Call Jamie", 1), runtimeEnv)
+    const workflow = new CalendarWorkflow({} as never, {} as never)
+    Object.assign(workflow, { env: runtimeEnv })
+    const run = (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(
+      { instanceId: "calendar-wf-1", payload: (calendar.created[0].params as { params: unknown }).params },
+      { do: vitest.fn(async (_: string, fn: () => unknown) => fn()), waitForEvent: calendar.waitForEvent },
+    )
+    await waitForMessages(network, 2)
+    await handleTelegramWebhook(message("Proceed", 2), runtimeEnv)
+    await waitForMessages(network, 3)
+    calendar.timeout()
+    await run
+
+    expect(mockGenerate.mock.calls[1]?.[0].messages[1].text).toContain(
+      "Calendar planner asked: The only available slot on July 30 is at 19:00. Would you like that time?\nUser replied: Proceed",
+    )
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
   it("routes a Calendar conflict alternative callback through the router and never through LinkedIn", async () => {
     const network = createFakeNetwork()
     vitest.stubGlobal("fetch", network.fetch)

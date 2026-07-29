@@ -10,6 +10,8 @@ const apiKey = process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY
 const enabled = process.env.DEEPSEEK_CONTRACT === "1" && Boolean(apiKey)
 const contractIt = enabled ? it : it.skip
 const handoffTools = ["submit_one_off_proposal", "request_clarification"]
+const source = z.enum(["explicit", "inferred"])
+const sourced = <Value extends z.ZodTypeAny>(value: Value) => z.object({ value, source })
 
 function registry(): ToolRegistry {
   return {
@@ -25,10 +27,13 @@ function registry(): ToolRegistry {
       name: "submit_one_off_proposal",
       description: "Submit a single Calendar proposal without writing to Calendar.",
       input: z.object({
-        title: z.string(),
-        localDate: z.string(),
-        startTime: z.string(),
-        durationMinutes: z.number().int(),
+        title: sourced(z.string()),
+        localDate: sourced(z.string()),
+        startTime: sourced(z.string()),
+        durationMinutes: sourced(z.number().int()),
+        classification: sourced(
+          z.enum(["ordinary", "family-social", "school-pickup", "appointment", "maintenance", "physical"]),
+        ),
       }),
       output: z.object({ accepted: z.literal(true) }),
       privacy: "private",
@@ -61,7 +66,7 @@ async function runContract(prompt: string) {
     [
       {
         role: "system",
-        text: "Use native tools only. Call exactly one decision action: submit_one_off_proposal or request_clarification.",
+        text: "Use native tools only. Call exactly one decision action: submit_one_off_proposal or request_clarification. Proposal fields are objects with value and source, where source is explicit or inferred.",
       },
       { role: "user", text: prompt },
     ],

@@ -203,9 +203,22 @@ async function dispatchRoutedInteraction(
 ): Promise<boolean> {
   const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
   const { interaction } = await router.resolve(input)
-  if (!interaction) return false
+  const inputKind = input.callbackToken ? "callback" : input.replyToMessageId !== undefined ? "reply" : "plain-text"
+  if (!interaction) {
+    logRuntime(env, { event: "telegram-interaction-route", outcome: "ignored", details: { inputKind } })
+    return false
+  }
   const workflow = interaction.kind.startsWith("calendar-") ? env.CALENDAR_WORKFLOW : env.PIPELINE_WORKFLOW
-  if (!workflow) return false
+  if (!workflow) {
+    logRuntime(env, {
+      workflow: interaction.workflowId,
+      interactionId: interaction.interactionId,
+      event: "telegram-interaction-route",
+      outcome: "not-configured",
+      details: { inputKind, interactionKind: interaction.kind },
+    })
+    return false
+  }
   const instance = await workflow.get(interaction.workflowId)
   const interactionText =
     interaction.text ??
@@ -223,6 +236,17 @@ async function dispatchRoutedInteraction(
       interactionVersion: interaction.version,
       interactionKind: interaction.kind,
       telegramUpdateId: interaction.telegramUpdateId,
+    },
+  })
+  logRuntime(env, {
+    workflow: interaction.workflowId,
+    interactionId: interaction.interactionId,
+    event: "telegram-interaction-route",
+    outcome: "succeeded",
+    details: {
+      inputKind,
+      interactionKind: interaction.kind,
+      workflowType: interaction.kind.startsWith("calendar-") ? "calendar" : "linkedin",
     },
   })
   return true

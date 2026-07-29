@@ -8,6 +8,8 @@ export interface ToolExecutionSummary {
   tool: string
   outcome: "succeeded" | "failed"
   failureCategory?: Extract<ToolResult, { ok: false }>["category"]
+  /** Input-schema paths only; excludes values and provider text. */
+  validationPaths?: string[]
 }
 
 export interface ToolRunResult {
@@ -87,7 +89,14 @@ export async function runTools(
       const tool = allowedTools.includes(call.name) ? call.name : "unknown"
       toolNames.push(tool)
       toolExecutions.push(
-        result.ok ? { tool, outcome: "succeeded" } : { tool, outcome: "failed", failureCategory: result.category },
+        result.ok
+          ? { tool, outcome: "succeeded" }
+          : {
+              tool,
+              outcome: "failed",
+              failureCategory: result.category,
+              ...(result.validationPaths?.length ? { validationPaths: result.validationPaths } : {}),
+            },
       )
       toolCalls++
       executedTools.push(tool)

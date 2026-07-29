@@ -2,6 +2,16 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## GitHub Issues
+
+When the user explicitly asks to create a GitHub issue for this repository, use the GitHub CLI outside the sandbox. The local `gh` credential is available only there.
+
+```bash
+rtk gh issue create --repo satwikhebbar/kipp --title "..." --body "..."
+```
+
+Request scoped escalation for that command and use the narrow `rtk gh issue create` approval prefix. Do not put GitHub tokens in the repository, shell profiles, command output, or runtime logs.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
