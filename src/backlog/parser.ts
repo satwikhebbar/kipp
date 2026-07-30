@@ -4,12 +4,14 @@ const FM_RE = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 
 type FM = Record<string, string | Record<string, string>>
 
+/** Parses one scalar frontmatter line into its key and unquoted value. */
 export function parseYamlLine(raw: string): [string, string] | null {
   const m = raw.trim().match(/^(\w+):\s*(.*)/)
   if (!m) return null
   return [m[1], m[2].replace(/^"(.*)"$/, "$1")]
 }
 
+/** Parses the limited scalar-and-one-level-map YAML format used by idea frontmatter. */
 function parseYaml(lines: string): FM {
   const fm: FM = {}
   let currentKey: string | null = null
@@ -35,6 +37,7 @@ function parseYaml(lines: string): FM {
   return fm
 }
 
+/** Serializes idea frontmatter without introducing YAML features the parser does not support. */
 function serializeYaml(fm: FM): string {
   const lines: string[] = []
   for (const [k, v] of Object.entries(fm)) {
@@ -50,6 +53,7 @@ function serializeYaml(fm: FM): string {
   return lines.join("\n")
 }
 
+/** Separates optional Draft and Critique sections from the user-authored idea body. */
 function extractSections(body: string): { preamble: string; draft?: string; critique?: string } {
   let draft: string | undefined
   let critique: string | undefined
@@ -73,6 +77,7 @@ const OPTIONAL_IDEA_FIELDS: [string, (v: string) => unknown][] = [
   ["costModel", String],
 ]
 
+/** Converts one frontmatter-delimited Markdown idea into the normalized Idea model. */
 export function parseIdea(text: string): Idea {
   const m = text.match(FM_RE)
   if (!m) throw new Error("Missing frontmatter")
@@ -110,6 +115,7 @@ export function parseIdea(text: string): Idea {
   return idea
 }
 
+/** Reconstructs an idea body, including persisted draft and critique sections when present. */
 function buildBody(idea: Idea): string {
   const parts = [idea.body]
   if (idea.draft) parts.push(`\n\n## Draft\n\n${idea.draft}`)
@@ -117,6 +123,7 @@ function buildBody(idea: Idea): string {
   return parts.join("")
 }
 
+/** Serializes one Idea to the constrained Markdown/frontmatter representation stored in the backlog. */
 export function serializeIdea(idea: Idea): string {
   const fm: FM = {
     id: idea.id,
@@ -143,10 +150,12 @@ export function serializeIdea(idea: Idea): string {
   return `---\n${serializeYaml(fm)}\n---\n\n${buildBody(idea)}\n`
 }
 
+/** Returns whether a line starts an idea frontmatter block rather than merely containing a delimiter. */
 export function isIdeaStart(lines: string[], i: number): boolean {
   return lines[i]?.trim() === "---" && /^\w+:(\s|$)/.test(lines[i + 1]?.trim() ?? "")
 }
 
+/** Scans a Markdown backlog and parses each complete frontmatter-delimited idea block. */
 export function parseIdeas(text: string): Idea[] {
   const ideas: Idea[] = []
   const lines = text.split("\n")
@@ -171,6 +180,7 @@ export function parseIdeas(text: string): Idea[] {
   return ideas
 }
 
+/** Serializes a collection of ideas with the blank-line separation expected by the backlog file. */
 export function serializeIdeas(ideas: Idea[]): string {
   return ideas.map(serializeIdea).join("\n")
 }
