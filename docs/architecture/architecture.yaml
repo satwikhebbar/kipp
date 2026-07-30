@@ -1,7 +1,7 @@
 version: 1
 system:
   name: Kipp
-  purpose: Create LinkedIn drafts from captured ideas with a human approval loop.
+  purpose: Create approval-gated LinkedIn drafts and safe personal Google Calendar blocks from Telegram.
   runtime:
     platform: Cloudflare Workers
     entrypoint: src/index.ts
@@ -14,28 +14,53 @@ runtime_components:
       - request authentication at protected routes
     depends_on:
       - pipeline_workflow
+      - calendar_workflow
       - token_vault
+      - interaction_router
       - triggers
   pipeline_workflow:
     implementation: src/workflow.ts
     owns:
-      - draft, critique, and revision orchestration
+      - bounded LinkedIn native-tool drafting and revision orchestration
       - approval wait states
       - creating the LinkedIn draft after explicit approval
     depends_on:
       - backlog
       - agents
       - providers
+      - runtime
       - integrations
       - token_vault
+      - interaction_router
+  calendar_workflow:
+    implementation: src/calendar-workflow.ts
+    owns:
+      - bounded native-tool interpretation of one-off Calendar requests
+      - deterministic validation, availability, conflict, and write decisions
+      - Calendar clarification, edit, and authorization-recovery wait states
+    depends_on:
+      - calendar_domain
+      - providers
+      - runtime
+      - integrations.google-calendar
+      - token_vault
+      - interaction_router
   token_vault:
     implementation: src/token-vault.ts
     type: Cloudflare Durable Object with SQLite storage
     owns:
       - OAuth state and expiry cleanup
-      - encrypted LinkedIn token storage and key rewrapping
+      - provider-namespaced encrypted LinkedIn and Google Calendar token storage
+      - token key rewrapping
     depends_on:
       - crypto
+  interaction_router:
+    implementation: src/interaction-router.ts
+    type: Cloudflare Durable Object with SQLite storage
+    owns:
+      - short-lived opaque Telegram interaction registrations
+      - idempotent claim, acknowledgement, expiry, and bounded cleanup
+    depends_on: []
 
 modules:
   triggers:
@@ -43,13 +68,15 @@ modules:
     owns:
       - Telegram webhook handling
       - RSS, cadence, and token-check schedules
-      - LinkedIn OAuth start and callback handling
+      - LinkedIn and Google Calendar OAuth start and callback handling
     depends_on:
       - backlog
       - integrations
       - providers
       - pipeline_workflow
+      - calendar_workflow
       - token_vault
+      - interaction_router
   backlog:
     path: src/backlog
     owns:
@@ -60,13 +87,29 @@ modules:
   agents:
     path: src/agent
     owns:
-      - drafting, critique, classification, and revision prompts
+      - LinkedIn native-tool prompt, typed draft handoff, and revision transcript
+      - supporting classification and legacy text-agent behaviors
+    depends_on:
+      - providers
+      - runtime
+  calendar_domain:
+    path: src/calendar-scheduling.ts and src/calendar-messages.ts
+    owns:
+      - deterministic one-off scheduling validation and conflict alternatives
+      - privacy-safe Calendar user messages
+    depends_on: []
+  runtime:
+    path: src/runtime
+    owns:
+      - static typed tool registry and deterministic guard
+      - bounded native-tool runner
+      - provider-agnostic context, metadata-only logging, and HTTP constants
     depends_on:
       - providers
   providers:
     path: src/providers
     owns:
-      - provider selection and normalized LLM generation interface
+      - provider selection and normalized text plus native-tool generation interfaces
     depends_on:
       - Gemini API
       - DeepSeek API
@@ -76,10 +119,12 @@ modules:
       - GitHub Contents API access
       - Telegram Bot API access
       - LinkedIn draft creation
+      - Google Calendar FreeBusy, event creation, verification, and token refresh
     depends_on:
       - GitHub API
       - Telegram Bot API
       - LinkedIn API
+      - Google Calendar API
   prompts:
     path: src/prompts
     owns:
@@ -103,21 +148,29 @@ data_stores:
   token_vault_storage:
     type: Durable Object SQLite storage
     data:
-      - encrypted LinkedIn OAuth tokens
+      - provider-namespaced encrypted LinkedIn and Google Calendar OAuth tokens
       - short-lived OAuth state records
     owner: token_vault
+  interaction_router_storage:
+    type: Durable Object SQLite storage
+    data:
+      - opaque Telegram callback and reply registrations
+      - workflow target, interaction kind, version, expiry, and delivery state
+    owner: interaction_router
   workflow_state:
     type: Cloudflare Workflows durable execution state
     data:
       - workflow steps
-      - Telegram approval or revision events
-    owner: pipeline_workflow
+      - LinkedIn draft transcript and approval or revision events
+      - Calendar request, typed dialogue state, proposals, and wait events
+    owner: pipeline_workflow and calendar_workflow
 
 external_systems:
   - Telegram Bot API
   - Substack RSS feed
   - GitHub Contents API
   - LinkedIn OAuth and Posts API
+  - Google OAuth and Calendar API
   - Gemini API
   - DeepSeek API
   - Cloudflare Access
@@ -129,4 +182,7 @@ security_boundaries:
   - Cloudflare Access JWT validation for setup and administration routes
   - OAuth state paired with an HTTP-only, secure cookie
   - AES-256-GCM encryption for LinkedIn tokens at rest
+  - Provider-namespaced AES-256-GCM encryption for Google Calendar tokens at rest
   - LinkedIn posts are created as drafts only after explicit Telegram approval
+  - Google Calendar uses owned-event and FreeBusy scopes; existing event details never enter model context
+  - Calendar writes remain deterministic and idempotent outside the model tool session

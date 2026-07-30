@@ -1,6 +1,6 @@
 # LinkedIn Posting Pipeline
 
-An automated LinkedIn posting pipeline on **Cloudflare Workers + Workflows**. Captures ideas, drafts posts via LLM, runs a critique–revise loop with Telegram-based feedback, and creates a LinkedIn **DRAFT** (never auto-published).
+An automated LinkedIn posting pipeline on **Cloudflare Workers + Workflows**. Captures ideas, drafts and revises posts through a bounded native-tool LLM session with Telegram feedback, and creates a LinkedIn **DRAFT** only after explicit approval (never auto-published).
 
 Designed as an **open-source template**. Your content data lives in a separate
 private GitHub repository.
@@ -284,7 +284,7 @@ src/
 ├── prompts/                 # Prompt defaults and runtime resolution
 │   ├── defaults.ts          # Built-in default style prompt constant (single source of truth)
 │   └── resolver.ts          # readPrompt() — multi-path data repo → built-in fallback
-├── agent/                   # LLM agent steps (draft, critique, revise, classify)
+├── agent/                   # Workflow-scoped LinkedIn tool agent and supporting LLM behaviors
 ├── providers/               # LLM provider clients (Gemini, DeepSeek)
 ├── triggers/                # Entry points (RSS, cadence, Telegram webhook, LinkedIn OAuth, token refresh)
 ├── integrations/            # External API clients (GitHub, LinkedIn, Telegram)

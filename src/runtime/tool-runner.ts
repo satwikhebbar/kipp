@@ -1,4 +1,5 @@
 import type { ToolChoice, ToolConversationMessage, ToolProviderClient, ToolReasoningMode } from "../providers"
+import type { LLMUsage } from "../types"
 import { ToolGuard, type ToolRegistry, type ToolResult } from "./tools"
 
 export const MAX_TOOL_PROVIDER_TURNS = 3
@@ -29,6 +30,7 @@ export interface ToolRunResult {
   toolCallCount: number
   toolNames: string[]
   toolExecutions: ToolExecutionSummary[]
+  usage: LLMUsage
 }
 
 /** Controls a bounded native-tool session without exposing unapproved tools to the provider. */
@@ -62,6 +64,7 @@ export async function runTools(
   let toolCalls = 0
   const toolNames: string[] = []
   const toolExecutions: ToolExecutionSummary[] = []
+  const usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
   for (let turn = 0; turn < MAX_TOOL_PROVIDER_TURNS; turn++) {
     const guard = new ToolGuard(registry, allowedTools)
     const response = await provider.generate({
@@ -70,6 +73,8 @@ export async function runTools(
       toolChoice: options.toolChoice,
       reasoning: options.reasoning,
     })
+    usage.inputTokens += response.usage.inputTokens ?? 0
+    usage.outputTokens += response.usage.outputTokens ?? 0
     if (!response.toolCalls?.length) {
       if (options.requireHandoff) {
         if (response.text) messages.push({ role: "assistant", text: response.text })
@@ -83,6 +88,7 @@ export async function runTools(
           toolCallCount: toolCalls,
           toolNames,
           toolExecutions,
+          usage,
         }
       }
       return {
@@ -93,6 +99,7 @@ export async function runTools(
         toolCallCount: toolCalls,
         toolNames,
         toolExecutions,
+        usage,
       }
     }
     if (
@@ -107,6 +114,7 @@ export async function runTools(
         toolCallCount: toolCalls,
         toolNames,
         toolExecutions,
+        usage,
       }
     messages.push({
       role: "assistant",
@@ -145,6 +153,7 @@ export async function runTools(
         toolCallCount: toolCalls,
         toolNames,
         toolExecutions,
+        usage,
       }
     allowedTools = options.nextAllowedTools?.(executedTools) ?? allowedTools
   }
@@ -156,5 +165,6 @@ export async function runTools(
     toolCallCount: toolCalls,
     toolNames,
     toolExecutions,
+    usage,
   }
 }

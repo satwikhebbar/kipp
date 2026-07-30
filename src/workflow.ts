@@ -1,9 +1,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
-import { createCritiqueAgent } from "./agent/critique"
-import { createDraftAgent, createDraftConversation } from "./agent/draft"
-import { createReviseAgent } from "./agent/revise"
+import { appendLinkedInFeedback, createLinkedInConversation, runLinkedInToolSession } from "./agent/linkedin"
 import { createBacklogManager } from "./backlog/manager"
-import { appendAssistant, appendHumanFeedback, assertStepOutputSize } from "./conversation"
+import { assertStepOutputSize } from "./conversation"
 import { createGitHubClient } from "./integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "./integrations/linkedin"
 import { createTelegramClient } from "./integrations/telegram"
@@ -11,12 +9,11 @@ import { createInteractionRouter, type InteractionRegistration } from "./interac
 import { computeCost, formatCostLine } from "./pricing"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
 import { readPrompt } from "./prompts/resolver"
-import { createGenerator, type GenerateFn, resolveModel } from "./providers"
+import { createToolProvider, resolveModel } from "./providers"
 import { logRuntime } from "./runtime/logging"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "./types"
 
 const DEFAULT_WAIT_FOR_FEEDBACK_HOURS = 12
-const MAX_CRITIQUE_ITERATIONS = 4
 const MAX_FEEDBACK_ROUNDS = 4
 const HOURS_TO_MS = 3_600_000 // ponytail: precomputed 60 * 60 * 1000
 const DEFAULT_LLM_RETRIES = 3
@@ -78,18 +75,6 @@ function interactionKeyboard(interactions: InteractionRegistration[]): Record<st
   }
 }
 
-/** Wraps a GenerateFn to accumulate token usage across multiple calls. */
-function withUsageAccumulator(gen: GenerateFn): { gen: GenerateFn; getUsage: () => LLMUsage } {
-  const cumulative: LLMUsage = { inputTokens: 0, outputTokens: 0 }
-  const wrapped: GenerateFn = async (opts) => {
-    const res = await gen(opts)
-    cumulative.inputTokens += res.usage.inputTokens
-    cumulative.outputTokens += res.usage.outputTokens
-    return res
-  }
-  return { gen: wrapped, getUsage: () => ({ ...cumulative }) }
-}
-
 export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
     logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "started" })
@@ -136,13 +121,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     }
 
     const state = await stepDo("generate", async () => {
-      const rawGen = createGenerator(
+      const provider = createToolProvider(
         this.env.LLM_API_KEY,
         this.env.LLM_PROVIDER,
         this.env.LLM_MODEL,
         Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
       )
-      const { gen, getUsage } = withUsageAccumulator(rawGen)
       const model = resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
 
       const client = createGitHubClient(this.env)
@@ -150,25 +134,31 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       const stylePaths = [this.env.PROMPT_STYLE_PATH, "style-prompt.md"].filter(Boolean) as string[]
       const stylePrompt = await readPrompt(client, stylePaths, DEFAULT_STYLE_PROMPT)
-      const draftAgent = createDraftAgent(gen, stylePrompt)
-      const critiqueAgent = createCritiqueAgent(gen)
-      const reviseAgent = createReviseAgent(gen)
-
-      let messages = createDraftConversation(stylePrompt, { title: ideaTitle, body: ideaBody, substackBody })
-      let draft = await draftAgent({ title: ideaTitle, body: ideaBody, substackBody })
-      messages = appendAssistant(messages, draft)
-      for (let i = 0; i < MAX_CRITIQUE_ITERATIONS; i++) {
-        const items = await critiqueAgent(draft)
-        if (items.every((c) => c.passed)) break
-        draft = await reviseAgent({ messages, failedItems: items.filter((c) => !c.passed) })
-        messages = appendAssistant(messages, draft)
-      }
+      const initialMessages = createLinkedInConversation(stylePrompt, {
+        title: ideaTitle,
+        body: ideaBody,
+        substackBody,
+      })
+      const session = await runLinkedInToolSession(provider, initialMessages)
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "linkedin-tool-session",
+        outcome: session.completed ? "succeeded" : "failed",
+        metrics: {
+          providerTurns: session.providerTurns,
+          toolCallCount: session.toolCallCount,
+          toolFailureCount: session.toolExecutions.filter((execution) => execution.outcome === "failed").length,
+        },
+      })
+      if (!session.draft) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-draft"}`)
+      const draft = session.draft
+      const messages = session.messages
 
       const ideas = await manager.readIdeas()
       const idea = ideas.find((i) => i.id === ideaId)
       if (!idea) throw new Error(`Idea ${ideaId} not found`)
 
-      const usage = getUsage()
+      const usage = session.usage
       const cost = computeCost(usage, model)
       const costLine = formatCostLine(cost)
 
@@ -341,26 +331,35 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       }
 
       const revised = await stepDo(`revise-${i}`, async () => {
-        const rawGen = createGenerator(
+        const provider = createToolProvider(
           this.env.LLM_API_KEY,
           this.env.LLM_PROVIDER,
           this.env.LLM_MODEL,
           Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
         )
-        const { gen, getUsage } = withUsageAccumulator(rawGen)
         const model = state.model ?? resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
-        const agent = createReviseAgent(gen)
         const feedback = text === "__revise__" ? undefined : text
-        let messages = feedback ? appendHumanFeedback(currentMessages, feedback) : currentMessages
-        const nextDraft = await agent({ messages, failedItems: [] })
-        messages = appendAssistant(messages, nextDraft)
+        const messages = feedback ? appendLinkedInFeedback(currentMessages, feedback) : currentMessages
+        const session = await runLinkedInToolSession(provider, messages)
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          event: "linkedin-tool-session",
+          outcome: session.completed ? "succeeded" : "failed",
+          metrics: {
+            providerTurns: session.providerTurns,
+            toolCallCount: session.toolCallCount,
+            toolFailureCount: session.toolExecutions.filter((execution) => execution.outcome === "failed").length,
+          },
+        })
+        if (!session.draft) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-draft"}`)
+        const nextDraft = session.draft
         const client = createGitHubClient(this.env)
         const manager = createBacklogManager(client)
         const ideas = await manager.readIdeas()
         const idea = ideas.find((i) => i.id === ideaId)
         const prevInput = idea?.costInputTokens ?? state.costInputTokens ?? 0
         const prevOutput = idea?.costOutputTokens ?? state.costOutputTokens ?? 0
-        const stepUsage = getUsage()
+        const stepUsage = session.usage
         const cumulativeUsage: LLMUsage = {
           inputTokens: prevInput + stepUsage.inputTokens,
           outputTokens: prevOutput + stepUsage.outputTokens,
@@ -369,7 +368,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const costLine = formatCostLine(cost)
         const nextState = assertStepOutputSize({
           draft: nextDraft,
-          messages,
+          messages: session.messages,
           costInputTokens: cumulativeUsage.inputTokens,
           costOutputTokens: cumulativeUsage.outputTokens,
           costLine,

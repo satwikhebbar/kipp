@@ -13,7 +13,40 @@ vi.mock("cloudflare:workers", () => {
 const mockCreateGenerator = vi.hoisted(() => vi.fn())
 const mockResolveModel = vi.hoisted(() => vi.fn((_p: string, m?: string) => m ?? "deepseek-v4-flash"))
 vi.mock("../providers", () => ({
-  createGenerator: () => mockCreateGenerator,
+  createToolProvider: () => ({
+    generate: async (input: {
+      messages: Array<
+        | { role: string; text: string }
+        | { role: "assistant"; toolCalls: Array<{ input: { draft?: string } }> }
+        | { role: "tool" }
+      >
+    }) => {
+      const messages = input.messages.flatMap((message) => {
+        if (message.role === "tool") return []
+        if ("toolCalls" in message) return [{ role: "assistant", content: message.toolCalls[0]?.input.draft ?? "" }]
+        if ("text" in message) return [{ role: message.role, content: message.text }]
+        return []
+      })
+      let response = await mockCreateGenerator({ messages })
+      while (
+        typeof response?.text === "string" &&
+        response.text.trim().startsWith("[") &&
+        response.text.includes('"passed"')
+      )
+        response = await mockCreateGenerator({ messages })
+      if (response?.toolCalls) return response
+      return {
+        toolCalls: [
+          {
+            id: crypto.randomUUID(),
+            name: "submit_linkedin_draft",
+            input: { draft: response.text },
+          },
+        ],
+        usage: response.usage,
+      }
+    },
+  }),
   resolveModel: mockResolveModel,
 }))
 
@@ -386,9 +419,12 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    // genCalls: [draft, critique, revise, critique]
+    // The compatibility mock skips the legacy critique fixture before returning the native revision handoff.
     const reviseMessages = genCalls[2].messages
-    expect(reviseMessages[0]).toEqual({ role: "system", content: STYLE_PROMPT })
+    expect(reviseMessages[0]).toEqual({
+      role: "system",
+      content: expect.stringContaining(`Style instructions:\n${STYLE_PROMPT}`),
+    })
     expect(reviseMessages[1].role).toBe("user")
     expect(reviseMessages[1].content).toContain("Test idea")
     expect(reviseMessages[1].content).toContain("Body content")
@@ -564,8 +600,8 @@ describe("PipelineWorkflow", () => {
     const notifyMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
     expect(notifyMsg).toBeDefined()
     expect(notifyMsg).toContain("Est. cost:")
-    expect(notifyMsg).toContain("100500 in")
-    expect(notifyMsg).toContain("50200 out")
+    expect(notifyMsg).toContain("100000 in")
+    expect(notifyMsg).toContain("50000 out")
     expect(notifyMsg).toContain("deepseek-v4-flash")
   })
 
@@ -622,14 +658,14 @@ describe("PipelineWorkflow", () => {
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
     const finalIdeaContent = fileStore["ideas.md"]
-    expect(finalIdeaContent).toContain("costInputTokens: 420")
-    expect(finalIdeaContent).toContain("costOutputTokens: 180")
+    expect(finalIdeaContent).toContain("costInputTokens: 300")
+    expect(finalIdeaContent).toContain("costOutputTokens: 130")
 
     const notifyMsg = telegramTexts.find((t) => t.startsWith("*Revised draft for idea"))
     expect(notifyMsg).toBeDefined()
     expect(notifyMsg).toContain("Est. cost:")
-    expect(notifyMsg).toContain("420 in")
-    expect(notifyMsg).toContain("180 out")
+    expect(notifyMsg).toContain("300 in")
+    expect(notifyMsg).toContain("130 out")
   })
 
   it("cost fields persist through archive", async () => {
@@ -749,8 +785,8 @@ Body`
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
     expect(telegramCalled).toBe(false)
-    expect(fileStore["ideas.md"]).toContain("costInputTokens: 150")
-    expect(fileStore["ideas.md"]).toContain("costOutputTokens: 70")
+    expect(fileStore["ideas.md"]).toContain("costInputTokens: 100")
+    expect(fileStore["ideas.md"]).toContain("costOutputTokens: 50")
   })
 
   it("includes cost line in publish notification when one token dimension is zero", async () => {
@@ -810,7 +846,7 @@ Body`
     expect(publishMsg).toBeDefined()
     expect(publishMsg).toContain("Est. cost:")
     expect(publishMsg).toContain("0 in")
-    expect(publishMsg).toContain("60 out")
+    expect(publishMsg).toContain("50 out")
     expect(publishMsg).toContain("deepseek-v4-flash")
   })
 

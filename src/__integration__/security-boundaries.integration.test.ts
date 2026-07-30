@@ -153,9 +153,24 @@ correlation:
 Body content`,
       },
       llmResponses: [
-        { choices: [{ message: { content: "My draft" } }], usage: { prompt_tokens: 2, completion_tokens: 1 } },
         {
-          choices: [{ message: { content: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]) } }],
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: "draft",
+                    type: "function",
+                    function: {
+                      name: "submit_linkedin_draft",
+                      arguments: JSON.stringify({ draft: "My draft" }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
           usage: { prompt_tokens: 2, completion_tokens: 1 },
         },
       ],

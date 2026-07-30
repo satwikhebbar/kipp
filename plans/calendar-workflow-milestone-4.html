@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp Calendar — Milestone 4 Implementation Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --code:#020617; } * { box-sizing:border-box; } body { max-width:1040px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; } h1,h2,h3 { line-height:1.25; color:#f8fafc; } h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; } h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; } h3 { margin-top:28px; font-size:1.12rem; } p,li { max-width:90ch; } .lede { color:var(--muted); font-size:1.1rem; } .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; } .note { border-left-color:var(--amber); } .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; } code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; } pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); } table { width:100%; border-collapse:collapse; margin:20px 0; } th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#cbd5e1; background:#1e293b; } ol>li { margin:14px 0; } @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp Calendar — Milestone 4 Implementation Plan</h1>
+    <p class="lede">Adopt the Calendar-validated native-tool runtime in LinkedIn while preserving its established draft, feedback, approval, publishing, and failure contract.</p>
+    <div class="callout"><strong>Outcome:</strong> LinkedIn generation and revision become bounded, workflow-scoped native-tool sessions. The model may submit a draft candidate through one typed handoff tool; only deterministic Workflow code may notify, accept approval, read credentials, create a LinkedIn draft, or archive the idea.<br /><span class="tag">LinkedIn</span><span class="tag">Native tools</span><span class="tag">Deterministic approval</span><span class="tag">Cloudflare Workflows</span></div>
+
+    <h2>1. Scope and invariants</h2>
+    <table><thead><tr><th>Included</th><th>Excluded</th></tr></thead><tbody>
+      <tr><td>Native-tool generation and revision; a static LinkedIn allowlist; schema-validated draft handoff; bounded provider/tool turns; safe guard and provider failures; lifecycle metrics; parity integration coverage.</td><td>Calendar behavior, LinkedIn API changes, direct model publishing, new Telegram commands or copy, backlog schema changes, generic memory, analytics dashboards, recurrence, and a universal feedback-session abstraction.</td></tr>
+    </tbody></table>
+    <ul>
+      <li>The only model-visible LinkedIn capability is <code>submit_linkedin_draft</code>. It returns an acknowledgement and cannot call GitHub, Telegram, the token vault, or LinkedIn.</li>
+      <li>The provider must make exactly one successful handoff call per generation or revision attempt. Prose-only output, multiple calls in a turn, unknown tools, malformed input, and exhausted budgets fail closed.</li>
+      <li>Publishing remains outside the model session. Only a valid, routed <code>__approve__</code> interaction reaches deterministic credential lookup and <code>createDraftPost</code>.</li>
+      <li>Draft text, source idea content, feedback, provider reasoning, tokens, and provider bodies never enter lifecycle logs.</li>
+      <li>The existing maximum of four user feedback rounds, interaction expiry, opaque routing, status transitions, cumulative usage/cost, archive behavior, and safe Telegram failures remain unchanged.</li>
+    </ul>
+
+    <h2>2. LinkedIn agent contract</h2>
+    <pre>idea + style prompt (+ latest approved conversation / feedback)
+  → runTools(provider, linkedInRegistry, LINKEDIN_ALLOWED_TOOLS)
+    → ToolGuard validates submit_linkedin_draft({ draft })
+    → successful handoff returns control to PipelineWorkflow
+  → persist candidate + notify user
+  → wait for deterministic Telegram interaction
+    → feedback: start a new bounded revision tool session
+    → approval: deterministic LinkedIn write + archive</pre>
+    <p>Add a LinkedIn-specific module that owns its system prompt, Zod schemas, registry construction, allowlist, transcript conversion, and bounded session result. The prompt carries the existing style and quality contract: 150–300 words, engaging hook, brief personal angle, clear takeaway, engagement prompt, and professional conversational tone. On revision, it receives the canonical prior conversation plus the newest human feedback and must return a complete replacement draft.</p>
+    <p>The successful handoff output is deliberately non-authoritative: <code>{ accepted: true }</code>. The handler records one in-memory candidate for the surrounding Workflow step. An empty or whitespace-only draft is rejected by schema; application code trims accepted text and preserves the existing step-output size guard.</p>
+
+    <h2>3. Workflow migration</h2>
+    <ol>
+      <li>Replace the fixed draft → critique → revise generation block with one native-tool session and remove the production dependency on the text-only draft, critique, and revise agents.</li>
+      <li>Represent LinkedIn history as canonical tool-provider messages so generation and subsequent user revisions use the same provider abstraction. Persist only the serializable transcript needed for later feedback.</li>
+      <li>Accumulate usage from every provider turn returned by the tool session. Preserve model resolution, stored cost fields, and Telegram cost lines.</li>
+      <li>On a failed tool session or provider error, preserve the existing safe Workflow retry/failure behavior, emit metadata-only failure information, and do not persist a candidate, register approval controls, or mutate LinkedIn.</li>
+      <li>Leave approval, token lookup, LinkedIn draft creation, archive, timeout, and Interaction Router code deterministic. No publish tool is declared or registered.</li>
+    </ol>
+    <div class="callout note"><strong>Abstraction boundary:</strong> Milestone 4 reuses <code>runTools</code>, provider adapters, <code>ToolGuard</code>, and canonical messages. It does not fold the LinkedIn and Calendar state machines together. The separate Beads item for a reusable bounded feedback-session runner remains the place to evaluate shared wait/resume mechanics.</div>
+
+    <h2>4. Failure and security behavior</h2>
+    <table><thead><tr><th>Failure</th><th>Required outcome</th></tr></thead><tbody>
+      <tr><td>Unknown or non-allowlisted tool</td><td>Guard returns a redacted category; the bounded session cannot yield an approvable draft.</td></tr>
+      <tr><td>Invalid draft input/output</td><td>No candidate is persisted or shown; validation output contains schema paths/expectations only.</td></tr>
+      <tr><td>Prose-only response or multiple calls</td><td>Bounded repair or call-limit failure; no approval interaction is registered.</td></tr>
+      <tr><td>Provider HTTP/protocol failure</td><td>Safe Workflow failure and metadata-only lifecycle log; no candidate or approval controls, and no provider payload, prompt, draft, or secret is logged.</td></tr>
+      <tr><td>Hallucinated publish request</td><td>No publishing tool exists in the registry or declarations, so the request is denied and cannot reach LinkedIn.</td></tr>
+      <tr><td>Valid approval with missing/revoked credentials or LinkedIn error</td><td>Retain the existing safe deterministic notification and do not archive.</td></tr>
+    </tbody></table>
+
+    <h2>5. Verification plan</h2>
+    <table><thead><tr><th>Layer</th><th>Coverage</th></tr></thead><tbody>
+      <tr><td>LinkedIn agent unit</td><td>Initial native tool request, revision transcript and feedback, usage aggregation, trim/validation, required handoff repair, unknown/non-allowlisted tool, multiple calls, and provider failure.</td></tr>
+      <tr><td>Runtime/provider regression</td><td>DeepSeek and Gemini declaration/call/result mapping remains green; guard results stay redacted.</td></tr>
+      <tr><td>Workflow unit</td><td>Native generation persists and notifies; revision replaces the candidate; timeout and tool/provider failures never publish; approval alone reaches credential and publish code.</td></tr>
+      <tr><td>Integration</td><td>Tool request → candidate → approval → LinkedIn DRAFT/archive; revision → new candidate → approval; guard denial; missing configuration; publish failure hygiene; interaction expiry and routing parity.</td></tr>
+      <tr><td>System</td><td>Focused tests, <code>pnpm test:unit</code>, <code>pnpm test:integration</code>, typecheck, lint, documentation gate, and full <code>pnpm check</code>. Controlled dev-bot smoke: generate, revise, approve, inspect the LinkedIn draft, and verify safe error behavior.</td></tr>
+    </tbody></table>
+
+    <h2>6. Delivery sequence</h2>
+    <ol>
+      <li>Claim Milestone 4 and record this plan in Beads.</li>
+      <li>Add the LinkedIn typed tool-session module with focused unit coverage.</li>
+      <li>Wire native generation and revision into <code>PipelineWorkflow</code> while leaving the approval/publish scaffold untouched.</li>
+      <li>Update workflow and integration fakes/assertions to use native provider tool calls, then add explicit guard-denial and failure cases.</li>
+      <li>Run all quality gates, inspect the diff and repository status, record automated evidence in Beads, and leave the issue open until the required dev-bot smoke test passes.</li>
+    </ol>
+  </body>
+</html>

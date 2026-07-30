@@ -39,17 +39,18 @@ sequenceDiagram
   participant LI as LinkedIn API
 
   P->>G: read ideas.md and style prompt
-  P->>L: draft, critique, revise (up to four critique loops)
+  P->>L: bounded native-tool draft session
+  L->>P: submit_linkedin_draft candidate
   P->>G: save draft and awaiting-feedback status
   P->>T: send draft with approval controls
   P->>P: wait for Telegram event
   U->>T: approve or provide feedback
   T->>P: send workflow event
-
   alt feedback
-    P->>L: revise draft
-    P->>G: update draft
-    P->>T: send revised draft
+    P->>L: prior native transcript + feedback
+    L->>P: submit_linkedin_draft replacement
+    P->>G: replace awaiting-feedback draft
+    P->>T: send revised draft with approval controls
   else approval
     P->>V: read encrypted access token
     P->>LI: create LinkedIn post with lifecycleState DRAFT

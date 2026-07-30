@@ -58,18 +58,28 @@ correlation:
 
 Body content`
 
-const DRAFT_RESPONSE = {
-  choices: [{ message: { content: "My draft content" } }],
-  usage: { prompt_tokens: 5, completion_tokens: 3 },
+function linkedInToolResponse(draft: string, id: string) {
+  return {
+    choices: [
+      {
+        message: {
+          content: "",
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              function: { name: "submit_linkedin_draft", arguments: JSON.stringify({ draft }) },
+            },
+          ],
+        },
+      },
+    ],
+    usage: { prompt_tokens: 5, completion_tokens: 3 },
+  }
 }
-const CRITIQUE_PASS = {
-  choices: [{ message: { content: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]) } }],
-  usage: { prompt_tokens: 5, completion_tokens: 3 },
-}
-const REVISE_RESPONSE = {
-  choices: [{ message: { content: "Revised draft" } }],
-  usage: { prompt_tokens: 3, completion_tokens: 2 },
-}
+
+const DRAFT_RESPONSE = linkedInToolResponse("My draft content", "draft")
+const REVISE_RESPONSE = linkedInToolResponse("Revised draft", "revision")
 
 function makeStep() {
   return createFakeStep()
@@ -88,7 +98,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
   it("generates draft, notifies, publishes to LinkedIn, and archives on approval", async () => {
     const { fetch, getState } = createFakeNetwork({
       githubFiles: { "ideas.md": RAW_IDEA, "archive.md": "" },
-      llmResponses: [DRAFT_RESPONSE, CRITIQUE_PASS],
+      llmResponses: [DRAFT_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
 
@@ -131,7 +141,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
   it("notifies but does not publish when no LinkedIn token is available", async () => {
     const { fetch, getState } = createFakeNetwork({
       githubFiles: { "ideas.md": RAW_IDEA },
-      llmResponses: [DRAFT_RESPONSE, CRITIQUE_PASS],
+      llmResponses: [DRAFT_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
 
@@ -159,7 +169,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
   it("revises on feedback then publishes on subsequent approval", async () => {
     const { fetch, getState } = createFakeNetwork({
       githubFiles: { "ideas.md": RAW_IDEA, "archive.md": "" },
-      llmResponses: [DRAFT_RESPONSE, CRITIQUE_PASS, REVISE_RESPONSE],
+      llmResponses: [DRAFT_RESPONSE, REVISE_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
 
@@ -194,7 +204,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
   it("marks idea as expired when feedback times out after revision", async () => {
     const { fetch, getState } = createFakeNetwork({
       githubFiles: { "ideas.md": RAW_IDEA },
-      llmResponses: [DRAFT_RESPONSE, CRITIQUE_PASS, REVISE_RESPONSE],
+      llmResponses: [DRAFT_RESPONSE, REVISE_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
 
@@ -221,12 +231,97 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(ideasMd).toContain("status: awaiting-feedback-expired")
   })
 
+  it("denies a hallucinated publishing tool before approval or any LinkedIn mutation", async () => {
+    const deniedResponse = {
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                id: "publish",
+                type: "function",
+                function: { name: "publish_linkedin_draft", arguments: JSON.stringify({ draft: "Unsafe" }) },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }
+    const { fetch, getState } = createFakeNetwork({
+      githubFiles: { "ideas.md": RAW_IDEA },
+      llmResponses: [deniedResponse, deniedResponse, deniedResponse],
+    })
+    vi.stubGlobal("fetch", fetch)
+    const step = makeStep()
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: { ...baseEnv(), LINKEDIN_ACCESS_TOKEN: "valid-token", LINKEDIN_AUTHOR_URN: "urn:li:person:123" },
+    })
+
+    await expect(
+      (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), {
+        do: step.do,
+        waitForEvent: step.waitForEvent,
+        sleep: step.sleep,
+        sleepUntil: step.sleepUntil,
+      }),
+    ).rejects.toThrow("provider-turn-limit")
+
+    expect(step.getCalledSteps()).not.toContain("notify")
+    expect(step.getCalledSteps()).not.toContain("linkedin-publish")
+    expect(step.getCalledSteps()).not.toContain("archive")
+    expect(getState().linkedinDrafts).toHaveLength(0)
+    expect(getState().githubFiles.get("ideas.md")).toContain("status: raw")
+  })
+
+  it("fails safely on a native provider error without creating an approvable draft", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    const { fetch: harnessFetch, getState } = createFakeNetwork({
+      githubFiles: { "ideas.md": RAW_IDEA },
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL, opts?: RequestInit) => {
+        const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
+        if (urlStr.includes("api.deepseek.com"))
+          return {
+            ok: false,
+            status: 503,
+            text: () => Promise.resolve("provider body must stay private"),
+          }
+        return harnessFetch(url, opts)
+      }),
+    )
+    const step = makeStep()
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: { ...baseEnv(), LLM_MAX_RETRIES: "0" } })
+
+    await expect(
+      (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), {
+        do: step.do,
+        waitForEvent: step.waitForEvent,
+        sleep: step.sleep,
+        sleepUntil: step.sleepUntil,
+      }),
+    ).rejects.toThrow("DeepSeek tool request failed (503)")
+
+    const errorOutput = consoleSpy.mock.calls.flat().join("\n")
+    consoleSpy.mockRestore()
+    expect(errorOutput).not.toContain("provider body must stay private")
+    expect(step.getCalledSteps()).not.toContain("notify")
+    expect(step.getCalledSteps()).not.toContain("linkedin-publish")
+    expect(getState().linkedinDrafts).toHaveLength(0)
+    expect(getState().githubFiles.get("ideas.md")).toContain("status: raw")
+  })
+
   it("does not leak LinkedIn token in Telegram error on publish failure", async () => {
     const telegramTexts: string[] = []
 
     const { fetch: harnessFetch } = createFakeNetwork({
       githubFiles: { "ideas.md": RAW_IDEA },
-      llmResponses: [DRAFT_RESPONSE, CRITIQUE_PASS],
+      llmResponses: [DRAFT_RESPONSE],
     })
 
     vi.stubGlobal(
