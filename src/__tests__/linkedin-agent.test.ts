@@ -7,9 +7,9 @@ function providerWith(...responses: Awaited<ReturnType<ToolProviderClient["gener
 }
 
 describe("LinkedIn native-tool agent", () => {
-  it("submits a trimmed draft through the one workflow-scoped handoff tool", async () => {
+  it("submits a trimmed complete response through the one workflow-scoped handoff tool", async () => {
     const provider = providerWith({
-      toolCalls: [{ id: "draft-1", name: "submit_linkedin_draft", input: { draft: "  Final draft  " } }],
+      toolCalls: [{ id: "response-1", name: "submit_linkedin_response", input: { response: "  Final response  " } }],
       usage: { inputTokens: 11, outputTokens: 7 },
     })
 
@@ -19,14 +19,14 @@ describe("LinkedIn native-tool agent", () => {
     )
 
     expect(result.completed).toBe(true)
-    expect(result.draft).toBe("Final draft")
-    expect(result.toolNames).toEqual(["submit_linkedin_draft"])
+    expect(result.response).toBe("Final response")
+    expect(result.toolNames).toEqual(["submit_linkedin_response"])
     expect(result.usage).toEqual({ inputTokens: 11, outputTokens: 7 })
     expect(provider.generate).toHaveBeenCalledWith(
       expect.objectContaining({
-        toolChoice: "required",
-        reasoning: "disabled",
-        tools: [expect.objectContaining({ name: "submit_linkedin_draft" })],
+        toolChoice: undefined,
+        reasoning: undefined,
+        tools: [expect.objectContaining({ name: "submit_linkedin_response" })],
       }),
     )
   })
@@ -38,32 +38,32 @@ describe("LinkedIn native-tool agent", () => {
     })
     const first = await runLinkedInToolSession(
       providerWith({
-        toolCalls: [{ id: "first", name: "submit_linkedin_draft", input: { draft: "First draft" } }],
+        toolCalls: [{ id: "first", name: "submit_linkedin_response", input: { response: "First response" } }],
         usage: { inputTokens: 5, outputTokens: 3 },
       }),
       initial,
     )
     const revisedInput = appendLinkedInFeedback(first.messages, "Make it shorter")
     const revisionProvider = providerWith({
-      toolCalls: [{ id: "second", name: "submit_linkedin_draft", input: { draft: "Short draft" } }],
+      toolCalls: [{ id: "second", name: "submit_linkedin_response", input: { response: "Short response" } }],
       usage: { inputTokens: 9, outputTokens: 4 },
     })
 
     const second = await runLinkedInToolSession(revisionProvider, revisedInput)
 
-    expect(second.draft).toBe("Short draft")
+    expect(second.response).toBe("Short response")
     expect(revisedInput.at(-1)).toEqual({ role: "user", text: "Make it shorter" })
     expect(revisionProvider.generate).toHaveBeenCalledWith(
       expect.objectContaining({
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: "assistant",
-            toolCalls: [expect.objectContaining({ name: "submit_linkedin_draft" })],
+            toolCalls: [expect.objectContaining({ name: "submit_linkedin_response" })],
           }),
           {
             role: "tool",
             toolCallId: "first",
-            name: "submit_linkedin_draft",
+            name: "submit_linkedin_response",
             output: { ok: true, output: { accepted: true } },
           },
           { role: "user", text: "Make it shorter" },
@@ -77,14 +77,14 @@ describe("LinkedIn native-tool agent", () => {
       providerWith(
         { text: "Here is a draft.", usage: { inputTokens: 4, outputTokens: 2 } },
         {
-          toolCalls: [{ id: "repair", name: "submit_linkedin_draft", input: { draft: "Repaired draft" } }],
+          toolCalls: [{ id: "repair", name: "submit_linkedin_response", input: { response: "Repaired response" } }],
           usage: { inputTokens: 6, outputTokens: 3 },
         },
       ),
       createLinkedInConversation("Direct.", { body: "Topic" }),
     )
 
-    expect(result.draft).toBe("Repaired draft")
+    expect(result.response).toBe("Repaired response")
     expect(result.providerTurns).toBe(2)
     expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5 })
   })
@@ -100,7 +100,7 @@ describe("LinkedIn native-tool agent", () => {
     )
 
     expect(result.completed).toBe(false)
-    expect(result.draft).toBeNull()
+    expect(result.response).toBeNull()
     expect(result.failureReason).toBe("provider-turn-limit")
     expect(result.toolExecutions).toEqual([
       expect.objectContaining({ tool: "unknown", outcome: "failed", failureCategory: "unknown-tool" }),
@@ -109,25 +109,25 @@ describe("LinkedIn native-tool agent", () => {
     ])
   })
 
-  it("rejects empty draft input and never exposes a publishing declaration", async () => {
+  it("rejects an empty response and never exposes a publishing declaration", async () => {
     const provider = providerWith(
       {
-        toolCalls: [{ id: "empty", name: "submit_linkedin_draft", input: { draft: "   " } }],
+        toolCalls: [{ id: "empty", name: "submit_linkedin_response", input: { response: "   " } }],
         usage: { inputTokens: 1, outputTokens: 1 },
       },
       {
-        toolCalls: [{ id: "empty-2", name: "submit_linkedin_draft", input: { draft: "" } }],
+        toolCalls: [{ id: "empty-2", name: "submit_linkedin_response", input: { response: "" } }],
         usage: { inputTokens: 1, outputTokens: 1 },
       },
       {
-        toolCalls: [{ id: "empty-3", name: "submit_linkedin_draft", input: { draft: "" } }],
+        toolCalls: [{ id: "empty-3", name: "submit_linkedin_response", input: { response: "" } }],
         usage: { inputTokens: 1, outputTokens: 1 },
       },
     )
 
     const result = await runLinkedInToolSession(provider, createLinkedInConversation("Direct.", { body: "Topic" }))
 
-    expect(result.draft).toBeNull()
+    expect(result.response).toBeNull()
     expect(result.toolExecutions[0]).toEqual(
       expect.objectContaining({ outcome: "failed", failureCategory: "invalid-input" }),
     )

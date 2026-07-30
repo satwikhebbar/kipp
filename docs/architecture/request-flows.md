@@ -40,7 +40,7 @@ sequenceDiagram
 
   P->>G: read ideas.md and style prompt
   P->>L: bounded native-tool draft session
-  L->>P: submit_linkedin_draft candidate
+  L->>P: submit_linkedin_response complete review response
   P->>G: save draft and awaiting-feedback status
   P->>T: send draft with approval controls
   P->>P: wait for Telegram event
@@ -48,7 +48,7 @@ sequenceDiagram
   T->>P: send workflow event
   alt feedback
     P->>L: prior native transcript + feedback
-    L->>P: submit_linkedin_draft replacement
+    L->>P: submit_linkedin_response complete replacement response
     P->>G: replace awaiting-feedback draft
     P->>T: send revised draft with approval controls
   else approval

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import { GithubError } from "../integrations/github"
-import { readPrompt } from "../prompts/resolver"
+import { readPrompt, resolvePrompt } from "../prompts/resolver"
 
 function mockClient(get: (path: string) => { content: string; sha: string } | Error) {
   return {
@@ -68,5 +68,31 @@ describe("readPrompt", () => {
     const result = await readPrompt(client, [], "fallback")
     expect(result).toBe("fallback")
     expect(client.readFile).not.toHaveBeenCalled()
+  })
+})
+
+describe("resolvePrompt", () => {
+  it("reports the path and GitHub version of the selected prompt", async () => {
+    const client = mockClient((path) => {
+      if (path === "style-prompt.md") return { content: "Current instructions", sha: "abc123" }
+      throw new GithubError(404, "not found")
+    })
+
+    await expect(resolvePrompt(client, ["custom.md", "style-prompt.md"], "fallback")).resolves.toEqual({
+      content: "Current instructions",
+      source: "style-prompt.md",
+      sha: "abc123",
+    })
+  })
+
+  it("identifies the bundled default when no repository prompt exists", async () => {
+    const client = mockClient(() => {
+      throw new GithubError(404, "not found")
+    })
+
+    await expect(resolvePrompt(client, ["style-prompt.md"], "fallback")).resolves.toEqual({
+      content: "fallback",
+      source: "built-in default",
+    })
   })
 })

@@ -8,7 +8,7 @@ import { createTelegramClient } from "./integrations/telegram"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import { computeCost, formatCostLine } from "./pricing"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
-import { readPrompt } from "./prompts/resolver"
+import { resolvePrompt } from "./prompts/resolver"
 import { createToolProvider, resolveModel } from "./providers"
 import { logRuntime } from "./runtime/logging"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "./types"
@@ -133,7 +133,18 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const manager = createBacklogManager(client)
 
       const stylePaths = [this.env.PROMPT_STYLE_PATH, "style-prompt.md"].filter(Boolean) as string[]
-      const stylePrompt = await readPrompt(client, stylePaths, DEFAULT_STYLE_PROMPT)
+      const promptResolution = await resolvePrompt(client, stylePaths, DEFAULT_STYLE_PROMPT)
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "linkedin-style-prompt-resolved",
+        outcome: "succeeded",
+        details: {
+          source: promptResolution.source,
+          sha: promptResolution.sha ?? "built-in",
+          length: promptResolution.content.length,
+        },
+      })
+      const stylePrompt = promptResolution.content
       const initialMessages = createLinkedInConversation(stylePrompt, {
         title: ideaTitle,
         body: ideaBody,
@@ -150,8 +161,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           toolFailureCount: session.toolExecutions.filter((execution) => execution.outcome === "failed").length,
         },
       })
-      if (!session.draft) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-draft"}`)
-      const draft = session.draft
+      if (!session.response) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
+      const draft = session.response
       const messages = session.messages
 
       const ideas = await manager.readIdeas()
@@ -351,8 +362,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             toolFailureCount: session.toolExecutions.filter((execution) => execution.outcome === "failed").length,
           },
         })
-        if (!session.draft) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-draft"}`)
-        const nextDraft = session.draft
+        if (!session.response)
+          throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
+        const nextDraft = session.response
         const client = createGitHubClient(this.env)
         const manager = createBacklogManager(client)
         const ideas = await manager.readIdeas()

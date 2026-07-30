@@ -58,7 +58,7 @@ correlation:
 
 Body content`
 
-function linkedInToolResponse(draft: string, id: string) {
+function linkedInToolResponse(response: string, id: string) {
   return {
     choices: [
       {
@@ -68,7 +68,7 @@ function linkedInToolResponse(draft: string, id: string) {
             {
               id,
               type: "function",
-              function: { name: "submit_linkedin_draft", arguments: JSON.stringify({ draft }) },
+              function: { name: "submit_linkedin_response", arguments: JSON.stringify({ response }) },
             },
           ],
         },

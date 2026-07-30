@@ -17,13 +17,13 @@ vi.mock("../providers", () => ({
     generate: async (input: {
       messages: Array<
         | { role: string; text: string }
-        | { role: "assistant"; toolCalls: Array<{ input: { draft?: string } }> }
+        | { role: "assistant"; toolCalls: Array<{ input: { response?: string } }> }
         | { role: "tool" }
       >
     }) => {
       const messages = input.messages.flatMap((message) => {
         if (message.role === "tool") return []
-        if ("toolCalls" in message) return [{ role: "assistant", content: message.toolCalls[0]?.input.draft ?? "" }]
+        if ("toolCalls" in message) return [{ role: "assistant", content: message.toolCalls[0]?.input.response ?? "" }]
         if ("text" in message) return [{ role: message.role, content: message.text }]
         return []
       })
@@ -39,8 +39,8 @@ vi.mock("../providers", () => ({
         toolCalls: [
           {
             id: crypto.randomUUID(),
-            name: "submit_linkedin_draft",
-            input: { draft: response.text },
+            name: "submit_linkedin_response",
+            input: { response: response.text },
           },
         ],
         usage: response.usage,

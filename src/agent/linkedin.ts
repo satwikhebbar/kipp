@@ -5,29 +5,22 @@ import type { ToolRegistry } from "../runtime/tools"
 import type { LLMUsage } from "../types"
 import type { DraftInput } from "./draft"
 
-const SUBMIT_LINKEDIN_DRAFT = "submit_linkedin_draft"
-const MAX_DRAFT_CHARACTERS = 10_000
+const SUBMIT_LINKEDIN_RESPONSE = "submit_linkedin_response"
+const MAX_RESPONSE_CHARACTERS = 10_000
 
-const draftInputSchema = z.object({
-  draft: z.string().trim().min(1).max(MAX_DRAFT_CHARACTERS),
+const responseInputSchema = z.object({
+  response: z.string().trim().min(1).max(MAX_RESPONSE_CHARACTERS),
 })
 const draftOutputSchema = z.object({ accepted: z.literal(true) })
 
 const LINKEDIN_AGENT_PROMPT = `You are Kipp's LinkedIn writing agent.
 
-Write a concise LinkedIn post of 150–300 words with:
-- an engaging first-line hook;
-- a brief personal story or observation;
-- a clear takeaway or lesson;
-- a final question or prompt for engagement; and
-- a professional but conversational tone.
+Use the supplied style instructions and source material as the authoritative requirements for the complete response. When the user supplies revision feedback, return a complete replacement response that preserves the established topic and style while applying that feedback.
 
-Use the supplied style instructions and source material. Silently review the complete draft against every requirement before submitting it. When the user supplies revision feedback, return a complete replacement draft that preserves the established topic and style while applying that feedback.
-
-Call submit_linkedin_draft exactly once with the final draft. This is the only available action. Never request or claim to publish, archive, notify, or access credentials. Do not answer with prose outside the tool call.`
+Call submit_linkedin_response exactly once with the complete response exactly as it should appear for human review, including every requested alternative or recommendation. This is the only available action. Never request or claim to publish, archive, notify, or access credentials. Do not answer with prose outside the tool call.`
 
 export interface LinkedInToolSessionResult {
-  draft: string | null
+  response: string | null
   messages: ToolConversationMessage[]
   completed: boolean
   failureReason?: ToolRunFailureReason
@@ -38,12 +31,9 @@ export interface LinkedInToolSessionResult {
   usage: LLMUsage
 }
 
-/** Builds the canonical native-tool transcript for a new LinkedIn draft. */
+/** Builds the canonical native-tool transcript for a new LinkedIn response. */
 export function createLinkedInConversation(stylePrompt: string, input: DraftInput): ToolConversationMessage[] {
-  const source = [
-    input.title ? `Write a LinkedIn post about: ${input.title}` : "Write a LinkedIn post",
-    `Context:\n${input.body}`,
-  ]
+  const source = [input.title ? `Topic: ${input.title}` : "Topic: LinkedIn post", `Context:\n${input.body}`]
   if (input.substackBody) source.push(`Reference material:\n${input.substackBody}`)
   return [
     { role: "system", text: `${LINKEDIN_AGENT_PROMPT}\n\nStyle instructions:\n${stylePrompt}` },
@@ -59,22 +49,22 @@ export function appendLinkedInFeedback(
   return [...messages, { role: "user", text: feedback }]
 }
 
-/** Runs one bounded LinkedIn generation or revision session and captures its typed draft handoff. */
+/** Runs one bounded LinkedIn generation or revision session and captures its complete response handoff. */
 export async function runLinkedInToolSession(
   provider: ToolProviderClient,
   initialMessages: ToolConversationMessage[],
 ): Promise<LinkedInToolSessionResult> {
-  let draft: string | null = null
+  let response: string | null = null
   const registry: ToolRegistry = {
-    [SUBMIT_LINKEDIN_DRAFT]: {
-      name: SUBMIT_LINKEDIN_DRAFT,
+    [SUBMIT_LINKEDIN_RESPONSE]: {
+      name: SUBMIT_LINKEDIN_RESPONSE,
       description:
-        "Submit the complete LinkedIn draft candidate for deterministic workflow validation and human review. This does not publish.",
-      input: draftInputSchema,
+        "Submit the complete LinkedIn response for deterministic workflow delivery and human review. This does not publish.",
+      input: responseInputSchema,
       output: draftOutputSchema,
       privacy: "private",
-      handler: async ({ draft: candidate }) => {
-        draft = candidate.trim()
+      handler: async ({ response: candidate }) => {
+        response = candidate.trim()
         return { accepted: true as const }
       },
     },
@@ -83,17 +73,15 @@ export async function runLinkedInToolSession(
     provider,
     registry,
     {
-      allowedTools: [SUBMIT_LINKEDIN_DRAFT],
-      handoffTools: [SUBMIT_LINKEDIN_DRAFT],
+      allowedTools: [SUBMIT_LINKEDIN_RESPONSE],
+      handoffTools: [SUBMIT_LINKEDIN_RESPONSE],
       requireHandoff: true,
       maxToolCallsPerTurn: 1,
-      toolChoice: "required",
-      reasoning: "disabled",
     },
     initialMessages,
   )
   return {
-    draft: result.completed ? draft : null,
+    response: result.completed ? response : null,
     messages: result.messages,
     completed: result.completed,
     failureReason: result.failureReason,
