@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp — Agent-Centered Workflow Architecture Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --red:#f87171; --code:#020617; }
+      * { box-sizing:border-box; }
+      html { scroll-behavior:smooth; }
+      body { max-width:1080px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; }
+      h1,h2,h3 { line-height:1.25; color:#f8fafc; }
+      h1 { margin:0 0 10px; padding-bottom:20px; border-bottom:2px solid var(--line); font-size:2.25rem; }
+      h2 { margin-top:46px; padding-bottom:8px; border-bottom:1px solid var(--line); color:var(--blue); }
+      h3 { margin-top:28px; font-size:1.12rem; }
+      p,li { max-width:94ch; }
+      a { color:#93c5fd; }
+      .lede { color:var(--muted); font-size:1.1rem; }
+      .callout { margin:24px 0; padding:18px 20px; border-left:4px solid var(--green); border-radius:0 8px 8px 0; background:var(--panel); }
+      .note { border-left-color:var(--amber); }
+      .risk { border-left-color:var(--red); }
+      .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; }
+      .decision { color:var(--amber); font-weight:700; }
+      .recommended { color:var(--green); font-weight:700; }
+      code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; }
+      pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); }
+      table { width:100%; margin:20px 0; border-collapse:collapse; }
+      th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+      th { color:#cbd5e1; background:#1e293b; }
+      ol>li { margin:14px 0; }
+      .flow { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin:22px 0; }
+      .flow div { min-height:104px; padding:14px; border:1px solid var(--line); border-radius:8px; background:#111c36; }
+      .flow strong { display:block; margin-bottom:6px; color:#bfdbfe; }
+      @media (max-width:820px) { .flow { grid-template-columns:1fr; } .flow div { min-height:auto; } }
+      @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp — Agent-Centered Workflow Architecture Plan</h1>
+    <p class="lede">Refactor Calendar from a terminal proposal extractor followed by a code-authored conversation into a bounded, tool-using agent. Preserve the completed Milestone 5 recurrence and integration baseline, and align LinkedIn with the same session contract without changing its approval or publishing behavior.</p>
+    <div class="callout"><strong>Outcome:</strong> for each Telegram interaction, the model interprets the conversation, uses guarded read and evaluation tools when helpful, and reaches exactly one workflow-approved terminal state: a validated plan ready to create or a clear request for all information still needed.<br /><span class="tag">Bounded agent session</span><span class="tag">Typed deterministic facts</span><span class="tag">Opaque plan authorization</span><span class="tag">Durable 15-minute context</span></div>
+    <p><a href="./calendar-workflow-milestone-5.html">← Milestone 5 recurrence baseline</a></p>
+
+    <h2>1. Relationship to Milestone 5</h2>
+    <p>The Milestone 5 implementation is a recoverable, passing baseline rather than architecture to discard. This plan replaces only the ownership of conversation and agent orchestration.</p>
+    <table><thead><tr><th>Retain as authoritative</th><th>Replace or reshape</th></tr></thead><tbody>
+      <tr><td><code>rrule</code>-backed civil-date expansion; recurrence horizon and month-end rules; timezone and scheduling primitives; FreeBusy policy; Google recurring parent and exception reconciliation; stable identities; compensation; reconnect and interaction routing; existing characterization tests.</td><td>Terminal-only proposal tools; English-returning domain validators; synthetic request-text assembly; workflow-authored clarification and conflict prose; prose-coupled tests; the assumption that Calendar details can never be exposed through a purpose-built model tool.</td></tr>
+    </tbody></table>
+    <div class="callout note"><strong>Tracking:</strong> this is the decision and migration plan for <code>agent-harness-0sg.3.1</code>. Coverage and module decomposition remain separately tracked by <code>agent-harness-0sg.3.2</code>, <code>agent-harness-0sg.3.3</code>, and <code>agent-harness-0sg.3.4</code>.</div>
+
+    <h2>2. Approved architecture decisions</h2>
+    <table><thead><tr><th>Decision</th><th>Approved contract</th></tr></thead><tbody>
+      <tr><td><span class="decision">A1 — Mutation boundary</span></td><td>The agent hands off <code>ready_to_create { planId }</code>. It never calls Google Calendar mutation directly. The workflow resolves, freshly revalidates, and idempotently writes the workflow-owned plan.</td></tr>
+      <tr><td><span class="decision">A2 — Calendar read projection</span></td><td>A bounded listing tool may expose opaque reference, title, start/end, all-day state, and transparency from the primary calendar. Descriptions, locations, attendees, organizers, conferencing data, links, credentials, and raw API responses remain excluded.</td></tr>
+      <tr><td><span class="decision">A3 — Complete validation feedback</span></td><td>Zod and deterministic validators return every independently discoverable typed issue in one evaluation. The model asks for all actionable missing or invalid facts in one concise message.</td></tr>
+      <tr><td><span class="decision">A4 — Tool topology</span></td><td>Calendar exposes one purpose-limited event listing tool and one comprehensive candidate-evaluation tool rather than delegating policy across many small model-directed calls.</td></tr>
+      <tr><td><span class="decision">A5 — Durable conversation</span></td><td>During the existing 15-minute interaction window, persist canonical structured state plus a bounded native user/model/tool transcript. Omit reasoning and compact obsolete event-list payloads. Expiry abandons and discards the pending interaction.</td></tr>
+      <tr><td><span class="decision">A6 — Presentation</span></td><td>The model writes normal clarification and conflict explanations. Code owns fixed action labels, operational failures, OAuth recovery, timeouts, and successful-write confirmation templates.</td></tr>
+      <tr><td><span class="decision">A7 — Button execution</span></td><td>Fixed, guard-authorized button choices transition workflow state deterministically. Natural-language replies and Edit corrections resume the agent.</td></tr>
+    </tbody></table>
+
+    <h2>3. Responsibility boundary</h2>
+    <table><thead><tr><th>Layer</th><th>Owns</th><th>Must not own</th></tr></thead><tbody>
+      <tr><td>Model and prompt</td><td>Natural-language interpretation, ambiguity detection, recurrence/activity classification, choice explanation, and normal pre-write user-facing prose.</td><td>Date arithmetic, candidate invention, availability truth, option authorization, mutations, credentials, retries, idempotency, or policy whose failure changes Calendar state.</td></tr>
+      <tr><td>Zod and tool guard</td><td>Complete structural shape/type/presence errors; tool allowlists; input/output validation; terminal-state and opaque-reference checks.</td><td>Conversational prose or domain calculations that require validated values.</td></tr>
+      <tr><td>Calendar domain services</td><td>Cross-field and policy validation, date/time conversion, recurrence expansion, FreeBusy evaluation, conflict heuristics, candidate ranking, reminder policy, and typed issue/fact production.</td><td>English clarification, conflict, or confirmation responses.</td></tr>
+      <tr><td>Durable workflow</td><td>Canonical state, transcript lifetime, Telegram waits, fixed buttons, plan storage, fresh revalidation, mutation, compensation, delivery recovery, expiry, and safe fallbacks.</td><td>Open-ended interpretation of human language.</td></tr>
+    </tbody></table>
+    <div class="callout risk"><strong>Governing safety test:</strong> if a plausible model mistake could create, move, expose, or duplicate a real-world item, the relevant decision and authorization remain outside the prompt.</div>
+
+    <h2>4. End-to-end interaction</h2>
+    <div class="flow">
+      <div><strong>1. Telegram</strong>Receive natural-language request, reply, or correction and resolve it to the active workflow/version.</div>
+      <div><strong>2. Agent session</strong>Build bounded context from trusted state and native conversation messages; expose only state-appropriate tools.</div>
+      <div><strong>3. Guarded tools</strong>Optionally list projected events, then evaluate one strict one-off or recurring candidate into typed facts and opaque plans.</div>
+      <div><strong>4. Terminal handoff</strong>Return <code>needs_user_input</code> or <code>ready_to_create</code>. Guard rejects unissued facts, options, or plans.</div>
+      <div><strong>5. Workflow</strong>Wait for input, or freshly revalidate and write. Send a trusted template confirmation and retain the created baseline for Edit.</div>
+    </div>
+    <pre>Telegram input
+  → bounded Calendar agent (≤ 3 model turns, ≤ 4 tool calls, 1 call/turn)
+     ├─ list_calendar_events? → projected, untrusted event data
+     ├─ evaluate_calendar_candidate → typed issues | choices | plan
+     └─ terminal handoff
+          ├─ needs_user_input → LLM message + fixed reply/choice contract
+          └─ ready_to_create(planId)
+                → resolve current one-use plan
+                → fresh deterministic revalidation
+                → idempotent Calendar write
+                → deterministic confirmation + Edit</pre>
+
+    <h2>5. Shared session and terminal contracts</h2>
+    <p>Add a shared bounded agent-session result that carries the projected native messages, usage and execution metadata, and a workflow-specific terminal result. Avoid a universal business-outcome enum: Calendar and LinkedIn share mechanics while retaining their own terminal schemas.</p>
+    <pre>AgentSessionResult&lt;Terminal&gt; {
+  terminal: Terminal | null
+  messages: ProjectedToolConversationMessage[]
+  completed: boolean
+  failureReason?: bounded runtime failure
+  providerTurns, toolCallCount, toolNames, toolExecutions, usage
+}
+
+CalendarTerminal =
+  | ready_to_create { planId }
+  | needs_user_input {
+      message
+      reasonCodes[]
+      interaction:
+        | reply { requestedFacts[] }
+        | choices { optionIds[] }
+    }
+
+LinkedInTerminal = ready_for_review { response }</pre>
+    <ul>
+      <li><code>ready_to_create</code> succeeds only for an unexpired plan ID issued by the current interaction version.</li>
+      <li><code>needs_user_input</code> may be called directly for model-detected language ambiguity. After evaluation, its issue and option references must match the evaluator’s authorized result.</li>
+      <li>Messages persisted for later turns exclude provider reasoning content. Tool execution logs retain only safe metadata already supported by the runtime.</li>
+      <li>The current three-turn/four-call limits and required terminal-handoff repair remain fail-closed runtime policy.</li>
+    </ul>
+
+    <h2>6. Calendar tool contracts</h2>
+    <h3><code>list_calendar_events</code></h3>
+    <table><thead><tr><th>Input and bounds</th><th>Projected output</th><th>Guardrails</th></tr></thead><tbody>
+      <tr><td>RFC 3339 <code>timeMin</code>/<code>timeMax</code>; primary calendar only; no more than 31 calendar days; at most 50 projected events.</td><td><code>opaqueRef</code>, title, start/end, all-day state, transparency, and <code>truncated</code>.</td><td>Internally paginate only until the cap; never return raw objects; mark strings as untrusted data in the tool description and prompt; redact all content from logs.</td></tr>
+    </tbody></table>
+    <p>The existing <code>calendar.events.owned</code> scope already permits event listing on calendars the user owns, so this does not broaden OAuth consent. The plan records the official <a href="https://developers.google.com/workspace/calendar/api/v3/reference/events/list">Events list authorization contract</a> and <a href="https://developers.google.com/workspace/calendar/api/auth">Calendar scope description</a>.</p>
+
+    <h3><code>evaluate_calendar_candidate</code></h3>
+    <ul>
+      <li>Input is a discriminated <code>one_off</code> or <code>recurring</code> union. Each branch retains its own strict schema; <code>RecurringProposal</code> preserves explicit absence/default states.</li>
+      <li>Zod returns aggregate safe paths and expectations for malformed input. The handler never runs for structurally unsafe values.</li>
+      <li>The handler collects every independent semantic issue it can establish. Checks whose prerequisites are invalid are skipped rather than producing misleading secondary errors.</li>
+      <li>The handler performs recurrence expansion, FreeBusy access, time selection, and conflict-policy evaluation as one deterministic operation.</li>
+      <li>No validation or availability function returns English. Outputs use typed issue codes, safe parameters, summaries, and opaque identifiers.</li>
+    </ul>
+    <pre>CalendarEvaluation =
+  | needs_input { evaluationId, issues[] }
+  | choice_required { evaluationId, facts, options[] }
+  | ready { evaluationId, planId, summaryFacts }
+
+CalendarIssue {
+  code: approved enum
+  path: schema/domain field
+  kind: missing | ambiguous | invalid | policy | unavailable
+  safeParameters?: bounded typed values
+}
+
+CalendarOption {
+  optionId
+  action: use_candidate | create_with_adjustments | try_another_time | cancel
+  displayFacts
+}</pre>
+
+    <h2>7. Plan authorization and stale-state safety</h2>
+    <ol>
+      <li>Evaluation creates version-scoped opaque plan and option IDs inside workflow-owned durable state. IDs reveal no event or Telegram data.</li>
+      <li>A plan records the exact proposal, resolved one-off slot or recurring occurrence set, RRULE, exception set, reminder, evaluation version, and expiry.</li>
+      <li>Terminal guards accept only IDs issued by the active evaluation. Superseded, forged, consumed, expired, or wrong-version IDs fail as <code>invalid-state</code>.</li>
+      <li>Immediately before mutation, rerun the relevant deterministic policy and availability checks against fresh Calendar data. Do not let the model replace or amend the stored plan at this boundary.</li>
+      <li>If the plan changes, consume neither the plan nor a write identity. Feed a typed <code>availability_changed</code> result into a fresh bounded agent session so it can explain the new state; use a deterministic fallback if the provider is unavailable.</li>
+      <li>After a successful write, atomically mark the plan consumed and persist a trusted <code>write_succeeded</code> workflow event plus the complete edit baseline. Existing stable event identity and compensation behavior remain authoritative.</li>
+    </ol>
+
+    <h2>8. Conversation persistence and Telegram presentation</h2>
+    <ul>
+      <li>Persist the original request, real user replies, assistant messages, safe tool calls/results, terminal outcomes, canonical proposal state, current evaluation, and created-event baseline for at most 15 minutes.</li>
+      <li>Do not persist provider reasoning. After a terminal handoff, replace obsolete event-list item arrays with range/count/truncation metadata once the current evaluation has captured the needed facts. Canonical domain state, not prose, remains authoritative.</li>
+      <li>The model composes normal requests for missing information and explanations of conflicts or choices. It receives safe typed facts rather than English fragments from validators.</li>
+      <li>Code maps option IDs to fixed labels such as <strong>Use this time</strong>, <strong>Create with adjustments</strong>, <strong>Try another time</strong>, and <strong>Cancel</strong>. The model cannot invent a button or bind a label to a different action.</li>
+      <li>Use/confirm/cancel/retry button taps transition deterministically. A reply requested by the agent and an Edit correction append real user input and begin a new bounded agent session.</li>
+      <li>Successful writes use trusted templates populated from the persisted result. The next Edit session receives the structured created baseline without an extra LLM rendering turn.</li>
+      <li>OAuth recovery, timeouts, exhausted tool sessions, provider failures, and post-write delivery recovery retain concise deterministic fallbacks.</li>
+    </ul>
+
+    <h2>9. Calendar migration sequence</h2>
+    <ol>
+      <li><strong>Typed domain results:</strong> replace English-returning one-off and recurrence validation with aggregate issue collectors. Keep pure scheduling and recurrence behavior unchanged and add compatibility adapters only while the workflow migration is incomplete.</li>
+      <li><strong>Projected Calendar reads:</strong> add the bounded <code>events.list</code> integration and its schema-checked tool projection without changing FreeBusy-based authorization.</li>
+      <li><strong>Evaluation and plan store:</strong> assemble strict one-off/recurring inputs, deterministic evaluation outcomes, opaque plans/options, version binding, consumption, and fresh revalidation.</li>
+      <li><strong>Agent session:</strong> replace <code>submit_one_off_proposal</code>, <code>submit_recurring_proposal</code>, and <code>request_clarification</code> as the only available terminal actions with list/evaluate plus the two approved terminal handoffs.</li>
+      <li><strong>Durable conversation:</strong> persist projected native messages and canonical state across waits; remove synthetic question/reply concatenation and prose-dependent pending-conflict fields.</li>
+      <li><strong>Workflow simplification:</strong> replace normal hard-coded clarification/conflict branches with terminal-outcome handling while preserving deterministic buttons, auth recovery, mutation, compensation, confirmation, and Edit.</li>
+      <li><strong>Remove compatibility paths:</strong> once direct, conflict, recurrence, reconnect, and Edit integration coverage passes, delete English adapters and obsolete conversational helpers.</li>
+    </ol>
+
+    <h2>10. LinkedIn alignment</h2>
+    <p>LinkedIn is already close to the target: it runs a bounded native-tool session, persists its transcript, and hands a complete response to deterministic review and publishing. Adapt it to the shared session-result contract with <code>ready_for_review</code>; do not redesign the user experience.</p>
+    <ul>
+      <li>Keep Telegram approval, revision waits, publishing authorization, archival behavior, and failure handling deterministic.</li>
+      <li>Keep real feedback appended to the native conversation transcript.</li>
+      <li>Verify repository-wide imports before removing legacy draft/critique/revise/classify modules. Remove them only when production code no longer depends on them and parity tests pass.</li>
+    </ul>
+
+    <h2>11. Verification matrix</h2>
+    <table><thead><tr><th>Area</th><th>Required coverage</th></tr></thead><tbody>
+      <tr><td>Shared runtime</td><td>Aggregate Zod paths; state-dependent allowlists; required terminal repair; three-turn/four-call caps; workflow-specific terminals; reasoning omission; transcript compaction and expiry; metadata-only failures.</td></tr>
+      <tr><td>Calendar validation</td><td>Multiple structural and semantic issues in one result; safe parameters; prerequisite-aware collection; no English from domain validators; every one-off and supported recurrence policy branch.</td></tr>
+      <tr><td>Event listing</td><td>Primary calendar URL; 31-day and 50-event caps; pagination to cap; truncation; exact field projection; all-day and transparency handling; malicious titles remain inert data; no sensitive logging.</td></tr>
+      <tr><td>Plan authorization</td><td>Issued plan success; forged, stale, reused, expired, superseded, and wrong-version rejection; option-action binding; TOCTOU availability change; mutation only after fresh validation.</td></tr>
+      <tr><td>Calendar workflow</td><td>Clear one-off and recurrence through evaluate → ready → one write; all missing facts in one agent request; fixed conflict choices; deterministic button transitions; free-text replacement; auth recovery; timeout; confirmation-only recovery; Edit receives the trusted created baseline.</td></tr>
+      <tr><td>Recurring integration</td><td>Retain the complete Milestone 5 cadence, expansion, conflict-ratio, parent/exception reconciliation, compensation, and whole-series Edit matrix as characterization coverage.</td></tr>
+      <tr><td>LinkedIn parity</td><td>Generation, revision feedback, approval, publish, archive, expiry, and provider failure remain behaviorally unchanged under the shared result contract.</td></tr>
+      <tr><td>System</td><td><code>pnpm check</code>, integration suite, provider-contract suite, privacy-safe log inspection, and controlled Calendar dev-bot create/inspect/Edit/remove smoke coverage.</td></tr>
+    </tbody></table>
+
+    <h2>12. Completion criteria</h2>
+    <ul>
+      <li>Every normal Calendar interaction ends in a schema-validated <code>ready_to_create</code> or <code>needs_user_input</code> handoff.</li>
+      <li>No domain validator or availability engine returns user-facing English.</li>
+      <li>The model can read only the approved bounded Calendar projection and cannot authorize or parameterize a mutation outside an issued plan.</li>
+      <li>All action buttons bind to deterministic, guard-authorized IDs; all natural-language replies resume with real bounded conversation context.</li>
+      <li>Clear requests still auto-create, successful writes still offer immediate Edit, and no provider or delivery failure can duplicate an event.</li>
+      <li>Calendar documentation states the new read-tool and language boundary consistently, LinkedIn passes parity coverage, and all Milestone 5 recurrence behavior remains intact.</li>
+    </ul>
+  </body>
+</html>
