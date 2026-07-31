@@ -50,11 +50,12 @@ describe("createLinkedInClient", () => {
   it("creates a draft post and returns URN", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
+      headers: new Headers({ "x-restli-id": "urn:li:ugcPost:from-header" }),
       json: () => Promise.resolve({ id: "urn:li:share:abc123" }),
     })
     const client = createLinkedInClient("token")
     const result = await client.createDraftPost("urn:li:person:789", "Post text")
-    expect(result.urn).toBe("urn:li:share:abc123")
+    expect(result.urn).toBe("urn:li:ugcPost:from-header")
     expect(mockFetch).toHaveBeenCalledWith(
       "https://api.linkedin.com/v2/ugcPosts",
       expect.objectContaining({
@@ -76,6 +77,18 @@ describe("createLinkedInClient", () => {
     const callBody = JSON.parse(mockFetch.mock.calls[0][1].body)
     expect(callBody.lifecycleState).toBe("DRAFT")
     expect(callBody.specificContent["com.linkedin.ugc.ShareContent"].shareMediaCategory).toBe("NONE")
+  })
+
+  it("uses the JSON ID when LinkedIn does not return an x-restli-id header", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      headers: new Headers(),
+      json: () => Promise.resolve({ id: "urn:li:share:abc123" }),
+    })
+    const client = createLinkedInClient("token")
+    await expect(client.createDraftPost("urn:li:person:1", "Text")).resolves.toEqual({
+      urn: "urn:li:share:abc123",
+    })
   })
 
   it("throws on API error", async () => {

@@ -18,6 +18,13 @@ const MAX_FEEDBACK_ROUNDS = 4
 const HOURS_TO_MS = 3_600_000 // ponytail: precomputed 60 * 60 * 1000
 const DEFAULT_LLM_RETRIES = 3
 
+type PipelineWorkflowOutcome =
+  | { outcome: "published"; linkedInDraftUrn?: string }
+  | { outcome: "publish-failed" }
+  | { outcome: "not-configured" }
+  | { outcome: "feedback-expired" }
+  | { outcome: "feedback-limit-reached" }
+
 /** Generates a unique interaction ID. */
 function interactionId(): string {
   return crypto.randomUUID()
@@ -76,11 +83,26 @@ function interactionKeyboard(interactions: InteractionRegistration[]): Record<st
 }
 
 export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
-  override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
-    logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "started" })
+  override async run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep): Promise<PipelineWorkflowOutcome> {
+    logRuntime(this.env, {
+      workflow: event.instanceId,
+      event: "workflow-run",
+      outcome: "started",
+      details: { workflowEventTimestamp: event.timestamp.toISOString() },
+    })
     try {
       const result = await this._run(event, step)
-      logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "succeeded" })
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "workflow-run",
+        outcome: "succeeded",
+        details: {
+          terminalOutcome: result.outcome,
+          ...(result.outcome === "published" && result.linkedInDraftUrn
+            ? { linkedInDraftUrn: result.linkedInDraftUrn }
+            : {}),
+        },
+      })
       return result
     } catch (err) {
       logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "failed" })
@@ -89,7 +111,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     }
   }
 
-  private async _run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep) {
+  private async _run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep): Promise<PipelineWorkflowOutcome> {
     const { ideaId, ideaTitle, ideaBody, substackBody } = event.payload
 
     const stepDo = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -189,6 +211,16 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         costLine,
         model,
       })
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "linkedin-workflow-state-persisted",
+        outcome: "succeeded",
+        details: {
+          responseCharacters: draft.length,
+          transcriptMessages: messages.length,
+          transcriptCharacters: JSON.stringify(messages).length,
+        },
+      })
       await manager.updateIdea(ideaId, {
         draft,
         status: "awaiting-feedback",
@@ -224,10 +256,30 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let currentMessages = state.messages
     for (let i = 0; i < MAX_FEEDBACK_ROUNDS; i++) {
       const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || String(DEFAULT_WAIT_FOR_FEEDBACK_HOURS)
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "linkedin-feedback-wait",
+        outcome: "started",
+        details: { round: i, timeoutHours: Number(timeoutHours) },
+      })
       const reply = await step.waitForEvent<{ text?: string }>(`feedback-${i}`, {
         type: "telegram-reply",
         // biome-ignore lint/suspicious/noExplicitAny: WorkflowSleepDuration doesn't accept computed strings
         timeout: `${timeoutHours} hours` as any,
+      })
+      const text = (reply.payload?.text as string) ?? ((reply as Record<string, unknown>)?.text as string) ?? ""
+      logRuntime(this.env, {
+        workflow: event.instanceId,
+        event: "linkedin-feedback-wait",
+        outcome: "succeeded",
+        details: {
+          round: i,
+          result: reply.type === "timeout" ? "timeout" : "event",
+          interaction: text === "__approve__" ? "approve" : text === "__revise__" ? "revise" : "feedback",
+          responseCharacters: currentDraft.length,
+          transcriptMessages: currentMessages.length,
+          transcriptCharacters: JSON.stringify(currentMessages).length,
+        },
       })
       if (reply.type === "timeout") {
         await stepDo(`timeout-${i}`, async () => {
@@ -235,10 +287,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           const manager = createBacklogManager(client)
           await manager.updateIdea(ideaId, { status: "awaiting-feedback-expired" })
         })
-        return
+        return { outcome: "feedback-expired" }
       }
 
-      const text = (reply.payload?.text as string) ?? ((reply as Record<string, unknown>)?.text as string) ?? ""
       if (text === "__revise__") {
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
           const feedbackInteraction = await stepDo(`notify-revision-prompt-${i}`, async () => {
@@ -285,7 +336,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         } catch (err) {
           logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-token-read", outcome: "failed" })
           await notifyPublishFailure(err)
-          return
+          return { outcome: "publish-failed" }
         }
 
         if (!publishToken || !this.env.LINKEDIN_AUTHOR_URN) {
@@ -299,18 +350,25 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
               )
             })
           }
-          return
+          return { outcome: "not-configured" }
         }
 
+        let publication: { urn: string }
         try {
-          await stepDo("linkedin-publish", async () => {
+          publication = await stepDo("linkedin-publish", async () => {
             const li = createLinkedInClient(publishToken)
-            await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
+            return li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
           })
         } catch (err) {
           await notifyPublishFailure(err)
-          return
+          return { outcome: "publish-failed" }
         }
+        logRuntime(this.env, {
+          workflow: event.instanceId,
+          event: "linkedin-draft-created",
+          outcome: "succeeded",
+          details: { urn: publication.urn || "unavailable" },
+        })
 
         const finalCostLine = await stepDo("archive", async () => {
           const client = createGitHubClient(this.env)
@@ -337,8 +395,13 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${finalCostLine}`)
           })
         }
+        const completion = await stepDo("workflow-complete", async () =>
+          publication.urn
+            ? { outcome: "published" as const, linkedInDraftUrn: publication.urn }
+            : { outcome: "published" as const },
+        )
         logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "succeeded" })
-        return
+        return completion
       }
 
       const revised = await stepDo(`revise-${i}`, async () => {
@@ -419,5 +482,6 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         })
       }
     }
+    return { outcome: "feedback-limit-reached" }
   }
 }

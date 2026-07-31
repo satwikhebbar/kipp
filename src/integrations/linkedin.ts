@@ -69,8 +69,8 @@ export function createLinkedInClient(accessToken: string): LinkedinClient {
       },
       visibility: { "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC" },
     })
-    const data = (await res.json()) as { id?: string }
-    return { urn: data.id ?? "" }
+    const data = (await res.json().catch(() => ({}))) as { id?: string }
+    return { urn: res.headers?.get("x-restli-id") ?? data.id ?? "" }
   }
 
   return { createDraftPost }

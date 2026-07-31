@@ -110,18 +110,25 @@ describe("workflow-approval-to-linkedin-draft", () => {
       env: { ...baseEnv(), LINKEDIN_ACCESS_TOKEN: "my-token", LINKEDIN_AUTHOR_URN: "urn:li:person:123" },
     })
 
-    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), {
+    const outcome = await (
+      wf as unknown as {
+        run: (e: unknown, s: unknown) => Promise<{ outcome: string; linkedInDraftUrn?: string }>
+      }
+    ).run(makeEvent(), {
       do: step.do,
       waitForEvent: step.waitForEvent,
       sleep: step.sleep,
       sleepUntil: step.sleepUntil,
     })
 
+    expect(outcome).toEqual({ outcome: "published", linkedInDraftUrn: "urn:li:ugcPost:fake" })
+
     expect(step.getCalledSteps()).toContain("generate")
     expect(step.getCalledSteps()).toContain("notify")
     expect(step.getCalledSteps()).toContain("linkedin-publish")
     expect(step.getCalledSteps()).toContain("archive")
     expect(step.getCalledSteps()).toContain("notify-published")
+    expect(step.getCalledSteps()).toContain("workflow-complete")
 
     const state = getState()
     expect(state.linkedinDrafts).toHaveLength(1)
