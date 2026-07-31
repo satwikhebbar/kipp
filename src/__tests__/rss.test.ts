@@ -167,8 +167,38 @@ describe("handleRssCron", () => {
     expect(result.started).toBe(false)
   })
 
-  it("throws on RSS fetch error", async () => {
-    mockFetch.mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve("fail") })
-    await expect(handleRssCron(mockEnv() as never)).rejects.toThrow("RSS fetch error 500")
+  it("retries transient RSS fetch failures then succeeds", async () => {
+    const statuses = [429, 429]
+    let rssCalls = 0
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url.startsWith("https://test.substack.com/feed")) {
+        rssCalls++
+        const status = statuses.shift()
+        if (status) return { ok: false, status, text: () => Promise.resolve("Too Many Requests") }
+        return { ok: true, text: () => Promise.resolve(SAMPLE_RSS) }
+      }
+      if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
+      return { ok: true, json: () => Promise.resolve({ content: b64(EMPTY_IDEAS), sha: "s1" }) }
+    })
+    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
+
+    const env = mockEnv()
+    const result = await handleRssCron(env as never)
+    expect(result.started).toBe(true)
+    expect(rssCalls).toBe(3)
+  })
+
+  it("throws after retries exhaust on a persistent 429", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: () => Promise.resolve("Too Many Requests"),
+    })
+    await expect(handleRssCron(mockEnv() as never)).rejects.toThrow("RSS fetch error 429")
+  }, 15_000)
+
+  it("throws on non-transient RSS fetch error", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 403, text: () => Promise.resolve("fail") })
+    await expect(handleRssCron(mockEnv() as never)).rejects.toThrow("RSS fetch error 403")
   })
 })

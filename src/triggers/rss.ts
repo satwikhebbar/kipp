@@ -2,6 +2,7 @@ import { nextId } from "../backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../backlog/parser"
 import { createGitHubClient, type GithubClient } from "../integrations/github"
 import { createGenerator, type GenerateFn, messages, parseLLMJson } from "../providers"
+import { isTransientHttpStatus } from "../runtime/http"
 import type { Env, Idea } from "../types"
 
 interface RssItem {
@@ -61,6 +62,8 @@ const RSS_CONTENT_TRUNCATE_LENGTH = 6000
 const MAX_SECTION_IDEAS = 4
 const MAX_TITLE_LENGTH = 80
 const DEFAULT_RSS_RETRIES = 3
+const RSS_FETCH_MAX_RETRIES = 3
+const RSS_FETCH_BACKOFF_MS = 1_000
 
 /** Uses LLM to extract a teaser and sub-ideas from an RSS item's content. */
 async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<ExtractedIdeas> {
@@ -143,9 +146,15 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
   return { started: true, ideaId: instance.id }
 }
 
-/** Fetches and parses an RSS feed from a URL. */
+/** Fetches and parses an RSS feed from a URL, retrying transient failures (429/5xx). */
 async function fetchRssItems(url: string): Promise<RssItem[]> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`RSS fetch error ${res.status} for ${url}`)
-  return parseRssFeed(await res.text())
+  let lastStatus = 0
+  for (let attempt = 0; attempt <= RSS_FETCH_MAX_RETRIES; attempt++) {
+    const res = await fetch(url)
+    if (res.ok) return parseRssFeed(await res.text())
+    lastStatus = res.status
+    if (!isTransientHttpStatus(res.status) || attempt === RSS_FETCH_MAX_RETRIES) break
+    await new Promise((r) => setTimeout(r, RSS_FETCH_BACKOFF_MS * 2 ** attempt))
+  }
+  throw new Error(`RSS fetch error ${lastStatus} for ${url}`)
 }
