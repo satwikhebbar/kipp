@@ -53,7 +53,7 @@ const START_OF_DAY = "00:00"
 const END_OF_DAY = "23:59"
 
 /** Returns the minutes after midnight for a valid 24-hour time, or null when invalid. */
-function localMinutes(time: string): number | null {
+export function localMinutes(time: string): number | null {
   const matched = TIME_PATTERN.exec(time)
   if (!matched) return null
   return Number(matched[1]) * 60 + Number(time.slice(HHMM_COLON_OFFSET))
@@ -79,13 +79,13 @@ function dateTimeParts(timestamp: number, timeZone: string): Record<string, stri
 }
 
 /** Returns an instant's YYYY-MM-DD calendar date in the supplied IANA time zone. */
-function localDateAt(timestamp: number, timeZone: string): string {
+export function localDateAt(timestamp: number, timeZone: string): string {
   const parts = dateTimeParts(timestamp, timeZone)
   return `${parts.year}-${parts.month}-${parts.day}`
 }
 
 /** Returns an instant's HH:mm wall-clock time in the supplied IANA time zone. */
-function localTimeAt(timestamp: number, timeZone: string): string {
+export function localTimeAt(timestamp: number, timeZone: string): string {
   const parts = dateTimeParts(timestamp, timeZone)
   return `${parts.hour}:${parts.minute}`
 }
@@ -105,7 +105,7 @@ export function zonedDateTimeToMillis(localDate: string, time: string, timeZone:
 }
 
 /** Returns whether a candidate interval overlaps a busy interval, including the requested buffer. */
-function isBusy(start: number, end: number, intervals: BusyInterval[], bufferMinutes: number): boolean {
+export function isBusy(start: number, end: number, intervals: BusyInterval[], bufferMinutes: number): boolean {
   const buffer = bufferMinutes * MILLIS_PER_MINUTE
   return intervals.some((interval) => {
     const busyStart = Date.parse(interval.start)
@@ -117,7 +117,7 @@ function isBusy(start: number, end: number, intervals: BusyInterval[], bufferMin
 }
 
 /** Returns permitted start minutes ordered by preferred window and then requested-time proximity. */
-function candidateMinutes(preferredStart: number | null): number[] {
+export function candidateMinutes(preferredStart: number | null): number[] {
   const all: number[] = []
   for (
     let minute = CALENDAR_SEARCH_START_MINUTES;

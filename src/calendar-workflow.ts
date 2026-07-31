@@ -1,6 +1,15 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
 import { z } from "zod"
 import {
+  evaluateRecurrenceAvailability,
+  expandRecurrence,
+  managedRecurringEvent,
+  type RecurrenceAdjustment,
+  type RecurrenceAvailability,
+  type RecurringOccurrence,
+  type RecurringProposal,
+} from "./calendar-recurrence"
+import {
   CALENDAR_TIMEZONE_DEFAULT,
   calendarDayBounds,
   managedEvent,
@@ -10,7 +19,12 @@ import {
   scheduleOneOff,
   suggestOneOffAlternative,
 } from "./calendar-scheduling"
-import { type BusyInterval, createGoogleCalendarClient, GoogleCalendarError } from "./integrations/google-calendar"
+import {
+  type BusyInterval,
+  createGoogleCalendarClient,
+  GoogleCalendarError,
+  type ManagedCalendarException,
+} from "./integrations/google-calendar"
 import { createTelegramClient } from "./integrations/telegram"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import { createToolProvider } from "./providers"
@@ -35,7 +49,7 @@ type CalendarPlanningFailureCategory =
   | `provider-http-${number}`
 
 interface CalendarPlanningResult {
-  proposal: OneOffProposal | null
+  proposal: CalendarProposal | null
   clarification?: string
   dialogueFields?: CalendarDialogueFields
   failureCategory?: CalendarPlanningFailureCategory
@@ -47,7 +61,7 @@ interface CalendarPlanningResult {
 }
 
 type CalendarPlanningDecision =
-  | { kind: "proposal"; proposal: OneOffProposal; dialogueFields: CalendarDialogueFields }
+  | { kind: "proposal"; proposal: CalendarProposal; dialogueFields: CalendarDialogueFields }
   | { kind: "clarification"; message: string; dialogueFields: CalendarDialogueFields }
 
 export interface CalendarPlanningAttempt {
@@ -67,9 +81,23 @@ type CalendarActionResponse =
 
 /** The persisted block that an Edit correction may retain without re-scheduling it. */
 interface CalendarEditBaseline {
+  kind: "one-off"
   proposal: OneOffProposal
   scheduled: ScheduledOneOff
 }
+
+interface CalendarRecurringEditBaseline {
+  kind: "recurring"
+  proposal: RecurringProposal
+  occurrences: RecurringOccurrence[]
+  adjustments: RecurrenceAdjustment[]
+  rrule: string
+  humanCadence: string
+  reminderMinutes: number
+}
+
+type CalendarProposal = OneOffProposal | RecurringProposal
+type CalendarAnyEditBaseline = CalendarEditBaseline | CalendarRecurringEditBaseline
 
 interface CalendarPendingConflict {
   localDate?: string
@@ -79,6 +107,7 @@ interface CalendarPendingConflict {
 
 interface CalendarDialogueState {
   fields: CalendarDialogueFields
+  recurringFields?: Partial<SubmittedRecurringProposal>
   pendingQuestion?: string
   pendingConflict?: CalendarPendingConflict
 }
@@ -92,6 +121,7 @@ function plannerFailureCategory(error: unknown): CalendarPlanningFailureCategory
 
 const CALENDAR_TOOL = {
   SUBMIT_ONE_OFF_PROPOSAL: "submit_one_off_proposal",
+  SUBMIT_RECURRING_PROPOSAL: "submit_recurring_proposal",
   REQUEST_CLARIFICATION: "request_clarification",
 } as const
 /**
@@ -142,6 +172,53 @@ const proposalSchema = z.object({
   reminderMinutes: sourcedField(z.number().int()).optional(),
 })
 type SubmittedOneOffProposal = z.infer<typeof proposalSchema>
+
+const explicitSourceSchema = z.literal("explicit")
+const providedField = <Value extends z.ZodTypeAny>(value: Value) =>
+  z.object({ state: z.literal("provided"), value, source: explicitSourceSchema })
+const omittedField = z.object({ state: z.literal("omitted") })
+const recurringStartTimeSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("provided"), value: z.string(), source: explicitSourceSchema }),
+  z.object({ state: z.literal("policy_default") }),
+])
+const recurrenceRuleSchema = z.discriminatedUnion("cadence", [
+  z.object({ cadence: z.literal("daily"), source: explicitSourceSchema }),
+  z.object({
+    cadence: z.literal("weekly"),
+    source: explicitSourceSchema,
+    weekdays: z.discriminatedUnion("mode", [
+      z.object({
+        mode: z.literal("named"),
+        values: z.array(z.enum(["MO", "TU", "WE", "TH", "FR", "SA", "SU"])).min(1),
+        source: explicitSourceSchema,
+      }),
+      z.object({ mode: z.literal("first_date_weekday") }),
+    ]),
+  }),
+  z.object({ cadence: z.literal("biweekly"), source: explicitSourceSchema }),
+  z.object({ cadence: z.literal("monthly"), source: explicitSourceSchema }),
+  z.object({ cadence: z.literal("bimonthly"), source: explicitSourceSchema }),
+])
+const recurrenceEndSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("default_horizon") }),
+  z.object({ mode: z.literal("until"), inclusiveDate: z.string(), source: explicitSourceSchema }),
+  z.object({ mode: z.literal("count"), occurrences: z.number().int(), source: explicitSourceSchema }),
+])
+const recurringProposalSchema = z.object({
+  title: sourcedField(z.string()),
+  firstDate: z.object({ value: z.string(), source: explicitSourceSchema }),
+  startTime: recurringStartTimeSchema,
+  durationMinutes: sourcedField(z.number().int()),
+  classification: sourcedField(
+    z.enum(["ordinary", "family-social", "school-pickup", "appointment", "maintenance", "physical"]),
+  ),
+  recurrence: recurrenceRuleSchema,
+  end: recurrenceEndSchema,
+  description: z.discriminatedUnion("state", [providedField(z.string()), omittedField]),
+  location: z.discriminatedUnion("state", [providedField(z.string()), omittedField]),
+  reminderMinutes: z.discriminatedUnion("state", [providedField(z.number().int()), omittedField]),
+})
+type SubmittedRecurringProposal = z.infer<typeof recurringProposalSchema>
 const dialogueFieldsSchema = proposalSchema.partial()
 type CalendarDialogueFields = z.infer<typeof dialogueFieldsSchema>
 const dialogueSnapshotField = <Value extends z.ZodTypeAny>(value: Value) =>
@@ -171,6 +248,9 @@ const calendarFieldNameSchema = z.enum([
   "description",
   "location",
   "reminderMinutes",
+  "firstDate",
+  "recurrence",
+  "end",
 ])
 
 const proposalOutputSchema = z.object({ accepted: z.literal(true) })
@@ -179,12 +259,13 @@ const clarificationInputSchema = z.object({
   message: z.string().trim().min(1).max(MAX_CLARIFICATION_LENGTH),
   missingField: calendarFieldNameSchema,
   fields: dialogueSnapshotSchema,
+  recurringFields: recurringProposalSchema.partial().optional(),
 })
 const clarificationOutputSchema = z.object({ accepted: z.literal(true) })
 
 /** Builds the static system prompt for the calendar planner agent. */
 function plannerPrompt(): string {
-  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal when you have enough information, or request_clarification when you do not. There are no other actions. Every decision must preserve all calendar fields learned so far with their source: submit_one_off_proposal carries the complete proposal, while request_clarification carries a complete field snapshot and names the one missingField being requested. In a clarification snapshot, every field must be marked missing, explicit, or inferred; include value for explicit or inferred fields. Treat the accumulated dialogue fields supplied by the workflow as authoritative context. Use explicit when the user's words supplied the fact, even when you normalized it. For example, when the user says Tonight, normalize localDate using the current date in the dynamic user context and mark its source explicit, not inferred. Use inferred only for facts you chose without user words. A startTime clarification is invalid unless its snapshot preserves an explicit localDate; when the user just supplied a date or relative-date phrase, extract that date before asking for the time. Do not submit a date unless the user supplied a specific date or relative-date phrase. Omit startTime when the user did not give a time; do not invent a clock time. During an Edit, the current scheduled date and time are context only: treat them as changed only when the correction explicitly supplies a new date or time, and otherwise omit those fields. Availability is checked by deterministic workflow code after a proposal is submitted; never claim that a requested time is free or unavailable. A pending conflict means only that the requested interval is occupied and may include a privacy-safe offered time; it contains no event details. If the user asks why a time is unavailable, explain that only occupancy is visible and ask whether to use the offered time or provide another. Do not treat a question about a conflict as a replacement time. Omit description, location, and reminderMinutes unless the user explicitly supplied them. A proposal must have a YYYY-MM-DD date and HH:mm time when time is explicit. A clarification must ask for the one specific missing or ambiguous detail; never use a generic request for more detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, private Calendar details, or any unsupported recurrence."
+  return "You are Kipp's personal calendar planner. Interpret the user's request, but do not invent facts.\n\nCall exactly one decision action: submit_one_off_proposal for a one-off, submit_recurring_proposal for a supported recurrence, or request_clarification when a required fact is missing or ambiguous. There are no other actions. The supported recurrence classifications are daily, weekly, biweekly (every two weeks), monthly, and bimonthly (every two months). Clarify annual, ordinal, business-day, custom-interval, compound, or ambiguous recurrence phrases; never emit raw RRULE text. A recurring firstDate must be a user-explicit YYYY-MM-DD first occurrence. Weekly may carry one or more explicit named weekdays; biweekly is always anchored to firstDate. Recurrence end must be exactly default_horizon, an explicit inclusive until date, or an explicit occurrence count. Six calendar months is the hard maximum. Every key in submit_recurring_proposal is required: use policy_default for an unstated start time and omitted for unstated description, location, and reminderMinutes. Never omit those keys.\n\nEvery decision must preserve calendar fields learned so far with their source. Treat accumulated dialogue state as authoritative. Use explicit when the user's words supplied a fact, even when normalized, and inferred only for policy defaults. Do not submit a date unless the user supplied a specific date or relative-date phrase. During an Edit, retain unchanged baseline fields. Availability is checked by deterministic workflow code after handoff; occurrence alternatives are selected there too. Never claim a series or occurrence is free or unavailable. Calendar event details are not available to you. If the user asks why a time is unavailable, explain that only occupancy is visible. Description, location, and reminder overrides must be explicit. A clarification asks for one specific missing or ambiguous detail. Generic defaults: personal calls 30 minutes, professional calls 15 minutes. Family/social without a usable time requires clarification. Do not include attendees, video links, or private Calendar details."
 }
 
 /** Builds the dynamic user context for the calendar planner agent. */
@@ -217,8 +298,22 @@ function appendConflictReply(requestText: string, conflictMessage: string, reply
 }
 
 /** Preserves the persisted Calendar block as edit context without treating it as new user input. */
-function appendEditCorrection(requestText: string, baseline: CalendarEditBaseline, correction: string): string {
-  return `${requestText}\n\nCurrent scheduled Calendar block (retain its date and time unless the correction changes them): ${baseline.proposal.localDate} at ${baseline.scheduled.localStartTime} for ${baseline.proposal.durationMinutes} min.\nUser correction: ${correction}`
+function appendEditCorrection(requestText: string, baseline: CalendarAnyEditBaseline, correction: string): string {
+  if (baseline.kind === "one-off")
+    return `${requestText}\n\nCurrent scheduled Calendar block (retain its date and time unless the correction changes them): ${baseline.proposal.localDate} at ${baseline.scheduled.localStartTime} for ${baseline.proposal.durationMinutes} min.\nUser correction: ${correction}`
+  return `${requestText}\n\nCurrent recurring Calendar series (retain every field unless the correction changes it): ${JSON.stringify(
+    {
+      title: baseline.proposal.title,
+      firstDate: baseline.proposal.firstDate,
+      startTime: baseline.occurrences[0]?.localStartTime,
+      durationMinutes: baseline.proposal.durationMinutes,
+      recurrence: baseline.proposal.recurrence,
+      end: baseline.proposal.end,
+      description: baseline.proposal.description,
+      location: baseline.proposal.location,
+      reminderMinutes: baseline.proposal.reminderMinutes,
+    },
+  )}\nUser correction for the entire series: ${correction}`
 }
 
 /** Keeps earlier explicit facts when a later model turn merely infers or omits them. */
@@ -288,11 +383,53 @@ function normalizeSubmittedProposal(
   }
 }
 
+/** Converts the recurring handoff's explicit presence states into the domain proposal. */
+function normalizeSubmittedRecurringProposal(
+  submitted: SubmittedRecurringProposal,
+  editBaseline?: CalendarRecurringEditBaseline | null,
+): RecurringProposal {
+  const baseline = editBaseline?.proposal
+  const recurrence =
+    submitted.recurrence.cadence === "weekly"
+      ? {
+          cadence: "weekly" as const,
+          weekdays:
+            submitted.recurrence.weekdays.mode === "named"
+              ? {
+                  mode: "named" as const,
+                  values: submitted.recurrence.weekdays.values,
+                }
+              : { mode: "first_date_weekday" as const },
+        }
+      : { cadence: submitted.recurrence.cadence }
+  return {
+    title: submitted.title.value || baseline?.title || "",
+    firstDate: submitted.firstDate.value || baseline?.firstDate || "",
+    startTime:
+      submitted.startTime.state === "provided"
+        ? submitted.startTime.value
+        : editBaseline?.occurrences[0]?.localStartTime,
+    timeIsExplicit: submitted.startTime.state === "provided" ? true : (editBaseline?.proposal.timeIsExplicit ?? false),
+    durationMinutes: submitted.durationMinutes.value,
+    classification: submitted.classification.value,
+    recurrence,
+    end:
+      submitted.end.mode === "until"
+        ? { mode: "until", inclusiveDate: submitted.end.inclusiveDate }
+        : submitted.end.mode === "count"
+          ? { mode: "count", occurrences: submitted.end.occurrences }
+          : { mode: "default_horizon" },
+    description: submitted.description.state === "provided" ? submitted.description.value : undefined,
+    location: submitted.location.state === "provided" ? submitted.location.value : undefined,
+    reminderMinutes: submitted.reminderMinutes.state === "provided" ? submitted.reminderMinutes.value : undefined,
+  }
+}
+
 /** Uses the planner's bounded tool session to return either a proposal or one focused clarification question. */
 export async function planOneOff(
   env: Env,
   requestText: string,
-  editBaseline?: CalendarEditBaseline | null,
+  editBaseline?: CalendarAnyEditBaseline | null,
   dialogueState: CalendarDialogueState = { fields: {} },
 ): Promise<CalendarPlanningAttempt> {
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
@@ -311,12 +448,36 @@ export async function planOneOff(
       privacy: "private",
       handler: async (submitted) => {
         const dialogueFields = mergeDialogueFields(dialogueState.fields, submitted)
-        const normalized = normalizeSubmittedProposal(proposalSchema.parse(dialogueFields), editBaseline)
+        const normalized = normalizeSubmittedProposal(
+          proposalSchema.parse(dialogueFields),
+          editBaseline?.kind === "one-off" ? editBaseline : null,
+        )
         recordDecision(
           "proposal" in normalized
             ? { kind: "proposal", proposal: normalized.proposal, dialogueFields }
             : { kind: "clarification", message: normalized.clarification, dialogueFields },
         )
+        return { accepted: true }
+      },
+    },
+    [CALENDAR_TOOL.SUBMIT_RECURRING_PROPOSAL]: {
+      name: CALENDAR_TOOL.SUBMIT_RECURRING_PROPOSAL,
+      description:
+        "Submit one complete supported recurring proposal. This does not access or write Calendar. Every key is structurally required. firstDate and recurrence must be explicit. Use policy_default for an unstated start time; use omitted states for unstated event text and reminder override.",
+      input: recurringProposalSchema,
+      output: proposalOutputSchema,
+      privacy: "private",
+      handler: async (submitted) => {
+        const parsed = recurringProposalSchema.parse(submitted)
+        dialogueState.recurringFields = parsed
+        recordDecision({
+          kind: "proposal",
+          proposal: normalizeSubmittedRecurringProposal(
+            parsed,
+            editBaseline?.kind === "recurring" ? editBaseline : null,
+          ),
+          dialogueFields: dialogueState.fields,
+        })
         return { accepted: true }
       },
     },
@@ -327,8 +488,13 @@ export async function planOneOff(
       input: clarificationInputSchema,
       output: clarificationOutputSchema,
       privacy: "private",
-      handler: async ({ message, missingField, fields }) => {
+      handler: async ({ message, missingField, fields, recurringFields }) => {
         const dialogueFields = mergeDialogueFields(dialogueState.fields, snapshotDialogueFields(fields))
+        if (recurringFields)
+          dialogueState.recurringFields = {
+            ...dialogueState.recurringFields,
+            ...recurringFields,
+          }
         if (missingField === "startTime" && dialogueFields.localDate?.source !== "explicit")
           throw new ToolHandlerError(
             "A time clarification must preserve the explicit date it refers to",
@@ -349,7 +515,11 @@ export async function planOneOff(
     env.LLM_MODEL,
     Number(env.LLM_MAX_RETRIES || "3"),
   )
-  const decisionTools = [CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL, CALENDAR_TOOL.REQUEST_CLARIFICATION]
+  const decisionTools = [
+    CALENDAR_TOOL.SUBMIT_ONE_OFF_PROPOSAL,
+    CALENDAR_TOOL.SUBMIT_RECURRING_PROPOSAL,
+    CALENDAR_TOOL.REQUEST_CLARIFICATION,
+  ]
   const result = await runTools(
     provider,
     registry,
@@ -396,6 +566,32 @@ function conflictsWithExtension(busy: BusyInterval[], current: ScheduledOneOff, 
   })
 }
 
+/** Narrows a successfully validated planner handoff to the recurring domain. */
+function isRecurringProposal(proposal: CalendarProposal): proposal is RecurringProposal {
+  return "firstDate" in proposal
+}
+
+/** Selects a compatible one-off baseline when the current proposal is one-off. */
+function asOneOffEditBaseline(baseline: CalendarAnyEditBaseline | null): CalendarEditBaseline | null {
+  return baseline?.kind === "one-off" ? baseline : null
+}
+
+/** Removes only the persisted Kipp series intervals from privacy-safe FreeBusy during whole-series Edit. */
+function withoutRecurringBaseline(
+  busy: BusyInterval[],
+  baseline: CalendarRecurringEditBaseline | null,
+): BusyInterval[] {
+  if (!baseline) return busy
+  const owned = new Set(
+    baseline.occurrences.map((occurrence) => {
+      const adjustment = baseline.adjustments.find((item) => item.localDate === occurrence.localDate)
+      const scheduled = adjustment?.scheduled ?? occurrence
+      return `${Date.parse(scheduled.start)}:${Date.parse(scheduled.end)}`
+    }),
+  )
+  return busy.filter((interval) => !owned.has(`${Date.parse(interval.start)}:${Date.parse(interval.end)}`))
+}
+
 /**
  * The Calendar workflow is deliberately separate from LinkedIn. Its planning
  * and deterministic write stages are added incrementally in this milestone.
@@ -407,7 +603,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
     let interactionVersion = 0
     let retryUsed = false
     let editing = false
-    let editBaseline: CalendarEditBaseline | null = null
+    let editBaseline: CalendarAnyEditBaseline | null = null
     const dialogueState: CalendarDialogueState = { fields: {} }
     // Keep Calendar's state transitions explicit; revisit a shared feedback-loop wrapper once its semantics align with LinkedIn.
     for (let interactionTurn = 0; interactionTurn < MAX_CALENDAR_INTERACTION_TURNS; interactionTurn++) {
@@ -531,6 +727,223 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         details: { from: "planning", to: "availability" },
       })
       const timeZone = this.env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
+      if (isRecurringProposal(proposal)) {
+        const expanded = expandRecurrence(proposal)
+        if ("clarification" in expanded) {
+          const reply = await this.promptForReply(
+            step,
+            event,
+            ++interactionVersion,
+            `calendar-recurrence-policy-${interactionTurn}`,
+            expanded.clarification,
+            INTERACTION_KIND.CALENDAR_CLARIFICATION,
+          )
+          if (!reply) return
+          requestText = appendClarificationReply(requestText, expanded.clarification, reply)
+          continue
+        }
+        const firstBounds = calendarDayBounds(expanded.dates[0], timeZone)
+        const lastBounds = calendarDayBounds(expanded.dates.at(-1) as string, timeZone)
+        if (!firstBounds || !lastBounds) {
+          const message = "Please tell me a valid first date."
+          const reply = await this.promptForReply(
+            step,
+            event,
+            ++interactionVersion,
+            `calendar-recurrence-date-${interactionTurn}`,
+            message,
+            INTERACTION_KIND.CALENDAR_CLARIFICATION,
+          )
+          if (!reply) return
+          requestText = appendClarificationReply(requestText, message, reply)
+          continue
+        }
+        try {
+          const calendar = createGoogleCalendarClient(this.env)
+          const readBusy = async (suffix: string): Promise<BusyInterval[]> =>
+            withoutRecurringBaseline(
+              await step.do(`calendar-recurrence-availability-${interactionTurn}-${suffix}`, () =>
+                calendar.getBusyIntervals(firstBounds.timeMin, lastBounds.timeMax),
+              ),
+              editBaseline?.kind === "recurring" ? editBaseline : null,
+            )
+          let busy = await readBusy("initial")
+          let availability = evaluateRecurrenceAvailability(proposal, busy, timeZone)
+          if (availability.kind === "clarification") {
+            const reply = await this.promptForReply(
+              step,
+              event,
+              ++interactionVersion,
+              `calendar-recurrence-clarification-${interactionTurn}`,
+              availability.message,
+              INTERACTION_KIND.CALENDAR_CLARIFICATION,
+            )
+            if (!reply) return
+            requestText = appendClarificationReply(requestText, availability.message, reply)
+            continue
+          }
+          if (availability.kind === "conflict") {
+            const reply = await this.promptForReply(
+              step,
+              event,
+              ++interactionVersion,
+              `calendar-recurrence-replacement-${interactionTurn}`,
+              "I couldn't find one safe time for the complete series. Reply with another series time.",
+              INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
+            )
+            if (!reply) return
+            requestText = `${requestText}\n\nReplacement time for the entire series: ${reply}`
+            continue
+          }
+          if (availability.kind === "common-alternative") {
+            const response = await this.promptForActions(
+              step,
+              event,
+              ++interactionVersion,
+              `calendar-recurrence-common-time-${interactionTurn}`,
+              `At least half of the occurrences conflict. ${availability.localStartTime} is available for the complete series.`,
+              [
+                [`Use ${availability.localStartTime}`, INTERACTION_KIND.CALENDAR_CONFLICT_ALTERNATIVE],
+                ["Try another series time", INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME],
+                ["Cancel", INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL],
+              ],
+            )
+            if (
+              response.type === "timeout" ||
+              (response.type === "action" && response.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL)
+            )
+              return
+            if (response.type !== "action" || response.kind !== INTERACTION_KIND.CALENDAR_CONFLICT_ALTERNATIVE) {
+              const reply =
+                response.type === "reply"
+                  ? response.text
+                  : await this.promptForReply(
+                      step,
+                      event,
+                      ++interactionVersion,
+                      `calendar-recurrence-new-time-${interactionTurn}`,
+                      "Reply with another time for the complete series.",
+                      INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
+                    )
+              if (!reply) return
+              requestText = `${requestText}\n\nReplacement time for the entire series: ${reply}`
+              continue
+            }
+            const alternativeProposal: RecurringProposal = {
+              ...proposal,
+              startTime: availability.localStartTime,
+              timeIsExplicit: true,
+            }
+            busy = await readBusy("revalidate-common")
+            const revalidated = evaluateRecurrenceAvailability(alternativeProposal, busy, timeZone)
+            if (revalidated.kind !== "available") {
+              requestText = `${requestText}\n\nThe offered series time became unavailable; choose another time.`
+              continue
+            }
+            availability = revalidated
+          } else if (availability.kind === "adjustments") {
+            const preview = availability.adjustments
+              .map((adjustment) => `${adjustment.localDate} → ${adjustment.scheduled.localStartTime}`)
+              .join(", ")
+            const response = await this.promptForActions(
+              step,
+              event,
+              ++interactionVersion,
+              `calendar-recurrence-adjustments-${interactionTurn}`,
+              `Some dates need a different time: ${preview}.`,
+              [
+                ["Create with adjustments", INTERACTION_KIND.CALENDAR_RECURRENCE_ADJUSTMENTS],
+                ["Try another series time", INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME],
+                ["Cancel", INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL],
+              ],
+            )
+            if (
+              response.type === "timeout" ||
+              (response.type === "action" && response.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL)
+            )
+              return
+            if (response.type !== "action" || response.kind !== INTERACTION_KIND.CALENDAR_RECURRENCE_ADJUSTMENTS) {
+              const reply =
+                response.type === "reply"
+                  ? response.text
+                  : await this.promptForReply(
+                      step,
+                      event,
+                      ++interactionVersion,
+                      `calendar-recurrence-adjustment-new-time-${interactionTurn}`,
+                      "Reply with another time for the complete series.",
+                      INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
+                    )
+              if (!reply) return
+              requestText = `${requestText}\n\nReplacement time for the entire series: ${reply}`
+              continue
+            }
+            busy = await readBusy("revalidate-adjustments")
+            const revalidated = evaluateRecurrenceAvailability(proposal, busy, timeZone)
+            if (
+              revalidated.kind !== "adjustments" ||
+              JSON.stringify(revalidated.adjustments) !== JSON.stringify(availability.adjustments)
+            ) {
+              requestText = `${requestText}\n\nCalendar availability changed; please choose another series time.`
+              continue
+            }
+            availability = revalidated
+          }
+          const finalAvailability = availability
+          if (finalAvailability.kind !== "available" && finalAvailability.kind !== "adjustments")
+            throw new Error("Unexpected recurring availability outcome")
+          const correction = await this.writeRecurringAndConfirm(
+            step,
+            event,
+            proposal,
+            finalAvailability,
+            editing,
+            ++interactionVersion,
+          )
+          if (!correction) return
+          editBaseline = {
+            kind: "recurring",
+            proposal,
+            occurrences: finalAvailability.occurrences,
+            adjustments: finalAvailability.kind === "adjustments" ? finalAvailability.adjustments : [],
+            rrule: finalAvailability.rrule,
+            humanCadence: finalAvailability.humanCadence,
+            reminderMinutes: finalAvailability.reminderMinutes,
+          }
+          requestText = appendEditCorrection(event.payload.requestText, editBaseline, correction)
+          editing = true
+          continue
+        } catch (error) {
+          if (error instanceof GoogleCalendarError && error.kind === "authorization" && !retryUsed) {
+            const retry = await this.promptForActions(
+              step,
+              event,
+              ++interactionVersion,
+              `calendar-recurrence-reconnect-${interactionTurn}`,
+              `${calendarUnavailableMessage(this.env)}\n\nReconnect, then tap Retry within 15 minutes.`,
+              [
+                ["Retry", INTERACTION_KIND.CALENDAR_RETRY],
+                ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],
+              ],
+            )
+            if (retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY) {
+              retryUsed = true
+              continue
+            }
+            return
+          }
+          logRuntime(this.env, {
+            workflow: event.instanceId,
+            event: "calendar-workflow-failure",
+            outcome: "failed",
+            failureCategory: "calendar-recurrence-operation-failed",
+            details: { stage: "recurrence-availability-or-write" },
+          })
+          await this.notify(step, event.payload.chatId, CALENDAR_FAILURE)
+          return
+        }
+      }
+      const oneOffEditBaseline = asOneOffEditBaseline(editBaseline)
       const bounds = proposal.localDate ? calendarDayBounds(proposal.localDate, timeZone) : null
       if (!bounds) {
         const reply = await this.promptForReply(
@@ -547,18 +960,23 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
       }
       try {
         const calendar = createGoogleCalendarClient(this.env)
-        const provisional: ReturnType<typeof scheduleOneOff> | null = editBaseline
+        const provisional: ReturnType<typeof scheduleOneOff> | null = oneOffEditBaseline
           ? scheduleOneOff(proposal, [], timeZone)
           : null
         let busy: BusyInterval[] = []
         let scheduled: ReturnType<typeof scheduleOneOff>
-        if (provisional && "start" in provisional && editBaseline && retainsScheduledStart(provisional, editBaseline)) {
-          if (Date.parse(provisional.end) <= Date.parse(editBaseline.scheduled.end)) scheduled = provisional
+        if (
+          provisional &&
+          "start" in provisional &&
+          oneOffEditBaseline &&
+          retainsScheduledStart(provisional, oneOffEditBaseline)
+        ) {
+          if (Date.parse(provisional.end) <= Date.parse(oneOffEditBaseline.scheduled.end)) scheduled = provisional
           else {
             busy = await step.do(`calendar-availability-${interactionTurn}`, () =>
               calendar.getBusyIntervals(bounds.timeMin, bounds.timeMax),
             )
-            scheduled = conflictsWithExtension(busy, editBaseline.scheduled, provisional)
+            scheduled = conflictsWithExtension(busy, oneOffEditBaseline.scheduled, provisional)
               ? { conflict: true }
               : provisional
           }
@@ -618,7 +1036,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
               ++interactionVersion,
             )
             if (!correction) return
-            editBaseline = { proposal, scheduled: alternative }
+            editBaseline = { kind: "one-off", proposal, scheduled: alternative }
             requestText = appendEditCorrection(event.payload.requestText, editBaseline, correction)
             editing = true
             continue
@@ -641,7 +1059,7 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
         dialogueState.pendingConflict = undefined
         const correction = await this.writeAndConfirm(step, event, proposal, scheduled, editing, ++interactionVersion)
         if (!correction) return
-        editBaseline = { proposal, scheduled }
+        editBaseline = { kind: "one-off", proposal, scheduled }
         requestText = appendEditCorrection(event.payload.requestText, editBaseline, correction)
         editing = true
       } catch (error) {
@@ -680,6 +1098,91 @@ export class CalendarWorkflow extends WorkflowEntrypoint<Env, CalendarWorkflowPa
       "I still need one clear date and time. Please start a new /calendar request.",
     )
     logRuntime(this.env, { workflow: event.instanceId, event: "calendar-workflow-run", outcome: "succeeded" })
+  }
+
+  private async writeRecurringAndConfirm(
+    step: WorkflowStep,
+    event: WorkflowEvent<CalendarWorkflowParams>,
+    proposal: RecurringProposal,
+    availability: Extract<RecurrenceAvailability, { kind: "available" | "adjustments" }>,
+    editing: boolean,
+    version: number,
+  ): Promise<string | null> {
+    const timeZone = this.env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
+    await step.do(`calendar-series-${editing ? "update" : "create"}-${version}`, async () => {
+      const calendar = createGoogleCalendarClient(this.env)
+      const identity = await managedEventIdentity(event.payload.chatId, event.payload.telegramMessageId)
+      const parent = managedRecurringEvent(
+        identity,
+        proposal,
+        availability.occurrences[0],
+        availability.rrule,
+        availability.reminderMinutes,
+        timeZone,
+      )
+      const adjustments = availability.kind === "adjustments" ? availability.adjustments : []
+      const exceptions: ManagedCalendarException[] = adjustments.map((adjustment) => {
+        const original = availability.occurrences.find((occurrence) => occurrence.localDate === adjustment.localDate)
+        if (!original) throw new Error("Recurring adjustment omitted its parent occurrence")
+        return {
+          originalStart: original.start,
+          start: adjustment.scheduled.start,
+          end: adjustment.scheduled.end,
+        }
+      })
+      let parentCreated = false
+      try {
+        if (editing) await calendar.updateManagedEvent(parent)
+        else {
+          await calendar.createManagedEvent(parent)
+          parentCreated = true
+        }
+        await calendar.reconcileManagedSeries(parent, exceptions)
+      } catch (error) {
+        if (parentCreated) {
+          try {
+            await calendar.deleteManagedEvent(parent.id)
+          } catch {
+            logRuntime(this.env, {
+              workflow: event.instanceId,
+              event: "calendar-series-compensation",
+              outcome: "failed",
+              failureCategory: "calendar-series-cleanup-failed",
+            })
+          }
+        }
+        throw error
+      }
+    })
+    const adjustments = availability.kind === "adjustments" ? availability.adjustments.length : 0
+    logRuntime(this.env, {
+      workflow: event.instanceId,
+      event: "calendar-write",
+      outcome: "succeeded",
+      details: {
+        operation: editing ? "update-series" : "create-series",
+        occurrences: String(availability.occurrences.length),
+        adjustments: String(adjustments),
+      },
+    })
+    const first = availability.occurrences[0]
+    const edit = await this.promptForActions(
+      step,
+      event,
+      version,
+      `calendar-series-confirmation-${version}`,
+      `Added: ${proposal.title.trim()} from ${proposal.firstDate} at ${first.localStartTime} for ${proposal.durationMinutes} min, ${availability.humanCadence}, ${availability.occurrences.length} occurrences. Reminder: ${availability.reminderMinutes} min.${adjustments ? ` Adjusted dates: ${adjustments}.` : ""}`,
+      [["Edit entire series", INTERACTION_KIND.CALENDAR_EDIT]],
+    )
+    if (edit.type !== "action" || edit.kind !== INTERACTION_KIND.CALENDAR_EDIT) return null
+    return this.promptForReply(
+      step,
+      event,
+      version + 1,
+      `calendar-series-edit-feedback-${version}`,
+      "Reply with the correction for the entire recurring series.",
+      INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+    )
   }
 
   private async writeAndConfirm(

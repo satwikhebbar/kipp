@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp Calendar — Milestone 5 Revised Implementation Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --red:#f87171; --code:#020617; } * { box-sizing:border-box; } body { max-width:1080px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; } h1,h2,h3 { line-height:1.25; color:#f8fafc; } h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; } h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; } h3 { margin-top:28px; font-size:1.12rem; } p,li { max-width:94ch; } .lede { color:var(--muted); font-size:1.1rem; } .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; } .note { border-left-color:var(--amber); } .risk { border-left-color:var(--red); } .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; } code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; } pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); } table { width:100%; border-collapse:collapse; margin:20px 0; } th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#cbd5e1; background:#1e293b; } ol>li { margin:14px 0; } .recommended { color:var(--green); font-weight:700; } .decision { color:var(--amber); font-weight:700; } @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp Calendar — Milestone 5 Revised Implementation Plan</h1>
+    <p class="lede">Add bounded recurring Calendar blocks to the conversational workflow that now exists after Milestones 1–4. Preserve its native-tool planner, deterministic scheduling, privacy-safe conflict handling, idempotent writes, typed Telegram routing, reconnect flow, and 15-minute immediate Edit contract.</p>
+    <div class="callout"><strong>Outcome:</strong> Kipp can understand the approved recurrence forms, expand and validate the complete v1 series before writing, create one native Google recurring event plus any approved per-date exceptions, and safely correct the whole series during the immediate Edit window.<br /><span class="tag">Native recurrence</span><span class="tag">Full-horizon validation</span><span class="tag">Deterministic policy</span><span class="tag">Idempotent series writes</span></div>
+
+    <h2>1. Why the original phase outline needs revision</h2>
+    <p>The original roadmap predates the implemented Calendar conversation. Milestone 5 must extend the following established contracts rather than introduce a separate recurrence path:</p>
+    <ul>
+      <li>The planner uses one bounded native-tool session and a static handoff allowlist. It preserves source-tagged dialogue fields across clarifications and conflict questions.</li>
+      <li>Deterministic code owns time choice, availability, reminders, writes, retries, identities, and privacy. Google event details never enter the model or Telegram conflict text.</li>
+      <li>The workflow already has typed 15-minute interactions for clarification, conflict choice, correction, reconnect, retry, and cancellation.</li>
+      <li>A stable identity derived from the original Telegram message makes one-off writes idempotent. Recurrence must extend that identity to a parent series and its exceptions.</li>
+      <li>Every successful write exposes immediate Edit. Recurring creation therefore is incomplete without a defined whole-series correction and exception-reconciliation contract.</li>
+    </ul>
+
+    <h2>2. Scope and invariants</h2>
+    <table><thead><tr><th>Included</th><th>Excluded</th></tr></thead><tbody>
+      <tr><td>Daily, weekly, every-two-weeks, monthly, and every-two-months; weekly named weekdays; explicit first occurrence; bounded end/count; six-month default; 29th–31st clamping; full-horizon availability; the 50% conflict heuristic; one native parent plus approved exceptions; whole-series immediate Edit; cleanup-safe dev-bot smoke test.</td><td>Annual, ordinal, custom RRULE/RDATE/EXDATE input, all-day recurrence, unbounded series, renewal prompts, post-window series management, editing one occurrence, “this and following,” cancellation from Telegram, multiple calendars, guests, event-detail disclosure, and automatic movement of unrelated events.</td></tr>
+    </tbody></table>
+    <ul>
+      <li>The model may describe recurrence but never supplies raw RRULE text, reads Calendar data, or authorizes a write.</li>
+      <li>The start date is user-explicit and denotes the first occurrence; it is not silently interpreted as only a search lower bound.</li>
+      <li>Every occurrence that Kipp will create is expanded as a local civil date, converted in the configured IANA timezone, and availability-checked before any write.</li>
+      <li>Exactly 50% conflict follows the whole-series-time branch. Below 50% follows the per-date-adjustment branch only when every conflicting date has a safe same-day replacement.</li>
+      <li>No success confirmation is sent until the parent and every approved exception are present. Partial creation is never reported as success.</li>
+    </ul>
+
+    <h2>3. Approved product decisions</h2>
+    <table><thead><tr><th>Decision</th><th>Approved contract</th><th>Rationale</th></tr></thead><tbody>
+      <tr><td><span class="decision">D1 — Maximum horizon</span></td><td><span class="recommended">Approved:</span> six calendar months is the v1 hard maximum, not only the default. An explicit end date or count may shorten the series but may not extend it. “Indefinite” is normalized to the six-month maximum.</td><td>This preserves complete validation and keeps availability reads, recovery work, and test size bounded.</td></tr>
+      <tr><td><span class="decision">D2 — Named weekdays</span></td><td><span class="recommended">Approved:</span> weekly supports one or multiple named weekdays. Every-two-weeks uses the explicit first occurrence’s weekday only. The first date must satisfy the rule; otherwise Kipp asks for correction.</td><td>This supports the approved weekly form without introducing an unapproved denser alternating-week cadence.</td></tr>
+      <tr><td><span class="decision">D3 — Immediate Edit</span></td><td><span class="recommended">Approved:</span> Edit always means the entire recurring series. It may change any supported v1 field, re-expands and revalidates the whole series, then reconciles the parent rule and complete exception set. Kipp does not expose single-occurrence or “this and following” edits.</td><td>This preserves the existing immediate-correction contract while keeping ongoing recurrence management out of v1.</td></tr>
+    </tbody></table>
+    <div class="callout note"><strong>Engineering decisions that do not need separate product approval:</strong> end dates are inclusive; an end date and occurrence count are mutually exclusive; the six-month boundary is calendar arithmetic rather than 180 days; daily means every calendar day; the conflict ratio denominator is the complete expanded occurrence count; all suggested times must preserve duration and fit the existing 15-minute scheduling grid.</div>
+
+    <h2>4. Recurrence domain and planner contract</h2>
+    <ol>
+      <li>Keep the existing <code>OneOffProposal</code> and its Zod schema unchanged. Introduce a separate <code>RecurringProposal</code> and separate <code>recurringProposalSchema</code>, owned exclusively by <code>submit_recurring_proposal</code>. The workflow may use a result union after successful handoff validation, but the two tool input schemas do not share a permissive “calendar proposal” shape.</li>
+      <li>Add <code>submit_recurring_proposal</code> beside the existing one-off and clarification tools. Its input has no structurally optional keys. Every conceptual field is either required outright or represented by a discriminated state such as <code>provided</code>, <code>omitted</code>, <code>policy_default</code>, or <code>first_date_weekday</code>.</li>
+      <li>Use discriminated unions to make conditional requirements unambiguous. Cadence selects the exact rule shape; weekly selects named weekdays or the first-date weekday; and the end condition selects exactly one of default horizon, inclusive end date, or occurrence count. A missing key is invalid input, not an empty optional value.</li>
+      <li>When a required key is absent or a union is malformed, the tool guard returns only safe validation paths and expectations to the model. The existing bounded tool session may repair the call on a later provider turn. If it still cannot produce a valid handoff, the workflow fails closed before availability or Calendar access.</li>
+      <li>Extend the persisted dialogue snapshot so recurrence facts and explicit absence states survive focused questions. Missing or ambiguous first date always produces clarification, even when cadence or weekday is obvious.</li>
+      <li>The LLM owns the semantic classification of explicit natural language into <code>daily</code>, <code>weekly</code>, <code>biweekly</code>, <code>monthly</code>, or <code>bimonthly</code>. Deterministic guards then enforce the allowlist and cross-field consistency. The model must clarify rather than guess when the phrase could map to more than one supported form.</li>
+      <li>The model does not choose occurrences or conflict alternatives. It returns recurrence intent and interprets later user replies. Deterministic code expands the occurrence set, reads privacy-safe FreeBusy intervals, calculates the ratio, and selects the common-time or per-date candidates without exposing conflicting events to the model.</li>
+    </ol>
+    <pre>RecurringProposal handoff — presence contract
+  title, firstDate, duration, classification, recurrence, end: required
+  recurrence:
+    daily | biweekly | monthly | bimonthly
+    | weekly { weekdayMode: named([...]) | first_date_weekday }
+  end:
+    default_horizon | until(inclusiveDate) | count(occurrences)
+  startTime:
+    provided(value, source) | policy_default
+  description, location, reminder override:
+    provided(value, explicit) | omitted
+
+missing key → invalid tool input → bounded model repair
+valid explicit absence → accepted, deterministic policy applies</pre>
+
+    <h2>5. Deterministic recurrence engine</h2>
+    <p>Do not begin with a handwritten recurrence engine. Start with a time-boxed dependency spike around <a href="https://github.com/jkbrzt/rrule">rrule.js</a>, which already expands and serializes RFC 5545 rules and supports the required <code>COUNT</code>, <code>INTERVAL</code>, <code>BYDAY</code>, <code>BYMONTHDAY</code>, and <code>BYSETPOS</code> options. Kipp supplies typed options; it never accepts the library’s natural-language or raw-RRULE parsing surfaces from the model or user.</p>
+    <table><thead><tr><th>Candidate</th><th>Decision</th><th>Boundary</th></tr></thead><tbody>
+      <tr><td><a href="https://github.com/jkbrzt/rrule">rrule.js</a></td><td><span class="recommended">Adopted.</span> Use for bounded civil recurrence expansion and RRULE serialization. Version 2.8.1 passed the TypeScript and Wrangler Worker bundle gate; semantic conformance is covered by the recurrence matrix.</td><td>Use UTC-valued <code>Date</code> objects as civil date containers, as recommended by the library. Convert each returned civil occurrence through Kipp’s existing IANA-zone conversion before availability checks; do not treat the library’s returned “UTC” value as the final instant.</td></tr>
+      <tr><td><a href="https://github.com/js-temporal/temporal-polyfill">@js-temporal/polyfill</a></td><td>Fallback for civil-date arithmetic if rrule.js cannot satisfy Worker or timezone-parity tests.</td><td><code>Temporal.PlainDate</code> provides correct calendar arithmetic and month overflow control, but it does not supply recurrence-rule expansion or serialization by itself. Do not add both dependencies unless tests demonstrate a concrete need.</td></tr>
+      <tr><td>Handwritten recurrence engine</td><td>Rejected as the starting point.</td><td>Keep only thin Kipp-owned adapters, policy guards, and Google serialization checks. Implement custom expansion only if the dependency spike documents a specific unsupported requirement.</td></tr>
+    </tbody></table>
+    <div class="callout note"><strong>Dependency gate:</strong> before adopting rrule.js, prove ESM/TypeScript bundling under Wrangler, the four approved rule families, 29th–31st clamping, leap years, weekly weekday ordering, six-month counts, and exact parity between library expansion, emitted Google RRULE, and Google <code>events.instances</code> in the controlled smoke test. The dependency is currently BSD-3-Clause and exposes an ESM build with TypeScript declarations.</div>
+    <table><thead><tr><th>Rule</th><th>Deterministic expansion and Google representation</th></tr></thead><tbody>
+      <tr><td>Daily</td><td>Configure daily frequency and bounded count; emit <code>FREQ=DAILY;COUNT=n</code>.</td></tr>
+      <tr><td>Weekly</td><td>Configure the selected weekday set; emit <code>FREQ=WEEKLY;BYDAY=…;COUNT=n</code>. Without named weekdays, use the first occurrence’s weekday.</td></tr>
+      <tr><td>Every two weeks</td><td>Anchor on the explicit first occurrence; emit <code>FREQ=WEEKLY;INTERVAL=2;COUNT=n</code>.</td></tr>
+      <tr><td>Monthly / every two months</td><td>Configure the anchor day plus the last day as candidates so days 29–31 clamp to a shorter month’s final day and return to the anchor day later. Select the first valid candidate with <code>BYSETPOS=1</code>, using interval 1 or 2 and <code>COUNT=n</code>.</td></tr>
+    </tbody></table>
+    <p>Kipp’s wrapper validates real dates, inclusive end/count, horizon, local time, duration, same-day completion, lead time for the first occurrence, and timezone conversion for every library occurrence. Tests compare the expanded dates with the serialized rule across ordinary months, leap years, month-end anchors, and configured timezone transitions.</p>
+
+    <h2>6. Full-horizon availability and conflict decisions</h2>
+    <pre>expand complete bounded series
+  → one FreeBusy read spanning first start through last end
+  → evaluate requested common clock time on every date
+     ├─ 0 conflicts: create native series
+     ├─ conflicts / occurrences ≥ 50%:
+     │    find nearest one common clock time free on every date
+     │    → offer it, or request another series time / cancel
+     └─ conflicts / occurrences &lt; 50%:
+          find nearest same-day time for each conflicting date
+          → preview complete adjustment batch
+          → Create with adjustments / Try another series time / Cancel</pre>
+    <ul>
+      <li>An explicit requested time uses the existing zero-buffer policy. A deterministically chosen or suggested time retains the existing 15-minute safety buffer.</li>
+      <li>A common alternative is offered only if it is valid on every occurrence. The workflow revalidates the full series after the user chooses it.</li>
+      <li>An adjustment batch is offered only if every conflicting occurrence has a same-day safe alternative. If even one date cannot be adjusted, Kipp falls back to the whole-series-time path.</li>
+      <li>The adjustment preview shows only the affected dates and proposed new times. It never names or describes the events causing conflicts.</li>
+      <li>All choices re-enter deterministic validation immediately before writing, so time spent in Telegram cannot authorize a stale availability result.</li>
+    </ul>
+
+    <h2>7. Google Calendar representation and write safety</h2>
+    <ol>
+      <li>Extend the managed event contract with a parent recurrence rule and series metadata. Derive a stable parent ID/request ID from the original Telegram message. Do not assign standalone identities to normal occurrences.</li>
+      <li>Create one native recurring parent using <code>events.insert</code>. Resolve its occurrences through <code>events.instances</code>, keyed by <code>originalStartTime</code>, and update only the approved adjusted instances.</li>
+      <li>Make the write operation restartable: verify an existing matching parent before insert; enumerate instances on resume; idempotently reconcile the required exceptions; and verify the final parent/exception shape before returning success.</li>
+      <li>On a permanent failure before confirmation, attempt compensating deletion of the newly created parent so the user is not left with a knowingly partial series. If cleanup also fails, emit metadata-only high-severity recovery context and a truthful failure message; never claim success.</li>
+      <li>For immediate whole-series Edit, re-expand and revalidate first, then update the parent and reconcile the complete desired exception set. Remove obsolete Kipp-created exceptions by restoring them to the parent schedule; do not touch unrelated events.</li>
+    </ol>
+    <div class="callout risk"><strong>Atomicity note:</strong> Google Calendar batch requests reduce connection overhead but are neither ordered nor transactional. They are not an atomicity mechanism for parent-plus-exception creation. Kipp must use stable identities, resumable reconciliation, final verification, and compensating cleanup.</div>
+
+    <h2>8. Workflow and Telegram changes</h2>
+    <ul>
+      <li>Add typed recurrence state rather than encoding it into free text: requested rule, expanded dates, conflict ratio, common alternative, proposed exceptions, and current series baseline.</li>
+      <li>Add Calendar interaction kinds for <strong>Create with adjustments</strong> and <strong>Try another series time</strong>; reuse the established safe Cancel and reply routing semantics where their meaning is identical.</li>
+      <li>Confirmation includes title, first occurrence, local time, duration, human-readable cadence, bounded end/count, reminder, number of occurrences, and adjustment count. It does not expose an event link.</li>
+      <li>Edit replies retain the persisted whole-series baseline, not merely the first occurrence. A correction is replanned through the same bounded native-tool contract and revalidated like a new request.</li>
+      <li>Authorization recovery remains explicit and one-shot. Retry resumes the same stable series identity and reconciliation operation.</li>
+    </ul>
+
+    <h2>9. Verification matrix</h2>
+    <table><thead><tr><th>Area</th><th>Required coverage</th></tr></thead><tbody>
+      <tr><td>Planner contract</td><td>Separate one-off/recurring schemas; every presence-state branch; missing-key repair then bounded failure; each supported cadence; missing/ambiguous first date; explicit end versus count; indefinite normalization; multiple weekly weekdays; unsupported custom/annual/ordinal rules; dialogue preservation; one terminal handoff; no raw RRULE or Calendar detail exposure.</td></tr>
+      <tr><td>Expansion</td><td>Dependency bundling and license gate; daily, weekly weekday sets, biweekly anchor, monthly and bimonthly; 28th–31st; leap February; inclusive end; count; six-calendar-month boundary; invalid rule/start combinations; local clock preserved through timezone transitions; library/RRULE/Google-instance parity.</td></tr>
+      <tr><td>Conflict policy</td><td>Zero conflicts; below, exactly, and above 50%; one and many exceptions; common alternative; no common alternative; unavailable exception date; duration/grid/lead-time enforcement; complete revalidation after interaction.</td></tr>
+      <tr><td>Google client</td><td>RRULE payload and timezone; parent identity; instance paging and original-start matching; exception update; existing-parent resume; partial retry; final verification; compensation; safe authorization/transient/permanent failures; no sensitive logs.</td></tr>
+      <tr><td>Workflow</td><td>Direct creation; adjustment preview/create/replace/cancel; stale and expired controls; reconnect/Retry; recurring confirmation; whole-series Edit with added, changed, and removed exceptions; no one-off regression.</td></tr>
+      <tr><td>System</td><td><code>pnpm check</code>, full unit/integration/provider-contract suites, and a controlled dev-bot run that creates a uniquely named short test series, verifies parent and instances, applies one planned exception when safe, and removes the parent in a finally-style cleanup.</td></tr>
+    </tbody></table>
+
+    <h2>10. Delivery sequence</h2>
+    <ol>
+      <li>Record approved D1–D3 and the separate-schema/presence-state contract in the requirements and roadmap documents.</li>
+      <li>Run the rrule.js dependency spike and document Worker compatibility, semantic parity, license, and the decision to adopt it or use the Temporal-based fallback.</li>
+      <li>Add the separate recurring types, validated library adapter, RRULE serialization, and exhaustive matrix tests.</li>
+      <li>Extend the planner handoff, repair coverage, and dialogue state while keeping the one-off tool path unchanged; update the real-provider contract test.</li>
+      <li>Add full-horizon availability evaluation and pure structured outcomes for clean series, common-time conflict, adjustment batch, and unsatisfied conflict.</li>
+      <li>Extend the Google client for parent recurrence, paged instances, exception reconciliation, verification, and compensation.</li>
+      <li>Integrate recurring workflow states, typed Telegram actions, confirmation, reconnect, and whole-series Edit; add integration coverage for every branch.</li>
+      <li>Run all quality gates, inspect privacy-safe logs, perform the controlled dev-bot create/inspect/remove smoke test, update Beads/GitHub status, and hand off without committing or pushing unless explicitly authorized.</li>
+    </ol>
+  </body>
+</html>

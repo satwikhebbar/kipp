@@ -31,7 +31,7 @@ async function runContract(requestText: string) {
 
 function expectSuccessfulHandoff(
   result: Awaited<ReturnType<typeof runContract>>,
-  tool: "submit_one_off_proposal" | "request_clarification",
+  tool: "submit_one_off_proposal" | "submit_recurring_proposal" | "request_clarification",
 ): void {
   expect(result).toMatchObject({ toolRunCompleted: true })
   expect(result.toolExecutions.filter((execution) => execution.outcome === "succeeded")).toEqual([
@@ -63,5 +63,21 @@ describe("DeepSeek Calendar native-tool contract", () => {
     })
     expect(result.decision?.kind === "proposal" ? result.decision.proposal.startTime : undefined).toBeUndefined()
     expectSuccessfulHandoff(result, "submit_one_off_proposal")
+  })
+
+  contractIt("classifies and submits a supported recurrence without raw RRULE input", async () => {
+    const result = await runContract(
+      "Schedule a 30-minute weekly review every Monday and Wednesday at 19:00, starting 2026-08-03, for 6 occurrences.",
+    )
+    expect(result.decision).toMatchObject({
+      kind: "proposal",
+      proposal: {
+        firstDate: "2026-08-03",
+        startTime: "19:00",
+        recurrence: { cadence: "weekly", weekdays: { mode: "named", values: ["MO", "WE"] } },
+        end: { mode: "count", occurrences: 6 },
+      },
+    })
+    expectSuccessfulHandoff(result, "submit_recurring_proposal")
   })
 })

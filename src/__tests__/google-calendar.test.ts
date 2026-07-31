@@ -82,6 +82,65 @@ describe("Google Calendar client", () => {
     })
   })
 
+  it("creates a native recurring parent from an adapter-generated rule", async () => {
+    const fetch = vi.fn().mockResolvedValue(response(200))
+    vi.stubGlobal("fetch", fetch)
+
+    await createGoogleCalendarClient(await environment()).createManagedEvent({
+      ...EVENT,
+      recurrence: ["RRULE:FREQ=WEEKLY;COUNT=4;BYDAY=MO,WE"],
+    })
+
+    const request = fetch.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(request.body as string)).toMatchObject({
+      recurrence: ["RRULE:FREQ=WEEKLY;COUNT=4;BYDAY=MO,WE"],
+    })
+  })
+
+  it("reconciles desired exceptions, restores obsolete ones, and verifies the result", async () => {
+    const originalOne = "2026-07-28T13:30:00.000Z"
+    const originalTwo = "2026-08-04T13:30:00.000Z"
+    const adjustedOne = "2026-07-28T14:15:00.000Z"
+    const adjustedOneEnd = "2026-07-28T14:45:00.000Z"
+    const instances = (firstStart: string, secondStart: string) => ({
+      items: [
+        {
+          id: "instance-1",
+          originalStartTime: { dateTime: originalOne },
+          start: { dateTime: firstStart },
+          end: { dateTime: firstStart === originalOne ? "2026-07-28T14:00:00.000Z" : adjustedOneEnd },
+        },
+        {
+          id: "instance-2",
+          originalStartTime: { dateTime: originalTwo },
+          start: { dateTime: secondStart },
+          end: {
+            dateTime: secondStart === originalTwo ? "2026-08-04T14:00:00.000Z" : "2026-08-04T14:45:00.000Z",
+          },
+        },
+      ],
+    })
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, instances(originalOne, "2026-08-04T14:15:00.000Z")))
+      .mockResolvedValueOnce(response(200))
+      .mockResolvedValueOnce(response(200))
+      .mockResolvedValueOnce(response(200, instances(adjustedOne, originalTwo)))
+    vi.stubGlobal("fetch", fetch)
+
+    await createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [
+      { originalStart: originalOne, start: adjustedOne, end: adjustedOneEnd },
+    ])
+
+    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(fetch.mock.calls[1][0]).toContain("/events/instance-1")
+    expect(fetch.mock.calls[2][0]).toContain("/events/instance-2")
+    expect(JSON.parse((fetch.mock.calls[2][1] as RequestInit).body as string)).toMatchObject({
+      start: { dateTime: originalTwo },
+      end: { dateTime: "2026-08-04T14:00:00.000Z" },
+    })
+  })
+
   it("treats a conflict as success only when the matching managed event already exists", async () => {
     const fetch = vi
       .fn()

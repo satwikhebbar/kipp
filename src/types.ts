@@ -129,6 +129,8 @@ export const INTERACTION_KIND = {
   CALENDAR_CONFLICT_ALTERNATIVE: "calendar-conflict-alternative",
   CALENDAR_CONFLICT_REPLACE: "calendar-conflict-replace",
   CALENDAR_CONFLICT_CANCEL: "calendar-conflict-cancel",
+  CALENDAR_RECURRENCE_ADJUSTMENTS: "calendar-recurrence-adjustments",
+  CALENDAR_RECURRENCE_NEW_TIME: "calendar-recurrence-new-time",
   CALENDAR_EDIT: "calendar-edit",
   CALENDAR_EDIT_FEEDBACK: "calendar-edit-feedback",
   CALENDAR_RETRY: "calendar-retry",

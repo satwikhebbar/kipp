@@ -65,6 +65,13 @@ given an explicit compile-time allowlist; configuration and runtime data cannot
 add tools or expand permissions. Every tool declares input/output schemas and
 privacy classification.
 
+Calendar one-off and recurring proposals use separate terminal handoffs and
+separate schemas. Recurring handoff keys are structurally required: fields
+that the user did not provide use explicit discriminated absence/default
+states, while an actually missing key is invalid input. Schema or semantic
+failure receives only a bounded, privacy-safe repair opportunity and never
+reaches availability or Calendar access.
+
 The model can request a tool, but never executes an external mutation itself.
 A deterministic guard layer validates every request before execution and
 validates the result before it returns to the model. Guards own:
@@ -224,9 +231,15 @@ bot smoke test confirms the established user journey.
 ### Phase 5 — Recurring Calendar blocks
 
 Implement the supported recurrence forms and all recurrence behavior in the
-requirements specification: start/end inference, six-month default horizon,
-month-end rules, all-occurrence validation, and the 50% conflict heuristic for
-single-series-time versus per-date-adjustment proposals.
+requirements specification: an explicit first occurrence, a hard six-calendar-
+month horizon, weekly named-weekday scope, month-end rules, all-occurrence
+validation, whole-series immediate Edit, and the 50% conflict heuristic for
+single-series-time versus per-date-adjustment proposals. Use a separate
+recurring proposal handoff with explicit presence states. Use `rrule` behind a
+narrow adapter for bounded recurrence expansion and RRULE serialization; it
+passed TypeScript and Wrangler Worker bundling. Keep rule-set validation,
+month-end semantics, availability policy, and Calendar authorization in
+Kipp-owned deterministic guards.
 
 **Exit criteria:** recurrence and exception test matrices cover each supported
 cadence and conflict outcome; a controlled dev-bot smoke test creates,

@@ -61,9 +61,16 @@ expansion, reminder selection, OAuth, retries, idempotency, expiration, and
 Calendar reads/writes. The LLM has no direct Calendar, Telegram, or storage
 tools and cannot alter policy based on text embedded in a request.
 
-The LLM receives no titles, descriptions, locations, attendees, or other
-details from existing Calendar events. Availability is the only Calendar
-context exposed while resolving a request.
+For recurrence, the LLM classifies explicit natural language into one supported
+cadence or asks a focused clarification when it is ambiguous. It does not
+select occurrences or conflict alternatives. Deterministic code expands the
+complete bounded occurrence set, evaluates privacy-safe availability, and
+selects any common-time or per-date candidates.
+
+The LLM receives no titles, descriptions, locations, attendees, availability
+intervals, or other details from existing Calendar events. It may interpret a
+later user reply to a deterministic conflict prompt, but the availability
+calculation and candidate selection remain outside the model.
 
 If the LLM is unavailable or returns an invalid proposal, Kipp creates nothing
 and asks the user to try again.
@@ -174,22 +181,28 @@ specification when their reuse value is established.
 
 ## Recurrence
 
-- Support only daily; weekly (including named weekdays); every two weeks;
-  monthly; and every two months.
-- A recurrence auto-creates when its cadence and start date are clear and all
-  occurrences are conflict-free.
-- A missing/ambiguous start date requires clarification even if the cadence is
-  obvious.
-- A series ends after six months unless a clear end date or occurrence count is
-  given. An “indefinite” request still ends after six months.
+- Support only daily; weekly on one or multiple named weekdays; every two
+  weeks on the explicit first occurrence’s weekday; monthly; and every two
+  months.
+- The explicit start date is the first occurrence, not only a lower search
+  bound, and must satisfy the selected recurrence rule.
+- A recurrence auto-creates when its cadence and first occurrence are clear
+  and all occurrences are conflict-free.
+- A missing/ambiguous first occurrence requires clarification even if the
+  cadence or weekday is obvious.
+- Six calendar months from the first occurrence is the hard v1 maximum. A
+  clear inclusive end date or occurrence count may shorten but never extend
+  the series. An “indefinite” request also ends at the six-month maximum.
 - A 29th, 30th, or 31st monthly/bimonthly occurrence falls on the shorter
   month’s final day.
-- Validate every occurrence in the six-month horizon before writing the series.
+- Validate every occurrence in the complete bounded series before writing it.
 - If 50% or more of occurrences conflict, offer a new single time for the
   whole series and revalidate every occurrence.
 - If fewer than 50% conflict, propose nearest-free per-date exceptions as one
-  batch. The user chooses **Create with adjustments**, **Try another series
-  time**, or **Cancel** before Kipp creates the series and exceptions.
+  batch only when every conflicting date has a safe same-day replacement.
+  Otherwise, use the whole-series-time path. The user chooses **Create with
+  adjustments**, **Try another series time**, or **Cancel** before Kipp creates
+  the series and exceptions.
 
 ## Confirmation and immediate correction
 
@@ -204,6 +217,10 @@ inferred values are labelled—for example, `19:00 (chosen)` or `45 min
   edits.
 - An immediate edit may change any v1-supported field and is revalidated as a
   fresh scheduling proposal.
+- For a recurring block, immediate Edit applies to the whole series. Kipp
+  re-expands and revalidates the complete series, then reconciles its recurrence
+  rule and exception set. Editing one occurrence or “this and following”
+  remains out of scope.
 - Every reconfirmation exposes a fresh Edit action. Only the newest action is
   valid; prior buttons are invalidated. This is user-driven, never an automatic
   loop.

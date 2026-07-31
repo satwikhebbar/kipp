@@ -12,6 +12,8 @@ const mockGenerate = vitest.hoisted(() => vitest.fn())
 const mockBusyIntervals = vitest.hoisted(() => vitest.fn())
 const mockCreateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockUpdateManagedEvent = vitest.hoisted(() => vitest.fn())
+const mockReconcileManagedSeries = vitest.hoisted(() => vitest.fn())
+const mockDeleteManagedEvent = vitest.hoisted(() => vitest.fn())
 const MockGoogleCalendarError = vitest.hoisted(
   () =>
     class GoogleCalendarError extends Error {
@@ -27,6 +29,8 @@ vitest.mock("../integrations/google-calendar", () => ({
     getBusyIntervals: mockBusyIntervals,
     createManagedEvent: mockCreateManagedEvent,
     updateManagedEvent: mockUpdateManagedEvent,
+    reconcileManagedSeries: mockReconcileManagedSeries,
+    deleteManagedEvent: mockDeleteManagedEvent,
   }),
   GoogleCalendarError: MockGoogleCalendarError,
 }))
@@ -47,6 +51,36 @@ const untimedProposal = (durationMinutes = 30) => ({
   durationMinutes: { value: durationMinutes, source: "explicit" as const },
   classification: { value: "ordinary", source: "inferred" as const },
 })
+
+const recurringProposal = (startTime = "19:00") => ({
+  title: { value: "Weekly review", source: "explicit" as const },
+  firstDate: { value: "2026-07-28", source: "explicit" as const },
+  startTime: { state: "provided" as const, value: startTime, source: "explicit" as const },
+  durationMinutes: { value: 30, source: "inferred" as const },
+  classification: { value: "ordinary", source: "inferred" as const },
+  recurrence: {
+    cadence: "weekly" as const,
+    source: "explicit" as const,
+    weekdays: { mode: "first_date_weekday" as const },
+  },
+  end: { mode: "count" as const, occurrences: 3, source: "explicit" as const },
+  description: { state: "omitted" as const },
+  location: { state: "omitted" as const },
+  reminderMinutes: { state: "omitted" as const },
+})
+
+function queueRecurringProposal(startTime = "19:00"): void {
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [
+      {
+        id: `recurring-proposal-${mockGenerate.mock.calls.length}`,
+        name: "submit_recurring_proposal",
+        input: recurringProposal(startTime),
+      },
+    ],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  })
+}
 
 function queueProposal(startTime = "19:00"): void {
   mockGenerate.mockResolvedValueOnce({
@@ -156,6 +190,10 @@ describe("CalendarWorkflow", () => {
     mockBusyIntervals.mockReset()
     mockCreateManagedEvent.mockReset()
     mockUpdateManagedEvent.mockReset()
+    mockReconcileManagedSeries.mockReset()
+    mockDeleteManagedEvent.mockReset()
+    mockReconcileManagedSeries.mockResolvedValue(undefined)
+    mockDeleteManagedEvent.mockResolvedValue(undefined)
   })
   afterEach(() => vitest.useRealTimers())
 
@@ -173,6 +211,95 @@ describe("CalendarWorkflow", () => {
       expect.stringContaining("sendMessage"),
       expect.objectContaining({ body: expect.stringContaining("Added: Call Jamie") }),
     )
+  })
+
+  it("creates one native recurring parent after validating the complete occurrence set", async () => {
+    queueRecurringProposal()
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(createStep({ type: "timeout" }), environment(), {
+      ...workflowEvent(),
+      payload: { ...workflowEvent().payload, requestText: "Weekly review every Tuesday at 7pm for 3 weeks" },
+    })
+
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        summary: "Weekly review",
+        recurrence: [expect.stringContaining("FREQ=WEEKLY")],
+      }),
+    )
+    expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [])
+  })
+
+  it("requires explicit approval and revalidation before creating per-date exceptions", async () => {
+    queueRecurringProposal()
+    const conflicting = [{ start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValue(conflicting)
+    telegramMock()
+
+    await run(
+      createStep({ type: "event", payload: { text: "__calendar-recurrence-adjustments__" } }, { type: "timeout" }),
+      environment(),
+      {
+        ...workflowEvent(),
+        payload: { ...workflowEvent().payload, requestText: "Weekly review every Tuesday at 7pm for 3 weeks" },
+      },
+    )
+
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
+    expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        originalStart: "2026-08-04T13:30:00.000Z",
+        start: "2026-08-04T14:15:00.000Z",
+      }),
+    ])
+  })
+
+  it("updates the same recurring parent when immediate Edit changes the entire series", async () => {
+    queueRecurringProposal()
+    queueRecurringProposal("20:00")
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-edit__" } },
+        { type: "event", payload: { text: "Move the entire series to 8pm" } },
+        { type: "timeout" },
+      ),
+      environment(),
+      {
+        ...workflowEvent(),
+        payload: { ...workflowEvent().payload, requestText: "Weekly review every Tuesday at 7pm for 3 weeks" },
+      },
+    )
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: mockCreateManagedEvent.mock.calls[0][0].id,
+        start: "2026-07-28T14:30:00.000Z",
+      }),
+    )
+    expect(mockReconcileManagedSeries).toHaveBeenCalledTimes(2)
+  })
+
+  it("compensates a new recurring parent when exception reconciliation fails", async () => {
+    queueRecurringProposal()
+    mockBusyIntervals.mockResolvedValue([])
+    mockReconcileManagedSeries.mockRejectedValueOnce(new Error("instance reconciliation failed"))
+    telegramMock()
+
+    await run(createStep(), environment(), {
+      ...workflowEvent(),
+      payload: { ...workflowEvent().payload, requestText: "Weekly review every Tuesday at 7pm for 3 weeks" },
+    })
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockDeleteManagedEvent).toHaveBeenCalledWith(mockCreateManagedEvent.mock.calls[0][0].id)
   })
 
   it("keeps static planner instructions separate from dynamic user context", async () => {
@@ -301,6 +428,37 @@ describe("CalendarWorkflow", () => {
         }),
       }),
     )
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("repairs a recurring handoff that omitted an explicit absence key before Calendar access", async () => {
+    const malformed = { ...recurringProposal() } as Record<string, unknown>
+    delete malformed.location
+    mockGenerate
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "malformed-recurring", name: "submit_recurring_proposal", input: malformed }],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "repaired-recurring", name: "submit_recurring_proposal", input: recurringProposal() }],
+        usage: {},
+      })
+    mockBusyIntervals.mockResolvedValue([])
+    telegramMock()
+
+    await run(createStep({ type: "timeout" }))
+
+    expect(mockGenerate.mock.calls[1]?.[0].messages).toContainEqual(
+      expect.objectContaining({
+        role: "tool",
+        name: "submit_recurring_proposal",
+        output: expect.objectContaining({
+          category: "invalid-input",
+          validationErrors: expect.arrayContaining(["location: expected object"]),
+        }),
+      }),
+    )
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(1)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 

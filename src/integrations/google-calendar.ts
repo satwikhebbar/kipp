@@ -18,6 +18,7 @@ const SCHEMA_VERSION = "1"
 const PRIVATE_VISIBILITY = "private"
 const OPAQUE_TRANSPARENCY = "opaque"
 const POPUP_REMINDER_METHOD = "popup"
+const MAX_CALENDAR_INSTANCES_PER_PAGE = "2500"
 
 export interface BusyInterval {
   start: string
@@ -34,11 +35,33 @@ export interface ManagedCalendarEvent {
   location?: string
   reminderMinutes: number
   requestId: string
+  recurrence?: string[]
+}
+
+export interface ManagedCalendarException {
+  originalStart: string
+  start: string
+  end: string
+}
+
+interface ManagedCalendarInstance {
+  id: string
+  originalStart: string
+  start: string
+  end: string
 }
 
 interface GoogleCalendarEventResponse {
   id?: string
   extendedProperties?: { private?: Record<string, string> }
+  start?: { dateTime?: string }
+  end?: { dateTime?: string }
+  originalStartTime?: { dateTime?: string }
+}
+
+interface GoogleCalendarInstancesResponse {
+  items?: GoogleCalendarEventResponse[]
+  nextPageToken?: string
 }
 
 interface GoogleCalendarFreeBusyResponse {
@@ -56,6 +79,7 @@ interface GoogleCalendarEventBody {
   transparency: typeof OPAQUE_TRANSPARENCY
   reminders: { useDefault: false; overrides: Array<{ method: typeof POPUP_REMINDER_METHOD; minutes: number }> }
   extendedProperties: { private: Record<string, string> }
+  recurrence?: string[]
 }
 
 export interface GoogleCalendarClient {
@@ -63,6 +87,8 @@ export interface GoogleCalendarClient {
   findManagedEvent(id: string, requestId: string): Promise<boolean>
   createManagedEvent(event: ManagedCalendarEvent): Promise<void>
   updateManagedEvent(event: ManagedCalendarEvent): Promise<void>
+  reconcileManagedSeries(event: ManagedCalendarEvent, exceptions: ManagedCalendarException[]): Promise<void>
+  deleteManagedEvent(id: string): Promise<void>
 }
 
 /** Returns the epoch ms at which the token expires. */
@@ -93,6 +119,7 @@ function calendarEventBody(event: ManagedCalendarEvent): GoogleCalendarEventBody
     visibility: PRIVATE_VISIBILITY,
     transparency: OPAQUE_TRANSPARENCY,
     reminders: { useDefault: false, overrides: [{ method: POPUP_REMINDER_METHOD, minutes: event.reminderMinutes }] },
+    ...(event.recurrence ? { recurrence: event.recurrence } : {}),
     extendedProperties: {
       private: {
         [MANAGED_BY_PROPERTY]: MANAGED_BY_VALUE,
@@ -231,5 +258,100 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     if (!response.ok) throw new GoogleCalendarError("Calendar event could not be updated", "permanent")
   }
 
-  return { getBusyIntervals, findManagedEvent, createManagedEvent, updateManagedEvent }
+  async function listManagedInstances(parentId: string): Promise<ManagedCalendarInstance[]> {
+    const instances: ManagedCalendarInstance[] = []
+    let pageToken: string | undefined
+    do {
+      const query = new URLSearchParams({ maxResults: MAX_CALENDAR_INSTANCES_PER_PAGE, showDeleted: "false" })
+      if (pageToken) query.set("pageToken", pageToken)
+      const response = await request(
+        `/calendars/primary/events/${encodeURIComponent(parentId)}/instances?${query.toString()}`,
+        { method: "GET" },
+      )
+      if (!response.ok) throw new GoogleCalendarError("Calendar series instances could not be read", "permanent")
+      const data = (await response.json()) as GoogleCalendarInstancesResponse
+      for (const item of data.items ?? []) {
+        const originalStart = item.originalStartTime?.dateTime
+        const start = item.start?.dateTime
+        const end = item.end?.dateTime
+        if (item.id && originalStart && start && end) instances.push({ id: item.id, originalStart, start, end })
+      }
+      pageToken = data.nextPageToken
+    } while (pageToken)
+    return instances
+  }
+
+  async function updateManagedInstance(
+    parent: ManagedCalendarEvent,
+    instanceId: string,
+    start: string,
+    end: string,
+  ): Promise<void> {
+    const instanceEvent: ManagedCalendarEvent = { ...parent, id: instanceId, start, end, recurrence: undefined }
+    const response = await request(`/calendars/primary/events/${encodeURIComponent(instanceId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(calendarEventBody(instanceEvent)),
+    })
+    if (!response.ok) throw new GoogleCalendarError("Calendar series exception could not be updated", "permanent")
+  }
+
+  async function reconcileManagedSeries(
+    event: ManagedCalendarEvent,
+    exceptions: ManagedCalendarException[],
+  ): Promise<void> {
+    const requested = new Map(exceptions.map((exception) => [Date.parse(exception.originalStart), exception]))
+    const desired = new Map(requested)
+    const instances = await listManagedInstances(event.id)
+    const duration = Date.parse(event.end) - Date.parse(event.start)
+    for (const instance of instances) {
+      const key = Date.parse(instance.originalStart)
+      const exception = desired.get(key)
+      if (exception) {
+        await updateManagedInstance(event, instance.id, exception.start, exception.end)
+        desired.delete(key)
+        continue
+      }
+      if (Date.parse(instance.start) !== key) {
+        await updateManagedInstance(
+          event,
+          instance.id,
+          new Date(key).toISOString(),
+          new Date(key + duration).toISOString(),
+        )
+      }
+    }
+    if (desired.size) throw new GoogleCalendarError("Calendar series exceptions could not be matched", "permanent")
+    const verified = await listManagedInstances(event.id)
+    const verifiedKeys = new Set<number>()
+    for (const instance of verified) {
+      const key = Date.parse(instance.originalStart)
+      const exception = requested.get(key)
+      verifiedKeys.add(key)
+      if (
+        exception
+          ? Date.parse(instance.start) !== Date.parse(exception.start) ||
+            Date.parse(instance.end) !== Date.parse(exception.end)
+          : Date.parse(instance.start) !== key
+      )
+        throw new GoogleCalendarError("Calendar series reconciliation could not be verified", "permanent")
+    }
+    if ([...requested.keys()].some((key) => !verifiedKeys.has(key)))
+      throw new GoogleCalendarError("Calendar series reconciliation could not be verified", "permanent")
+  }
+
+  async function deleteManagedEvent(id: string): Promise<void> {
+    const response = await request(`/calendars/primary/events/${encodeURIComponent(id)}`, { method: "DELETE" })
+    if (!response.ok && response.status !== HTTP_STATUS.NOT_FOUND)
+      throw new GoogleCalendarError("Calendar event could not be removed", "permanent")
+  }
+
+  return {
+    getBusyIntervals,
+    findManagedEvent,
+    createManagedEvent,
+    updateManagedEvent,
+    reconcileManagedSeries,
+    deleteManagedEvent,
+  }
 }

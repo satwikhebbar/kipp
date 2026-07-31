@@ -12,6 +12,8 @@ const mockGenerate = vitest.hoisted(() => vitest.fn())
 const mockBusyIntervals = vitest.hoisted(() => vitest.fn())
 const mockCreateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockUpdateManagedEvent = vitest.hoisted(() => vitest.fn())
+const mockReconcileManagedSeries = vitest.hoisted(() => vitest.fn())
+const mockDeleteManagedEvent = vitest.hoisted(() => vitest.fn())
 const MockGoogleCalendarError = vitest.hoisted(
   () =>
     class GoogleCalendarError extends Error {
@@ -27,6 +29,8 @@ vitest.mock("../integrations/google-calendar", () => ({
     getBusyIntervals: mockBusyIntervals,
     createManagedEvent: mockCreateManagedEvent,
     updateManagedEvent: mockUpdateManagedEvent,
+    reconcileManagedSeries: mockReconcileManagedSeries,
+    deleteManagedEvent: mockDeleteManagedEvent,
   }),
   GoogleCalendarError: MockGoogleCalendarError,
 }))
@@ -50,6 +54,23 @@ const UNTIMED_PROPOSAL = (durationMinutes = 30) => ({
   durationMinutes: { value: durationMinutes, source: "explicit" as const },
   classification: { value: "ordinary", source: "inferred" as const },
 })
+
+const RECURRING_PROPOSAL = {
+  title: { value: "Weekly review", source: "explicit" as const },
+  firstDate: { value: "2026-07-28", source: "explicit" as const },
+  startTime: { state: "provided" as const, value: "19:00", source: "explicit" as const },
+  durationMinutes: { value: 30, source: "inferred" as const },
+  classification: { value: "ordinary", source: "inferred" as const },
+  recurrence: {
+    cadence: "weekly" as const,
+    source: "explicit" as const,
+    weekdays: { mode: "first_date_weekday" as const },
+  },
+  end: { mode: "count" as const, occurrences: 3, source: "explicit" as const },
+  description: { state: "omitted" as const },
+  location: { state: "omitted" as const },
+  reminderMinutes: { state: "omitted" as const },
+}
 
 function queueProposal(startTime = "19:00"): void {
   mockGenerate.mockResolvedValueOnce({
@@ -223,6 +244,10 @@ describe("calendar Telegram workflow integration", () => {
     mockBusyIntervals.mockReset()
     mockCreateManagedEvent.mockReset()
     mockUpdateManagedEvent.mockReset()
+    mockReconcileManagedSeries.mockReset()
+    mockDeleteManagedEvent.mockReset()
+    mockReconcileManagedSeries.mockResolvedValue(undefined)
+    mockDeleteManagedEvent.mockResolvedValue(undefined)
   })
   afterEach(() => {
     vitest.useRealTimers()
@@ -259,6 +284,38 @@ describe("calendar Telegram workflow integration", () => {
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(calendar.get).toHaveBeenCalledWith("calendar-wf-1")
+  })
+
+  it("routes a recurring Telegram request through one native parent and bounded instance reconciliation", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [{ id: "recurring", name: "submit_recurring_proposal", input: RECURRING_PROPOSAL }],
+      usage: {},
+    })
+    mockBusyIntervals.mockResolvedValue([])
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences", 1),
+      runtimeEnv,
+    )
+    const workflow = new CalendarWorkflow({} as never, {} as never)
+    Object.assign(workflow, { env: runtimeEnv })
+    const run = (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(
+      { instanceId: "calendar-wf-1", payload: (calendar.created[0].params as { params: unknown }).params },
+      { do: vitest.fn(async (_: string, fn: () => unknown) => fn()), waitForEvent: calendar.waitForEvent },
+    )
+    await waitForMessageText(network, "3 occurrences")
+    calendar.timeout()
+    await run
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ recurrence: [expect.stringContaining("COUNT=3")] }),
+    )
+    expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [])
   })
 
   it("checks an explicit Telegram time only in deterministic Calendar code", async () => {
