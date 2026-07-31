@@ -149,14 +149,14 @@ Existing content`,
       vi.fn(async (url: RequestInfo | URL) => {
         const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
         if (urlStr.includes(RSS_FEED_URL)) {
-          return { ok: false, status: 500, text: () => Promise.resolve("Server Error") }
+          return { ok: false, status: 403, text: () => Promise.resolve("Forbidden") }
         }
         return { ok: true, json: () => Promise.resolve({ content: "cGFzc2Vk", sha: "s1" }) }
       }),
     )
 
     const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
-    await expect(handleRssCron(env)).rejects.toThrow("RSS fetch error 500")
+    await expect(handleRssCron(env)).rejects.toThrow("RSS fetch error 403")
   })
 
   it("propagates malformed LLM response as an error", async () => {
