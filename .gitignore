@@ -17,15 +17,11 @@ scripts/
 wrangler.local.toml
 wrangler.prod.toml
 
-# Local agent handoff queues
-.agent-handoff/inbox/*
-.agent-handoff/in-progress/*
-.agent-handoff/done/*
-.agent-handoff/archive/*
-!.agent-handoff/inbox/.gitkeep
-!.agent-handoff/in-progress/.gitkeep
-!.agent-handoff/done/.gitkeep
-!.agent-handoff/archive/.gitkeep
+# Local agent tooling (handoff queues, beads skill, tool configs)
+.agent-handoff/
+.agents/skills/beads/
+.claude/
+.codex/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
