@@ -19,6 +19,11 @@ const PRIVATE_VISIBILITY = "private"
 const OPAQUE_TRANSPARENCY = "opaque"
 const POPUP_REMINDER_METHOD = "popup"
 const MAX_CALENDAR_INSTANCES_PER_PAGE = "2500"
+const MAX_VISIBLE_EVENTS = 50
+const EVENT_LIST_FETCH_LIMIT = String(MAX_VISIBLE_EVENTS + 1)
+const MAX_EVENT_LIST_RANGE_DAYS = 31
+const MILLIS_PER_DAY = 86_400_000
+const MAX_EVENT_LIST_RANGE_MS = MAX_EVENT_LIST_RANGE_DAYS * MILLIS_PER_DAY
 
 export interface BusyInterval {
   start: string
@@ -44,6 +49,20 @@ export interface ManagedCalendarException {
   end: string
 }
 
+export interface CalendarEventProjection {
+  reference: string
+  title: string
+  start: string
+  end: string
+  allDay: boolean
+  transparency: "opaque" | "transparent"
+}
+
+export interface CalendarEventList {
+  events: CalendarEventProjection[]
+  truncated: boolean
+}
+
 interface ManagedCalendarInstance {
   id: string
   originalStart: string
@@ -53,13 +72,20 @@ interface ManagedCalendarInstance {
 
 interface GoogleCalendarEventResponse {
   id?: string
+  summary?: string
+  transparency?: "opaque" | "transparent"
   extendedProperties?: { private?: Record<string, string> }
-  start?: { dateTime?: string }
-  end?: { dateTime?: string }
+  start?: { dateTime?: string; date?: string }
+  end?: { dateTime?: string; date?: string }
   originalStartTime?: { dateTime?: string }
 }
 
 interface GoogleCalendarInstancesResponse {
+  items?: GoogleCalendarEventResponse[]
+  nextPageToken?: string
+}
+
+interface GoogleCalendarEventsResponse {
   items?: GoogleCalendarEventResponse[]
   nextPageToken?: string
 }
@@ -84,6 +110,7 @@ interface GoogleCalendarEventBody {
 
 export interface GoogleCalendarClient {
   getBusyIntervals(timeMin: string, timeMax: string): Promise<BusyInterval[]>
+  listEvents(timeMin: string, timeMax: string): Promise<CalendarEventList>
   findManagedEvent(id: string, requestId: string): Promise<boolean>
   createManagedEvent(event: ManagedCalendarEvent): Promise<void>
   updateManagedEvent(event: ManagedCalendarEvent): Promise<void>
@@ -222,6 +249,55 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     return data.calendars?.[PRIMARY_CALENDAR_ID]?.busy ?? []
   }
 
+  async function listEvents(timeMin: string, timeMax: string): Promise<CalendarEventList> {
+    const rangeStart = Date.parse(timeMin)
+    const rangeEnd = Date.parse(timeMax)
+    if (
+      !Number.isFinite(rangeStart) ||
+      !Number.isFinite(rangeEnd) ||
+      rangeEnd <= rangeStart ||
+      rangeEnd - rangeStart > MAX_EVENT_LIST_RANGE_MS
+    )
+      throw new GoogleCalendarError("Calendar event range is invalid", "permanent")
+
+    const events: CalendarEventProjection[] = []
+    let pageToken: string | undefined
+    do {
+      const query = new URLSearchParams({
+        timeMin: new Date(rangeStart).toISOString(),
+        timeMax: new Date(rangeEnd).toISOString(),
+        singleEvents: "true",
+        orderBy: "startTime",
+        showDeleted: "false",
+        maxResults: EVENT_LIST_FETCH_LIMIT,
+      })
+      if (pageToken) query.set("pageToken", pageToken)
+      const response = await request(`/calendars/${PRIMARY_CALENDAR_ID}/events?${query.toString()}`, { method: "GET" })
+      if (!response.ok) throw new GoogleCalendarError("Calendar events could not be read", "permanent")
+      const data = (await response.json()) as GoogleCalendarEventsResponse
+      for (const item of data.items ?? []) {
+        const allDay = Boolean(item.start?.date && item.end?.date)
+        const start = item.start?.dateTime ?? item.start?.date
+        const end = item.end?.dateTime ?? item.end?.date
+        if (!item.id || !start || !end) continue
+        events.push({
+          reference: item.id,
+          title: item.summary ?? "(untitled)",
+          start,
+          end,
+          allDay,
+          transparency: item.transparency === "transparent" ? "transparent" : "opaque",
+        })
+        if (events.length > MAX_VISIBLE_EVENTS) break
+      }
+      pageToken = data.nextPageToken
+    } while (pageToken && events.length <= MAX_VISIBLE_EVENTS)
+    return {
+      events: events.slice(0, MAX_VISIBLE_EVENTS),
+      truncated: events.length > MAX_VISIBLE_EVENTS || Boolean(pageToken),
+    }
+  }
+
   async function findManagedEvent(id: string, requestId: string): Promise<boolean> {
     const response = await request(`/calendars/primary/events/${encodeURIComponent(id)}`, { method: "GET" })
     if (response.status === HTTP_STATUS.NOT_FOUND) return false
@@ -348,6 +424,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
 
   return {
     getBusyIntervals,
+    listEvents,
     findManagedEvent,
     createManagedEvent,
     updateManagedEvent,

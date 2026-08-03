@@ -5,6 +5,7 @@ import {
   managedRecurringEvent,
   type RecurringProposal,
   recurrenceHorizon,
+  validateRecurringProposalIssues,
 } from "../calendar-recurrence"
 
 const TIME_ZONE = "Asia/Kolkata"
@@ -116,6 +117,23 @@ describe("Calendar recurrence policy", () => {
         end: { mode: "count", occurrences: 200 },
       }),
     ).toEqual({ clarification: "That occurrence count would run beyond the six-month maximum." })
+  })
+
+  it("aggregates independent recurring policy issues as typed facts", () => {
+    expect(
+      validateRecurringProposalIssues({
+        ...MONTHLY,
+        title: " ",
+        startTime: "not-a-time",
+        durationMinutes: 20,
+        firstDate: "not-a-date",
+      }),
+    ).toEqual([
+      { code: "invalid_title", field: "title", params: { maxCharacters: 120 } },
+      { code: "invalid_duration_increment", field: "durationMinutes", params: { increment: 15 } },
+      { code: "missing_or_invalid_time", field: "startTime" },
+      { code: "invalid_first_date", field: "firstDate" },
+    ])
   })
 
   it("keeps one local wall-clock time across timezone offset changes", () => {

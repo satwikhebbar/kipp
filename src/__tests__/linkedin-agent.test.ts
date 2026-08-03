@@ -19,7 +19,7 @@ describe("LinkedIn native-tool agent", () => {
     )
 
     expect(result.completed).toBe(true)
-    expect(result.response).toBe("Final response")
+    expect(result.terminal).toEqual({ kind: "ready_for_review", response: "Final response" })
     expect(result.toolNames).toEqual(["submit_linkedin_response"])
     expect(result.usage).toEqual({ inputTokens: 11, outputTokens: 7 })
     expect(provider.generate).toHaveBeenCalledWith(
@@ -51,7 +51,7 @@ describe("LinkedIn native-tool agent", () => {
 
     const second = await runLinkedInToolSession(revisionProvider, revisedInput)
 
-    expect(second.response).toBe("Short response")
+    expect(second.terminal).toEqual({ kind: "ready_for_review", response: "Short response" })
     expect(revisedInput.at(-1)).toEqual({ role: "user", text: "Make it shorter" })
     expect(revisionProvider.generate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -72,6 +72,19 @@ describe("LinkedIn native-tool agent", () => {
     )
   })
 
+  it("excludes provider reasoning from the persisted session transcript", async () => {
+    const result = await runLinkedInToolSession(
+      providerWith({
+        toolCalls: [{ id: "response", name: "submit_linkedin_response", input: { response: "Final" } }],
+        reasoningContent: "private provider reasoning",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      }),
+      createLinkedInConversation("Direct.", { body: "Topic" }),
+    )
+
+    expect(result.messages).not.toContainEqual(expect.objectContaining({ reasoningContent: expect.anything() }))
+  })
+
   it("repairs a prose-only response and aggregates usage across provider turns", async () => {
     const result = await runLinkedInToolSession(
       providerWith(
@@ -84,7 +97,7 @@ describe("LinkedIn native-tool agent", () => {
       createLinkedInConversation("Direct.", { body: "Topic" }),
     )
 
-    expect(result.response).toBe("Repaired response")
+    expect(result.terminal).toEqual({ kind: "ready_for_review", response: "Repaired response" })
     expect(result.providerTurns).toBe(2)
     expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 5 })
   })
@@ -100,7 +113,7 @@ describe("LinkedIn native-tool agent", () => {
     )
 
     expect(result.completed).toBe(false)
-    expect(result.response).toBeNull()
+    expect(result.terminal).toBeNull()
     expect(result.failureReason).toBe("provider-turn-limit")
     expect(result.toolExecutions).toEqual([
       expect.objectContaining({ tool: "unknown", outcome: "failed", failureCategory: "unknown-tool" }),
@@ -127,7 +140,7 @@ describe("LinkedIn native-tool agent", () => {
 
     const result = await runLinkedInToolSession(provider, createLinkedInConversation("Direct.", { body: "Topic" }))
 
-    expect(result.response).toBeNull()
+    expect(result.terminal).toBeNull()
     expect(result.toolExecutions[0]).toEqual(
       expect.objectContaining({ outcome: "failed", failureCategory: "invalid-input" }),
     )

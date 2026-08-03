@@ -1,83 +1,69 @@
-import { describe, expect, it, vi } from "vitest"
-import type { Env } from "../types"
-
-vi.mock("cloudflare:workers", () => {
-  class WorkflowEntrypoint {
-    env!: Env
-  }
-  return { WorkflowEntrypoint }
-})
+import { describe, expect, it } from "vitest"
+import { runCalendarAgentSession } from "../agent/calendar-session"
+import { createCalendarPlanLedger } from "../calendar-plan"
+import { createToolProvider } from "../providers"
 
 declare const process: { env: Record<string, string | undefined> }
 
 const apiKey = process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY
 const enabled = process.env.DEEPSEEK_CONTRACT === "1" && Boolean(apiKey)
 const contractIt = enabled ? it : it.skip
-
-function environment(): Env {
-  return {
-    LLM_API_KEY: apiKey ?? "",
-    LLM_PROVIDER: "deepseek",
-    LLM_MODEL: "deepseek-v4-flash",
-    LLM_MAX_RETRIES: "0",
-    TIMEZONE: "Asia/Kolkata",
-  } as Env
-}
+const NOW = Date.parse("2026-08-01T00:00:00.000Z")
+const CONTRACT_TTL_MS = 900_000
 
 async function runContract(requestText: string) {
-  const { planOneOff } = await import("../calendar-workflow")
-  return planOneOff(environment(), requestText)
+  const provider = createToolProvider(apiKey ?? "", "deepseek", "deepseek-v4-flash", 0)
+  return runCalendarAgentSession(provider, [{ role: "user", text: requestText }], {
+    calendar: { listEvents: async () => ({ events: [], truncated: false }) },
+    evaluation: {
+      getBusyIntervals: async () => [],
+      ledger: createCalendarPlanLedger(),
+      version: 1,
+      expiresAt: NOW + CONTRACT_TTL_MS,
+      timeZone: "Asia/Kolkata",
+      now: NOW,
+    },
+  })
 }
 
-function expectSuccessfulHandoff(
-  result: Awaited<ReturnType<typeof runContract>>,
-  tool: "submit_one_off_proposal" | "submit_recurring_proposal" | "request_clarification",
-): void {
-  expect(result).toMatchObject({ toolRunCompleted: true })
-  expect(result.toolExecutions.filter((execution) => execution.outcome === "succeeded")).toEqual([
-    { tool, outcome: "succeeded" },
-  ])
-}
-
-describe("DeepSeek Calendar native-tool contract", () => {
-  contractIt("returns a focused clarification through a handoff tool", async () => {
-    const result = await runContract("Schedule a call with Jamie. The date and time are unknown.")
-    expect(result.decision).toMatchObject({ kind: "clarification" })
-    expectSuccessfulHandoff(result, "request_clarification")
-  })
-
-  contractIt("returns an explicit proposal through a handoff tool", async () => {
-    const result = await runContract("Schedule a 15-minute professional call with Jamie on 2026-08-03 at 10:30.")
-    expect(result.decision).toMatchObject({
-      kind: "proposal",
-      proposal: { localDate: "2026-08-03", startTime: "10:30", durationMinutes: 15 },
-    })
-    expectSuccessfulHandoff(result, "submit_one_off_proposal")
-  })
-
-  contractIt("submits an untimed proposal for deterministic availability selection", async () => {
-    const result = await runContract("Schedule a 30-minute call with Jamie on 2026-08-03.")
-    expect(result.decision).toMatchObject({
-      kind: "proposal",
-      proposal: { localDate: "2026-08-03", durationMinutes: 30 },
-    })
-    expect(result.decision?.kind === "proposal" ? result.decision.proposal.startTime : undefined).toBeUndefined()
-    expectSuccessfulHandoff(result, "submit_one_off_proposal")
-  })
-
-  contractIt("classifies and submits a supported recurrence without raw RRULE input", async () => {
+describe("DeepSeek agent-centered Calendar native-tool contract", () => {
+  contractIt("returns a focused clarification through needs_user_input", async () => {
     const result = await runContract(
-      "Schedule a 30-minute weekly review every Monday and Wednesday at 19:00, starting 2026-08-03, for 6 occurrences.",
+      "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a call with Jamie; the date and time are unknown.",
     )
-    expect(result.decision).toMatchObject({
-      kind: "proposal",
-      proposal: {
-        firstDate: "2026-08-03",
-        startTime: "19:00",
-        recurrence: { cadence: "weekly", weekdays: { mode: "named", values: ["MO", "WE"] } },
-        end: { mode: "count", occurrences: 6 },
-      },
-    })
-    expectSuccessfulHandoff(result, "submit_recurring_proposal")
+
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "needs_user_input", interaction: { kind: "reply" } })
+    expect(result.toolNames.at(-1)).toBe("needs_user_input")
+  })
+
+  contractIt("evaluates and authorizes an explicit one-off proposal", async () => {
+    const result = await runContract(
+      "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a 15-minute professional call with Jamie on 2026-08-03 at 10:30.",
+    )
+
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "ready_to_create"])
+  })
+
+  contractIt("submits an untimed candidate for deterministic availability selection", async () => {
+    const result = await runContract(
+      "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a 30-minute call with Jamie on 2026-08-03; choose a policy-safe time.",
+    )
+
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "ready_to_create"])
+  })
+
+  contractIt("classifies and authorizes a supported recurrence without raw RRULE input", async () => {
+    const result = await runContract(
+      "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a 30-minute weekly review every Monday and Wednesday at 19:00, starting 2026-08-03, for 6 occurrences.",
+    )
+
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "ready_to_create"])
   })
 })

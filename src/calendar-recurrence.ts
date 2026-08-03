@@ -15,6 +15,7 @@ import {
   localMinutes,
   zonedDateTimeToMillis,
 } from "./calendar-scheduling"
+import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./calendar-validation"
 import type { BusyInterval, ManagedCalendarEvent } from "./integrations/google-calendar"
 
 export const RECURRENCE_MAX_MONTHS = 6
@@ -189,28 +190,28 @@ function recurrenceCountLimit(proposal: RecurringProposal, hardEnd: string): num
   return Math.floor((end - start) / MILLIS_PER_DAY) + COUNT_GENERATION_MARGIN
 }
 
+type RecurrenceExpansionResult = ExpandedRecurrence | { issue: CalendarValidationIssue }
+
 /** Expands an approved recurrence into bounded local civil dates and a Google RRULE. */
-export function expandRecurrence(proposal: RecurringProposal): ExpandedRecurrence | { clarification: string } {
+function expandRecurrenceResult(proposal: RecurringProposal): RecurrenceExpansionResult {
   const first = dateParts(proposal.firstDate)
   const horizon = recurrenceHorizon(proposal.firstDate)
-  if (!first || !horizon) return { clarification: "Please tell me a valid first date." }
+  if (!first || !horizon) return { issue: { code: "invalid_first_date", field: "firstDate" } }
   let inclusiveEnd = horizon
   if (proposal.end.mode === "until") {
-    if (!dateParts(proposal.end.inclusiveDate))
-      return { clarification: "Please tell me a valid inclusive recurrence end date." }
-    if (proposal.end.inclusiveDate < proposal.firstDate)
-      return { clarification: "The recurrence end date cannot be before its first occurrence." }
+    if (!dateParts(proposal.end.inclusiveDate)) return { issue: { code: "invalid_end_date", field: "end" } }
+    if (proposal.end.inclusiveDate < proposal.firstDate) return { issue: { code: "end_before_first", field: "end" } }
     if (proposal.end.inclusiveDate > horizon)
-      return { clarification: "Recurring blocks can run for at most six calendar months." }
+      return { issue: { code: "horizon_exceeded", field: "end", params: { maximumMonths: RECURRENCE_MAX_MONTHS } } }
     inclusiveEnd = proposal.end.inclusiveDate
   }
   if (proposal.end.mode === "count" && (!Number.isInteger(proposal.end.occurrences) || proposal.end.occurrences < 1))
-    return { clarification: "Please give me a positive number of occurrences." }
+    return { issue: { code: "invalid_occurrence_count", field: "end" } }
   if (proposal.recurrence.cadence === "weekly" && proposal.recurrence.weekdays.mode === "named") {
     const unique = [...new Set(proposal.recurrence.weekdays.values)]
-    if (!unique.length) return { clarification: "Please name at least one weekday." }
+    if (!unique.length) return { issue: { code: "missing_weekday", field: "recurrence.weekdays" } }
     if (!unique.includes(weekdayFor(proposal.firstDate)))
-      return { clarification: "The first date must fall on one of the selected weekdays." }
+      return { issue: { code: "first_date_weekday_mismatch", field: "firstDate" } }
   }
   const start = civilDate(first.year, first.month, first.day)
   const countLimit = recurrenceCountLimit(proposal, horizon)
@@ -219,14 +220,26 @@ export function expandRecurrence(proposal: RecurringProposal): ExpandedRecurrenc
   const dates = proposal.end.mode === "count" ? generated : generated.filter((date) => date <= inclusiveEnd)
   if (proposal.end.mode === "count") {
     if (dates.length !== proposal.end.occurrences || dates.some((date) => date > horizon))
-      return { clarification: "That occurrence count would run beyond the six-month maximum." }
+      return {
+        issue: {
+          code: "occurrence_count_exceeds_horizon",
+          field: "end",
+          params: { maximumMonths: RECURRENCE_MAX_MONTHS },
+        },
+      }
   }
   if (!dates.length || dates[0] !== proposal.firstDate)
-    return { clarification: "The first date does not satisfy that recurrence rule." }
+    return { issue: { code: "first_date_weekday_mismatch", field: "firstDate" } }
   const rrule = new RRule(recurrenceOptions(proposal, dates.length, start))
     .toString()
     .replace(/^DTSTART:[^\n]+\nRRULE:/, "RRULE:")
   return { dates, rrule, humanCadence: humanCadence(proposal.recurrence) }
+}
+
+/** Compatibility expansion contract retained while the workflow migrates to typed evaluation outcomes. */
+export function expandRecurrence(proposal: RecurringProposal): ExpandedRecurrence | { clarification: string } {
+  const result = expandRecurrenceResult(proposal)
+  return "issue" in result ? { clarification: legacyCalendarIssueMessage(result.issue) } : result
 }
 
 /** Produces a compact user-facing cadence description without parsing RRULE text. */
@@ -240,25 +253,46 @@ function humanCadence(rule: RecurrenceRule): string {
   return `weekly on ${weekdays}`
 }
 
-/** Validates the non-negotiable recurring-event policy before any Calendar access. */
-export function validateRecurringProposal(proposal: RecurringProposal): string | null {
+/** Returns every independently discoverable recurring-event policy violation as typed facts. */
+export function validateRecurringProposalIssues(proposal: RecurringProposal): CalendarValidationIssue[] {
+  const issues: CalendarValidationIssue[] = []
   if (!proposal.title.trim() || proposal.title.length > MAX_EVENT_TITLE_LENGTH)
-    return "I need a short title for this calendar block."
+    issues.push({ code: "invalid_title", field: "title", params: { maxCharacters: MAX_EVENT_TITLE_LENGTH } })
   if (
     !Number.isInteger(proposal.durationMinutes) ||
     proposal.durationMinutes < CALENDAR_SLOT_MINUTES ||
     proposal.durationMinutes > CALENDAR_MAX_DURATION_MINUTES
   )
-    return "Please give me a duration between 15 minutes and 4 hours."
-  if (proposal.durationMinutes % CALENDAR_SLOT_MINUTES !== 0) return "Please use a duration in 15-minute increments."
+    issues.push({
+      code: "invalid_duration_range",
+      field: "durationMinutes",
+      params: { minimum: CALENDAR_SLOT_MINUTES, maximum: CALENDAR_MAX_DURATION_MINUTES },
+    })
+  else if (proposal.durationMinutes % CALENDAR_SLOT_MINUTES !== 0)
+    issues.push({
+      code: "invalid_duration_increment",
+      field: "durationMinutes",
+      params: { increment: CALENDAR_SLOT_MINUTES },
+    })
   if (proposal.timeIsExplicit && (!proposal.startTime || localMinutes(proposal.startTime) === null))
-    return "Please tell me a valid time."
+    issues.push({ code: "missing_or_invalid_time", field: "startTime" })
   if (!proposal.timeIsExplicit && proposal.durationMinutes > CALENDAR_MAX_INFERRED_DURATION_MINUTES)
-    return "Please tell me what time works for this longer block."
+    issues.push({
+      code: "inferred_duration_requires_time",
+      field: "startTime",
+      params: { maximumInferredDuration: CALENDAR_MAX_INFERRED_DURATION_MINUTES },
+    })
   if (!proposal.timeIsExplicit && proposal.classification === "family-social")
-    return "Please tell me what time works for this family or social plan."
-  const expanded = expandRecurrence(proposal)
-  return "clarification" in expanded ? expanded.clarification : null
+    issues.push({ code: "family_social_requires_time", field: "startTime" })
+  const expanded = expandRecurrenceResult(proposal)
+  if ("issue" in expanded) issues.push(expanded.issue)
+  return issues
+}
+
+/** Legacy first-issue adapter retained until Calendar dialogue is fully agent-rendered. */
+export function validateRecurringProposal(proposal: RecurringProposal): string | null {
+  const issue = validateRecurringProposalIssues(proposal)[0]
+  return issue ? legacyCalendarIssueMessage(issue) : null
 }
 
 /** Converts one civil date and local time into a same-day zoned occurrence. */

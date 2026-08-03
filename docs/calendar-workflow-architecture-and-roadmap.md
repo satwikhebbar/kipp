@@ -65,12 +65,12 @@ given an explicit compile-time allowlist; configuration and runtime data cannot
 add tools or expand permissions. Every tool declares input/output schemas and
 privacy classification.
 
-Calendar one-off and recurring proposals use separate terminal handoffs and
-separate schemas. Recurring handoff keys are structurally required: fields
-that the user did not provide use explicit discriminated absence/default
-states, while an actually missing key is invalid input. Schema or semantic
-failure receives only a bounded, privacy-safe repair opportunity and never
-reaches availability or Calendar access.
+Calendar one-off and recurring proposals retain separate strict schemas under
+one nonterminal `evaluate_calendar_candidate` tool. Zod aggregates structural
+omissions and type failures; deterministic validation returns all independently
+discoverable semantic issues as typed codes and safe parameters. The agent may
+ask directly about natural-language ambiguity, but after evaluation it must
+include every actionable issue in one concise request.
 
 The model can request a tool, but never executes an external mutation itself.
 A deterministic guard layer validates every request before execution and
@@ -83,11 +83,18 @@ validates the result before it returns to the model. Guards own:
 - idempotency, retry bounds, expiry, and write safety; and
 - redaction of Calendar data and secrets.
 
-Calendar write tools may be requested by the agent, but only the guard can
-authorize a resulting Google Calendar mutation. Calendar availability exposed
-to the model is busy/free information only: event titles, descriptions,
-locations, attendees, and other personal details never enter the model
-context.
+Calendar exposes two nonterminal tools: a bounded `list_calendar_events` read
+and `evaluate_calendar_candidate`. The former projects only opaque reference,
+title, timing, all-day state, transparency, and truncation metadata from the
+primary calendar; all richer fields remain hidden. The latter returns typed
+validation/evaluation facts plus workflow-owned opaque plan and option IDs.
+Neither tool mutates Calendar.
+
+The agent terminates with either `ready_to_create { planId }` or
+`needs_user_input`. `ready_to_create` is an intent handoff, not a write tool.
+Only the workflow can resolve a current, single-use plan, revalidate it against
+fresh policy and availability evidence, and execute the idempotent mutation.
+Fixed Telegram buttons select only workflow-issued option IDs.
 
 The provider layer will gain a normalized native tool-calling interface rather
 than emulating calls with JSON embedded in model text. Provider adapters remain
@@ -111,12 +118,11 @@ the prompt. The model may request an allowlisted tool, but a deterministic
 guard remains the only authority able to approve an external mutation.
 
 For Calendar, a prompt can interpret a request such as “call Amit next Tuesday
-evening”; an availability tool can return only validated free candidates; and
-deterministic code decides whether automatic scheduling is permitted, resolves
-the final slot, applies event policy, and writes the event. The workflow
-scaffold enforces bounded turns and calls, handles safe failure and retry
-behavior, and never places private Calendar data or credentials in model
-context.
+evening,” inspect a narrowly projected event list when useful, submit a typed
+candidate for deterministic evaluation, and explain the resulting facts. The
+workflow scaffold enforces bounded turns and calls, authorizes opaque IDs,
+revalidates fresh state, applies event policy, and performs the write. It never
+places rich Calendar data or credentials in model context.
 
 ### Session routing and persistence
 

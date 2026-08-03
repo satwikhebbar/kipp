@@ -50,30 +50,44 @@ existing OAuth-state and encrypted token-vault patterns.
 
 ## Agent and deterministic-engine boundary
 
-The LLM understands the natural-language request and produces a strictly
-validated structured proposal: action/title, date and time constraints,
-duration, recurrence, reminder class, useful description/location, and
-uncertainty flags.
+The LLM runs inside a bounded, workflow-owned agent session. It interprets the
+request, detects ambiguity, explains validated options, and writes ordinary
+pre-creation questions. It may use only two purpose-specific, read-only tools:
 
-Deterministic code owns all consequences: relative-date validation, timezone
-handling, time-grid search, buffers, availability, conflict rules, recurrence
-expansion, reminder selection, OAuth, retries, idempotency, expiration, and
-Calendar reads/writes. The LLM has no direct Calendar, Telegram, or storage
-tools and cannot alter policy based on text embedded in a request.
+- `list_calendar_events` projects at most 50 events from the primary calendar
+  across at most 31 days. It exposes only an opaque reference, title,
+  start/end, all-day state, transparency, and truncation status.
+- `evaluate_calendar_candidate` accepts either the strict `OneOffProposal` or
+  strict `RecurringProposal` schema. It performs semantic policy validation,
+  recurrence expansion, FreeBusy evaluation, candidate ranking, and conflict
+  heuristics, then returns typed facts and opaque plan or option IDs.
 
-For recurrence, the LLM classifies explicit natural language into one supported
-cadence or asks a focused clarification when it is ambiguous. It does not
-select occurrences or conflict alternatives. Deterministic code expands the
-complete bounded occurrence set, evaluates privacy-safe availability, and
-selects any common-time or per-date candidates.
+The model must finish in one of two workflow-specific states:
+`ready_to_create { planId }` or `needs_user_input { message, reasonCodes,
+interaction }`. Structural schema errors and independently discoverable
+semantic issues are aggregated before another model turn, allowing one concise
+request for all actionable missing or invalid facts.
 
-The LLM receives no titles, descriptions, locations, attendees, availability
-intervals, or other details from existing Calendar events. It may interpret a
-later user reply to a deterministic conflict prompt, but the availability
-calculation and candidate selection remain outside the model.
+Deterministic code owns authorization and all consequences: schema and policy
+validation, relative-date and timezone arithmetic, recurrence expansion,
+availability calculations, candidate generation, opaque-ID lifecycle, OAuth,
+retry and expiry limits, fresh pre-write revalidation, idempotency, and Calendar
+writes. A `ready_to_create` result expresses intent only; the workflow accepts
+it only for a current plan ID issued by that session. It rejects forged, stale,
+expired, superseded, or reused IDs and never silently substitutes a candidate
+when availability changes.
 
-If the LLM is unavailable or returns an invalid proposal, Kipp creates nothing
-and asks the user to try again.
+Event titles and timing may be model-visible through the bounded projection.
+Descriptions, locations, attendees, organizers, conferencing data, links,
+credentials, and raw Calendar responses are never exposed or logged. Returned
+titles are always treated as untrusted data, not instructions.
+
+The workflow persists the bounded native message transcript and canonical
+structured state for its 15-minute lifetime, excluding provider reasoning and
+compacting obsolete event-list payloads. Fixed code templates are reserved for
+OAuth recovery, timeouts, provider failures, terminal safety fallbacks, and
+post-write confirmations. If the model or a deterministic guard fails, Kipp
+creates nothing and returns a safe response.
 
 ## Event construction
 

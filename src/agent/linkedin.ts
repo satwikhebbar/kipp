@@ -1,8 +1,8 @@
 import { z } from "zod"
 import type { ToolConversationMessage, ToolProviderClient } from "../providers"
-import { runTools, type ToolExecutionSummary, type ToolRunFailureReason } from "../runtime/tool-runner"
+import { type AgentSessionResult, persistableAgentMessages } from "../runtime/agent-session"
+import { runTools } from "../runtime/tool-runner"
 import type { ToolRegistry } from "../runtime/tools"
-import type { LLMUsage } from "../types"
 import type { DraftInput } from "./draft"
 
 const SUBMIT_LINKEDIN_RESPONSE = "submit_linkedin_response"
@@ -19,17 +19,8 @@ Use the supplied style instructions and source material as the authoritative req
 
 Call submit_linkedin_response exactly once with the complete response exactly as it should appear for human review, including every requested alternative or recommendation. This is the only available action. Never request or claim to publish, archive, notify, or access credentials. Do not answer with prose outside the tool call.`
 
-export interface LinkedInToolSessionResult {
-  response: string | null
-  messages: ToolConversationMessage[]
-  completed: boolean
-  failureReason?: ToolRunFailureReason
-  providerTurns: number
-  toolCallCount: number
-  toolNames: string[]
-  toolExecutions: ToolExecutionSummary[]
-  usage: LLMUsage
-}
+export type LinkedInTerminalOutcome = { kind: "ready_for_review"; response: string }
+export type LinkedInToolSessionResult = AgentSessionResult<LinkedInTerminalOutcome>
 
 /** Builds the canonical native-tool transcript for a new LinkedIn response. */
 export function createLinkedInConversation(stylePrompt: string, input: DraftInput): ToolConversationMessage[] {
@@ -81,8 +72,8 @@ export async function runLinkedInToolSession(
     initialMessages,
   )
   return {
-    response: result.completed ? response : null,
-    messages: result.messages,
+    terminal: result.completed && response ? { kind: "ready_for_review", response } : null,
+    messages: persistableAgentMessages(result.messages),
     completed: result.completed,
     failureReason: result.failureReason,
     providerTurns: result.providerTurns,

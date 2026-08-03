@@ -1,3 +1,4 @@
+import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./calendar-validation"
 import type { BusyInterval, ManagedCalendarEvent } from "./integrations/google-calendar"
 
 export const CALENDAR_TIMEZONE_DEFAULT = "Asia/Kolkata"
@@ -150,26 +151,46 @@ export function reminderMinutes(proposal: OneOffProposal): number {
     : CALENDAR_IMPORTANT_REMINDER_MINUTES
 }
 
-/** Validates a proposal against non-negotiable calendar safety policy; null means valid. */
-export function validateProposal(proposal: OneOffProposal): string | null {
+/** Returns every independently discoverable one-off policy violation as typed, value-free facts. */
+export function validateProposalIssues(proposal: OneOffProposal): CalendarValidationIssue[] {
+  const issues: CalendarValidationIssue[] = []
   if (proposal.needsClarification || !proposal.localDate || !DATE_PATTERN.test(proposal.localDate))
-    return "Please tell me the date."
+    issues.push({ code: "missing_date", field: "localDate" })
   if (!proposal.title.trim() || proposal.title.length > MAX_EVENT_TITLE_LENGTH)
-    return "I need a short title for this calendar block."
+    issues.push({ code: "invalid_title", field: "title", params: { maxCharacters: MAX_EVENT_TITLE_LENGTH } })
   if (
     !Number.isInteger(proposal.durationMinutes) ||
     proposal.durationMinutes < CALENDAR_SLOT_MINUTES ||
     proposal.durationMinutes > CALENDAR_MAX_DURATION_MINUTES
   )
-    return "Please give me a duration between 15 minutes and 4 hours."
-  if (proposal.durationMinutes % CALENDAR_SLOT_MINUTES !== 0) return "Please use a duration in 15-minute increments."
+    issues.push({
+      code: "invalid_duration_range",
+      field: "durationMinutes",
+      params: { minimum: CALENDAR_SLOT_MINUTES, maximum: CALENDAR_MAX_DURATION_MINUTES },
+    })
+  else if (proposal.durationMinutes % CALENDAR_SLOT_MINUTES !== 0)
+    issues.push({
+      code: "invalid_duration_increment",
+      field: "durationMinutes",
+      params: { increment: CALENDAR_SLOT_MINUTES },
+    })
   if (proposal.timeIsExplicit && (!proposal.startTime || localMinutes(proposal.startTime) === null))
-    return "Please tell me the time."
+    issues.push({ code: "missing_or_invalid_time", field: "startTime" })
   if (!proposal.timeIsExplicit && proposal.durationMinutes > CALENDAR_MAX_INFERRED_DURATION_MINUTES)
-    return "Please tell me what time works for this longer block."
+    issues.push({
+      code: "inferred_duration_requires_time",
+      field: "startTime",
+      params: { maximumInferredDuration: CALENDAR_MAX_INFERRED_DURATION_MINUTES },
+    })
   if (!proposal.timeIsExplicit && proposal.classification === "family-social")
-    return "Please tell me what time works for this family or social plan."
-  return null
+    issues.push({ code: "family_social_requires_time", field: "startTime" })
+  return issues
+}
+
+/** Legacy first-issue adapter retained until Calendar dialogue is fully agent-rendered. */
+export function validateProposal(proposal: OneOffProposal): string | null {
+  const issue = validateProposalIssues(proposal)[0]
+  return issue ? legacyCalendarIssueMessage(issue) : null
 }
 
 /** Finds a safe deterministic interval or reports the required clarification or a conflict. */

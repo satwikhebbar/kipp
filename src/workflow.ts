@@ -183,8 +183,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           toolFailureCount: session.toolExecutions.filter((execution) => execution.outcome === "failed").length,
         },
       })
-      if (!session.response) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
-      const draft = session.response
+      if (!session.terminal) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
+      const draft = session.terminal.response
       const messages = session.messages
 
       const ideas = await manager.readIdeas()
@@ -425,9 +425,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             toolFailureCount: session.toolExecutions.filter((execution) => execution.outcome === "failed").length,
           },
         })
-        if (!session.response)
+        if (!session.terminal)
           throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
-        const nextDraft = session.response
+        const nextDraft = session.terminal.response
         const client = createGitHubClient(this.env)
         const manager = createBacklogManager(client)
         const ideas = await manager.readIdeas()

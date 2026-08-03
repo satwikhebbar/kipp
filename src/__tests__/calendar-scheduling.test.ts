@@ -11,6 +11,7 @@ import {
   scheduleOneOff,
   suggestOneOffAlternative,
   validateProposal,
+  validateProposalIssues,
   zonedDateTimeToMillis,
 } from "../calendar-scheduling"
 
@@ -156,6 +157,23 @@ describe("Calendar scheduling policy", () => {
     expect(validateProposal({ ...EXPLICIT_CALL, durationMinutes: 20 })).toBe(
       "Please use a duration in 15-minute increments.",
     )
+  })
+
+  it("returns every independently discoverable semantic issue without prose", () => {
+    expect(
+      validateProposalIssues({
+        ...EXPLICIT_CALL,
+        title: " ",
+        localDate: undefined,
+        startTime: "not-a-time",
+        durationMinutes: 20,
+      }),
+    ).toEqual([
+      { code: "missing_date", field: "localDate" },
+      { code: "invalid_title", field: "title", params: { maxCharacters: 120 } },
+      { code: "invalid_duration_increment", field: "durationMinutes", params: { increment: 15 } },
+      { code: "missing_or_invalid_time", field: "startTime" },
+    ])
   })
 
   it("uses explicit reminder overrides and classification defaults", () => {
