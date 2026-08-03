@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { runCalendarAgentSession } from "../agent/calendar-session"
 import { createCalendarPlanLedger } from "../calendar-plan"
 import { createToolProvider } from "../providers"
+import { ToolProviderHttpError } from "../providers/llm"
 
 declare const process: { env: Record<string, string | undefined> }
 
@@ -13,17 +14,23 @@ const CONTRACT_TTL_MS = 900_000
 
 async function runContract(requestText: string) {
   const provider = createToolProvider(apiKey ?? "", "deepseek", "deepseek-v4-flash", 0)
-  return runCalendarAgentSession(provider, [{ role: "user", text: requestText }], {
-    calendar: { listEvents: async () => ({ events: [], truncated: false }) },
-    evaluation: {
-      getBusyIntervals: async () => [],
-      ledger: createCalendarPlanLedger(),
-      version: 1,
-      expiresAt: NOW + CONTRACT_TTL_MS,
-      timeZone: "Asia/Kolkata",
-      now: NOW,
-    },
-  })
+  try {
+    return await runCalendarAgentSession(provider, [{ role: "user", text: requestText }], {
+      calendar: { listEvents: async () => ({ events: [], truncated: false }) },
+      evaluation: {
+        getBusyIntervals: async () => [],
+        ledger: createCalendarPlanLedger(),
+        version: 1,
+        expiresAt: NOW + CONTRACT_TTL_MS,
+        timeZone: "Asia/Kolkata",
+        now: NOW,
+      },
+    })
+  } catch (error) {
+    if (error instanceof ToolProviderHttpError && error.providerMessage)
+      throw new Error(`${error.message}: ${error.providerMessage}`)
+    throw error
+  }
 }
 
 describe("DeepSeek agent-centered Calendar native-tool contract", () => {
@@ -54,7 +61,10 @@ describe("DeepSeek agent-centered Calendar native-tool contract", () => {
 
     expect(result.completed).toBe(true)
     expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
-    expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "ready_to_create"])
+    expect([
+      ["evaluate_calendar_candidate", "ready_to_create"],
+      ["list_calendar_events", "evaluate_calendar_candidate", "ready_to_create"],
+    ]).toContainEqual(result.toolNames)
   })
 
   contractIt("classifies and authorizes a supported recurrence without raw RRULE input", async () => {

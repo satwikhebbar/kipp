@@ -51,6 +51,8 @@ export class ToolProviderHttpError extends Error {
   constructor(
     readonly provider: string,
     readonly status: number,
+    /** Sanitized provider validation detail for diagnostics; excluded from the public error message. */
+    readonly providerMessage?: string,
   ) {
     super(`${provider} tool request failed (${status})`)
     this.name = "ToolProviderHttpError"
@@ -76,10 +78,11 @@ export function toolDeclaration(tool: ToolDefinition): {
   description: string
   parameters: Record<string, unknown>
 } {
+  const parameters = zodProperty(tool.input)
   return {
     name: tool.name,
     description: tool.description,
-    parameters: zodProperty(tool.input),
+    parameters: parameters.type === "object" ? parameters : { ...parameters, type: "object" },
   }
 }
 
@@ -94,14 +97,25 @@ function zodProperty(schema: unknown): Record<string, unknown> {
       type: "object",
       properties: Object.fromEntries(entries.map(([name, value]) => [name, zodProperty(value)])),
       required: entries.filter(([, value]) => !isOptionalZodProperty(value)).map(([name]) => name),
+      additionalProperties: false,
     }
   }
-  if (typeName === "ZodNumber") return { type: "number" }
+  if (typeName === "ZodDiscriminatedUnion" || typeName === "ZodUnion")
+    return { anyOf: (definition?.options ?? []).map((option) => zodProperty(option)) }
+  if (typeName === "ZodNumber")
+    return { type: definition?.checks?.some((check) => check.kind === "int") ? "integer" : "number" }
   if (typeName === "ZodBoolean") return { type: "boolean" }
   if (typeName === "ZodArray") return { type: "array", items: zodProperty(definition?.type) }
   if (typeName === "ZodEnum") return { type: "string", enum: definition?.values }
-  if (typeName === "ZodLiteral") return { const: definition?.value }
+  if (typeName === "ZodLiteral") return literalProperty(definition?.value)
   return { type: "string" }
+}
+
+/** Uses an enum for literals because it is accepted by every supported tool-schema provider. */
+function literalProperty(value: unknown): Record<string, unknown> {
+  const type = typeof value
+  if (type === "string" || type === "number" || type === "boolean") return { type, enum: [value] }
+  return { enum: [value] }
 }
 
 type ZodProperty = {
@@ -111,6 +125,8 @@ type ZodProperty = {
     values?: readonly string[]
     value?: unknown
     type?: ZodProperty
+    options?: ZodProperty[]
+    checks?: Array<{ kind?: string }>
     shape?: () => Record<string, ZodProperty>
   }
 }

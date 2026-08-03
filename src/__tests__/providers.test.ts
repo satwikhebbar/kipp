@@ -48,6 +48,24 @@ const PROVENANCE_TOOL: ToolDefinition = {
   handler: async () => ({ accepted: true }),
 }
 
+const CANDIDATE_TOOL: ToolDefinition = {
+  name: "evaluate_calendar_candidate",
+  description: "Evaluate one candidate.",
+  input: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("one_off"), durationMinutes: z.number().int() }).strict(),
+    z.object({
+      kind: z.literal("recurring"),
+      end: z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("default_horizon") }).strict(),
+        z.object({ mode: z.literal("count"), occurrences: z.number().int() }).strict(),
+      ]),
+    }),
+  ]),
+  output: z.object({ accepted: z.literal(true) }),
+  privacy: "private",
+  handler: async () => ({ accepted: true }),
+}
+
 describe("DeepSeek provider", () => {
   beforeEach(() => mockFetch.mockReset())
 
@@ -56,11 +74,30 @@ describe("DeepSeek provider", () => {
       ok: false,
       status: 401,
       text: () => Promise.resolve("bad auth"),
+      json: () => Promise.resolve({ error: { message: "bad auth" } }),
     })
 
     const { createDeepseekGenerator } = await import("../providers/deepseek")
     const gen = createDeepseekGenerator("bad-key")
     await expect(gen(userMsg("hi"))).rejects.toThrow("DeepSeek API error 401")
+  })
+
+  it("retains sanitized native-tool provider validation detail outside the public error message", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: { message: "invalid\n tool schema" } }),
+    })
+
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    const promise = createDeepseekToolClient("key").generate({
+      messages: TOOL_TEST_MESSAGES,
+      tools: [TOOL_TEST_REGISTRY.echo],
+    })
+    await expect(promise).rejects.toMatchObject({
+      message: "DeepSeek tool request failed (400)",
+      providerMessage: "invalid tool schema",
+    })
   })
 
   it("throws on empty choices", async () => {
@@ -244,6 +281,61 @@ describe("DeepSeek provider", () => {
         source: { type: "string", enum: ["explicit", "inferred"] },
       },
       required: ["value", "source"],
+      additionalProperties: false,
+    })
+  })
+
+  it("projects discriminated Calendar candidates as provider-compatible object alternatives", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+    })
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    await createDeepseekToolClient("key").generate({ messages: TOOL_TEST_MESSAGES, tools: [CANDIDATE_TOOL] })
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string) as {
+      tools: Array<{ function: { parameters: { anyOf: Array<Record<string, unknown>> } } }>
+    }
+    expect(body.tools[0].function.parameters).toEqual({
+      type: "object",
+      anyOf: [
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["one_off"] },
+            durationMinutes: { type: "integer" },
+          },
+          required: ["kind", "durationMinutes"],
+          additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["recurring"] },
+            end: {
+              anyOf: [
+                {
+                  type: "object",
+                  properties: { mode: { type: "string", enum: ["default_horizon"] } },
+                  required: ["mode"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    mode: { type: "string", enum: ["count"] },
+                    occurrences: { type: "integer" },
+                  },
+                  required: ["mode", "occurrences"],
+                  additionalProperties: false,
+                },
+              ],
+            },
+          },
+          required: ["kind", "end"],
+          additionalProperties: false,
+        },
+      ],
     })
   })
 

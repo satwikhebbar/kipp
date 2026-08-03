@@ -11,6 +11,7 @@ import {
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
 const DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
 const FUNCTION_TOOL_TYPE = "function"
+const MAX_PROVIDER_ERROR_MESSAGE_CHARACTERS = 500
 
 interface DeepseekToolResponse {
   choices?: Array<{
@@ -93,7 +94,10 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
           ...(reasoning ? { thinking: { type: reasoning } } : {}),
         }),
       })
-      if (!response.ok) throw new ToolProviderHttpError("DeepSeek", response.status)
+      if (!response.ok) {
+        const providerMessage = await readProviderErrorMessage(response)
+        throw new ToolProviderHttpError("DeepSeek", response.status, providerMessage)
+      }
       const data = (await response.json()) as DeepseekToolResponse
       const message = data.choices?.[0]?.message
       if (!message) throw new ToolProviderProtocolError("DeepSeek returned empty choices")
@@ -111,5 +115,16 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
         usage: { inputTokens: data.usage?.prompt_tokens ?? 0, outputTokens: data.usage?.completion_tokens ?? 0 },
       }
     },
+  }
+}
+
+/** Extracts only DeepSeek's bounded validation message, never the request or raw response body. */
+async function readProviderErrorMessage(response: Response): Promise<string | undefined> {
+  try {
+    const body = (await response.json()) as { error?: { message?: unknown } }
+    if (typeof body.error?.message !== "string") return undefined
+    return body.error.message.replace(/\s+/g, " ").trim().slice(0, MAX_PROVIDER_ERROR_MESSAGE_CHARACTERS) || undefined
+  } catch {
+    return undefined
   }
 }
