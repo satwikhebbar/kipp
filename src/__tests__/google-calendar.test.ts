@@ -15,6 +15,28 @@ const EVENT = {
   requestId: "request-1",
 }
 
+const ORIGINAL_ONE = "2026-07-28T13:30:00.000Z"
+const ORIGINAL_ONE_END = "2026-07-28T14:00:00.000Z"
+const ADJUSTED_ONE = "2026-07-28T14:15:00.000Z"
+const ADJUSTED_ONE_END = "2026-07-28T14:45:00.000Z"
+const ORIGINAL_TWO = "2026-08-04T13:30:00.000Z"
+const ORIGINAL_TWO_END = "2026-08-04T14:00:00.000Z"
+const ADJUSTED_TWO = "2026-08-04T14:15:00.000Z"
+const ADJUSTED_TWO_END = "2026-08-04T14:45:00.000Z"
+
+function instance(id: string, originalStart: string, start: string, end: string) {
+  return {
+    id,
+    originalStartTime: { dateTime: originalStart },
+    start: { dateTime: start },
+    end: { dateTime: end },
+  }
+}
+
+function instancePage(...items: ReturnType<typeof instance>[]) {
+  return { items }
+}
+
 function storage(): DurableObjectStorage {
   const entries = new Map<string, unknown>()
   return {
@@ -98,47 +120,248 @@ describe("Google Calendar client", () => {
   })
 
   it("reconciles desired exceptions, restores obsolete ones, and verifies the result", async () => {
-    const originalOne = "2026-07-28T13:30:00.000Z"
-    const originalTwo = "2026-08-04T13:30:00.000Z"
-    const adjustedOne = "2026-07-28T14:15:00.000Z"
-    const adjustedOneEnd = "2026-07-28T14:45:00.000Z"
     const instances = (firstStart: string, secondStart: string) => ({
       items: [
         {
           id: "instance-1",
-          originalStartTime: { dateTime: originalOne },
+          originalStartTime: { dateTime: ORIGINAL_ONE },
           start: { dateTime: firstStart },
-          end: { dateTime: firstStart === originalOne ? "2026-07-28T14:00:00.000Z" : adjustedOneEnd },
+          end: { dateTime: firstStart === ORIGINAL_ONE ? ORIGINAL_ONE_END : ADJUSTED_ONE_END },
         },
         {
           id: "instance-2",
-          originalStartTime: { dateTime: originalTwo },
+          originalStartTime: { dateTime: ORIGINAL_TWO },
           start: { dateTime: secondStart },
-          end: {
-            dateTime: secondStart === originalTwo ? "2026-08-04T14:00:00.000Z" : "2026-08-04T14:45:00.000Z",
-          },
+          end: { dateTime: secondStart === ORIGINAL_TWO ? ORIGINAL_TWO_END : ADJUSTED_TWO_END },
         },
       ],
     })
     const fetch = vi
       .fn()
-      .mockResolvedValueOnce(response(200, instances(originalOne, "2026-08-04T14:15:00.000Z")))
+      .mockResolvedValueOnce(response(200, instances(ORIGINAL_ONE, ADJUSTED_TWO)))
       .mockResolvedValueOnce(response(200))
       .mockResolvedValueOnce(response(200))
-      .mockResolvedValueOnce(response(200, instances(adjustedOne, originalTwo)))
+      .mockResolvedValueOnce(response(200, instances(ADJUSTED_ONE, ORIGINAL_TWO)))
     vi.stubGlobal("fetch", fetch)
 
     await createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [
-      { originalStart: originalOne, start: adjustedOne, end: adjustedOneEnd },
+      { originalStart: ORIGINAL_ONE, start: ADJUSTED_ONE, end: ADJUSTED_ONE_END },
     ])
 
     expect(fetch).toHaveBeenCalledTimes(4)
     expect(fetch.mock.calls[1][0]).toContain("/events/instance-1")
     expect(fetch.mock.calls[2][0]).toContain("/events/instance-2")
     expect(JSON.parse((fetch.mock.calls[2][1] as RequestInit).body as string)).toMatchObject({
-      start: { dateTime: originalTwo },
-      end: { dateTime: "2026-08-04T14:00:00.000Z" },
+      start: { dateTime: ORIGINAL_TWO },
+      end: { dateTime: ORIGINAL_TWO_END },
     })
+  })
+
+  it("paginates both reconciliation reads and propagates page tokens", async () => {
+    const firstPage = {
+      ...instancePage(instance("instance-1", ORIGINAL_ONE, ORIGINAL_ONE, ORIGINAL_ONE_END)),
+      nextPageToken: "page-2",
+    }
+    const secondPage = instancePage(instance("instance-2", ORIGINAL_TWO, ORIGINAL_TWO, ORIGINAL_TWO_END))
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, firstPage))
+      .mockResolvedValueOnce(response(200, secondPage))
+      .mockResolvedValueOnce(response(200, firstPage))
+      .mockResolvedValueOnce(response(200, secondPage))
+    vi.stubGlobal("fetch", fetch)
+
+    await createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [])
+
+    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(fetch.mock.calls[0][0]).not.toContain("pageToken")
+    expect(fetch.mock.calls[1][0]).toContain("pageToken=page-2")
+    expect(fetch.mock.calls[2][0]).not.toContain("pageToken")
+    expect(fetch.mock.calls[3][0]).toContain("pageToken=page-2")
+    expect(fetch.mock.calls.every(([, init]) => (init as RequestInit).method === "GET")).toBe(true)
+  })
+
+  it("performs no instance writes when the series already matches", async () => {
+    const clean = instancePage(
+      instance("instance-1", ORIGINAL_ONE, ORIGINAL_ONE, ORIGINAL_ONE_END),
+      instance("instance-2", ORIGINAL_TWO, ORIGINAL_TWO, ORIGINAL_TWO_END),
+    )
+    const fetch = vi.fn().mockResolvedValueOnce(response(200, clean)).mockResolvedValueOnce(response(200, clean))
+    vi.stubGlobal("fetch", fetch)
+
+    await createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [])
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch.mock.calls.every(([, init]) => (init as RequestInit).method === "GET")).toBe(true)
+  })
+
+  it("updates only multiple desired exceptions and omits recurrence from instance bodies", async () => {
+    const original = instancePage(
+      instance("instance-1", ORIGINAL_ONE, ORIGINAL_ONE, ORIGINAL_ONE_END),
+      instance("instance-2", ORIGINAL_TWO, ORIGINAL_TWO, ORIGINAL_TWO_END),
+    )
+    const adjusted = instancePage(
+      instance("instance-1", ORIGINAL_ONE, ADJUSTED_ONE, ADJUSTED_ONE_END),
+      instance("instance-2", ORIGINAL_TWO, ADJUSTED_TWO, ADJUSTED_TWO_END),
+    )
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, original))
+      .mockResolvedValueOnce(response(200))
+      .mockResolvedValueOnce(response(200))
+      .mockResolvedValueOnce(response(200, adjusted))
+    vi.stubGlobal("fetch", fetch)
+
+    await createGoogleCalendarClient(await environment()).reconcileManagedSeries(
+      { ...EVENT, recurrence: ["RRULE:FREQ=WEEKLY;COUNT=2"] },
+      [
+        { originalStart: ORIGINAL_ONE, start: ADJUSTED_ONE, end: ADJUSTED_ONE_END },
+        { originalStart: ORIGINAL_TWO, start: ADJUSTED_TWO, end: ADJUSTED_TWO_END },
+      ],
+    )
+
+    const writes = fetch.mock.calls.filter(([, init]) => (init as RequestInit).method === "PUT")
+    expect(writes).toHaveLength(2)
+    expect(writes.map(([url]) => url)).toEqual([
+      expect.stringContaining("/events/instance-1"),
+      expect.stringContaining("/events/instance-2"),
+    ])
+    for (const [, init] of writes)
+      expect(JSON.parse((init as RequestInit).body as string)).not.toHaveProperty("recurrence")
+  })
+
+  it("rejects a desired exception that cannot be matched to a provider instance", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(200, instancePage()))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [
+        { originalStart: ORIGINAL_ONE, start: ADJUSTED_ONE, end: ADJUSTED_ONE_END },
+      ]),
+    ).rejects.toMatchObject({ kind: "permanent", message: "Calendar series exceptions could not be matched" })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("ignores malformed provider instances without attempting to mutate them", async () => {
+    const malformed = {
+      items: [
+        { id: "missing-original", start: { dateTime: ORIGINAL_ONE }, end: { dateTime: ORIGINAL_ONE_END } },
+        { id: "missing-start", originalStartTime: { dateTime: ORIGINAL_ONE }, end: { dateTime: ORIGINAL_ONE_END } },
+        { id: "missing-end", originalStartTime: { dateTime: ORIGINAL_ONE }, start: { dateTime: ORIGINAL_ONE } },
+        {
+          originalStartTime: { dateTime: ORIGINAL_ONE },
+          start: { dateTime: ORIGINAL_ONE },
+          end: { dateTime: ORIGINAL_ONE_END },
+        },
+      ],
+    }
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, malformed))
+      .mockResolvedValueOnce(response(200, malformed))
+    vi.stubGlobal("fetch", fetch)
+
+    await createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [])
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch.mock.calls.every(([, init]) => (init as RequestInit).method === "GET")).toBe(true)
+  })
+
+  it("surfaces an instance update failure and stops before verification", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, instancePage(instance("instance-1", ORIGINAL_ONE, ORIGINAL_ONE, ORIGINAL_ONE_END))),
+      )
+      .mockResolvedValueOnce(response(400))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [
+        { originalStart: ORIGINAL_ONE, start: ADJUSTED_ONE, end: ADJUSTED_ONE_END },
+      ]),
+    ).rejects.toMatchObject({ kind: "permanent", message: "Calendar series exception could not be updated" })
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ["start", ORIGINAL_ONE, ORIGINAL_ONE_END],
+    ["end", ADJUSTED_ONE, ORIGINAL_ONE_END],
+  ])("rejects a final verification %s mismatch", async (_field, verifiedStart, verifiedEnd) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, instancePage(instance("instance-1", ORIGINAL_ONE, ORIGINAL_ONE, ORIGINAL_ONE_END))),
+      )
+      .mockResolvedValueOnce(response(200))
+      .mockResolvedValueOnce(
+        response(200, instancePage(instance("instance-1", ORIGINAL_ONE, verifiedStart, verifiedEnd))),
+      )
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [
+        { originalStart: ORIGINAL_ONE, start: ADJUSTED_ONE, end: ADJUSTED_ONE_END },
+      ]),
+    ).rejects.toMatchObject({ kind: "permanent", message: "Calendar series reconciliation could not be verified" })
+  })
+
+  it("rejects a desired exception missing from the final verification read", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, instancePage(instance("instance-1", ORIGINAL_ONE, ORIGINAL_ONE, ORIGINAL_ONE_END))),
+      )
+      .mockResolvedValueOnce(response(200))
+      .mockResolvedValueOnce(response(200, instancePage()))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, [
+        { originalStart: ORIGINAL_ONE, start: ADJUSTED_ONE, end: ADJUSTED_ONE_END },
+      ]),
+    ).rejects.toMatchObject({ kind: "permanent", message: "Calendar series reconciliation could not be verified" })
+  })
+
+  it("rejects an obsolete exception that remains shifted after restoration", async () => {
+    const shifted = instancePage(instance("instance-1", ORIGINAL_ONE, ADJUSTED_ONE, ADJUSTED_ONE_END))
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, shifted))
+      .mockResolvedValueOnce(response(200))
+      .mockResolvedValueOnce(response(200, shifted))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, []),
+    ).rejects.toMatchObject({ kind: "permanent", message: "Calendar series reconciliation could not be verified" })
+  })
+
+  it.each([
+    [400, "permanent", 1],
+    [401, "authorization", 1],
+    [500, "transient", 3],
+  ] as const)("classifies a reconciliation list failure (%i) as %s", async (status, kind, calls) => {
+    const fetch = vi.fn().mockResolvedValue(response(status))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, []),
+    ).rejects.toMatchObject({
+      kind,
+    })
+    expect(fetch).toHaveBeenCalledTimes(calls)
+  })
+
+  it.each([200, 404])("deletes managed parents idempotently for provider status %i", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(response(status))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(createGoogleCalendarClient(await environment()).deleteManagedEvent(EVENT.id)).resolves.toBeUndefined()
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining(`/calendars/primary/events/${EVENT.id}`),
+      expect.objectContaining({ method: "DELETE" }),
+    )
   })
 
   it("treats a conflict as success only when the matching managed event already exists", async () => {

@@ -75,6 +75,9 @@ const RECURRING = {
   },
 }
 
+const FIRST_CONFLICT = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+const SECOND_CONFLICT = [{ start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" }]
+
 function toolResult(messages: ToolConversationMessage[], name: string): Record<string, unknown> {
   const message = [...messages].reverse().find((candidate) => candidate.role === "tool" && candidate.name === name)
   if (message?.role !== "tool") throw new Error(`Missing ${name} result`)
@@ -125,20 +128,47 @@ function queueChoice(candidate: typeof ONE_OFF | typeof RECURRING): void {
   })
 }
 
-function queueQuestion(): void {
+function queueQuestion(
+  message = "Please provide a title, date, and valid time.",
+  reasonCodes = ["invalid_title", "missing_date", "missing_or_invalid_time"],
+): void {
   mockGenerate.mockResolvedValueOnce({
     toolCalls: [
       {
         id: "question",
         name: "needs_user_input",
         input: {
-          message: "Please provide a title, date, and valid time.",
-          reasonCodes: ["invalid_title", "missing_date", "missing_or_invalid_time"],
+          message,
+          reasonCodes,
           interaction: { kind: "reply" },
         },
       },
     ],
     usage: {},
+  })
+}
+
+function queueEvaluationQuestion(candidate: typeof ONE_OFF | typeof RECURRING, message: string): void {
+  mockGenerate.mockResolvedValueOnce({
+    toolCalls: [{ id: "evaluate-question", name: "evaluate_calendar_candidate", input: candidate }],
+    usage: {},
+  })
+  mockGenerate.mockImplementationOnce(async ({ messages }: { messages: ToolConversationMessage[] }) => {
+    const evaluation = toolResult(messages, "evaluate_calendar_candidate") as { issues: Array<{ code: string }> }
+    return {
+      toolCalls: [
+        {
+          id: "evaluated-question",
+          name: "needs_user_input",
+          input: {
+            message,
+            reasonCodes: evaluation.issues.map((issue) => issue.code),
+            interaction: { kind: "reply" },
+          },
+        },
+      ],
+      usage: {},
+    }
   })
 }
 
@@ -240,10 +270,18 @@ function startWorkflow(calendar: ReturnType<typeof liveWorkflowBinding>, runtime
   )
 }
 
-async function waitForMessageText(network: ReturnType<typeof createFakeNetwork>, text: string): Promise<number> {
+async function waitForMessageText(
+  network: ReturnType<typeof createFakeNetwork>,
+  text: string,
+  afterIndex = -1,
+): Promise<number> {
   try {
     await vitest.waitFor(() =>
-      expect(network.getState().telegramMessages.some((candidate) => candidate.text?.includes(text))).toBe(true),
+      expect(
+        network
+          .getState()
+          .telegramMessages.some((candidate, index) => index > afterIndex && candidate.text?.includes(text)),
+      ).toBe(true),
     )
   } catch {
     throw new Error(
@@ -254,7 +292,9 @@ async function waitForMessageText(network: ReturnType<typeof createFakeNetwork>,
         .join(" | ")}`,
     )
   }
-  return network.getState().telegramMessages.findIndex((candidate) => candidate.text?.includes(text))
+  return network
+    .getState()
+    .telegramMessages.findIndex((candidate, index) => index > afterIndex && candidate.text?.includes(text))
 }
 
 async function waitForWorkflowWait(calendar: ReturnType<typeof liveWorkflowBinding>): Promise<void> {
@@ -354,6 +394,236 @@ describe("agent-centered Calendar Telegram integration", () => {
     expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [])
   })
 
+  it("repairs a malformed recurring handoff, asks once, and preserves the resumed recurrence", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    const missingDate = {
+      ...RECURRING,
+      proposal: { ...RECURRING.proposal, firstDate: "2026-07-28", dateIsExplicit: false },
+    }
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [
+        {
+          id: "malformed-recurring",
+          name: "evaluate_calendar_candidate",
+          input: { kind: "recurring", proposal: { ...RECURRING.proposal, recurrence: undefined } },
+        },
+      ],
+      usage: {},
+    })
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [{ id: "missing-date", name: "evaluate_calendar_candidate", input: missingDate }],
+      usage: {},
+    })
+    mockGenerate.mockImplementationOnce(async ({ messages }: { messages: ToolConversationMessage[] }) => ({
+      toolCalls: [
+        {
+          id: "ask-date",
+          name: "needs_user_input",
+          input: {
+            message: "Which Tuesday should the weekly review start on?",
+            reasonCodes: (
+              toolResult(messages, "evaluate_calendar_candidate") as { issues: Array<{ code: string }> }
+            ).issues.map((issue) => issue.code),
+            interaction: { kind: "reply" },
+          },
+        },
+      ],
+      usage: {},
+    }))
+    queueReady(RECURRING)
+
+    await handleTelegramWebhook(message("/calendar Schedule a weekly review on Tuesdays at 7pm"), runtimeEnv)
+    const run = startWorkflow(calendar, runtimeEnv)
+    const questionIndex = await waitForMessageText(network, "Which Tuesday")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(message("Start 2026-07-28", 2, network.getState().nextMessageId - 1), runtimeEnv)
+    const confirmationIndex = await waitForMessageText(network, "3 occurrences", questionIndex)
+    calendar.timeout()
+    await run
+
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ recurrence: [expect.stringContaining("BYDAY=TU")] }),
+    )
+    expect(network.getState().telegramMessages[confirmationIndex]?.text).not.toContain("planId")
+  })
+
+  it("approves a below-half recurring adjustment through its fixed Telegram option", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals.mockResolvedValue(FIRST_CONFLICT)
+    queueChoice(RECURRING)
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const choiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex)), runtimeEnv)
+    await waitForMessageText(network, "Adjusted dates: 1")
+    calendar.timeout()
+    await run
+
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [
+      expect.objectContaining({
+        originalStart: "2026-07-28T13:30:00.000Z",
+        start: "2026-07-28T14:15:00.000Z",
+      }),
+    ])
+    expect(network.getState().telegramMessages[choiceIndex]?.text).not.toMatch(/(?:plan|option)[ _-]?id/i)
+  })
+
+  it("routes the recurring replacement-time action back through the agent before writing", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals.mockResolvedValue(FIRST_CONFLICT)
+    queueChoice(RECURRING)
+    queueReady({ ...RECURRING, proposal: { ...RECURRING.proposal, startTime: "20:00" } })
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const choiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 1)), runtimeEnv)
+    const replacementIndex = await waitForMessageText(network, "Reply with another time")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(message("Use 8pm", 2, network.getState().nextMessageId - 1), runtimeEnv)
+    await waitForMessageText(network, "at 20:00", replacementIndex)
+    calendar.timeout()
+    await run
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-28T14:30:00.000Z" }))
+    expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [])
+  })
+
+  it("exits a recurring conflict cancellation without any Calendar mutation", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals.mockResolvedValue(FIRST_CONFLICT)
+    queueChoice(RECURRING)
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const choiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 2)), runtimeEnv)
+    await run
+
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+    expect(mockReconcileManagedSeries).not.toHaveBeenCalled()
+  })
+
+  it("rejects an accepted recurring adjustment when fresh availability changes", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals
+      .mockResolvedValueOnce(FIRST_CONFLICT)
+      .mockResolvedValueOnce([
+        ...FIRST_CONFLICT,
+        { start: "2026-07-28T14:15:00.000Z", end: "2026-07-28T14:45:00.000Z" },
+      ])
+    queueChoice(RECURRING)
+    queueQuestion("Availability changed. Which time should I try instead?", ["requested_time_conflicts"])
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const choiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex)), runtimeEnv)
+    await waitForMessageText(network, "Availability changed")
+    calendar.timeout()
+    await run
+
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockGenerate.mock.calls[2]?.[0].messages).toContainEqual(
+      expect.objectContaining({ role: "system", text: expect.stringContaining("availability changed") }),
+    )
+  })
+
+  it("accepts the common-time branch at or above half of the recurring occurrences", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals.mockResolvedValue([...FIRST_CONFLICT, ...SECOND_CONFLICT])
+    queueChoice(RECURRING)
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const choiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex)), runtimeEnv)
+    await waitForMessageText(network, "at 19:45")
+    calendar.timeout()
+    await run
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-28T14:15:00.000Z" }))
+    expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [])
+  })
+
+  it("asks for another series time when no common recurring time exists", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals.mockResolvedValue(
+      ["2026-07-28", "2026-08-04", "2026-08-11"].map((date) => ({
+        start: `${date}T03:00:00.000Z`,
+        end: `${date}T17:30:00.000Z`,
+      })),
+    )
+    queueEvaluationQuestion(RECURRING, "I couldn't find one safe time for the complete series. Try another time.")
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    await waitForMessageText(network, "couldn't find one safe time")
+    calendar.timeout()
+    await run
+
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockReconcileManagedSeries).not.toHaveBeenCalled()
+  })
+
   it("routes one multi-issue agent request and resumes the persisted transcript", async () => {
     const network = createFakeNetwork()
     vitest.stubGlobal("fetch", network.fetch)
@@ -435,6 +705,136 @@ describe("agent-centered Calendar Telegram integration", () => {
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockUpdateManagedEvent.mock.calls[0]?.[0].id).toBe(mockCreateManagedEvent.mock.calls[0]?.[0].id)
+  })
+
+  it("adds, changes, and removes recurring exceptions across whole-series Edit turns", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    const recurringAtEight = { ...RECURRING, proposal: { ...RECURRING.proposal, startTime: "20:00" } }
+    const recurringAtNine = { ...RECURRING, proposal: { ...RECURRING.proposal, startTime: "21:00" } }
+    const eightPmConflict = [{ start: "2026-07-28T14:30:00.000Z", end: "2026-07-28T15:00:00.000Z" }]
+    mockBusyIntervals
+      .mockResolvedValueOnce(FIRST_CONFLICT)
+      .mockResolvedValueOnce(FIRST_CONFLICT)
+      .mockResolvedValueOnce(eightPmConflict)
+      .mockResolvedValueOnce(eightPmConflict)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+    queueChoice(RECURRING)
+    queueChoice(recurringAtEight)
+    queueReady(recurringAtNine)
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const firstChoiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, firstChoiceIndex)), runtimeEnv)
+    const addedIndex = await waitForMessageText(network, "Added: Weekly review", firstChoiceIndex)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, addedIndex)), runtimeEnv)
+    const firstEditIndex = await waitForMessageText(network, "correction for the entire recurring series", addedIndex)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(
+      message("Move the whole series to 8pm", 2, network.getState().nextMessageId - 1),
+      runtimeEnv,
+    )
+    const secondChoiceIndex = await waitForMessageText(network, "safe alternative", firstEditIndex)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, secondChoiceIndex)), runtimeEnv)
+    const firstUpdateIndex = await waitForMessageText(network, "Updated: Weekly review", secondChoiceIndex)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, firstUpdateIndex)), runtimeEnv)
+    const secondEditIndex = await waitForMessageText(
+      network,
+      "correction for the entire recurring series",
+      firstUpdateIndex,
+    )
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(
+      message("Move the whole series to 9pm", 3, network.getState().nextMessageId - 1),
+      runtimeEnv,
+    )
+    await waitForMessageText(network, "Updated: Weekly review", secondEditIndex)
+    calendar.timeout()
+    await run
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(2)
+    const parentId = mockCreateManagedEvent.mock.calls[0]?.[0].id
+    expect(mockUpdateManagedEvent.mock.calls.map(([event]) => event.id)).toEqual([parentId, parentId])
+    expect(mockReconcileManagedSeries).toHaveBeenCalledTimes(3)
+    expect(mockReconcileManagedSeries.mock.calls[0]?.[1]).toEqual([
+      expect.objectContaining({ start: "2026-07-28T14:15:00.000Z" }),
+    ])
+    expect(mockReconcileManagedSeries.mock.calls[1]?.[1]).toEqual([
+      expect.objectContaining({ originalStart: "2026-07-28T14:30:00.000Z" }),
+    ])
+    expect(mockReconcileManagedSeries.mock.calls[1]?.[1]?.[0]?.start).not.toBe(
+      mockReconcileManagedSeries.mock.calls[0]?.[1]?.[0]?.start,
+    )
+    expect(mockReconcileManagedSeries.mock.calls[2]?.[1]).toEqual([])
+  })
+
+  it("reconnects once and re-evaluates a recurring request before writing", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new MockGoogleCalendarError("disconnected", "authorization"))
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+    queueReady(RECURRING)
+    queueReady(RECURRING)
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const reconnectIndex = await waitForMessageText(network, "Reconnect, then tap Retry")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, reconnectIndex)), runtimeEnv)
+    await waitForMessageText(network, "Added: Weekly review", reconnectIndex)
+    calendar.timeout()
+    await run
+
+    expect(mockGenerate).toHaveBeenCalledTimes(4)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockReconcileManagedSeries).toHaveBeenCalledTimes(1)
+    expect(mockGenerate.mock.calls[2]?.[0].messages).toContainEqual(
+      expect.objectContaining({ role: "system", text: expect.stringContaining("authorization was restored") }),
+    )
+  })
+
+  it("compensates a recurring parent when instance reconciliation fails after creation", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    queueReady(RECURRING)
+    mockReconcileManagedSeries.mockRejectedValueOnce(new Error("reconciliation failed"))
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    await waitForMessageText(network, "couldn't create that calendar block")
+    await run
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockDeleteManagedEvent).toHaveBeenCalledWith(mockCreateManagedEvent.mock.calls[0]?.[0].id)
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
   })
 
   it("does not dispatch expired or stale Calendar callbacks", async () => {
