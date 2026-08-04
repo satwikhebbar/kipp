@@ -39,6 +39,15 @@ type CalendarActionResponse =
   | { type: "action"; kind: WorkflowInteractionKind; actionIndex: number }
   | { type: "reply"; text: string }
 
+type CalendarInteractionStage = "notify" | "register" | "wait"
+
+class CalendarInteractionOperationError extends Error {
+  constructor(readonly stage: CalendarInteractionStage) {
+    super("Calendar interaction operation failed")
+    this.name = "CalendarInteractionOperationError"
+  }
+}
+
 interface PreparedCalendarOption {
   optionId: string
   label: string
@@ -393,7 +402,8 @@ async function writePlanAndConfirm(
     edit = await promptForActions(env, step, event, version, `calendar-agent-confirmation-${turn}`, message, [
       [label, INTERACTION_KIND.CALENDAR_EDIT],
     ])
-  } catch {
+  } catch (error) {
+    if (!(error instanceof CalendarInteractionOperationError) || error.stage !== "notify") return null
     try {
       edit = await promptForActions(
         env,
@@ -572,7 +582,7 @@ async function promptForActions(
 ): Promise<CalendarActionResponse> {
   if (keyboard && actions.length > 1 && actions.some(([label]) => label.length > MAX_MULTI_ACTION_LABEL_CHARACTERS))
     throw new Error(`Calendar action labels must be at most ${MAX_MULTI_ACTION_LABEL_CHARACTERS} characters`)
-  let stage: "notify" | "register" | "wait" = "notify"
+  let stage: CalendarInteractionStage = "notify"
   const prepared = actions.map(([label, kind]) => ({
     label,
     kind,
@@ -641,6 +651,6 @@ async function promptForActions(
       failureCategory: "interaction-operation-failed",
       details: { stage, version },
     })
-    throw new Error("Calendar interaction operation failed")
+    throw new CalendarInteractionOperationError(stage)
   }
 }

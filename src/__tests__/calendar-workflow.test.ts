@@ -418,6 +418,19 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(telegram).toHaveBeenCalledTimes(2)
   })
 
+  it("does not resend a delivered confirmation when its Edit wait fails", async () => {
+    queueReady(RECURRING)
+    const telegram = telegramMock()
+    const step = createStep()
+    step.waitForEvent.mockRejectedValueOnce(new Error("workflow wait failed"))
+
+    await run(step, "Weekly review every Tuesday at 7pm for 3 occurrences")
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(telegram).toHaveBeenCalledTimes(1)
+    expect((telegram.mock.calls[0]?.[1] as { body?: string } | undefined)?.body).toContain("3 occurrences")
+  })
+
   it("offers one deterministic reconnect and retries through a new agent evaluation", async () => {
     queueReady(ONE_OFF)
     mockBusyIntervals
