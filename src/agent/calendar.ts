@@ -72,11 +72,17 @@ export const recurringCandidateSchema = z
   .object({
     title: z.string(),
     firstDate: z.string(),
+    dateIsExplicit: z
+      .boolean()
+      .describe("True only when the user explicitly supplied or confirmed the first occurrence date."),
     startTime: z.string().optional(),
     timeIsExplicit: z.boolean(),
     durationMinutes: z.number().int(),
     classification: classificationSchema,
     recurrence: recurrenceRuleSchema,
+    recurrenceIsExplicit: z
+      .boolean()
+      .describe("True only when the user explicitly supplied or confirmed a supported recurrence cadence."),
     end: recurrenceEndSchema,
     description: z.string().optional(),
     location: z.string().optional(),

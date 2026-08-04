@@ -12,11 +12,13 @@ const TIME_ZONE = "Asia/Kolkata"
 const MONTHLY: RecurringProposal = {
   title: "Monthly review",
   firstDate: "2026-01-31",
+  dateIsExplicit: true,
   startTime: "19:00",
   timeIsExplicit: true,
   durationMinutes: 30,
   classification: "ordinary",
   recurrence: { cadence: "monthly" },
+  recurrenceIsExplicit: true,
   end: { mode: "count", occurrences: 4 },
 }
 

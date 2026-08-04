@@ -80,7 +80,7 @@ async function evaluateOneOffCandidate(
     )
     return {
       kind: "choice_required",
-      issues: [{ code: "no_available_time", field: "startTime" }],
+      issues: [{ code: "requested_time_conflicts", field: "startTime" }],
       options: [
         { optionId: optionIds[0] as string, kind: "one_off_alternative", localStartTime: alternative.localStartTime },
       ],
@@ -144,7 +144,7 @@ async function evaluateRecurringCandidate(
   const [optionId] = issueCalendarOptions(context.ledger, [optionPlan], context.version, context.expiresAt)
   return {
     kind: "choice_required",
-    issues: [{ code: "no_available_time", field: "startTime" }],
+    issues: [{ code: "requested_time_conflicts", field: "startTime" }],
     options: [
       availability.kind === "adjustments"
         ? {

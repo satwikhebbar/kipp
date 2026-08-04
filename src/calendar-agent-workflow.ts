@@ -29,6 +29,7 @@ const CALENDAR_INTERACTION_TTL_MINUTES = 15
 const MILLISECONDS_PER_MINUTE = 60_000
 const CALENDAR_INTERACTION_TTL_MS = CALENDAR_INTERACTION_TTL_MINUTES * MILLISECONDS_PER_MINUTE
 const MAX_CALENDAR_INTERACTION_TURNS = 8
+const MAX_MULTI_ACTION_LABEL_CHARACTERS = 16
 const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try again shortly."
 const CALENDAR_AGENT_UNAVAILABLE = "I couldn't reach the calendar agent. Please try again shortly."
 const CALENDAR_AGENT_NO_DECISION = "The calendar agent didn't return a scheduling decision. Please retry your request."
@@ -442,7 +443,7 @@ function authorizedOptions(
     options.push({
       optionId,
       plan,
-      label: plan.kind === "recurring" && plan.adjustments.length ? "Create with adjustments" : `Use ${localStartTime}`,
+      label: plan.kind === "recurring" && plan.adjustments.length ? "Use adjustments" : `Use ${localStartTime}`,
       kind:
         plan.kind === "recurring" && plan.adjustments.length
           ? INTERACTION_KIND.CALENDAR_RECURRENCE_ADJUSTMENTS
@@ -555,6 +556,8 @@ async function promptForActions(
   actions: Array<[string, WorkflowInteractionKind]>,
   keyboard = true,
 ): Promise<CalendarActionResponse> {
+  if (keyboard && actions.length > 1 && actions.some(([label]) => label.length > MAX_MULTI_ACTION_LABEL_CHARACTERS))
+    throw new Error(`Calendar action labels must be at most ${MAX_MULTI_ACTION_LABEL_CHARACTERS} characters`)
   let stage: "notify" | "register" | "wait" = "notify"
   const prepared = actions.map(([label, kind]) => ({
     label,

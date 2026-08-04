@@ -44,6 +44,17 @@ describe("DeepSeek agent-centered Calendar native-tool contract", () => {
     expect(result.toolNames.at(-1)).toBe("needs_user_input")
   })
 
+  contractIt("does not invent a first date or cadence for an underspecified recurrence", async () => {
+    const result = await runContract(
+      "Current instant: 2026-08-03T14:09:51Z. Calendar time zone: Asia/Kolkata. Schedule a recurring review.",
+    )
+
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "needs_user_input", interaction: { kind: "reply" } })
+    expect(result.toolNames.at(-1)).toBe("needs_user_input")
+    expect(result.toolNames).not.toContain("ready_to_create")
+  })
+
   contractIt("evaluates and authorizes an explicit one-off proposal", async () => {
     const result = await runContract(
       "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a 15-minute professional call with Jamie on 2026-08-03 at 10:30.",

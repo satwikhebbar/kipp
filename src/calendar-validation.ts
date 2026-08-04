@@ -18,6 +18,7 @@ export const CALENDAR_ISSUE_CODES = [
   "inferred_duration_requires_time",
   "family_social_requires_time",
   "event_crosses_local_day",
+  "requested_time_conflicts",
   "no_available_time",
 ] as const
 
@@ -29,6 +30,7 @@ export type CalendarIssueField =
   | "firstDate"
   | "startTime"
   | "durationMinutes"
+  | "recurrence"
   | "recurrence.weekdays"
   | "end"
 
@@ -78,6 +80,8 @@ export function legacyCalendarIssueMessage(issue: CalendarValidationIssue): stri
       return "Please tell me what time works for this family or social plan."
     case "event_crosses_local_day":
       return "Please choose a time that finishes on the same day."
+    case "requested_time_conflicts":
+      return "The requested time conflicts with another calendar event."
     case "no_available_time":
       return "I couldn't find a safe time for that calendar block."
   }

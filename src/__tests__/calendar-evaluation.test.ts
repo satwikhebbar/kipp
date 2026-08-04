@@ -51,11 +51,13 @@ describe("Calendar candidate evaluation", () => {
         proposal: {
           title: "Weekly review",
           firstDate: "2026-08-04",
+          dateIsExplicit: true,
           startTime: "19:00",
           timeIsExplicit: true,
           durationMinutes: 30,
           classification: "ordinary",
           recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+          recurrenceIsExplicit: true,
           end: { mode: "count", occurrences: 3 },
         },
       },
@@ -69,5 +71,73 @@ describe("Calendar candidate evaluation", () => {
     })
     expect(ledger.records).toHaveLength(1)
     expect(ledger.records[0]?.plan).toMatchObject({ kind: "recurring", occurrences: { length: 3 } })
+  })
+
+  it("distinguishes a valid recurring adjustment from having no available time", async () => {
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "recurring",
+        proposal: {
+          title: "Weekly review",
+          firstDate: "2026-08-04",
+          dateIsExplicit: true,
+          startTime: "19:00",
+          timeIsExplicit: true,
+          durationMinutes: 30,
+          classification: "ordinary",
+          recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+          recurrenceIsExplicit: true,
+          end: { mode: "count", occurrences: 3 },
+        },
+      },
+      {
+        ...CONTEXT,
+        ledger: createCalendarPlanLedger(),
+        getBusyIntervals: vi
+          .fn()
+          .mockResolvedValue([{ start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" }]),
+      },
+    )
+
+    expect(result).toMatchObject({
+      kind: "choice_required",
+      issues: [{ code: "requested_time_conflicts", field: "startTime" }],
+      options: [
+        {
+          kind: "recurring_adjustments",
+          adjustedDates: [{ localDate: "2026-08-04", localStartTime: "19:45" }],
+        },
+      ],
+    })
+  })
+
+  it("rejects an invented recurring date and cadence before Calendar access", async () => {
+    const getBusyIntervals = vi.fn()
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "recurring",
+        proposal: {
+          title: "Recurring review",
+          firstDate: "2026-08-04",
+          dateIsExplicit: false,
+          timeIsExplicit: false,
+          durationMinutes: 30,
+          classification: "ordinary",
+          recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+          recurrenceIsExplicit: false,
+          end: { mode: "default_horizon" },
+        },
+      },
+      { ...CONTEXT, ledger: createCalendarPlanLedger(), getBusyIntervals },
+    )
+
+    expect(result).toEqual({
+      kind: "needs_input",
+      issues: [
+        { code: "missing_date", field: "firstDate" },
+        { code: "unsupported_recurrence", field: "recurrence" },
+      ],
+    })
+    expect(getBusyIntervals).not.toHaveBeenCalled()
   })
 })

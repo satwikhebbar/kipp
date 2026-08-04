@@ -64,11 +64,13 @@ const RECURRING = {
   proposal: {
     title: "Weekly review",
     firstDate: "2026-07-28",
+    dateIsExplicit: true,
     startTime: "19:00",
     timeIsExplicit: true,
     durationMinutes: 30,
     classification: "ordinary" as const,
     recurrence: { cadence: "weekly" as const, weekdays: { mode: "first_date_weekday" as const } },
+    recurrenceIsExplicit: true,
     end: { mode: "count" as const, occurrences: 3 },
   },
 }

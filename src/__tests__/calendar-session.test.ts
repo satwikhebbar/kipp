@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { runCalendarAgentSession } from "../agent/calendar-session"
 import { createCalendarPlanLedger } from "../calendar-plan"
-import type { ToolProviderClient } from "../providers"
+import type { ToolConversationMessage, ToolProviderClient } from "../providers"
 
 function providerWith(...responses: Awaited<ReturnType<ToolProviderClient["generate"]>>[]): ToolProviderClient {
   return { generate: vi.fn().mockImplementation(async () => responses.shift()) }
@@ -19,6 +19,12 @@ function options() {
       now: Date.parse("2026-08-01T00:00:00.000Z"),
     },
   }
+}
+
+function toolOutput(messages: ToolConversationMessage[], name: string): Record<string, unknown> {
+  const message = [...messages].reverse().find((candidate) => candidate.role === "tool" && candidate.name === name)
+  if (message?.role !== "tool") throw new Error(`Missing ${name} output`)
+  return (message.output as { ok: true; output: Record<string, unknown> }).output
 }
 
 describe("bounded Calendar agent session", () => {
@@ -122,5 +128,87 @@ describe("bounded Calendar agent session", () => {
       reasonCodes: expect.arrayContaining(["missing_date", "invalid_title", "missing_or_invalid_time"]),
     })
     expect(result.providerTurns).toBe(3)
+  })
+
+  it("repairs a choice handoff that exposes its opaque option ID", async () => {
+    let turn = 0
+    const provider: ToolProviderClient = {
+      generate: vi.fn(async ({ messages }) => {
+        turn++
+        if (turn === 1)
+          return {
+            toolCalls: [
+              {
+                id: "evaluate",
+                name: "evaluate_calendar_candidate",
+                input: {
+                  kind: "recurring",
+                  proposal: {
+                    title: "Weekly review",
+                    firstDate: "2026-08-04",
+                    dateIsExplicit: true,
+                    startTime: "19:00",
+                    timeIsExplicit: true,
+                    durationMinutes: 30,
+                    classification: "ordinary",
+                    recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+                    recurrenceIsExplicit: true,
+                    end: { mode: "count", occurrences: 3 },
+                  },
+                },
+              },
+            ],
+            usage: { inputTokens: 0, outputTokens: 0 },
+          }
+        const evaluation = toolOutput(messages, "evaluate_calendar_candidate") as {
+          issues: Array<{ code: string }>
+          options: Array<{ optionId: string }>
+        }
+        const optionId = evaluation.options[0]?.optionId as string
+        return {
+          toolCalls: [
+            {
+              id: `choice-${turn}`,
+              name: "needs_user_input",
+              input: {
+                message:
+                  turn === 2
+                    ? `Option ID ${optionId} moves the conflicting occurrence.`
+                    : "The first occurrence conflicts. I can move only that date to 7:45 PM. Choose a button below.",
+                reasonCodes: evaluation.issues.map((issue) => issue.code),
+                interaction: { kind: "options", optionIds: evaluation.options.map((option) => option.optionId) },
+              },
+            },
+          ],
+          usage: { inputTokens: 0, outputTokens: 0 },
+        }
+      }),
+    }
+    const sessionOptions = options()
+    sessionOptions.evaluation.getBusyIntervals.mockResolvedValue([
+      { start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" },
+    ])
+
+    const result = await runCalendarAgentSession(
+      provider,
+      [{ role: "user", text: "Schedule a weekly review" }],
+      sessionOptions,
+    )
+
+    expect(result.terminal).toMatchObject({
+      kind: "needs_user_input",
+      message: expect.not.stringContaining("Option ID"),
+      reasonCodes: ["requested_time_conflicts"],
+    })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "needs_user_input", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    const firstRequest = vi.mocked(provider.generate).mock.calls[0]?.[0]
+    expect(firstRequest?.messages[0]).toEqual(
+      expect.objectContaining({
+        role: "system",
+        text: expect.stringContaining("option IDs must never appear in the human-facing message"),
+      }),
+    )
   })
 })

@@ -61,11 +61,13 @@ const RECURRING = {
   proposal: {
     title: "Weekly review",
     firstDate: "2026-07-28",
+    dateIsExplicit: true,
     startTime: "19:00",
     timeIsExplicit: true,
     durationMinutes: 30,
     classification: "ordinary" as const,
     recurrence: { cadence: "weekly" as const, weekdays: { mode: "first_date_weekday" as const } },
+    recurrenceIsExplicit: true,
     end: { mode: "count" as const, occurrences: 3 },
   },
 }
@@ -250,6 +252,27 @@ describe("agent-centered CalendarWorkflow", () => {
 
     expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledWith(expect.objectContaining({ start: "2026-07-28T14:15:00.000Z" }))
+  })
+
+  it("renders recurring adjustment choices in authorized order with compact labels", async () => {
+    mockBusyIntervals.mockResolvedValue([{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }])
+    queueChoice(
+      RECURRING,
+      "The first occurrence conflicts. I can move only that date to 7:45 PM. Choose a button below.",
+    )
+    const telegram = telegramMock()
+
+    await run(createStep({ type: "timeout" }), "Weekly review every Tuesday at 7pm for 3 occurrences")
+
+    const request = telegram.mock.calls[0]?.[1] as RequestInit
+    const body = JSON.parse(request.body as string) as {
+      text: string
+      reply_markup: { inline_keyboard: Array<Array<{ text: string }>> }
+    }
+    const labels = body.reply_markup.inline_keyboard[0]?.map((button) => button.text)
+    expect(body.text).not.toContain("Option ID")
+    expect(labels).toEqual(["Use adjustments", "Try another time", "Cancel"])
+    expect(labels?.every((label) => label.length <= 16)).toBe(true)
   })
 
   it.each([

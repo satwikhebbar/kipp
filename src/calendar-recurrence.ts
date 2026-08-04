@@ -46,11 +46,13 @@ export type RecurrenceEnd =
 export interface RecurringProposal {
   title: string
   firstDate: string
+  dateIsExplicit: boolean
   startTime?: string
   timeIsExplicit: boolean
   durationMinutes: number
   classification: CalendarReminderClass | "family-social" | "school-pickup" | "appointment" | "maintenance" | "physical"
   recurrence: RecurrenceRule
+  recurrenceIsExplicit: boolean
   end: RecurrenceEnd
   description?: string
   location?: string
@@ -256,6 +258,8 @@ function humanCadence(rule: RecurrenceRule): string {
 /** Returns every independently discoverable recurring-event policy violation as typed facts. */
 export function validateRecurringProposalIssues(proposal: RecurringProposal): CalendarValidationIssue[] {
   const issues: CalendarValidationIssue[] = []
+  if (!proposal.dateIsExplicit) issues.push({ code: "missing_date", field: "firstDate" })
+  if (!proposal.recurrenceIsExplicit) issues.push({ code: "unsupported_recurrence", field: "recurrence" })
   if (!proposal.title.trim() || proposal.title.length > MAX_EVENT_TITLE_LENGTH)
     issues.push({ code: "invalid_title", field: "title", params: { maxCharacters: MAX_EVENT_TITLE_LENGTH } })
   if (
@@ -284,8 +288,10 @@ export function validateRecurringProposalIssues(proposal: RecurringProposal): Ca
     })
   if (!proposal.timeIsExplicit && proposal.classification === "family-social")
     issues.push({ code: "family_social_requires_time", field: "startTime" })
-  const expanded = expandRecurrenceResult(proposal)
-  if ("issue" in expanded) issues.push(expanded.issue)
+  if (proposal.dateIsExplicit && proposal.recurrenceIsExplicit) {
+    const expanded = expandRecurrenceResult(proposal)
+    if ("issue" in expanded) issues.push(expanded.issue)
+  }
   return issues
 }
 
