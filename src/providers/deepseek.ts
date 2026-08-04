@@ -1,4 +1,4 @@
-import type { LLMResponse } from "../types"
+import type { LLMResponse } from "../core/types"
 import {
   type DeepseekToolWireMessage,
   type GenerateOptions,

@@ -6,7 +6,7 @@ import {
   createCalendarPlanLedger,
   issueCalendarOptions,
   issueCalendarPlan,
-} from "../calendar-plan"
+} from "../calendar/plan"
 
 const PLAN: CalendarPlan = {
   kind: "one_off",

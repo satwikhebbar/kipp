@@ -130,10 +130,10 @@ pnpm lefthook install
 Create a private GitHub repository containing:
 
 - `ideas.md` — start from
-  [`example/ideas-template.md`](example/ideas-template.md);
+  [`docs/ideas-template.md`](docs/ideas-template.md);
 - `archive.md` — initially empty; and
 - `style-prompt.md` — optional writing instructions. Kipp falls back to
-  `src/prompts/defaults.ts` when this file is absent.
+  `src/linkedin/prompts/defaults.ts` when this file is absent.
 
 Calendar state is not stored in this repository.
 
@@ -287,19 +287,31 @@ The deploy command runs the pre-deployment checks and deploys with
 ```text
 src/
 ├── index.ts                       Worker entry, routes, and cron dispatch
-├── workflow.ts                    LinkedIn durable workflow
-├── calendar-workflow.ts           Calendar WorkflowEntrypoint
-├── calendar-agent-workflow.ts     Calendar agent/conversation orchestration
-├── calendar-*.ts                  Calendar validation, plans, scheduling, and recurrence
-├── agent/                         Workflow-specific prompts, tools, and terminal outcomes
+├── calendar/                      Calendar workflow domain
+│   ├── workflow.ts                Calendar WorkflowEntrypoint
+│   ├── agent-workflow.ts          Calendar agent/conversation orchestration
+│   ├── evaluation.ts              Calendar candidate evaluation
+│   ├── plan.ts                    Calendar plan ledger
+│   ├── validation.ts              Calendar issue validation
+│   ├── scheduling.ts              Calendar event scheduling
+│   ├── recurrence.ts              Calendar recurrence handling
+│   └── messages.ts                Calendar message formatting
+├── linkedin/                      LinkedIn pipeline workflow
+│   ├── workflow.ts                LinkedIn durable workflow
+│   ├── backlog/                   LinkedIn ideas/archive parsing and mutation
+│   └── prompts/                   LinkedIn style-prompt resolution
+├── agent/                         Shared agent sessions, prompts, tools, and terminal outcomes
+├── core/                          Cross-workflow shared infrastructure
+│   ├── types.ts                   Shared contracts
+│   ├── conversation.ts            Transcript assembly and guards
+│   ├── cost.ts                    LLM cost estimation
+│   ├── crypto.ts                  Encryption helpers
+│   ├── interaction-router*.ts     Short-lived Telegram interaction routing
+│   └── token-vault*.ts            Encrypted provider token storage
 ├── runtime/                       Shared bounded tool runner and guards
 ├── triggers/                      Telegram, OAuth, RSS, cadence, and token checks
 ├── integrations/                  GitHub, Telegram, LinkedIn, and Google Calendar clients
-├── backlog/                       LinkedIn ideas/archive parsing and mutation
-├── prompts/                       LinkedIn style-prompt resolution
 ├── providers/                     Gemini and DeepSeek adapters
-├── interaction-router*.ts         Short-lived Telegram interaction routing
-├── token-vault*.ts                Encrypted provider token storage
 ├── __tests__/                     Unit tests
 ├── __integration__/               Workflow and boundary integration tests
 └── __contract__/                  Credential-gated provider contract tests

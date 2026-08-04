@@ -1,5 +1,5 @@
+import type { LLMUsage } from "../core/types"
 import type { ToolConversationMessage } from "../providers"
-import type { LLMUsage } from "../types"
 import type { ToolExecutionSummary, ToolRunFailureReason } from "./tool-runner"
 
 /** Shared result envelope for one bounded workflow-specific native-tool session. */

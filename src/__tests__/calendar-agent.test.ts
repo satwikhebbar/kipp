@@ -5,7 +5,7 @@ import {
   createListCalendarEventsTool,
   evaluateCalendarCandidateInputSchema,
 } from "../agent/calendar"
-import { createCalendarPlanLedger } from "../calendar-plan"
+import { createCalendarPlanLedger } from "../calendar/plan"
 import { ToolGuard } from "../runtime/tools"
 
 describe("Calendar agent contracts", () => {

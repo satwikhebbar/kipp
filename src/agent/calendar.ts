@@ -1,6 +1,6 @@
 import { z } from "zod"
-import { type CalendarEvaluationContext, evaluateCalendarCandidate } from "../calendar-evaluation"
-import type { CalendarIssueCode } from "../calendar-validation"
+import { type CalendarEvaluationContext, evaluateCalendarCandidate } from "../calendar/evaluation"
+import type { CalendarIssueCode } from "../calendar/validation"
 import type { GoogleCalendarClient } from "../integrations/google-calendar"
 import type { ToolDefinition } from "../runtime/tools"
 

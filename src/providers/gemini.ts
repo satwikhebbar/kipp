@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai"
-import type { LLMResponse } from "../types"
+import type { LLMResponse } from "../core/types"
 import { type GenerateOptions, type ToolProviderClient, ToolProviderProtocolError, toolDeclaration } from "./llm"
 
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"

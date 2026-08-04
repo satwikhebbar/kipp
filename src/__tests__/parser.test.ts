@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { nextId } from "../backlog/id-generator"
-import { isIdeaStart, parseIdea, parseIdeas, parseYamlLine, serializeIdea, serializeIdeas } from "../backlog/parser"
+import { nextId } from "../linkedin/backlog/id-generator"
+import {
+  isIdeaStart,
+  parseIdea,
+  parseIdeas,
+  parseYamlLine,
+  serializeIdea,
+  serializeIdeas,
+} from "../linkedin/backlog/parser"
 
 const RAW_IDEA = `---
 id: 1

@@ -1,5 +1,5 @@
-import type { GithubClient } from "../integrations/github"
-import type { Idea, IdeaStatus } from "../types"
+import type { Idea, IdeaStatus } from "../../core/types"
+import type { GithubClient } from "../../integrations/github"
 import { appendToArchive, cleanupArchive } from "./archive"
 import { parseIdeas, serializeIdeas } from "./parser"
 

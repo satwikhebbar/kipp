@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { CONSUMED_INTERACTION_RETENTION_MS, InteractionRouterDO } from "../interaction-router"
-import { INTERACTION_KIND } from "../types"
+import { CONSUMED_INTERACTION_RETENTION_MS, InteractionRouterDO } from "../core/interaction-router"
+import { INTERACTION_KIND } from "../core/types"
 
 const NOW = 1_000_000
 function createRouter() {

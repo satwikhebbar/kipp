@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const mockFetch = vi.hoisted(() => vi.fn())
 vi.stubGlobal("fetch", mockFetch)
 
+import { INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import { INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "../types"
 
 function b64(s: string): string {
   const bytes = new TextEncoder().encode(s)

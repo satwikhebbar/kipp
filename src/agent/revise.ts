@@ -1,5 +1,5 @@
+import type { ChecklistItem } from "../core/types"
 import type { GenerateFn, LLMMessage } from "../providers/llm"
-import type { ChecklistItem } from "../types"
 
 export interface ReviseInput {
   messages: LLMMessage[]

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
-import { TranscriptTooLargeError } from "../conversation"
-import type { Env } from "../types"
+import { TranscriptTooLargeError } from "../core/conversation"
+import type { Env } from "../core/types"
 
 vi.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -51,8 +51,8 @@ vi.mock("../providers", () => ({
 }))
 
 const mockAssertStepOutputSize = vi.hoisted(() => vi.fn((v: unknown) => v))
-vi.mock("../conversation", async () => {
-  const actual = await vi.importActual("../conversation")
+vi.mock("../core/conversation", async () => {
+  const actual = await vi.importActual("../core/conversation")
   return {
     ...actual,
     appendAssistant: (msgs: unknown[], content: string) => [...(msgs as unknown[]), { role: "assistant", content }],
@@ -64,7 +64,7 @@ vi.mock("../conversation", async () => {
   }
 })
 
-import { PipelineWorkflow } from "../workflow"
+import { PipelineWorkflow } from "../linkedin/workflow"
 
 function b64(s: string): string {
   const bytes = new TextEncoder().encode(s)

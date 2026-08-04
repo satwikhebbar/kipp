@@ -1,4 +1,4 @@
-import type { Idea } from "../types"
+import type { Idea } from "../../core/types"
 
 /** Returns one greater than the largest numeric idea ID. */
 export function nextId(ideas: Idea[]): number {

@@ -1,5 +1,5 @@
-import { createTokenVault, TOKEN_PROVIDER } from "../token-vault-client"
-import type { Env, GoogleCalendarTokens } from "../types"
+import { createTokenVault, TOKEN_PROVIDER } from "../core/token-vault-client"
+import type { Env, GoogleCalendarTokens } from "../core/types"
 import { extractCookie, hasSetupAccess } from "./oauth"
 
 const GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"

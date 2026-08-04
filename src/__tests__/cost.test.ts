@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest"
-import { computeCost, formatCostLine } from "../pricing"
+import { computeCost, formatCostLine } from "../core/cost"
+import type { WorkflowCost } from "../core/types"
 import { resolveModel } from "../providers"
-import type { WorkflowCost } from "../types"
 
 describe("computeCost", () => {
   test("known model arithmetic", () => {

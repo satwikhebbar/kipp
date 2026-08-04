@@ -1,5 +1,5 @@
-import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./calendar-validation"
-import type { BusyInterval, ManagedCalendarEvent } from "./integrations/google-calendar"
+import type { BusyInterval, ManagedCalendarEvent } from "../integrations/google-calendar"
+import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./validation"
 
 export const CALENDAR_TIMEZONE_DEFAULT = "Asia/Kolkata"
 export const CALENDAR_SLOT_MINUTES = 15

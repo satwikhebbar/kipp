@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
-import { verifyAccessJwt } from "../token-vault-client"
-import type { Env } from "../types"
+import { verifyAccessJwt } from "../core/token-vault-client"
+import type { Env } from "../core/types"
 
 const KID = "test-key-01"
 const TEAM = "test-team"

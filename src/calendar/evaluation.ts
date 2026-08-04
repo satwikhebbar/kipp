@@ -1,19 +1,19 @@
-import { type CalendarPlan, type CalendarPlanLedger, issueCalendarOptions, issueCalendarPlan } from "./calendar-plan"
+import type { BusyInterval } from "../integrations/google-calendar"
+import { type CalendarPlan, type CalendarPlanLedger, issueCalendarOptions, issueCalendarPlan } from "./plan"
 import {
   evaluateRecurrenceAvailability,
   expandRecurrence,
   type RecurringProposal,
   validateRecurringProposalIssues,
-} from "./calendar-recurrence"
+} from "./recurrence"
 import {
   calendarDayBounds,
   type OneOffProposal,
   scheduleOneOff,
   suggestOneOffAlternative,
   validateProposalIssues,
-} from "./calendar-scheduling"
-import type { CalendarValidationIssue } from "./calendar-validation"
-import type { BusyInterval } from "./integrations/google-calendar"
+} from "./scheduling"
+import type { CalendarValidationIssue } from "./validation"
 
 export type CalendarCandidate =
   | { kind: "one_off"; proposal: OneOffProposal }

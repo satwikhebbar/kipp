@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const mockReadTokens = vi.hoisted(() => vi.fn())
 
-vi.mock("../token-vault-client", () => ({
+vi.mock("../core/token-vault-client", () => ({
   createTokenVault: () => ({ readTokens: mockReadTokens }),
 }))
 

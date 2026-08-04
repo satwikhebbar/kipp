@@ -1,5 +1,5 @@
-import type { GithubClient } from "../integrations/github"
-import type { Idea } from "../types"
+import type { Idea } from "../../core/types"
+import type { GithubClient } from "../../integrations/github"
 import { parseIdeas, serializeIdea, serializeIdeas } from "./parser"
 
 export const ARCHIVE_RETENTION_MS = 2_592_000_000 // ponytail: precomputed 30 * 24 * 60 * 60 * 1000

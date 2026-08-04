@@ -1,6 +1,6 @@
 import { vi } from "vitest"
-import { CONSUMED_INTERACTION_RETENTION_MS } from "../interaction-router"
-import { INTERACTION_KIND, type WorkflowInteractionKind } from "../types"
+import { CONSUMED_INTERACTION_RETENTION_MS } from "../core/interaction-router"
+import { INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
 
 export interface FakeState {
   githubFiles: Map<string, string>

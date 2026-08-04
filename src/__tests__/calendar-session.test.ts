@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import { runCalendarAgentSession } from "../agent/calendar-session"
-import { createCalendarPlanLedger } from "../calendar-plan"
+import { createCalendarPlanLedger } from "../calendar/plan"
 import type { ToolConversationMessage, ToolProviderClient } from "../providers"
 
 function providerWith(...responses: Awaited<ReturnType<ToolProviderClient["generate"]>>[]): ToolProviderClient {

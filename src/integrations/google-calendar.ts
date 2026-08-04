@@ -1,6 +1,6 @@
+import { createTokenVault } from "../core/token-vault-client"
+import { type Env, type GoogleCalendarTokens, TOKEN_PROVIDER } from "../core/types"
 import { HTTP_STATUS, isTransientHttpStatus } from "../runtime/http"
-import { createTokenVault } from "../token-vault-client"
-import { type Env, type GoogleCalendarTokens, TOKEN_PROVIDER } from "../types"
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const GOOGLE_CALENDAR_API_URL = "https://www.googleapis.com/calendar/v3"

@@ -1,5 +1,5 @@
-import { createTokenVault } from "../token-vault-client"
-import type { Env } from "../types"
+import { createTokenVault } from "../core/token-vault-client"
+import type { Env } from "../core/types"
 
 const LINKEDIN_API = "https://api.linkedin.com"
 

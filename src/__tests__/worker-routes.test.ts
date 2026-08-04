@@ -1,11 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
-import { TokenVaultDO } from "../token-vault"
-import { createTokenVault } from "../token-vault-client"
+import { TokenVaultDO } from "../core/token-vault"
+import { createTokenVault } from "../core/token-vault-client"
+import type { Env } from "../core/types"
 import { handleAuthCallback, handleAuthStart } from "../triggers/linkedin-auth"
-import type { Env } from "../types"
 
-vi.mock("../workflow", () => ({ PipelineWorkflow: class {} }))
-vi.mock("../calendar-workflow", () => ({ CalendarWorkflow: class {} }))
+vi.mock("../linkedin/workflow", () => ({ PipelineWorkflow: class {} }))
+vi.mock("../calendar/workflow", () => ({ CalendarWorkflow: class {} }))
 
 import worker from "../index"
 

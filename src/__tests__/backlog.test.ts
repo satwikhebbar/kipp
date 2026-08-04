@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
-import { cleanupArchive } from "../backlog/archive"
-import { createBacklogManager } from "../backlog/manager"
 import type { GithubClient, GithubFile } from "../integrations/github"
+import { cleanupArchive } from "../linkedin/backlog/archive"
+import { createBacklogManager } from "../linkedin/backlog/manager"
 
 const RAW_IDEA = `---
 id: 1
@@ -191,7 +191,7 @@ Paragraph three.`)
       expect(archived.content).toContain("## Draft")
 
       // Roundtrip the archived entry
-      const entries = (await import("../backlog/parser")).parseIdeas(archived.content)
+      const entries = (await import("../linkedin/backlog/parser")).parseIdeas(archived.content)
       expect(entries).toHaveLength(1)
       expect(entries[0].body).toBe("Original body.")
       expect(entries[0].draft).toBe("Paragraph one.\n\nParagraph two.\n\nParagraph three.")
@@ -236,7 +236,7 @@ Paragraph three.`)
       }
 
       const archived = await m.client.readFile("archive.md")
-      const entries = (await import("../backlog/parser")).parseIdeas(archived.content)
+      const entries = (await import("../linkedin/backlog/parser")).parseIdeas(archived.content)
       expect(entries).toHaveLength(3)
       expect(entries.map((e) => e.body)).toEqual(["Body 1", "Body 2", "Body 3"])
     })
@@ -299,7 +299,7 @@ Body 3`)
 
       // Also verify raw file has only one entry
       const file = await m.client.readFile("ideas.md")
-      const reparsed = (await import("../backlog/parser")).parseIdeas(file.content)
+      const reparsed = (await import("../linkedin/backlog/parser")).parseIdeas(file.content)
       expect(reparsed).toHaveLength(1)
     })
   })
@@ -319,7 +319,7 @@ Body 3`)
 
       // Verify raw file stores it correctly
       const file = await m.client.readFile("ideas.md")
-      const reParsed = (await import("../backlog/parser")).parseIdeas(file.content)
+      const reParsed = (await import("../linkedin/backlog/parser")).parseIdeas(file.content)
       expect(reParsed[0].draft).toBe(draft)
       expect(reParsed[0].body).toBe("# Idea 1\n\nThis is a raw idea.")
       expect(reParsed[0].body).not.toContain("Line one")
