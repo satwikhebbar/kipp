@@ -33,11 +33,12 @@ runtime_components:
       - token_vault
       - interaction_router
   calendar_workflow:
-    implementation: src/calendar-workflow.ts
+    implementation: src/calendar-workflow.ts and src/calendar-agent-workflow.ts
     owns:
-      - bounded native-tool interpretation of one-off Calendar requests
-      - deterministic validation, availability, conflict, and write decisions
-      - Calendar clarification, edit, and authorization-recovery wait states
+      - bounded native-tool interpretation of one-off and recurring Calendar requests
+      - safe transcript and versioned opaque plan and option ledger persistence
+      - fixed Telegram actions and Calendar interaction wait states
+      - fresh deterministic revalidation and idempotent Calendar writes
     depends_on:
       - calendar_domain
       - providers
@@ -87,23 +88,32 @@ modules:
   agents:
     path: src/agent
     owns:
-      - LinkedIn native-tool prompt, typed draft handoff, and revision transcript
-      - supporting classification and legacy text-agent behaviors
+      - workflow-specific prompts, native-tool contracts, and terminal outcomes
+      - LinkedIn ready_for_review handoff and revision transcript
+      - Calendar ready_to_create and needs_user_input handoffs
+      - safe Calendar transcript persistence and event-list compaction
     depends_on:
       - providers
       - runtime
   calendar_domain:
-    path: src/calendar-scheduling.ts and src/calendar-messages.ts
+    path: src/calendar-validation.ts, src/calendar-evaluation.ts, src/calendar-plan.ts, src/calendar-scheduling.ts, src/calendar-recurrence.ts, and src/calendar-messages.ts
     owns:
-      - deterministic one-off scheduling validation and conflict alternatives
-      - privacy-safe Calendar user messages
-    depends_on: []
+      - strict one-off and recurring proposal schemas
+      - aggregate typed semantic validation
+      - civil-date recurrence expansion and Google-compatible RRULE generation
+      - FreeBusy evaluation, candidate ranking, and conflict alternatives
+      - versioned single-use plan and option authorization
+      - Calendar event projection and deterministic operational messages
+    depends_on:
+      - integrations.google-calendar types and client
+      - rrule
   runtime:
     path: src/runtime
     owns:
       - static typed tool registry and deterministic guard
-      - bounded native-tool runner
-      - provider-agnostic context, metadata-only logging, and HTTP constants
+      - three-turn and four-call bounded native-tool runner
+      - tool batching, handoff, allowlist-transition, and repair policy
+      - shared agent-session result, metadata-only logging, and HTTP constants
     depends_on:
       - providers
   providers:
@@ -162,7 +172,7 @@ data_stores:
     data:
       - workflow steps
       - LinkedIn draft transcript and approval or revision events
-      - Calendar request, typed dialogue state, proposals, and wait events
+      - Calendar safe transcript, typed proposals, exact plans, opaque plan and option ledger, created-event baseline, and wait events
     owner: pipeline_workflow and calendar_workflow
 
 external_systems:
@@ -181,8 +191,9 @@ security_boundaries:
   - Telegram webhook secret and allowed-user check protect the bypassed endpoint
   - Cloudflare Access JWT validation for setup and administration routes
   - OAuth state paired with an HTTP-only, secure cookie
-  - AES-256-GCM encryption for LinkedIn tokens at rest
-  - Provider-namespaced AES-256-GCM encryption for Google Calendar tokens at rest
+  - Provider-namespaced AES-256-GCM encryption for LinkedIn and Google Calendar tokens at rest
   - LinkedIn posts are created as drafts only after explicit Telegram approval
-  - Google Calendar uses owned-event and FreeBusy scopes; existing event details never enter model context
-  - Calendar writes remain deterministic and idempotent outside the model tool session
+  - Google Calendar uses owned-event and FreeBusy scopes; only bounded primary-calendar title and timing projections may enter model context
+  - Calendar descriptions, locations, people, links, credentials, and raw provider responses never enter model context or content logs
+  - Calendar plan and option IDs are opaque, version-scoped, expiring, and single-use
+  - Calendar writes require fresh deterministic revalidation and remain idempotent outside the model tool session

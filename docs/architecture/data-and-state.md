@@ -1,43 +1,76 @@
 # Data and state
 
-Kipp does not use a conventional application database. Its state is intentionally
-split by durability and sensitivity.
+Kipp intentionally splits state by lifecycle, sensitivity, and owning
+workflow. It does not use a general-purpose application database.
 
 ```mermaid
 flowchart LR
-  workflow["PipelineWorkflow"] --> ideas["ideas.md\nactive idea backlog"]
-  workflow --> archive["archive.md\nfinalized ideas"]
-  workflow --> style_prompt["style-prompt.md\noptional writing style"]
-  workflow --> state["Workflow durable state\nsteps and wait events"]
-  workflow --> tokens["TokenVaultDO SQLite\nencrypted OAuth tokens"]
-  oauth["OAuth routes"] --> tokens
-  telegram["Telegram trigger"] --> ideas
-  rss["RSS trigger"] --> ideas
+  telegram["Telegram ingress"] --> linkedinFlow["PipelineWorkflow"]
+  telegram --> calendarFlow["CalendarWorkflow"]
+  rss["RSS trigger"] --> ideas["ideas.md"]
+
+  linkedinFlow <--> ideas
+  linkedinFlow --> archive["archive.md"]
+  linkedinFlow --> style["style-prompt.md"]
+  linkedinFlow <--> router["InteractionRouterDO SQLite"]
+  calendarFlow <--> router
+  linkedinFlow <--> vault["TokenVaultDO SQLite"]
+  calendarFlow <--> vault
+  linkedinFlow --> linkedinState["LinkedIn Workflow state"]
+  calendarFlow --> calendarState["Calendar Workflow state"]
 
   subgraph github["Private GitHub data repository"]
     ideas
     archive
-    style_prompt
+    style
   end
 ```
 
 | Store | Data | Lifecycle and protection |
 | --- | --- | --- |
-| Private GitHub data repository | `ideas.md`, `archive.md`, optional `style-prompt.md` | Accessed with a GitHub PAT; the backlog manager manages parsing, updates, archival, and retention. |
-| Durable Object SQLite | OAuth state records and encrypted LinkedIn tokens | OAuth state expires after five minutes. Tokens are encrypted with AES-256-GCM using a configured key ID and can be rewrapped after key rotation. |
-| Cloudflare Workflows | Durable steps, draft transcript, and Telegram wait events | A workflow waits for feedback without a running Worker process. Workflow step output is bounded by `conversation.ts`. |
+| Private GitHub data repository | `ideas.md`, `archive.md`, optional `style-prompt.md` | LinkedIn content backlog accessed with a GitHub PAT. Calendar does not use this store. |
+| `TokenVaultDO` SQLite | Short-lived OAuth state; provider-namespaced encrypted LinkedIn and Google Calendar tokens | OAuth state expires after five minutes. Tokens use AES-256-GCM and configured key IDs and can be rewrapped during rotation. |
+| `InteractionRouterDO` SQLite | Opaque callback or reply registration, workflow target, interaction kind, version, expiry, and delivery state | Contains no request prose or credentials. Entries are claimed idempotently and expire after the owning interaction window. |
+| `PipelineWorkflow` state | LinkedIn agent transcript, review version, approval or revision events, usage, and step results | Durable across the configured feedback wait. Transcript output is bounded before persistence. |
+| `CalendarWorkflow` state | Bounded safe transcript, versioned plan/option ledger, exact evaluated plans, created-event baseline, and interaction events | Exists for the 15-minute Calendar conversation. Provider reasoning is removed; obsolete event-list results are compacted; IDs expire and are single-use. |
 
-## Idea lifecycle
+Calendar event content is not copied into the private GitHub data repository or
+the interaction router. The model can see only user text and the narrow event
+projection explicitly returned by `list_calendar_events`; descriptions,
+locations, attendees, organizers, conferencing data, links, credentials, and
+raw provider responses remain outside model context and content logs.
+
+## LinkedIn idea lifecycle
 
 ```mermaid
 stateDiagram-v2
   [*] --> raw: Telegram capture or RSS extraction
-  raw --> awaiting_feedback: workflow generates draft
+  raw --> awaiting_feedback: agent returns ready_for_review
   awaiting_feedback --> awaiting_feedback: revision feedback
   awaiting_feedback --> awaiting_feedback_expired: timeout
-  awaiting_feedback --> finalized: explicit approval and LinkedIn draft creation
-  finalized --> [*]: copied to archive.md and removed from ideas.md
+  awaiting_feedback --> finalized: approval creates LinkedIn draft
+  finalized --> [*]: archive and remove from ideas.md
 ```
 
-`drafted` and `skipped` remain valid domain statuses for data compatibility, but
-the current workflow moves a generated idea directly to `awaiting-feedback`.
+`drafted` and `skipped` remain valid data statuses for compatibility, but the
+current workflow moves generated content directly to `awaiting-feedback`.
+
+## Calendar plan lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> interpreted: agent builds strict candidate
+  interpreted --> needs_input: typed issues or authorized choices
+  needs_input --> interpreted: user reply
+  interpreted --> authorized: deterministic evaluation issues plan ID
+  authorized --> stale: version, expiry, or availability changes
+  authorized --> consumed: fresh revalidation and single use
+  consumed --> written: idempotent Calendar mutation
+  written --> editing: fixed Edit action
+  editing --> interpreted: correction supplied
+  written --> [*]: interaction expires
+  stale --> interpreted: agent re-evaluates
+```
+
+The workflow persists a complete created-event baseline after a write so an
+immediate edit can re-evaluate without guessing or recreating the event.

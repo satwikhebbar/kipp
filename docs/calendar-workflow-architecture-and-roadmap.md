@@ -3,29 +3,28 @@
 ## Purpose and relationship to the requirements
 
 This is the durable planning record for the Calendar workflow and the shared
-agent foundations it will introduce. It captures the architectural, delivery,
-testing, and rollout decisions agreed before implementation so later
-milestone-level plans do not depend on conversation context.
+agent foundations introduced while delivering it. It captures the
+architectural, delivery, testing, and rollout decisions agreed across the
+milestones so later changes do not depend on conversation context.
 
 [`calendar-workflow-spec.md`](./calendar-workflow-spec.md) remains the
 normative product and behavior contract: it defines what Calendar must do for
-the user. This document defines how Kipp should be evolved to deliver that
-contract in deliberate, independently testable phases. When the documents
+the user. This document records how Kipp evolved to deliver that contract in
+deliberate, independently testable phases. When the documents
 appear to disagree, the requirements specification wins for user-visible
 Calendar behavior; resolve the discrepancy before implementation.
 
 ## Current state and architectural direction
 
-Kipp currently has one LinkedIn workflow. It uses a Cloudflare Workflow to
-coordinate a fixed LLM sequence (draft, critique, revise), waits for Telegram
-feedback, and invokes integrations directly from its workflow code. Telegram
-reply routing is tied to LinkedIn's GitHub-backed idea records. The current LLM
-provider abstraction returns text only; it has no normalized native tool-call
-interface.
+Kipp now has separate LinkedIn and Calendar Cloudflare Workflows. Both use the
+shared bounded native-tool runtime and short-lived Telegram interaction router.
+LinkedIn produces a `ready_for_review` handoff before deterministic approval
+and draft creation. Calendar uses guarded reads and candidate evaluation before
+`ready_to_create` or `needs_user_input`, with every write authorized,
+revalidated, and executed outside the model session.
 
-Calendar is the second workflow. The goal is not a premature general-purpose
-agent framework. Instead, Kipp will establish the smallest shared foundation
-that two concrete workflows justify:
+The implementation deliberately established the smallest shared foundation
+that these two concrete workflows justify:
 
 - workflow-scoped, resumable agent sessions;
 - a source-controlled, typed tool registry and per-agent allowlists;
@@ -48,7 +47,8 @@ Agents are workflow-scoped and multi-turn. A Cloudflare Workflow owns the
 durable execution state and resumes when Telegram delivers a reply or callback.
 An agent session is therefore not limited to one prompt/response exchange.
 
-Calendar is the first agent to use model-directed tools. It uses a **bounded
+Calendar is the first agent to use model-directed information and evaluation
+tools. It uses a **bounded
 planning loop**: the model may interpret a request, request privacy-safe
 availability, and select from validated options. It does not receive
 unrestricted access to integrations or data.
@@ -96,7 +96,7 @@ Only the workflow can resolve a current, single-use plan, revalidate it against
 fresh policy and availability evidence, and execute the idempotent mutation.
 Fixed Telegram buttons select only workflow-issued option IDs.
 
-The provider layer will gain a normalized native tool-calling interface rather
+The provider layer exposes a normalized native tool-calling interface rather
 than emulating calls with JSON embedded in model text. Provider adapters remain
 responsible for translating their native request and response shapes into the
 shared runtime contract.
@@ -160,9 +160,9 @@ generic memory implementation are deferred.
 
 ## Delivery roadmap
 
-Each milestone is a deployment breakpoint. Detailed implementation planning is
-done immediately before the milestone begins, using this document and the
-requirements specification as its source of truth. A later milestone may
+Each milestone was designed as a deployment breakpoint. Detailed implementation
+planning was done immediately before each milestone, using this document and
+the requirements specification as its source of truth. A later milestone may
 refine internal details based on validated evidence, but may not change an
 approved product behavior without an explicit requirements update.
 
@@ -171,7 +171,9 @@ approved product behavior without an explicit requirements update.
 Build the shared session, tool, guard, provider, context, interaction-router,
 and observability contracts. Add the Durable Object migration required for the
 router. Migrate LinkedIn to the shared session and Telegram-routing foundation,
-but retain its current fixed draft → critique → revise LLM orchestration.
+initially retaining its fixed draft → critique → revise LLM orchestration;
+Phase 4 subsequently replaced that sequence with its bounded native-tool
+`ready_for_review` session.
 
 This phase is a strict user-facing parity migration. Preserve LinkedIn
 commands, approvals, revision behavior, statuses, Telegram messages,

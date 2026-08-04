@@ -1,5 +1,10 @@
 # Kipp Telegram Personal Calendar Blocks — v1 Requirements
 
+> **Document role:** This Markdown file is the normative product and behavior
+> contract for Calendar v1. The HTML files in `plans/` are milestone-scoped
+> implementation plans; the architecture and delivery history lives in
+> `calendar-workflow-architecture-and-roadmap.md`.
+
 ## Goal and scope
 
 Kipp creates personal, timed blocks and reminders in the connected Google
@@ -288,7 +293,11 @@ persisted merely because it appeared in an event.
 - ETag protection for simultaneous manual Calendar edits during immediate Edit
   (post-MVP hardening).
 
-## Delivery plan (no implementation started)
+## Delivery status
+
+Calendar v1, including supported recurrence and the agent-centered planning
+boundary, is implemented. The sequence below is retained as the delivery record
+and as context for future hardening work.
 
 1. Establish configuration and OAuth foundations: shared `TIMEZONE`, Google
    OAuth credentials/routes, provider-namespaced encrypted tokens, and the

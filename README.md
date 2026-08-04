@@ -1,295 +1,308 @@
-# LinkedIn Posting Pipeline
+# Kipp
 
-An automated LinkedIn posting pipeline on **Cloudflare Workers + Workflows**. Captures ideas, drafts and revises posts through a bounded native-tool LLM session with Telegram feedback, and creates a LinkedIn **DRAFT** only after explicit approval (never auto-published).
+Kipp is a personal workflow assistant built on **Cloudflare Workers and
+Workflows**, with Telegram as its primary interface. It currently runs two
+independent durable workflows:
 
-Designed as an **open-source template**. Your content data lives in a separate
-private GitHub repository.
+- **LinkedIn drafting** captures ideas, generates and revises copy with an LLM,
+  waits for explicit Telegram approval, and creates a LinkedIn **DRAFT**. It
+  never auto-publishes.
+- **Calendar scheduling** turns natural-language Telegram requests into safe
+  one-off or recurring Google Calendar events, including clarification,
+  conflict choices, fresh revalidation, and a short immediate-edit window.
 
-Architecture documentation, including Mermaid diagrams and the machine-readable
-architecture inventory, lives in [docs/architecture](docs/architecture/README.md).
+The workflows share infrastructure without sharing business policy. Each owns
+its prompt, tools, terminal outcomes, deterministic rules, and durable state.
 
-## How It Works
+## Architecture at a glance
 
+```mermaid
+flowchart LR
+  owner["Owner"] <--> telegram["Telegram"]
+  telegram --> worker["Kipp Worker"]
+  rss["Substack RSS"] --> worker
+
+  worker --> linkedinFlow["LinkedIn Workflow"]
+  worker --> calendarFlow["Calendar Workflow"]
+
+  linkedinFlow --> agentRuntime["Bounded tool-session runtime"]
+  calendarFlow --> agentRuntime
+  agentRuntime --> llm["Gemini or DeepSeek"]
+
+  linkedinFlow <--> github["Private GitHub data repo"]
+  linkedinFlow --> linkedin["LinkedIn DRAFT"]
+  calendarFlow <--> calendar["Primary Google Calendar"]
+
+  linkedinFlow <--> router["Telegram interaction router"]
+  calendarFlow <--> router
+  linkedinFlow <--> vault["Encrypted token vault"]
+  calendarFlow <--> vault
 ```
-Substack RSS (daily) ──→ ideas.md ──→ Pipeline Workflow ──→ LinkedIn DRAFT
-Telegram capture                  ↑                ↕
-Telegram /generate ───────────────┘          Telegram feedback loop
-Cadence check (weekly) ──────────┘
-```
 
-The workflow durably waits for Telegram feedback without a running Worker
-process (powered by `step.waitForEvent()`). It waits for
-`WAIT_FOR_FEEDBACK_HOURS` (12 hours by default), then marks the idea
-`awaiting-feedback-expired` if no response arrives.
+The model owns natural-language interpretation, ambiguity detection, and normal
+conversational prose. Typed tools and deterministic code own schema and policy
+validation, calculations, recurrence expansion, availability checks, option
+authorization, fresh pre-write revalidation, external mutations, idempotency,
+and operational recovery.
+
+The shared tool runner permits at most three provider turns and four tool calls
+per session. Tools are statically allowlisted and schema-validated. Terminal
+handoffs cannot be batched with other calls.
+
+Detailed diagrams and the machine-readable architecture inventory live in
+[`docs/architecture/`](docs/architecture/README.md). Calendar's normative
+behavior is documented in
+[`docs/calendar-workflow-spec.md`](docs/calendar-workflow-spec.md), with its
+delivery history and architecture decisions in
+[`docs/calendar-workflow-architecture-and-roadmap.md`](docs/calendar-workflow-architecture-and-roadmap.md).
+
+## Workflow behavior
+
+### LinkedIn drafting and review
+
+Ideas enter through Telegram `/add`, the configured Substack RSS feed, or the
+private data repository. `/generate` and scheduled cadence checks can start
+`PipelineWorkflow`.
+
+The LinkedIn writing agent returns a complete `ready_for_review` response. Kipp
+stores the draft, sends it to Telegram, and durably waits for approval or
+revision feedback. Feedback resumes the bounded agent with its prior transcript.
+Only an explicit **Approve** action allows deterministic code to create a
+LinkedIn post with `lifecycleState: DRAFT`, then archive the idea. A feedback
+wait expires after `WAIT_FOR_FEEDBACK_HOURS` (12 hours by default).
+
+### Calendar scheduling
+
+`/calendar <request>` starts a separate 15-minute `CalendarWorkflow` session.
+The Calendar agent can:
+
+- interpret one-off and supported recurring requests;
+- ask for missing or ambiguous details;
+- list up to 50 projected primary-calendar events over at most 31 days when a
+  title or timing reference such as “after my dentist appointment” requires it;
+- submit a strict candidate for deterministic policy, recurrence, FreeBusy, and
+  conflict evaluation; and
+- hand an opaque authorized plan back to the workflow for creation.
+
+The model never writes Calendar. Before every create or update, the workflow
+resolves a current single-use plan and revalidates fresh availability. Fixed
+Telegram buttons map only to authorized options. Successful writes receive a
+deterministic confirmation and an **Edit** action that remains active for the
+rest of the 15-minute window.
+
+Calendar supports daily, weekly, biweekly, monthly, and bimonthly recurrence
+within a six-calendar-month horizon. Monthly requests preserve the ordinal
+weekday of the first occurrence by default; an explicit calendar date such as
+“the 8th of every month” uses a day-of-month anchor.
+
+Calendar event listing exposes only opaque reference, title, start/end,
+all-day state, transparency, and truncation status. Descriptions, locations,
+attendees, organizers, conferencing data, links, credentials, and raw API
+responses stay outside model context and content logs.
 
 ## Prerequisites
 
 - Node.js 20+
 - pnpm 9+ (`corepack enable && corepack prepare pnpm@latest --activate`)
-- Cloudflare account (Workers Paid — $5/mo)
-- Telegram bot (from [BotFather](https://t.me/BotFather))
-- LinkedIn Developer App (with Posts API)
-- A **private** GitHub repo for your data (`ideas.md`, `archive.md`, `style-prompt.md`)
-- An LLM API key (Gemini, DeepSeek, etc.)
+- Cloudflare account — Kipp is currently deployed on the Free tier, including
+  Workers, Workflows, Durable Objects, and the
+  [Teams Free Base](https://dash.cloudflare.com/?to=/0314b39505295dcfd75993342bae44d2/:zone/access)
+  Zero Trust plan used for Cloudflare Access
+- Telegram bot from [BotFather](https://t.me/BotFather)
+- LinkedIn Developer App with the Share on LinkedIn product
+- Google Cloud OAuth web client with the Calendar API enabled
+- Private GitHub data repository for LinkedIn content
+- Gemini or DeepSeek API key
 
 ## Setup
 
-### 1. Fork or clone this repo
+### 1. Install the application
 
 ```bash
 git clone git@github.com:satwikhebbar/kipp.git
 cd kipp
 pnpm install
-pnpm lefthook install   # enable pre-commit hooks
+pnpm lefthook install
 ```
 
-### 2. Create your data repo
+### 2. Create the LinkedIn data repository
 
-Create a **private** GitHub repo (e.g., `linkedin-pipeline-data`) containing:
+Create a private GitHub repository containing:
 
-- `ideas.md` — your idea backlog (see [example/ideas-template.md](example/ideas-template.md))
-- `archive.md` — empty file (will hold published posts)
-- `style-prompt.md` — your writing style guide (optional; falls back to the built-in default in `src/prompts/defaults.ts`)
+- `ideas.md` — start from
+  [`example/ideas-template.md`](example/ideas-template.md);
+- `archive.md` — initially empty; and
+- `style-prompt.md` — optional writing instructions. Kipp falls back to
+  `src/prompts/defaults.ts` when this file is absent.
 
-### 3. Create a Telegram bot
+Calendar state is not stored in this repository.
 
-Talk to [BotFather](https://t.me/BotFather), create a bot, note the token.
+### 3. Configure Cloudflare Access
 
-### 4. Create a LinkedIn app
+Production uses two self-hosted Access applications on the same Worker
+hostname:
 
-1. Go to [LinkedIn Developer Portal](https://developer.linkedin.com/) → Create App
-2. Add the **Share on LinkedIn** product (free tier)
-3. Note your **Client ID** and **Client Secret**
-4. Add a redirect URL: `https://<worker>.workers.dev/auth/linkedin/callback`
+1. A primary application protects the entire hostname for the administrator.
+   Record its audience as `ACCESS_AUDIENCE` and its Zero Trust team name as
+   `ACCESS_TEAM`.
+2. A second application bypasses **only** `/webhook/telegram`, because Telegram
+   cannot complete an Access login.
 
-The OAuth token is obtained via the built-in setup endpoint (see step 5).
+The webhook bypass remains protected by
+`X-Telegram-Bot-Api-Secret-Token` and `TELEGRAM_ALLOWED_USER_ID`. Kipp also
+validates Access JWTs inside protected setup, callback, and administrative
+routes.
 
-### 5. Configure Cloudflare Access
+### 4. Configure variables and secrets
 
-The Worker hostname is protected by Cloudflare Access. Production uses two
-**self-hosted** Access applications on the same hostname:
+Use `wrangler.local.toml` for local non-secret variables and
+`wrangler.prod.toml` for production. Put local secrets in `.dev.vars` and
+production secrets in Cloudflare's secret store. Never commit credentials.
 
-1. A primary application for `https://<worker>.workers.dev` with an **Allow**
-   policy for the administrator. This protects every path by default. Record
-   its audience value as `ACCESS_AUDIENCE` and set `ACCESS_TEAM` to the Zero
-   Trust team name.
-2. A second application scoped **only** to
-   `https://<worker>.workers.dev/webhook/telegram`, with a **Bypass** policy.
-   Telegram cannot complete an interactive Access login, so this narrow bypass
-   is required for webhook delivery.
+| Category | Names |
+| --- | --- |
+| Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ALLOWED_USER_ID` |
+| LLM | `LLM_API_KEY`, `LLM_PROVIDER`, optional `LLM_MODEL`, `LLM_MAX_RETRIES` |
+| LinkedIn OAuth | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_AUTHOR_URN`, optional `LINKEDIN_REDIRECT_ORIGIN` |
+| Google OAuth | `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, optional `GOOGLE_CALENDAR_REDIRECT_ORIGIN` |
+| GitHub data | `GITHUB_PAT`, `DATA_REPO_OWNER`, `DATA_REPO_NAME`, `DATA_REPO_BRANCH`, optional `PROMPT_STYLE_PATH` |
+| Token encryption | `TOKEN_ENCRYPTION_KEY_IDS`, plus one `TOKEN_ENCRYPTION_KEY_<key-id>` secret per listed ID |
+| Access | `ACCESS_TEAM`, `ACCESS_AUDIENCE`, `ACCESS_ADMIN_EMAILS` |
+| Workflow behavior | `SUBSTACK_RSS_URL`, `POSTING_CADENCE_DAYS`, `WAIT_FOR_FEEDBACK_HOURS`, `TIMEZONE` |
+| Runtime | `DEPLOYMENT_ENV`, optional `LOG_LEVEL` |
 
-The bypass must not be broadened beyond `/webhook/telegram`. The Worker still
-requires Telegram's `X-Telegram-Bot-Api-Secret-Token` header and, when
-configured, checks `TELEGRAM_ALLOWED_USER_ID` before it performs any action.
-Protected setup, OAuth callback, and administrative routes validate the
-Cloudflare Access JWT in the Worker as a second layer of protection.
-
-Configure a separate Access application for preview URLs if preview deployments
-are enabled.
-
-### 6. Configure Worker secrets and variables
-
-Set production values in **Workers & Pages → linkedin-pipeline → Settings →
-Variables and Secrets** (or with `pnpm wrangler secret put <NAME>`). Do not put
-secret values in a committed Wrangler file.
-
-| Type | Names | Purpose |
-| --- | --- | --- |
-| Secret | `ACCESS_ADMIN_EMAILS` | Comma-separated emails allowed by Worker-side Access JWT validation. |
-| Secret | `DATA_REPO_NAME`, `DATA_REPO_OWNER`, `GITHUB_PAT` | Private GitHub data repository access. |
-| Secret | `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | Google Calendar and LinkedIn OAuth client credentials. |
-| Secret | `LLM_API_KEY` | Gemini or DeepSeek API credential. |
-| Secret | `TELEGRAM_ALLOWED_USER_ID`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Telegram user allow-list, Bot API access, and webhook verification. |
-| Secret | `TOKEN_ENCRYPTION_KEY_<key-id>` | 32-byte base64url token-encryption key; the configured key ID determines its exact name. |
-| Plaintext variable | `ACCESS_AUDIENCE`, `ACCESS_TEAM`, `DATA_REPO_BRANCH`, `DEPLOYMENT_ENV`, `LOG_LEVEL` | Access validation and deployment configuration. `LOG_LEVEL=info` enables metadata-only local runtime logs; leave it unset in production. |
-| Plaintext variable | `LINKEDIN_AUTHOR_URN`, `LLM_MAX_RETRIES`, `LLM_MODEL`, `LLM_PROVIDER` | LinkedIn identity and LLM behavior. |
-| Plaintext variable | `POSTING_CADENCE_DAYS`, `SUBSTACK_RSS_URL`, `TIMEZONE`, `WAIT_FOR_FEEDBACK_HOURS` | Scheduled-trigger and feedback-timeout behavior. |
-| Plaintext variable | `TOKEN_ENCRYPTION_KEY_IDS` | Ordered, comma-separated encryption key IDs; the first encrypts and all listed keys can decrypt. |
-
-Set the token encryption key:
+Generate a 32-byte base64url encryption key and store it under the active key
+ID:
 
 ```bash
-# Generate a 32-byte base64url-encoded key
 node -e "const c = require('crypto'); console.log(c.randomBytes(32).toString('base64url'))"
-# Store it as a Worker secret. Its suffix must match TOKEN_ENCRYPTION_KEY_IDS.
 pnpm wrangler secret put TOKEN_ENCRYPTION_KEY_k20260720a
 ```
 
-For key rotation, add the new key ID to `TOKEN_ENCRYPTION_KEY_IDS` (for
-example, `k20260720a,k20260720b`), add the corresponding secret, and call
-`POST /admin/rewrap`. Once rewrapping succeeds, remove the old key ID and
-delete its secret.
+`TOKEN_ENCRYPTION_KEY_IDS` is ordered: the first key encrypts and every listed
+key may decrypt. To rotate keys, add the new ID and secret, call
+`POST /admin/rewrap`, then remove the old ID and secret after rewrapping succeeds.
 
-### 7. Choose the Wrangler configuration
+### 5. Connect LinkedIn
 
-Use `wrangler.local.toml` for local development and `wrangler.prod.toml` for
-production deployment. These files hold non-secret `[vars]` only; Worker
-secrets stay in the Cloudflare dashboard (production) or `.dev.vars` (local).
+Configure the LinkedIn callback URL as:
+
+```text
+https://<worker-host>/auth/linkedin/callback
+```
+
+Then visit the Access-protected setup route:
+
+```text
+https://<worker-host>/setup/linkedin
+```
+
+Kipp creates and consumes one-time OAuth state, exchanges the code, encrypts
+the resulting token, and stores it in the LinkedIn token namespace.
+
+### 6. Connect Google Calendar
+
+Create a Google OAuth **Web application**, enable the Google Calendar API, and
+configure this callback URL:
+
+```text
+https://<worker-host>/auth/google-calendar/callback
+```
+
+For local development the origin is normally `http://localhost:8787`. Set
+`GOOGLE_CALENDAR_REDIRECT_ORIGIN` when the request host is not the desired OAuth
+origin, then visit:
+
+```text
+https://<worker-host>/setup/google-calendar
+```
+
+The requested Calendar consent supports owned-event operations and availability
+reads on the connected account's primary calendar; it does not request broad
+account access.
+
+### 7. Register the Telegram webhook
 
 ```bash
-# Local development
-pnpm dev                           # shortcut — uses wrangler.local.toml
-pnpm wrangler dev --config wrangler.local.toml   # explicit equivalent
-
-# Production deployment
-pnpm deploy                        # shortcut — uses wrangler.prod.toml
-pnpm wrangler deploy --config wrangler.prod.toml # explicit equivalent
+curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<worker-host>/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
-The configuration files define the same runtime bindings and environment
-variables for their respective targets. Keep credentials out of both files.
+## Local development
 
-To validate the production Calendar planner contract against DeepSeek V4 (three
-cases, with up to three bounded model turns each, and no Calendar access), run:
+Telegram permits only one webhook per bot, so use a separate development bot.
 
-```bash
-LLM_API_KEY=<key> pnpm test:provider-contract
-```
+1. Put development secrets in `.dev.vars`. For local-only Access bypass and a
+   static LinkedIn token fallback, include:
 
-`GOOGLE_CALENDAR_REDIRECT_ORIGIN`, `LINKEDIN_REDIRECT_ORIGIN`, and
-`PROMPT_STYLE_PATH` are optional overrides. The first two override their OAuth
-callback origins; the third selects a style prompt in the data repository and
-otherwise falls back to `style-prompt.md` and then the built-in default.
-
-### 8. LinkedIn OAuth setup
-
-Visit the setup URL in your browser through the Cloudflare Access-protected domain:
-
-```
-https://<worker>.workers.dev/setup/linkedin
-```
-
-The worker verifies your Access JWT, initiates the OAuth flow:
-1. Redirects you to LinkedIn for authorization
-2. LinkedIn redirects back to the callback URL
-3. The worker validates your Access session, exchanges the code for tokens, encrypts them with AES-256-GCM, and stores them in the Durable Object token vault
-
-Tokens are automatically refreshed via a weekly cron (`handleTokenCheckCron`). A `POST /admin/rewrap` endpoint re-encrypts stored tokens with the current active key encryption key.
-
-### 9. Google Calendar OAuth setup
-
-Create a Google OAuth **Web application** client, enable the Google Calendar
-API, and add the exact callback URL as an authorized redirect URI. For local
-development, that is usually `http://localhost:8787/auth/google-calendar/callback`.
-Set the matching client ID, secret, and optional `GOOGLE_CALENDAR_REDIRECT_ORIGIN`,
-then visit:
-
-```
-http://localhost:8787/setup/google-calendar
-```
-
-Once connected, send `/calendar <request>` to the dev bot. For example:
-
-```
-/calendar Call Jamie tomorrow at 7pm
-```
-
-Calendar supports bounded one-off conversations: it asks focused follow-ups,
-offers privacy-safe conflict choices, and keeps an **Edit** action active for
-15 minutes after confirmation. If authorization expires, reconnect through the
-setup route and use the explicit Retry action within 15 minutes. The model does
-not receive Calendar availability data; the worker checks availability and
-performs the final Calendar write deterministically.
-
-### 10. Register Telegram webhook
-
-```bash
-curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<worker>.workers.dev/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
-```
-
-### 11. Verify
-
-- Send `/add <your idea text>` to your Telegram bot — it should appear in `ideas.md`
-- Send `/generate` — it should start the pipeline workflow
-- Check the Cloudflare dashboard for Workflow runs
-
-## Local Development & Testing
-
-To test the Telegram flow locally without hijacking the production webhook, you must use a separate **dev bot**. Telegram only allows one webhook URL per bot.
-
-1. **Create a Dev Bot**: Talk to BotFather, create a second bot (e.g., `MyBotDev`), and note the token.
-2. **Configure `.dev.vars`**: Create a `.dev.vars` file in the project root with your dev bot token and a webhook secret:
    ```env
-   TELEGRAM_BOT_TOKEN="dev_bot_token_here"
-   TELEGRAM_WEBHOOK_SECRET="some_random_secret"
+   TELEGRAM_BOT_TOKEN="dev_bot_token"
+   TELEGRAM_WEBHOOK_SECRET="random_webhook_secret"
    ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK="true"
-   GOOGLE_CALENDAR_CLIENT_ID="your_google_client_id"
-   GOOGLE_CALENDAR_CLIENT_SECRET="your_google_client_secret"
-   GOOGLE_CALENDAR_REDIRECT_ORIGIN="http://localhost:8787"
-   LINKEDIN_ACCESS_TOKEN="your_linkedin_token"
+   LINKEDIN_ACCESS_TOKEN="local_linkedin_token"
    TOKEN_ENCRYPTION_KEY_IDS="k20260720a"
-   TOKEN_ENCRYPTION_KEY_k20260720a="<base64url-32-byte-key>"
+   TOKEN_ENCRYPTION_KEY_k20260720a="base64url_32_byte_key"
    ```
-   `ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK="true"` skips Cloudflare Access JWT verification and falls back to the `LINKEDIN_ACCESS_TOKEN` env var for LinkedIn API calls. Never set this in production.
-3. **Start Local Server**: Run `pnpm dev` (or `pnpm wrangler dev --config wrangler.local.toml`; usually on port 8787).
-4. **Start ngrok**: In a new terminal, expose your local server to the internet using ngrok:
-   ```bash
-   ngrok http 8787
-   ```
-5. **Register Dev Webhook**: In another terminal, run the helper script to automatically find your active ngrok URL and point your dev bot's webhook to it:
-   ```bash
-   pnpm run webhook:dev
-   ```
-Now, messages sent to your *dev bot* will route to your local server, while your production worker continues to safely handle messages from your production bot.
 
-## Usage
+   Never enable `ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK` in production.
+2. Start Kipp with `pnpm dev` (normally on port 8787).
+3. Expose it with `ngrok http 8787`.
+4. Run `pnpm run webhook:dev` to point the development bot at the active tunnel.
 
-| Action | How |
-|---|---|
-| Quick-capture idea | Send `/add <your idea text>` |
-| Start pipeline | Send `/generate` |
-| Approve draft | Tap **Approve** on the Telegram notification |
-| Request revision | Tap **Revise More** or reply with feedback text |
+## Telegram commands
 
-The pipeline will **never** auto-publish. All finished drafts land as LinkedIn DRAFT posts for you to review and publish manually.
+| Command or action | Result |
+| --- | --- |
+| `/add <text>` | Save a raw LinkedIn idea. |
+| `/generate` | Start LinkedIn generation for the next raw idea. |
+| **Approve** / **Revise More** / reply | Review or revise the current LinkedIn draft. |
+| `/calendar <request>` | Start a one-off or recurring Calendar conversation. |
+| Calendar buttons or reply | Select an authorized choice, supply clarification, cancel, retry, or edit. |
 
-## Secrets vs Vars
-
-| Type | Storage | Used for |
-|---|---|---|
-| **Secrets** | Cloudflare dashboard or `wrangler secret put` | API keys, tokens, private repository identifiers, and allow-lists |
-| **Vars** | `wrangler.local.toml`, `wrangler.prod.toml`, or dashboard | Configurable, non-sensitive environment settings |
-
-Secrets are encrypted and never visible in plaintext. Vars are readable in the
-Cloudflare dashboard. Never put credentials in either Wrangler configuration.
-
-## Commands
+## Testing and quality checks
 
 | Command | Purpose |
-|---|---|
-| `pnpm dev` | Start the local Worker with local configuration (`wrangler.local.toml`) |
-| `pnpm run webhook:dev` | Register dev bot webhook to active ngrok tunnel |
-| `pnpm deploy` | Deploy with production configuration (`wrangler.prod.toml`) |
-| `pnpm lint` | Check lint rules and formatting |
-| `pnpm lint:fix` | Auto-fix lint and formatting issues |
-| `pnpm typecheck` | Run TypeScript type checking |
-| `pnpm test` | Run all tests |
-| `pnpm test:unit` | Run unit tests only |
-| `pnpm test:integration` | Run integration tests only |
-| `pnpm check` | Run lint + typecheck + test (use before committing) |
+| --- | --- |
+| `pnpm lint` | Check source formatting and lint rules. |
+| `pnpm run docs` | Enforce source documentation requirements. |
+| `pnpm typecheck` | Run TypeScript checking without emitting files. |
+| `pnpm test` | Run the standard Vitest suite. |
+| `pnpm test:unit` | Run unit tests. |
+| `pnpm test:integration` | Run integration tests against fake external services. |
+| `LLM_API_KEY=<key> pnpm test:provider-contract` | Run credential-gated DeepSeek Calendar tool-contract tests. |
+| `pnpm check` | Run lint, documentation checks, typecheck, and the standard tests. |
 
-Pre-commit hooks (via lefthook) run `typecheck`, `lint`, and `test` automatically on every commit.
+Lefthook runs typecheck, lint, and tests before each commit.
 
-## Project Structure
+## Deployment
 
+```bash
+pnpm deploy
 ```
+
+The deploy command runs the pre-deployment checks and deploys with
+`wrangler.prod.toml`. `pnpm dev` uses `wrangler.local.toml`.
+
+## Repository layout
+
+```text
 src/
-├── index.ts                 # Worker entry (Hono routes)
-├── workflow.ts              # Workflow orchestration (Cloudflare Workflows)
-├── types.ts                 # Shared types
-├── crypto.ts                # AES-256-GCM encrypt/decrypt, base64url helpers
-├── token-vault.ts           # TokenVaultDO Durable Object (encrypted token store)
-├── token-vault-client.ts    # DO stub client + verifyAccessJwt (Cloudflare Access JWT)
-├── backlog/                 # ideas.md / archive.md management
-├── prompts/                 # Prompt defaults and runtime resolution
-│   ├── defaults.ts          # Built-in default style prompt constant (single source of truth)
-│   └── resolver.ts          # readPrompt() — multi-path data repo → built-in fallback
-├── agent/                   # Workflow-scoped LinkedIn tool agent and supporting LLM behaviors
-├── providers/               # LLM provider clients (Gemini, DeepSeek)
-├── triggers/                # Entry points (RSS, cadence, Telegram webhook, LinkedIn OAuth, token refresh)
-├── integrations/            # External API clients (GitHub, LinkedIn, Telegram)
-├── __tests__/               # Unit tests (vitest)
-└── __integration__/         # Integration tests (vitest, with fake network)
+├── index.ts                       Worker entry, routes, and cron dispatch
+├── workflow.ts                    LinkedIn durable workflow
+├── calendar-workflow.ts           Calendar WorkflowEntrypoint
+├── calendar-agent-workflow.ts     Calendar agent/conversation orchestration
+├── calendar-*.ts                  Calendar validation, plans, scheduling, and recurrence
+├── agent/                         Workflow-specific prompts, tools, and terminal outcomes
+├── runtime/                       Shared bounded tool runner and guards
+├── triggers/                      Telegram, OAuth, RSS, cadence, and token checks
+├── integrations/                  GitHub, Telegram, LinkedIn, and Google Calendar clients
+├── backlog/                       LinkedIn ideas/archive parsing and mutation
+├── prompts/                       LinkedIn style-prompt resolution
+├── providers/                     Gemini and DeepSeek adapters
+├── interaction-router*.ts         Short-lived Telegram interaction routing
+├── token-vault*.ts                Encrypted provider token storage
+├── __tests__/                     Unit tests
+├── __integration__/               Workflow and boundary integration tests
+└── __contract__/                  Credential-gated provider contract tests
 ```
 
 ## License

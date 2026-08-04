@@ -1,10 +1,36 @@
 # Request flows
 
-## Idea capture and generation
+## Telegram ingress and interaction routing
 
-Telegram `/add` writes a raw idea to the private data repository. Telegram
-`/generate`, the daily RSS poll, and the weekly cadence check can all create a
-workflow instance.
+Telegram commands start workflows; replies and callback buttons resume the
+specific waiting workflow through short-lived opaque registrations.
+
+```mermaid
+sequenceDiagram
+  participant U as Owner
+  participant T as Telegram
+  participant W as Worker trigger
+  participant R as InteractionRouterDO
+  participant F as Waiting workflow
+
+  U->>T: command, reply, or button
+  T->>W: webhook with secret header
+  W->>W: verify allowed user and parse command
+  alt new command
+    W->>F: create LinkedIn or Calendar workflow
+  else reply or callback
+    W->>R: claim opaque interaction
+    R-->>W: workflow target and interaction kind
+    W->>F: deliver normalized workflow event
+  end
+```
+
+## LinkedIn idea capture, generation, and review
+
+Telegram `/add` writes a raw idea to the private data repository. `/generate`,
+the daily RSS poll, and the weekly cadence check may start `PipelineWorkflow`.
+The LinkedIn agent returns a workflow-specific `ready_for_review` terminal
+outcome; it cannot approve, publish, archive, or access credentials.
 
 ```mermaid
 sequenceDiagram
@@ -13,56 +39,96 @@ sequenceDiagram
   participant W as Worker trigger
   participant G as GitHub data repo
   participant P as PipelineWorkflow
-
-  U->>T: /add idea
-  T->>W: signed webhook
-  W->>G: append raw idea to ideas.md
-  W-->>T: confirm saved
-
-  U->>T: /generate
-  T->>W: signed webhook
-  W->>G: read next raw idea
-  W->>P: create workflow instance
-  W-->>T: confirm started
-```
-
-## Draft, review, and LinkedIn draft creation
-
-```mermaid
-sequenceDiagram
-  participant P as PipelineWorkflow
-  participant G as GitHub data repo
-  participant L as LLM provider
-  participant T as Telegram
-  participant U as Owner
+  participant A as Bounded LinkedIn agent
   participant V as TokenVaultDO
   participant LI as LinkedIn API
 
-  P->>G: read ideas.md and style prompt
-  P->>L: bounded native-tool draft session
-  L->>P: submit_linkedin_response complete review response
-  P->>G: save draft and awaiting-feedback status
-  P->>T: send draft with approval controls
-  P->>P: wait for Telegram event
-  U->>T: approve or provide feedback
-  T->>P: send workflow event
-  alt feedback
-    P->>L: prior native transcript + feedback
-    L->>P: submit_linkedin_response complete replacement response
-    P->>G: replace awaiting-feedback draft
-    P->>T: send revised draft with approval controls
-  else approval
-    P->>V: read encrypted access token
-    P->>LI: create LinkedIn post with lifecycleState DRAFT
-    P->>G: archive finalized idea and remove it from ideas.md
-    P->>T: confirm draft created
+  U->>T: /add idea or /generate
+  T->>W: verified webhook
+  W->>G: save or select raw idea
+  W->>P: create workflow
+  P->>G: read idea and style instructions
+  P->>A: bounded native-tool session
+  A-->>P: ready_for_review
+  P->>G: persist draft and awaiting-feedback state
+  P->>T: send draft with Approve and Revise controls
+  P->>P: durably wait for interaction
+  alt revision feedback
+    U->>T: feedback
+    T->>P: routed interaction
+    P->>A: prior transcript plus feedback
+    A-->>P: replacement ready_for_review
+    P->>G: replace stored draft
+    P->>T: send revised review controls
+  else explicit approval
+    U->>T: Approve
+    T->>P: routed interaction
+    P->>V: read LinkedIn token
+    P->>LI: create lifecycleState DRAFT
+    P->>G: archive finalized idea
+    P->>T: confirm LinkedIn draft
   end
 ```
 
-If the workflow does not receive feedback within `WAIT_FOR_FEEDBACK_HOURS`, it
-marks the idea `awaiting-feedback-expired` and ends the run.
+No LinkedIn post is auto-published. If feedback does not arrive within
+`WAIT_FOR_FEEDBACK_HOURS`, the idea becomes `awaiting-feedback-expired`.
 
-## LinkedIn OAuth setup
+## Calendar conversation, evaluation, and write
+
+Calendar uses a bounded agent to interpret ordinary language and explain typed
+outcomes. Deterministic evaluation owns date arithmetic, policy, recurrence,
+FreeBusy checks, candidate ranking, and opaque plan authorization. Only the
+workflow can revalidate and write.
+
+```mermaid
+sequenceDiagram
+  participant U as Owner
+  participant T as Telegram
+  participant C as CalendarWorkflow
+  participant A as Bounded Calendar agent
+  participant E as Guarded Calendar tools
+  participant G as Google Calendar API
+  participant R as InteractionRouterDO
+
+  U->>T: /calendar natural-language request
+  T->>C: create workflow
+  C->>A: request plus bounded transcript
+  opt reference needs calendar context
+    A->>E: list_calendar_events
+    E->>G: bounded primary-calendar read
+    G-->>E: provider response
+    E-->>A: projected titles, timing, opaque references
+  end
+  A->>E: evaluate_calendar_candidate
+  E->>G: FreeBusy read when candidate is valid
+  G-->>E: busy intervals
+  E-->>A: typed issues, choices, or opaque plan ID
+  alt more user input or authorized choices
+    A-->>C: needs_user_input
+    C->>R: register reply or fixed buttons
+    C->>T: agent-authored explanation
+    U->>T: reply or select button
+    T->>R: claim interaction
+    R-->>C: normalized event
+    C->>A: resume with reply or changed availability fact
+  else candidate ready
+    A-->>C: ready_to_create with plan ID
+    C->>G: fresh deterministic revalidation
+    C->>G: idempotent create or update
+    C->>T: deterministic confirmation with Edit
+  end
+```
+
+`list_calendar_events` is limited to the primary calendar, a 31-day range, 50
+projected events, and safe fields. `evaluate_calendar_candidate` performs
+availability checks; neither model-facing tool mutates Calendar. Opaque plan
+and option IDs are version-scoped, expiring, and single-use. A successful write
+is never repeated merely because Telegram confirmation failed.
+
+## OAuth setup
+
+LinkedIn and Google Calendar use the same protected setup pattern and separate
+provider namespaces in the encrypted token vault.
 
 ```mermaid
 sequenceDiagram
@@ -70,18 +136,20 @@ sequenceDiagram
   participant A as Cloudflare Access
   participant W as Worker
   participant V as TokenVaultDO
-  participant LI as LinkedIn OAuth
+  participant O as Provider OAuth
 
-  U->>A: request /setup/linkedin
+  U->>A: request provider setup route
   A->>W: authenticated request with Access JWT
   W->>V: issue one-time OAuth state and cookie ID
-  W->>LI: redirect to authorization URL
-  LI->>W: callback with authorization code and state
+  W->>O: redirect to authorization URL
+  O->>W: callback with code and state
   W->>A: validate Access JWT
   W->>V: consume state paired with secure cookie
-  W->>LI: exchange code for tokens
-  W->>V: encrypt and store tokens
+  W->>O: exchange code for tokens
+  W->>V: encrypt in provider namespace
 ```
 
-The Monday token-check schedule refreshes a token when possible or alerts the
-allowed Telegram user when it is near expiry and cannot be refreshed.
+The weekly token check refreshes LinkedIn credentials when possible or alerts
+the allowed Telegram user when reconnection is required. Calendar refreshes an
+expired access token during a request and offers deterministic reconnect/retry
+recovery when authorization is no longer usable.

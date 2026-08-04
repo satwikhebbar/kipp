@@ -9,8 +9,9 @@ Update Kipp's architecture documentation for the current repository state.
 1. Read all files under docs/architecture/, including architecture.yaml and ADRs.
 2. Inspect the current diff and the relevant source code, especially src/index.ts,
    src/workflow.ts, src/triggers/, src/backlog/, src/integrations/, src/providers/,
-   src/agent/, src/token-vault.ts, src/token-vault-client.ts, src/types.ts, and
-   wrangler.toml.
+   src/agent/, src/runtime/, src/calendar-agent-workflow.ts,
+   src/calendar-evaluation.ts, src/calendar-plan.ts, src/token-vault.ts,
+   src/token-vault-client.ts, src/types.ts, and both Wrangler configurations.
 3. Identify only material architectural changes: a new or removed module,
    runtime component, external system, persistence store, API, schedule, security
    boundary, module responsibility, or dependency direction.

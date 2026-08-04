@@ -21,7 +21,7 @@ flowchart LR
   triggers --> vault
   triggers --> router
 
-  linkedin_workflow --> agents["agent"]
+  linkedin_workflow --> linkedin_agent["agent/linkedin"]
   linkedin_workflow --> backlog
   linkedin_workflow --> conversation["conversation"]
   linkedin_workflow --> prompts["prompts"]
@@ -31,7 +31,8 @@ flowchart LR
   linkedin_workflow --> vault
   linkedin_workflow --> router
 
-  calendar_workflow --> calendar_domain["calendar-scheduling + calendar-messages"]
+  calendar_workflow --> calendar_agent["agent/calendar-session"]
+  calendar_workflow --> calendar_domain["Calendar validation, evaluation, plan, scheduling, recurrence, messages"]
   calendar_workflow --> providers
   calendar_workflow --> runtime
   calendar_workflow --> integrations
@@ -40,8 +41,11 @@ flowchart LR
 
   backlog --> github["integrations/github"]
   prompts --> github
-  agents --> providers
-  agents --> runtime
+  linkedin_agent --> providers
+  linkedin_agent --> runtime
+  calendar_agent --> calendar_domain
+  calendar_agent --> providers
+  calendar_agent --> runtime
   runtime --> providers
   vault --> crypto["crypto"]
 ```
@@ -51,12 +55,12 @@ flowchart LR
 | `triggers/` | Adapts HTTP, Telegram, OAuth, and scheduled events into application actions. | Backlog, integrations, providers, both workflows, interaction router, token vault |
 | `workflow.ts` | Orchestrates bounded LinkedIn native-tool drafting/revision, notification, approval wait, deterministic publication, and archive actions. | Agents, backlog, conversation, integrations, interaction router, prompts, providers, runtime, token vault |
 | `calendar-workflow.ts` + `calendar-agent-workflow.ts` | Runs the bounded Calendar agent session, persists its safe transcript and opaque plan ledger, maps fixed actions, revalidates fresh state, and performs idempotent writes and recovery. | Calendar agent, Calendar domain, Google Calendar integration, interaction router, providers, runtime, token vault |
-| `calendar-evaluation.ts` + `calendar-plan.ts` | Aggregates typed proposal issues, evaluates one-off and recurring candidates, and authorizes versioned single-use plan and option IDs. | Scheduling and recurrence domains, Google Calendar integration |
-| `calendar-scheduling.ts` + `calendar-recurrence.ts` + `calendar-messages.ts` | Implements pure scheduling and recurrence policy, conflict alternatives, and deterministic operational or post-write messages. | Shared types, `rrule` |
+| `calendar-validation.ts` + `calendar-evaluation.ts` + `calendar-plan.ts` | Defines strict one-off/recurring proposal validation, aggregates typed semantic issues, evaluates safe candidates, and authorizes versioned single-use plan and option IDs. | Scheduling and recurrence domains, Google Calendar integration |
+| `calendar-scheduling.ts` + `calendar-recurrence.ts` + `calendar-messages.ts` | Implements time-zone conversion, availability policy, recurrence expansion, candidate selection, Calendar event projection, and deterministic operational or post-write messages. | Shared types, Google Calendar types, `rrule` |
 | `backlog/` | Parses and mutates the Markdown idea backlog and archive. | GitHub integration |
-| `agent/` | Defines workflow-specific bounded sessions, prompts, tool contracts, and terminal outcomes for Calendar and LinkedIn. | Providers, runtime, Calendar evaluation |
+| `agent/` | Defines workflow-specific bounded sessions, prompts, tool contracts, safe transcript handling, and terminal outcomes: Calendar `ready_to_create`/`needs_user_input` and LinkedIn `ready_for_review`. | Providers, runtime, Calendar evaluation and plans |
 | `providers/` | Selects Gemini or DeepSeek and normalizes text generation plus native tool declarations, calls, and results. | Provider SDK/API |
-| `runtime/` | Supplies the typed tool registry and guard, bounded tool runner, context contract, metadata-only logging, and shared HTTP constants. | Providers, Zod |
+| `runtime/` | Supplies the typed tool registry and guard, three-turn/four-call bounded runner, batching and handoff policy, shared agent-session result, metadata-only logging, and HTTP constants. | Providers, Zod |
 | `interaction-router.ts` + `interaction-router-client.ts` | Stores and resolves short-lived opaque Telegram interactions with idempotent claim/acknowledgement and expiry. | Durable Object SQLite |
 | `integrations/` | Implements GitHub, Telegram, LinkedIn, and Google Calendar API clients. | External APIs |
 | `prompts/` | Resolves the style prompt from the data repository with a built-in fallback. | GitHub integration |

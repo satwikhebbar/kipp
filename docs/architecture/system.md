@@ -1,69 +1,78 @@
 # System and runtime
 
-Kipp is a Cloudflare Worker that captures content ideas, generates and revises
-LinkedIn copy, and creates a LinkedIn **draft** only after explicit Telegram
-approval. It never publishes a post directly.
+Kipp is a personal workflow assistant on Cloudflare Workers. Telegram is its
+primary user interface. Separate durable workflows currently handle LinkedIn
+drafting and personal Google Calendar scheduling while sharing a bounded agent
+runtime, interaction routing, OAuth storage, and external integrations.
 
 ## System context
 
 ```mermaid
 flowchart LR
-  user["Owner"]
-  telegram["Telegram Bot API"]
-  rss["Substack RSS feed"]
-  access["Cloudflare Access"]
-  worker["Kipp Cloudflare Worker"]
-  workflow["Cloudflare Workflow"]
-  vault["TokenVault Durable Object"]
-  data["Private GitHub data repository"]
-  llm["Gemini or DeepSeek API"]
-  linkedin["LinkedIn OAuth and Posts API"]
-
-  user <--> telegram
+  owner["Owner"] <--> telegram["Telegram Bot API"]
+  substack["Substack RSS feed"] --> worker["Kipp Worker"]
   telegram --> worker
-  rss --> worker
-  user --> access --> worker
-  worker --> workflow
-  worker <--> vault
-  worker <--> data
-  workflow <--> telegram
-  workflow <--> data
-  workflow --> llm
-  workflow <--> vault
-  workflow --> linkedin
-  vault --> linkedin
+  owner --> access["Cloudflare Access"] --> worker
+
+  worker --> linkedinFlow["LinkedIn Workflow"]
+  worker --> calendarFlow["Calendar Workflow"]
+  worker <--> router["InteractionRouterDO"]
+  worker <--> vault["TokenVaultDO"]
+
+  linkedinFlow <--> data["Private GitHub data repository"]
+  linkedinFlow --> llm["Gemini or DeepSeek API"]
+  linkedinFlow --> linkedin["LinkedIn API"]
+  calendarFlow --> llm
+  calendarFlow <--> calendar["Google Calendar API"]
+  linkedinFlow <--> telegram
+  calendarFlow <--> telegram
+  linkedinFlow <--> router
+  calendarFlow <--> router
+  linkedinFlow <--> vault
+  calendarFlow <--> vault
 ```
+
+The model is a participant inside each workflow, not the workflow controller.
+Workflow-specific, schema-validated tools let it interpret requests and hand
+back a terminal outcome. Deterministic code retains authentication, policy,
+authorization, revalidation, mutations, and operational recovery.
 
 ## Cloudflare containers
 
-`src/index.ts` provides the Worker entry point and Hono HTTP routes. It also
-dispatches the three configured cron schedules. The worker delegates business
-work to trigger handlers and `PipelineWorkflow`; it does not own the core draft
-loop itself.
-
 ```mermaid
 flowchart TB
-  subgraph cf["Cloudflare account"]
-    worker["Worker + Hono\nsrc/index.ts"]
-    triggers["Trigger handlers\nsrc/triggers"]
-    workflow["PipelineWorkflow\nsrc/workflow.ts"]
-    vault["TokenVaultDO\nDurable Object + SQLite"]
-    worker --> triggers
-    worker --> workflow
-    worker --> vault
-    triggers --> workflow
-    triggers --> vault
-    workflow --> vault
+  subgraph edge["Cloudflare Worker"]
+    entry["Hono entry point\nsrc/index.ts"]
+    triggers["HTTP, Telegram, OAuth, and cron triggers\nsrc/triggers/"]
+    entry --> triggers
   end
 
-  triggers --> ext["External APIs"]
-  workflow --> ext
+  subgraph durable["Cloudflare durable components"]
+    linkedinFlow["PipelineWorkflow\nLinkedIn generation and review"]
+    calendarFlow["CalendarWorkflow\nCalendar conversation and writes"]
+    router["InteractionRouterDO\nshort-lived Telegram routing"]
+    vault["TokenVaultDO\nencrypted OAuth tokens"]
+  end
+
+  triggers --> linkedinFlow
+  triggers --> calendarFlow
+  triggers --> router
+  triggers --> vault
+  linkedinFlow <--> router
+  calendarFlow <--> router
+  linkedinFlow <--> vault
+  calendarFlow <--> vault
+  linkedinFlow --> external["External APIs"]
+  calendarFlow --> external
+  triggers --> external
 ```
 
-The Worker has five HTTP routes: the health response, Telegram webhook,
-LinkedIn OAuth start and callback, and administrative token rewrapping.
-Cloudflare Access protects the Worker hostname in production. A separate Access
-application bypasses only `/webhook/telegram` so Telegram can deliver updates;
-the Worker then verifies Telegram's webhook-secret header and allowed-user
-configuration. Setup, OAuth callback, and rewrapping require a valid Access JWT
-in the Worker.
+`src/index.ts` exposes seven routes: health, Telegram webhook, LinkedIn and
+Google Calendar OAuth starts, both OAuth callbacks, and administrative token
+rewrapping. It also dispatches the daily RSS poll, weekly token check, and
+weekly LinkedIn cadence check.
+
+Cloudflare Access protects the Worker hostname in production. A separate
+Access application bypasses only `/webhook/telegram`; the Worker still verifies
+Telegram's webhook-secret header and allowed user. Setup, OAuth callback, and
+rewrapping routes validate the Access JWT inside the Worker.
