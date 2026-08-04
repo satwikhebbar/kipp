@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { runCalendarAgentSession } from "../agent/calendar-session"
-import { createCalendarPlanLedger } from "../calendar-plan"
+import { createCalendarPlanLedger } from "../calendar/plan"
 import { createToolProvider } from "../providers"
 import { ToolProviderHttpError } from "../providers/llm"
 

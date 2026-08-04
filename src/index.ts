@@ -1,7 +1,8 @@
 import { Hono } from "hono"
-import { CalendarWorkflow } from "./calendar-workflow"
+import { CalendarWorkflow } from "./calendar/workflow"
+import { createTokenVault } from "./core/token-vault-client"
+import type { Env } from "./core/types"
 import { HTTP_STATUS } from "./runtime/http"
-import { createTokenVault } from "./token-vault-client"
 import { handleCadenceCron } from "./triggers/cadence"
 import { handleGoogleCalendarAuthCallback, handleGoogleCalendarAuthStart } from "./triggers/google-calendar-auth"
 import { handleAuthCallback, handleAuthStart } from "./triggers/linkedin-auth"
@@ -9,11 +10,10 @@ import { hasSetupAccess } from "./triggers/oauth"
 import { handleRssCron } from "./triggers/rss"
 import { handleTelegramWebhook } from "./triggers/telegram-webhook"
 import { handleTokenCheckCron } from "./triggers/token-check"
-import type { Env } from "./types"
 
-export { InteractionRouterDO } from "./interaction-router"
-export { TokenVaultDO } from "./token-vault"
-export { PipelineWorkflow } from "./workflow"
+export { InteractionRouterDO } from "./core/interaction-router"
+export { TokenVaultDO } from "./core/token-vault"
+export { PipelineWorkflow } from "./linkedin/workflow"
 export { CalendarWorkflow }
 
 const app = new Hono<{ Bindings: Env }>()

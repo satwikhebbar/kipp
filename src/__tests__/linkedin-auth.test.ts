@@ -4,7 +4,7 @@ const mockIssueState = vi.hoisted(() => vi.fn())
 const mockConsumeState = vi.hoisted(() => vi.fn())
 const mockWriteTokens = vi.hoisted(() => vi.fn())
 
-vi.mock("../token-vault-client", () => ({
+vi.mock("../core/token-vault-client", () => ({
   createTokenVault: () => ({
     issueState: mockIssueState,
     consumeState: mockConsumeState,

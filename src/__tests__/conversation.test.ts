@@ -6,7 +6,7 @@ import {
   STEP_OUTPUT_BYTE_LIMIT,
   serializedByteLength,
   TranscriptTooLargeError,
-} from "../conversation"
+} from "../core/conversation"
 import type { LLMMessage } from "../providers/llm"
 
 describe("serializedByteLength", () => {

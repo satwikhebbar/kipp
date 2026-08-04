@@ -1,7 +1,17 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
-import { runCalendarAgentSession } from "./agent/calendar-session"
-import type { CalendarEvaluationContext } from "./calendar-evaluation"
-import { evaluateCalendarCandidate } from "./calendar-evaluation"
+import { runCalendarAgentSession } from "../agent/calendar-session"
+import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
+import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
+import {
+  createGoogleCalendarClient,
+  GoogleCalendarError,
+  type ManagedCalendarException,
+} from "../integrations/google-calendar"
+import { createTelegramClient } from "../integrations/telegram"
+import { createToolProvider, type ToolConversationMessage } from "../providers"
+import { logRuntime } from "../runtime/logging"
+import type { CalendarEvaluationContext } from "./evaluation"
+import { evaluateCalendarCandidate } from "./evaluation"
 import {
   type CalendarPlan,
   type CalendarPlanLedger,
@@ -10,20 +20,10 @@ import {
   createCalendarPlanLedger,
   inspectCalendarOption,
   inspectCalendarPlan,
-} from "./calendar-plan"
-import { managedRecurringEvent } from "./calendar-recurrence"
-import { CALENDAR_TIMEZONE_DEFAULT, managedEvent, managedEventIdentity } from "./calendar-scheduling"
-import type { CalendarWorkflowParams } from "./calendar-workflow"
-import {
-  createGoogleCalendarClient,
-  GoogleCalendarError,
-  type ManagedCalendarException,
-} from "./integrations/google-calendar"
-import { createTelegramClient } from "./integrations/telegram"
-import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
-import { createToolProvider, type ToolConversationMessage } from "./providers"
-import { logRuntime } from "./runtime/logging"
-import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "./types"
+} from "./plan"
+import { managedRecurringEvent } from "./recurrence"
+import { CALENDAR_TIMEZONE_DEFAULT, managedEvent, managedEventIdentity } from "./scheduling"
+import type { CalendarWorkflowParams } from "./workflow"
 
 const CALENDAR_INTERACTION_TTL_MINUTES = 15
 const MILLISECONDS_PER_MINUTE = 60_000

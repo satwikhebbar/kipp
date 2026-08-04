@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
-import { runAgentCenteredCalendarWorkflow } from "./calendar-agent-workflow"
-import type { Env } from "./types"
+import type { Env } from "../core/types"
+import { runAgentCenteredCalendarWorkflow } from "./agent-workflow"
 
 export interface CalendarWorkflowParams {
   chatId: string

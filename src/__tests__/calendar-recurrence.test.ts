@@ -6,7 +6,7 @@ import {
   type RecurringProposal,
   recurrenceHorizon,
   validateRecurringProposalIssues,
-} from "../calendar-recurrence"
+} from "../calendar/recurrence"
 
 const TIME_ZONE = "Asia/Kolkata"
 const MONTHLY: RecurringProposal = {

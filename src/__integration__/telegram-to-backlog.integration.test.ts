@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { Env } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import type { Env } from "../types"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 function baseEnv(overrides?: Partial<Env>): Env {

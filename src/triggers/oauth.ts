@@ -1,5 +1,5 @@
-import { isInsecureLocalAccessEnabled, verifyAccessJwt } from "../token-vault-client"
-import type { Env } from "../types"
+import { isInsecureLocalAccessEnabled, verifyAccessJwt } from "../core/token-vault-client"
+import type { Env } from "../core/types"
 
 /** Allows Cloudflare Access admins, with an explicit development-only local escape hatch. */
 export async function hasSetupAccess(request: Request, env: Env): Promise<boolean> {

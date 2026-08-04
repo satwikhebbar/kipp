@@ -1,5 +1,5 @@
-import { type GithubClient, GithubError } from "../integrations/github"
-import { HTTP_STATUS } from "../runtime/http"
+import { type GithubClient, GithubError } from "../../integrations/github"
+import { HTTP_STATUS } from "../../runtime/http"
 
 export type PromptResolution = {
   content: string

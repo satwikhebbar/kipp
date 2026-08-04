@@ -1,5 +1,5 @@
+import type { ChecklistItem } from "../core/types"
 import { type GenerateFn, messages, parseLLMJson } from "../providers/llm"
-import type { ChecklistItem } from "../types"
 
 const CHECKLIST = [
   "Opening hook grabs attention within the first line",

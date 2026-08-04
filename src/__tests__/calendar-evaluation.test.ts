@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
-import { evaluateCalendarCandidate } from "../calendar-evaluation"
-import { createCalendarPlanLedger } from "../calendar-plan"
+import { evaluateCalendarCandidate } from "../calendar/evaluation"
+import { createCalendarPlanLedger } from "../calendar/plan"
 
 const CONTEXT = {
   getBusyIntervals: vi.fn().mockResolvedValue([]),

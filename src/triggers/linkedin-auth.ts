@@ -1,5 +1,5 @@
-import { createTokenVault } from "../token-vault-client"
-import type { Env, LinkedInTokens } from "../types"
+import { createTokenVault } from "../core/token-vault-client"
+import type { Env, LinkedInTokens } from "../core/types"
 import { extractCookie, hasSetupAccess } from "./oauth"
 
 const AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"

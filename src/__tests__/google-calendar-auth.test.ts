@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { TokenVaultDO } from "../token-vault"
-import { createTokenVault } from "../token-vault-client"
+import { TokenVaultDO } from "../core/token-vault"
+import { createTokenVault } from "../core/token-vault-client"
+import type { Env } from "../core/types"
 import { handleGoogleCalendarAuthCallback, handleGoogleCalendarAuthStart } from "../triggers/google-calendar-auth"
-import type { Env } from "../types"
 
 const ONE_HOUR_IN_SECONDS = 60 * 60
 

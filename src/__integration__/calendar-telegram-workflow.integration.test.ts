@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
+import type { Env } from "../core/types"
 import type { ToolConversationMessage } from "../providers"
-import type { Env } from "../types"
 
 vitest.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -40,9 +40,9 @@ vitest.mock("../integrations/google-calendar", () => ({
   GoogleCalendarError: MockGoogleCalendarError,
 }))
 
-import { CalendarWorkflow } from "../calendar-workflow"
+import { CalendarWorkflow } from "../calendar/workflow"
+import { INTERACTION_KIND } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import { INTERACTION_KIND } from "../types"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 const ONE_OFF = {

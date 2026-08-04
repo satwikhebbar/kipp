@@ -1,6 +1,6 @@
+import { createTokenVault } from "../core/token-vault-client"
+import type { Env, LinkedInTokens } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
-import { createTokenVault } from "../token-vault-client"
-import type { Env, LinkedInTokens } from "../types"
 
 const TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 const SECONDS_TO_MS = 1000

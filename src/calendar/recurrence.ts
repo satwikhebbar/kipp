@@ -1,4 +1,5 @@
 import { type Options, RRule, type Weekday } from "rrule"
+import type { BusyInterval, ManagedCalendarEvent } from "../integrations/google-calendar"
 import {
   CALENDAR_IMPORTANT_REMINDER_MINUTES,
   CALENDAR_INFERRED_BUFFER_MINUTES,
@@ -14,9 +15,8 @@ import {
   localDateAt,
   localMinutes,
   zonedDateTimeToMillis,
-} from "./calendar-scheduling"
-import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./calendar-validation"
-import type { BusyInterval, ManagedCalendarEvent } from "./integrations/google-calendar"
+} from "./scheduling"
+import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./validation"
 
 export const RECURRENCE_MAX_MONTHS = 6
 const MILLIS_PER_MINUTE = 60_000

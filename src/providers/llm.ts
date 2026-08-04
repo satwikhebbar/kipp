@@ -1,5 +1,5 @@
+import type { LLMResponse } from "../core/types"
 import type { ToolDefinition } from "../runtime/tools"
-import type { LLMResponse } from "../types"
 
 export type LLMRole = "system" | "user" | "assistant"
 

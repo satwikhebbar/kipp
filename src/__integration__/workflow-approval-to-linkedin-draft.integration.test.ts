@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
-import type { Env } from "../types"
-import { PipelineWorkflow } from "../workflow"
+import type { Env } from "../core/types"
+import { PipelineWorkflow } from "../linkedin/workflow"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeStep } from "./setup"
 
 vi.mock("cloudflare:workers", () => {

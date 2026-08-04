@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { Env } from "../core/types"
+import { PipelineWorkflow } from "../linkedin/workflow"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import type { Env } from "../types"
-import { PipelineWorkflow } from "../workflow"
 import { createFakeInteractionRouter, createFakeNetwork } from "./setup"
 
 vi.mock("cloudflare:workers", () => {

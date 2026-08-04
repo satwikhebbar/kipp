@@ -13,7 +13,7 @@ import {
   validateProposal,
   validateProposalIssues,
   zonedDateTimeToMillis,
-} from "../calendar-scheduling"
+} from "../calendar/scheduling"
 
 const TIME_ZONE = "Asia/Kolkata"
 const DATE = "2026-07-28"

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { Env } from "../core/types"
 import { handleRssCron } from "../triggers/rss"
-import type { Env } from "../types"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 const RSS_FEED_URL = "https://newsletter.test/feed"

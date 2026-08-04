@@ -1,11 +1,11 @@
-import { nextId } from "../backlog/id-generator"
-import { parseIdeas, serializeIdeas } from "../backlog/parser"
-import { CALENDAR_HELP } from "../calendar-messages"
+import { CALENDAR_HELP } from "../calendar/messages"
+import { createInteractionRouter } from "../core/interaction-router-client"
+import { type Env, INTERACTION_KIND } from "../core/types"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
-import { createInteractionRouter } from "../interaction-router-client"
+import { nextId } from "../linkedin/backlog/id-generator"
+import { parseIdeas, serializeIdeas } from "../linkedin/backlog/parser"
 import { logRuntime } from "../runtime/logging"
-import { type Env, INTERACTION_KIND } from "../types"
 
 const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32

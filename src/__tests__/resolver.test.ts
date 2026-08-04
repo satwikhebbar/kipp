@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import { GithubError } from "../integrations/github"
-import { readPrompt, resolvePrompt } from "../prompts/resolver"
+import { readPrompt, resolvePrompt } from "../linkedin/prompts/resolver"
 
 function mockClient(get: (path: string) => { content: string; sha: string } | Error) {
   return {

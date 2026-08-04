@@ -1,4 +1,4 @@
-import type { Idea, IdeaStatus, Source } from "../types"
+import type { Idea, IdeaStatus, Source } from "../../core/types"
 
 const FM_RE = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 

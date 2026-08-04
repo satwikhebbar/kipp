@@ -1,4 +1,4 @@
-import type { LLMMessage } from "./providers/llm"
+import type { LLMMessage } from "../providers/llm"
 
 export const STEP_OUTPUT_BYTE_LIMIT = 921_600 // ponytail: 900 KiB
 

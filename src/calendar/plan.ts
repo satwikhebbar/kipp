@@ -1,5 +1,5 @@
-import type { RecurrenceAdjustment, RecurringOccurrence, RecurringProposal } from "./calendar-recurrence"
-import type { OneOffProposal, ScheduledOneOff } from "./calendar-scheduling"
+import type { RecurrenceAdjustment, RecurringOccurrence, RecurringProposal } from "./recurrence"
+import type { OneOffProposal, ScheduledOneOff } from "./scheduling"
 
 export type CalendarPlan =
   | {

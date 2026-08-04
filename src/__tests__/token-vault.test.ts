@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
-import type { Envelope } from "../crypto"
-import { base64urlEncode } from "../crypto"
-import { TokenVaultDO } from "../token-vault"
-import type { Env } from "../types"
+import type { Envelope } from "../core/crypto"
+import { base64urlEncode } from "../core/crypto"
+import { TokenVaultDO } from "../core/token-vault"
+import type { Env } from "../core/types"
 
 function makeKey(): string {
   const key = new Uint8Array(32)

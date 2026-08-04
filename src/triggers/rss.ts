@@ -1,9 +1,9 @@
-import { nextId } from "../backlog/id-generator"
-import { parseIdeas, serializeIdeas } from "../backlog/parser"
+import type { Env, Idea } from "../core/types"
 import { createGitHubClient, type GithubClient } from "../integrations/github"
+import { nextId } from "../linkedin/backlog/id-generator"
+import { parseIdeas, serializeIdeas } from "../linkedin/backlog/parser"
 import { createGenerator, type GenerateFn, messages, parseLLMJson } from "../providers"
 import { isTransientHttpStatus } from "../runtime/http"
-import type { Env, Idea } from "../types"
 
 interface RssItem {
   title: string

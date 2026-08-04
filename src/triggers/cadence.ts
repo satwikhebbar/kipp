@@ -1,6 +1,6 @@
-import { parseIdeas } from "../backlog/parser"
+import type { Env } from "../core/types"
 import { createGitHubClient } from "../integrations/github"
-import type { Env } from "../types"
+import { parseIdeas } from "../linkedin/backlog/parser"
 
 /** Checks posting cadence and starts a workflow if enough time has passed since the last publish. */
 export async function handleCadenceCron(env: Env): Promise<{ started: boolean; ideaId?: string }> {

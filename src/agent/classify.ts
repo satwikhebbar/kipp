@@ -1,5 +1,5 @@
+import type { ClassificationResult } from "../core/types"
 import { type GenerateFn, messages, parseLLMJson } from "../providers/llm"
-import type { ClassificationResult } from "../types"
 
 const SYSTEM_PROMPT = `Given a reply from the author of a LinkedIn post draft, classify their intent.
 
