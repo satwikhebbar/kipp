@@ -11,6 +11,7 @@ describe("runTools", () => {
       input: z.object({ value: z.string() }),
       output: z.object({ value: z.string() }),
       privacy: "private",
+      batching: "isolated",
       handler: async ({ value }) => ({ value }),
     },
   }
@@ -60,6 +61,86 @@ describe("runTools", () => {
     ).resolves.toMatchObject({ completed: false })
   })
 
+  it("executes one provider batch when every tool explicitly allows batching", async () => {
+    const first = {
+      ...registry.echo,
+      name: "first",
+      batching: "allowed" as const,
+      handler: vi.fn(registry.echo.handler),
+    }
+    const second = {
+      ...registry.echo,
+      name: "second",
+      batching: "allowed" as const,
+      handler: vi.fn(registry.echo.handler),
+    }
+    const generate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { id: "one", name: "first", input: { value: "a" } },
+          { id: "two", name: "second", input: { value: "b" } },
+        ],
+        usage: {},
+      })
+      .mockResolvedValueOnce({ text: "done", usage: {} })
+
+    const result = await runTools({ generate }, { first, second }, { allowedTools: ["first", "second"] }, [
+      { role: "user", text: "start" },
+    ])
+
+    expect(result).toMatchObject({ completed: true, providerTurns: 2, toolCallCount: 2 })
+    expect(first.handler).toHaveBeenCalledOnce()
+    expect(second.handler).toHaveBeenCalledOnce()
+    expect(result.toolExecutions).toEqual([
+      { tool: "first", outcome: "succeeded" },
+      { tool: "second", outcome: "succeeded" },
+    ])
+  })
+
+  it("executes an isolated evaluation but rejects a handoff batched beside it", async () => {
+    const evaluate = { ...registry.echo, name: "evaluate" }
+    const finish = { ...registry.echo, name: "finish" }
+    const generate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        toolCalls: [
+          { id: "evaluate", name: "evaluate", input: { value: "candidate" } },
+          { id: "premature-finish", name: "finish", input: { value: "unknown-result" } },
+        ],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "finish", name: "finish", input: { value: "evaluated-result" } }],
+        usage: {},
+      })
+
+    const result = await runTools(
+      { generate },
+      { evaluate, finish },
+      {
+        allowedTools: ["evaluate", "finish"],
+        handoffTools: ["finish"],
+        requireHandoff: true,
+        nextAllowedTools: (executed) => (executed.includes("evaluate") ? ["finish"] : ["evaluate", "finish"]),
+      },
+      [{ role: "user", text: "start" }],
+    )
+
+    expect(result).toMatchObject({ completed: true, providerTurns: 2, toolCallCount: 3 })
+    expect(result.toolExecutions).toEqual([
+      { tool: "evaluate", outcome: "succeeded" },
+      { tool: "finish", outcome: "failed", failureCategory: "batching-not-allowed" },
+      { tool: "finish", outcome: "succeeded" },
+    ])
+    expect(result.messages).toContainEqual({
+      role: "tool",
+      toolCallId: "premature-finish",
+      name: "finish",
+      output: { ok: false, category: "batching-not-allowed" },
+    })
+  })
+
   it("stops after a handoff tool without an unnecessary provider follow-up", async () => {
     const generate = vi.fn().mockResolvedValue({
       toolCalls: [{ id: "one", name: "echo", input: { value: "hello" } }],
@@ -96,7 +177,6 @@ describe("runTools", () => {
         allowedTools: ["echo"],
         handoffTools: ["echo"],
         requireHandoff: true,
-        maxToolCallsPerTurn: 1,
         toolChoice: "required",
       },
       [{ role: "user", text: "start" }],
@@ -124,7 +204,6 @@ describe("runTools", () => {
         allowedTools: ["echo"],
         handoffTools: ["echo"],
         requireHandoff: true,
-        maxToolCallsPerTurn: 1,
         toolChoice: "required",
       },
       [{ role: "user", text: "start" }],
@@ -159,7 +238,6 @@ describe("runTools", () => {
       {
         allowedTools: ["availability", "proposal"],
         handoffTools: ["proposal"],
-        maxToolCallsPerTurn: 1,
         toolChoice: "required",
         nextAllowedTools: () => ["proposal"],
       },

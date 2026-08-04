@@ -54,6 +54,7 @@ export async function runLinkedInToolSession(
       input: responseInputSchema,
       output: draftOutputSchema,
       privacy: "private",
+      batching: "isolated",
       handler: async ({ response: candidate }) => {
         response = candidate.trim()
         return { accepted: true as const }
@@ -67,7 +68,6 @@ export async function runLinkedInToolSession(
       allowedTools: [SUBMIT_LINKEDIN_RESPONSE],
       handoffTools: [SUBMIT_LINKEDIN_RESPONSE],
       requireHandoff: true,
-      maxToolCallsPerTurn: 1,
     },
     initialMessages,
   )

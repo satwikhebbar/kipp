@@ -40,8 +40,6 @@ export interface ToolRunOptions {
   handoffTools?: readonly string[]
   /** Requires a successful handoff tool call; prose-only responses receive bounded repair turns. */
   requireHandoff?: boolean
-  /** Restricts a provider turn to one action, preventing mixed availability and handoff batches. */
-  maxToolCallsPerTurn?: number
   toolChoice?: ToolChoice
   reasoning?: ToolReasoningMode
   /** Chooses the allowlist for the next provider turn after a successful tool batch. */
@@ -102,10 +100,7 @@ export async function runTools(
         usage,
       }
     }
-    if (
-      toolCalls + response.toolCalls.length > MAX_TOOL_CALLS ||
-      (options.maxToolCallsPerTurn !== undefined && response.toolCalls.length > options.maxToolCallsPerTurn)
-    )
+    if (toolCalls + response.toolCalls.length > MAX_TOOL_CALLS)
       return {
         messages,
         completed: false,
@@ -122,11 +117,24 @@ export async function runTools(
       text: response.text,
       reasoningContent: response.reasoningContent,
     })
+    const isBatch = response.toolCalls.length > 1
+    const allowedNonHandoffCalls = response.toolCalls.filter(
+      (call) => allowedTools.includes(call.name) && !options.handoffTools?.includes(call.name),
+    )
     const executedTools: string[] = []
     let handoffActionCompleted = false
     for (const call of response.toolCalls) {
-      const result = await guard.execute(call.name, call.input)
-      const tool = allowedTools.includes(call.name) ? call.name : "unknown"
+      const definition = registry[call.name]
+      const tool = definition ? call.name : "unknown"
+      const isHandoff = definition && options.handoffTools?.includes(call.name) === true
+      const batchingRejected =
+        isBatch &&
+        Boolean(definition) &&
+        (isHandoff ||
+          (allowedTools.includes(call.name) && definition?.batching !== "allowed" && allowedNonHandoffCalls.length > 1))
+      const result: ToolResult = batchingRejected
+        ? { ok: false, category: "batching-not-allowed" }
+        : await guard.execute(call.name, call.input)
       toolNames.push(tool)
       toolExecutions.push(
         result.ok
@@ -141,7 +149,7 @@ export async function runTools(
             },
       )
       toolCalls++
-      executedTools.push(tool)
+      if (!batchingRejected) executedTools.push(tool)
       messages.push({ role: "tool", toolCallId: call.id, name: call.name, output: result })
       if (result.ok && options.handoffTools?.includes(call.name)) handoffActionCompleted = true
     }

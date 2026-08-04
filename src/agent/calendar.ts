@@ -169,6 +169,7 @@ export function createListCalendarEventsTool(calendar: Pick<GoogleCalendarClient
     input: listCalendarEventsInputSchema,
     output: listCalendarEventsOutputSchema,
     privacy: "private",
+    batching: "allowed",
     handler: async ({ timeMin, timeMax }) => calendar.listEvents(timeMin, timeMax),
   }
 }
@@ -182,6 +183,7 @@ export function createEvaluateCalendarCandidateTool(context: CalendarEvaluationC
     input: evaluateCalendarCandidateInputSchema,
     output: calendarEvaluationOutputSchema,
     privacy: "private",
+    batching: "isolated",
     handler: async (candidate) => evaluateCalendarCandidate(candidate, context),
   }
 }

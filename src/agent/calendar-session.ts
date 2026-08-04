@@ -85,6 +85,7 @@ export async function runCalendarAgentSession(
       input: readyToCreateInputSchema,
       output: acceptedOutputSchema,
       privacy: "private",
+      batching: "isolated",
       handler: async ({ planId }) => {
         if (latestEvaluation?.kind !== "ready" || latestEvaluation.planId !== planId)
           throw new ToolHandlerError("Calendar plan was not issued by this session", "invalid-state")
@@ -106,6 +107,7 @@ export async function runCalendarAgentSession(
       input: needsUserInputSchema,
       output: acceptedOutputSchema,
       privacy: "private",
+      batching: "isolated",
       handler: async ({ message, reasonCodes, interaction }) => {
         enforceCompleteNeedsInput(latestEvaluation, message, reasonCodes, interaction)
         terminal = { kind: "needs_user_input", message, reasonCodes, interaction }
@@ -126,7 +128,6 @@ export async function runCalendarAgentSession(
       allowedTools: initialAllowedTools,
       handoffTools: terminalTools,
       requireHandoff: true,
-      maxToolCallsPerTurn: 1,
       toolChoice: "required",
       reasoning: "disabled",
       nextAllowedTools: (executedTools) =>

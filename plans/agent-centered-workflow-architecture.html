@@ -57,6 +57,7 @@
       <tr><td><span class="decision">A5 — Durable conversation</span></td><td>During the existing 15-minute interaction window, persist canonical structured state plus a bounded native user/model/tool transcript. Omit reasoning and compact obsolete event-list payloads. Expiry abandons and discards the pending interaction.</td></tr>
       <tr><td><span class="decision">A6 — Presentation</span></td><td>The model writes normal clarification and conflict explanations. Code owns fixed action labels, operational failures, OAuth recovery, timeouts, and successful-write confirmation templates.</td></tr>
       <tr><td><span class="decision">A7 — Button execution</span></td><td>Fixed, guard-authorized button choices transition workflow state deterministically. Natural-language replies and Edit corrections resume the agent.</td></tr>
+      <tr><td><span class="decision">A8 — Tool batching</span></td><td>Every tool explicitly declares whether it may be batched; isolation is the safe default. Read-only independent tools may opt in. Terminal handoffs are always isolated because they depend on prior tool results. The runner returns a typed result for every rejected batched call and preserves safe calls so the model can recover within the existing budget.</td></tr>
     </tbody></table>
 
     <h2>3. Responsibility boundary</h2>
@@ -77,10 +78,10 @@
       <div><strong>5. Workflow</strong>Wait for input, or freshly revalidate and write. Send a trusted template confirmation and retain the created baseline for Edit.</div>
     </div>
     <pre>Telegram input
-  → bounded Calendar agent (≤ 3 model turns, ≤ 4 tool calls, 1 call/turn)
+  → bounded Calendar agent (≤ 3 model turns, ≤ 4 attempted tool calls)
      ├─ list_calendar_events? → projected, untrusted event data
      ├─ evaluate_calendar_candidate → typed issues | choices | plan
-     └─ terminal handoff
+     └─ isolated terminal handoff
           ├─ needs_user_input → LLM message + fixed reply/choice contract
           └─ ready_to_create(planId)
                 → resolve current one-use plan
@@ -113,6 +114,7 @@ LinkedInTerminal = ready_for_review { response }</pre>
       <li><code>ready_to_create</code> succeeds only for an unexpired plan ID issued by the current interaction version.</li>
       <li><code>needs_user_input</code> may be called directly for model-detected language ambiguity. After evaluation, its issue and option references must match the evaluator’s authorized result.</li>
       <li>Messages persisted for later turns exclude provider reasoning content. Tool execution logs retain only safe metadata already supported by the runtime.</li>
+      <li>Tool definitions declare <code>batching: allowed | isolated</code>. A multi-call provider response executes eligible independent calls, rejects a batched handoff or conflicting isolated call as <code>batching-not-allowed</code>, and returns one tool result for every attempted call before the next bounded provider turn.</li>
       <li>The current three-turn/four-call limits and required terminal-handoff repair remain fail-closed runtime policy.</li>
     </ul>
 
@@ -191,7 +193,7 @@ CalendarOption {
 
     <h2>11. Verification matrix</h2>
     <table><thead><tr><th>Area</th><th>Required coverage</th></tr></thead><tbody>
-      <tr><td>Shared runtime</td><td>Aggregate Zod paths; state-dependent allowlists; required terminal repair; three-turn/four-call caps; workflow-specific terminals; reasoning omission; transcript compaction and expiry; metadata-only failures.</td></tr>
+      <tr><td>Shared runtime</td><td>Aggregate Zod paths; state-dependent allowlists; explicit batchable/isolated tools; batched-handoff repair; three-turn/four-call caps; workflow-specific terminals; reasoning omission; transcript compaction and expiry; metadata-only failures.</td></tr>
       <tr><td>Calendar validation</td><td>Multiple structural and semantic issues in one result; safe parameters; prerequisite-aware collection; no English from domain validators; every one-off and supported recurrence policy branch.</td></tr>
       <tr><td>Event listing</td><td>Primary calendar URL; 31-day and 50-event caps; pagination to cap; truncation; exact field projection; all-day and transparency handling; malicious titles remain inert data; no sensitive logging.</td></tr>
       <tr><td>Plan authorization</td><td>Issued plan success; forged, stale, reused, expired, superseded, and wrong-version rejection; option-action binding; TOCTOU availability change; mutation only after fresh validation.</td></tr>

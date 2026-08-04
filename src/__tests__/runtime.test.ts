@@ -10,6 +10,7 @@ const registry: ToolRegistry = {
     input: z.object({ value: z.string() }),
     output: z.object({ value: z.string() }),
     privacy: "private",
+    batching: "isolated",
     handler: async ({ value }) => ({ value }),
   },
   brokenOutput: {
@@ -18,6 +19,7 @@ const registry: ToolRegistry = {
     input: z.object({}),
     output: z.object({ value: z.string() }),
     privacy: "private",
+    batching: "isolated",
     handler: async () => ({ value: 1 }) as never,
   },
 }
@@ -49,6 +51,7 @@ describe("ToolGuard", () => {
         input: z.object({}),
         output: z.object({}),
         privacy: "private",
+        batching: "isolated",
         handler: async () => {
           throw new ToolHandlerError("Google response body must not escape", "authorization-failed", 401)
         },

@@ -16,6 +16,7 @@ const ECHO_TOOL: ToolDefinition = {
   input: z.object({ value: z.string() }),
   output: z.object({ value: z.string() }),
   privacy: "private",
+  batching: "isolated",
   handler: async ({ value }) => ({ value }),
 }
 
@@ -33,6 +34,7 @@ const SCHEDULING_TOOL: ToolDefinition = {
   }),
   output: z.object({ accepted: z.literal(true) }),
   privacy: "private",
+  batching: "isolated",
   handler: async () => ({ accepted: true }),
 }
 
@@ -45,6 +47,7 @@ const PROVENANCE_TOOL: ToolDefinition = {
   }),
   output: z.object({ accepted: z.literal(true) }),
   privacy: "private",
+  batching: "isolated",
   handler: async () => ({ accepted: true }),
 }
 
@@ -63,6 +66,7 @@ const CANDIDATE_TOOL: ToolDefinition = {
   ]),
   output: z.object({ accepted: z.literal(true) }),
   privacy: "private",
+  batching: "isolated",
   handler: async () => ({ accepted: true }),
 }
 

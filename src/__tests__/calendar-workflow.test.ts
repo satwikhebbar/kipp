@@ -241,6 +241,72 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
   })
 
+  it("recovers when the provider batches a fresh evaluation with a premature handoff", async () => {
+    queueQuestion("Please provide the recurrence, time, duration, and first date.", [
+      "missing_date",
+      "unsupported_recurrence",
+    ])
+    const missingDate = {
+      ...RECURRING,
+      proposal: { ...RECURRING.proposal, firstDate: "2026-07-04", dateIsExplicit: false },
+    }
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [{ id: "evaluate-missing-date", name: "evaluate_calendar_candidate", input: missingDate }],
+      usage: {},
+    })
+    mockGenerate.mockImplementationOnce(async ({ messages }: { messages: ToolConversationMessage[] }) => {
+      const evaluation = toolResult(messages, "evaluate_calendar_candidate") as { issues: Array<{ code: string }> }
+      return {
+        toolCalls: [
+          {
+            id: "ask-for-weekday",
+            name: "needs_user_input",
+            input: {
+              message: "Which weekday should the biweekly review start on?",
+              reasonCodes: evaluation.issues.map((issue) => issue.code),
+              interaction: { kind: "reply" },
+            },
+          },
+        ],
+        usage: {},
+      }
+    })
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [
+        { id: "evaluate-final", name: "evaluate_calendar_candidate", input: RECURRING },
+        { id: "premature-ready", name: "ready_to_create", input: { planId: "not-yet-known" } },
+      ],
+      usage: {},
+    })
+    mockGenerate.mockImplementationOnce(async ({ messages }: { messages: ToolConversationMessage[] }) => ({
+      toolCalls: [
+        {
+          id: "ready-after-evaluation",
+          name: "ready_to_create",
+          input: { planId: toolResult(messages, "evaluate_calendar_candidate").planId },
+        },
+      ],
+      usage: {},
+    }))
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "biweekly, 9am, 15 min, starting this week" } },
+        { type: "event", payload: { text: "Saturday" } },
+        { type: "timeout" },
+      ),
+      "Schedule a recurring review of Substack metrics",
+    )
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockGenerate.mock.calls[4]?.[0].messages).toContainEqual({
+      role: "tool",
+      toolCallId: "premature-ready",
+      name: "ready_to_create",
+      output: { ok: false, category: "batching-not-allowed" },
+    })
+  })
+
   it("binds a deterministic conflict option, freshly revalidates it, and writes once", async () => {
     const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
     mockBusyIntervals.mockResolvedValue(conflict)

@@ -1,6 +1,7 @@
 import type { z } from "zod"
 
 export type PrivacyClassification = "public" | "private" | "sensitive"
+export type ToolBatchingPolicy = "allowed" | "isolated"
 
 /** A handler may expose a safe, machine-readable failure category to its caller. */
 export class ToolHandlerError extends Error {
@@ -20,6 +21,8 @@ export interface ToolDefinition<TInput extends z.ZodType = z.ZodType, TOutput ex
   input: TInput
   output: TOutput
   privacy: PrivacyClassification
+  /** Whether this tool may share one provider response with other nonterminal tool calls. */
+  batching: ToolBatchingPolicy
   handler: (input: z.infer<TInput>) => Promise<z.infer<TOutput>>
 }
 
@@ -37,6 +40,7 @@ export type ToolResult =
         | "handler-failed"
         | "authorization-failed"
         | "invalid-state"
+        | "batching-not-allowed"
       /** Schema paths only: these never include submitted values or provider text. */
       validationPaths?: string[]
       /** Safe schema expectations (for example, "title: expected object"); never includes submitted values. */
