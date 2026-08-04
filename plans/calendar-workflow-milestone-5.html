@@ -48,7 +48,7 @@
     <ol>
       <li>Keep the existing <code>OneOffProposal</code> and its Zod schema unchanged. Introduce a separate <code>RecurringProposal</code> and separate <code>recurringProposalSchema</code>, owned exclusively by <code>submit_recurring_proposal</code>. The workflow may use a result union after successful handoff validation, but the two tool input schemas do not share a permissive “calendar proposal” shape.</li>
       <li>Add <code>submit_recurring_proposal</code> beside the existing one-off and clarification tools. Its input has no structurally optional keys. Every conceptual field is either required outright or represented by a discriminated state such as <code>provided</code>, <code>omitted</code>, <code>policy_default</code>, or <code>first_date_weekday</code>.</li>
-      <li>Use discriminated unions to make conditional requirements unambiguous. Cadence selects the exact rule shape; weekly selects named weekdays or the first-date weekday; and the end condition selects exactly one of default horizon, inclusive end date, or occurrence count. A missing key is invalid input, not an empty optional value.</li>
+      <li>Use discriminated unions to make conditional requirements unambiguous. Cadence selects the exact rule shape; weekly selects named weekdays or the first-date weekday; monthly and bimonthly select an ordinal-weekday, last-weekday, or explicit day-of-month anchor; and the end condition selects exactly one of default horizon, inclusive end date, or occurrence count. A missing key is invalid input, not an empty optional value.</li>
       <li>When a required key is absent or a union is malformed, the tool guard returns only safe validation paths and expectations to the model. The existing bounded tool session may repair the call on a later provider turn. If it still cannot produce a valid handoff, the workflow fails closed before availability or Calendar access.</li>
       <li>Extend the persisted dialogue snapshot so recurrence facts and explicit absence states survive focused questions. Missing or ambiguous first date always produces clarification, even when cadence or weekday is obvious.</li>
       <li>The LLM owns the semantic classification of explicit natural language into <code>daily</code>, <code>weekly</code>, <code>biweekly</code>, <code>monthly</code>, or <code>bimonthly</code>. Deterministic guards then enforce the allowlist and cross-field consistency. The model must clarify rather than guess when the phrase could map to more than one supported form.</li>
@@ -57,8 +57,11 @@
     <pre>RecurringProposal handoff — presence contract
   title, firstDate, duration, classification, recurrence, end: required
   recurrence:
-    daily | biweekly | monthly | bimonthly
+    daily | biweekly
     | weekly { weekdayMode: named([...]) | first_date_weekday }
+    | monthly/bimonthly {
+        anchor: ordinal_weekday(weekday) | last_weekday(weekday) | day_of_month
+      }
   end:
     default_horizon | until(inclusiveDate) | count(occurrences)
   startTime:
@@ -81,7 +84,7 @@ valid explicit absence → accepted, deterministic policy applies</pre>
       <tr><td>Daily</td><td>Configure daily frequency and bounded count; emit <code>FREQ=DAILY;COUNT=n</code>.</td></tr>
       <tr><td>Weekly</td><td>Configure the selected weekday set; emit <code>FREQ=WEEKLY;BYDAY=…;COUNT=n</code>. Without named weekdays, use the first occurrence’s weekday.</td></tr>
       <tr><td>Every two weeks</td><td>Anchor on the explicit first occurrence; emit <code>FREQ=WEEKLY;INTERVAL=2;COUNT=n</code>.</td></tr>
-      <tr><td>Monthly / every two months</td><td>Configure the anchor day plus the last day as candidates so days 29–31 clamp to a shorter month’s final day and return to the anchor day later. Select the first valid candidate with <code>BYSETPOS=1</code>, using interval 1 or 2 and <code>COUNT=n</code>.</td></tr>
+      <tr><td>Monthly / every two months</td><td>Default to the first occurrence’s ordinal weekday and serialize it with an ordinal <code>BYDAY</code> (for example, the second Saturday is <code>+2SA</code>). Explicit “last weekday” wording uses <code>-1</code>. Only explicit day-of-month wording preserves the calendar date; days 29–31 then clamp to a shorter month’s final day and return to the anchor day later. Use interval 1 or 2 and <code>COUNT=n</code>.</td></tr>
     </tbody></table>
     <p>Kipp’s wrapper validates real dates, inclusive end/count, horizon, local time, duration, same-day completion, lead time for the first occurrence, and timezone conversion for every library occurrence. Tests compare the expanded dates with the serialized rule across ordinary months, leap years, month-end anchors, and configured timezone transitions.</p>
 

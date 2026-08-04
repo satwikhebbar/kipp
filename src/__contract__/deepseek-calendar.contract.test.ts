@@ -87,4 +87,33 @@ describe("DeepSeek agent-centered Calendar native-tool contract", () => {
     expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
     expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "ready_to_create"])
   })
+
+  contractIt("preserves a monthly weekday as an ordinal-weekday anchor", async () => {
+    const result = await runContract(
+      "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Clean AC filters every month on Saturday at 10:30, starting 2026-08-08.",
+    )
+
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "ready_to_create"])
+    const evaluationCall = result.messages.find(
+      (message) =>
+        message.role === "assistant" &&
+        "toolCalls" in message &&
+        message.toolCalls.some((call) => call.name === "evaluate_calendar_candidate"),
+    )
+    expect(evaluationCall).toMatchObject({
+      role: "assistant",
+      toolCalls: [
+        expect.objectContaining({
+          name: "evaluate_calendar_candidate",
+          input: expect.objectContaining({
+            proposal: expect.objectContaining({
+              recurrence: { cadence: "monthly", anchor: { mode: "ordinal_weekday", weekday: "SA" } },
+            }),
+          }),
+        }),
+      ],
+    })
+  })
 })

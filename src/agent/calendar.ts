@@ -47,6 +47,20 @@ export const oneOffCandidateSchema = z
   .strict()
 
 const recurrenceWeekdaySchema = z.enum(["MO", "TU", "WE", "TH", "FR", "SA", "SU"])
+const monthlyAnchorSchema = z.discriminatedUnion("mode", [
+  z
+    .object({ mode: z.literal("ordinal_weekday"), weekday: recurrenceWeekdaySchema })
+    .strict()
+    .describe("Default monthly anchor. Preserve the first occurrence's ordinal weekday, such as the second Saturday."),
+  z
+    .object({ mode: z.literal("last_weekday"), weekday: recurrenceWeekdaySchema })
+    .strict()
+    .describe('Use only for explicit phrases such as "the last Saturday of every month".'),
+  z
+    .object({ mode: z.literal("day_of_month") })
+    .strict()
+    .describe('Use only when the user explicitly requests a calendar date, such as "the 8th of every month".'),
+])
 const recurrenceRuleSchema = z
   .discriminatedUnion("cadence", [
     z
@@ -67,15 +81,19 @@ const recurrenceRuleSchema = z
       .strict()
       .describe('Every two weeks: exactly {"cadence":"biweekly"}; firstDate supplies the anchor weekday.'),
     z
-      .object({ cadence: z.literal("monthly") })
+      .object({ cadence: z.literal("monthly"), anchor: monthlyAnchorSchema })
       .strict()
-      .describe('Monthly recurrence: exactly {"cadence":"monthly"}.'),
+      .describe(
+        "Monthly recurrence. Default to ordinal_weekday so the series keeps the first occurrence's weekday position; use day_of_month only for explicit date-of-month wording.",
+      ),
     z
-      .object({ cadence: z.literal("bimonthly") })
+      .object({ cadence: z.literal("bimonthly"), anchor: monthlyAnchorSchema })
       .strict()
-      .describe('Every two months: exactly {"cadence":"bimonthly"}.'),
+      .describe(
+        "Every two months. Default to ordinal_weekday so the series keeps the first occurrence's weekday position; use day_of_month only for explicit date-of-month wording.",
+      ),
   ])
-  .describe("Select exactly one supported cadence shape. Only weekly recurrence accepts a weekdays field.")
+  .describe("Select exactly one supported cadence shape and preserve any explicit weekday or day-of-month intent.")
 const recurrenceEndSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("default_horizon") }).strict(),
   z.object({ mode: z.literal("until"), inclusiveDate: z.string() }).strict(),

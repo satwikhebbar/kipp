@@ -27,6 +27,36 @@ describe("Calendar agent contracts", () => {
       )
   })
 
+  it("requires monthly recurrence to preserve an explicit anchor mode", () => {
+    const proposal = {
+      title: "Clean AC filters",
+      firstDate: "2026-08-08",
+      dateIsExplicit: true,
+      startTime: "10:30",
+      timeIsExplicit: true,
+      durationMinutes: 30,
+      classification: "maintenance",
+      recurrenceIsExplicit: true,
+      end: { mode: "default_horizon" },
+    }
+
+    expect(
+      evaluateCalendarCandidateInputSchema.safeParse({
+        kind: "recurring",
+        proposal: {
+          ...proposal,
+          recurrence: { cadence: "monthly", anchor: { mode: "ordinal_weekday", weekday: "SA" } },
+        },
+      }).success,
+    ).toBe(true)
+    expect(
+      evaluateCalendarCandidateInputSchema.safeParse({
+        kind: "recurring",
+        proposal: { ...proposal, recurrence: { cadence: "monthly" } },
+      }).success,
+    ).toBe(false)
+  })
+
   it("returns hostile event titles as inert projected data", async () => {
     const listEvents = vi.fn().mockResolvedValue({
       events: [

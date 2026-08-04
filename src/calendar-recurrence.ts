@@ -27,16 +27,24 @@ const CLAMP_DAY_THRESHOLD = 29
 const MILLIS_PER_DAY = 86_400_000
 const COUNT_GENERATION_MARGIN = 2
 const PER_DATE_CONFLICT_RATIO = 0.5
+const DAYS_PER_WEEK = 7
 
 export type RecurrenceCadence = "daily" | "weekly" | "biweekly" | "monthly" | "bimonthly"
 export type RecurrenceWeekday = "MO" | "TU" | "WE" | "TH" | "FR" | "SA" | "SU"
 
+export type MonthlyRecurrenceAnchor =
+  | { mode: "day_of_month" }
+  | { mode: "ordinal_weekday"; weekday: RecurrenceWeekday }
+  | { mode: "last_weekday"; weekday: RecurrenceWeekday }
+
 export type RecurrenceRule =
-  | { cadence: "daily" | "biweekly" | "monthly" | "bimonthly" }
+  | { cadence: "daily" }
+  | { cadence: "biweekly" }
   | {
       cadence: "weekly"
       weekdays: { mode: "named"; values: RecurrenceWeekday[] } | { mode: "first_date_weekday" }
     }
+  | { cadence: "monthly" | "bimonthly"; anchor: MonthlyRecurrenceAnchor }
 
 export type RecurrenceEnd =
   | { mode: "default_horizon" }
@@ -156,22 +164,24 @@ const RRULE_WEEKDAYS: Record<RecurrenceWeekday, Weekday> = {
 
 /** Maps the approved recurrence domain to typed rrule options. */
 function recurrenceOptions(proposal: RecurringProposal, count: number, start: Date): Partial<Options> {
-  const cadence = proposal.recurrence.cadence
-  if (cadence === "daily") return { freq: RRule.DAILY, dtstart: start, count }
-  if (cadence === "weekly") {
-    const values =
-      proposal.recurrence.weekdays.mode === "named"
-        ? proposal.recurrence.weekdays.values
-        : [weekdayFor(proposal.firstDate)]
+  const recurrence = proposal.recurrence
+  if (recurrence.cadence === "daily") return { freq: RRule.DAILY, dtstart: start, count }
+  if (recurrence.cadence === "weekly") {
+    const values = recurrence.weekdays.mode === "named" ? recurrence.weekdays.values : [weekdayFor(proposal.firstDate)]
     return { freq: RRule.WEEKLY, dtstart: start, byweekday: values.map((day) => RRULE_WEEKDAYS[day]), count }
   }
-  if (cadence === "biweekly") return { freq: RRule.WEEKLY, interval: 2, dtstart: start, count }
+  if (recurrence.cadence === "biweekly") return { freq: RRule.WEEKLY, interval: 2, dtstart: start, count }
   const anchorDay = start.getUTCDate()
   const monthly: Partial<Options> = {
     freq: RRule.MONTHLY,
-    interval: cadence === "bimonthly" ? 2 : 1,
+    interval: recurrence.cadence === "bimonthly" ? 2 : 1,
     dtstart: start,
     count,
+  }
+  if (recurrence.anchor.mode !== "day_of_month") {
+    const position = recurrence.anchor.mode === "last_weekday" ? -1 : Math.ceil(anchorDay / DAYS_PER_WEEK)
+    monthly.byweekday = RRULE_WEEKDAYS[recurrence.anchor.weekday].nth(position)
+    return monthly
   }
   if (anchorDay >= CLAMP_DAY_THRESHOLD) {
     monthly.bymonthday = [anchorDay, -1]
@@ -215,6 +225,16 @@ function expandRecurrenceResult(proposal: RecurringProposal): RecurrenceExpansio
     if (!unique.includes(weekdayFor(proposal.firstDate)))
       return { issue: { code: "first_date_weekday_mismatch", field: "firstDate" } }
   }
+  if (proposal.recurrence.cadence === "monthly" || proposal.recurrence.cadence === "bimonthly") {
+    const anchor = proposal.recurrence.anchor
+    if (anchor.mode !== "day_of_month" && anchor.weekday !== weekdayFor(proposal.firstDate))
+      return { issue: { code: "first_date_weekday_mismatch", field: "firstDate" } }
+    if (anchor.mode === "last_weekday") {
+      const nextWeek = civilDate(first.year, first.month, first.day + DAYS_PER_WEEK)
+      if (nextWeek.getUTCMonth() === first.month - 1)
+        return { issue: { code: "first_date_weekday_mismatch", field: "firstDate" } }
+    }
+  }
   const start = civilDate(first.year, first.month, first.day)
   const countLimit = recurrenceCountLimit(proposal, horizon)
   const options = recurrenceOptions(proposal, countLimit, start)
@@ -235,7 +255,7 @@ function expandRecurrenceResult(proposal: RecurringProposal): RecurrenceExpansio
   const rrule = new RRule(recurrenceOptions(proposal, dates.length, start))
     .toString()
     .replace(/^DTSTART:[^\n]+\nRRULE:/, "RRULE:")
-  return { dates, rrule, humanCadence: humanCadence(proposal.recurrence) }
+  return { dates, rrule, humanCadence: humanCadence(proposal.recurrence, proposal.firstDate) }
 }
 
 /** Compatibility expansion contract retained while the workflow migrates to typed evaluation outcomes. */
@@ -245,14 +265,38 @@ export function expandRecurrence(proposal: RecurringProposal): ExpandedRecurrenc
 }
 
 /** Produces a compact user-facing cadence description without parsing RRULE text. */
-function humanCadence(rule: RecurrenceRule): string {
+function humanCadence(rule: RecurrenceRule, firstDate: string): string {
   if (rule.cadence === "daily") return "daily"
   if (rule.cadence === "biweekly") return "every two weeks"
-  if (rule.cadence === "monthly") return "monthly"
-  if (rule.cadence === "bimonthly") return "every two months"
+  if (rule.cadence === "monthly" || rule.cadence === "bimonthly") {
+    const prefix = rule.cadence === "monthly" ? "monthly" : "every two months"
+    const parts = dateParts(firstDate)
+    if (!parts || rule.anchor.mode === "day_of_month") return `${prefix} on day ${parts?.day ?? "?"}`
+    const weekday = weekdayName(rule.anchor.weekday)
+    if (rule.anchor.mode === "last_weekday") return `${prefix} on the last ${weekday}`
+    return `${prefix} on the ${ordinalName(Math.ceil(parts.day / DAYS_PER_WEEK))} ${weekday}`
+  }
   if (rule.cadence !== "weekly") throw new Error("Unsupported recurrence cadence")
   const weekdays = rule.weekdays.mode === "named" ? rule.weekdays.values.join(", ") : "the first occurrence's weekday"
   return `weekly on ${weekdays}`
+}
+
+/** Returns the user-facing weekday name for one RFC weekday token. */
+function weekdayName(weekday: RecurrenceWeekday): string {
+  return {
+    MO: "Monday",
+    TU: "Tuesday",
+    WE: "Wednesday",
+    TH: "Thursday",
+    FR: "Friday",
+    SA: "Saturday",
+    SU: "Sunday",
+  }[weekday]
+}
+
+/** Returns the user-facing ordinal name for a monthly weekday position. */
+function ordinalName(position: number): string {
+  return ["first", "second", "third", "fourth", "fifth"][position - 1] ?? `${position}th`
 }
 
 /** Returns every independently discoverable recurring-event policy violation as typed facts. */

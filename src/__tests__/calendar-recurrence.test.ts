@@ -17,7 +17,7 @@ const MONTHLY: RecurringProposal = {
   timeIsExplicit: true,
   durationMinutes: 30,
   classification: "ordinary",
-  recurrence: { cadence: "monthly" },
+  recurrence: { cadence: "monthly", anchor: { mode: "day_of_month" } },
   recurrenceIsExplicit: true,
   end: { mode: "count", occurrences: 4 },
 }
@@ -83,12 +83,50 @@ describe("Calendar recurrence policy", () => {
     expect(
       expandRecurrence({
         ...MONTHLY,
-        recurrence: { cadence: "bimonthly" },
+        recurrence: { cadence: "bimonthly", anchor: { mode: "day_of_month" } },
       }),
     ).toMatchObject({
       dates: ["2026-01-31", "2026-03-31", "2026-05-31", "2026-07-31"],
       rrule: expect.stringContaining("INTERVAL=2"),
     })
+  })
+
+  it("keeps the first occurrence's ordinal weekday for monthly recurrence", () => {
+    expect(
+      expandRecurrence({
+        ...MONTHLY,
+        firstDate: "2026-08-08",
+        recurrence: { cadence: "monthly", anchor: { mode: "ordinal_weekday", weekday: "SA" } },
+      }),
+    ).toMatchObject({
+      dates: ["2026-08-08", "2026-09-12", "2026-10-10", "2026-11-14"],
+      rrule: expect.stringContaining("BYDAY=+2SA"),
+      humanCadence: "monthly on the second Saturday",
+    })
+  })
+
+  it("supports an explicit last-weekday monthly anchor", () => {
+    expect(
+      expandRecurrence({
+        ...MONTHLY,
+        firstDate: "2026-08-29",
+        recurrence: { cadence: "monthly", anchor: { mode: "last_weekday", weekday: "SA" } },
+      }),
+    ).toMatchObject({
+      dates: ["2026-08-29", "2026-09-26", "2026-10-31", "2026-11-28"],
+      rrule: expect.stringContaining("BYDAY=-1SA"),
+      humanCadence: "monthly on the last Saturday",
+    })
+  })
+
+  it("rejects a monthly weekday anchor that does not match the first occurrence", () => {
+    expect(
+      expandRecurrence({
+        ...MONTHLY,
+        firstDate: "2026-08-08",
+        recurrence: { cadence: "monthly", anchor: { mode: "ordinal_weekday", weekday: "TU" } },
+      }),
+    ).toEqual({ clarification: "The first date must fall on one of the selected weekdays." })
   })
 
   it("treats an explicit end as inclusive and rejects bounds beyond six months", () => {

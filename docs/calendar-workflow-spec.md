@@ -197,7 +197,10 @@ specification when their reuse value is established.
 
 - Support only daily; weekly on one or multiple named weekdays; every two
   weeks on the explicit first occurrence’s weekday; monthly; and every two
-  months.
+  months. Monthly and every-two-month recurrence preserve the first
+  occurrence's ordinal weekday by default (for example, the second Saturday).
+  An explicit day-of-month phrase such as "the 8th" instead preserves that
+  calendar date, while an explicit "last weekday" phrase preserves that rule.
 - The explicit start date is the first occurrence, not only a lower search
   bound, and must satisfy the selected recurrence rule.
 - A recurrence auto-creates when its cadence and first occurrence are clear
@@ -207,8 +210,8 @@ specification when their reuse value is established.
 - Six calendar months from the first occurrence is the hard v1 maximum. A
   clear inclusive end date or occurrence count may shorten but never extend
   the series. An “indefinite” request also ends at the six-month maximum.
-- A 29th, 30th, or 31st monthly/bimonthly occurrence falls on the shorter
-  month’s final day.
+- A day-of-month recurrence anchored to the 29th, 30th, or 31st falls on the
+  shorter month’s final day.
 - Validate every occurrence in the complete bounded series before writing it.
 - If 50% or more of occurrences conflict, offer a new single time for the
   whole series and revalidate every occurrence.

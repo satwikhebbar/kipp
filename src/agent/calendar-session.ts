@@ -38,6 +38,8 @@ Call list_calendar_events only when titles and timing from the primary calendar 
 
 Preserve every explicit recurrence ending from the conversation. If the user says "6 occurrences" or "6 times", end must be {"mode":"count","occurrences":6}; use default_horizon only when the user supplied no ending.
 
+For monthly and bimonthly recurrence, preserve the user's anchor intent. Default to anchor {"mode":"ordinal_weekday","weekday":"..."}, which keeps the first occurrence's weekday position in the month (for example, August 8, 2026 becomes the second Saturday of each month). Use day_of_month only when the user explicitly asks for a calendar date such as "the 8th of every month". Use last_weekday only when the user explicitly says "last". The anchor weekday must match firstDate.
+
 Never invent a recurring first date or cadence. Set dateIsExplicit and recurrenceIsExplicit from the user's words or a later confirmation. If either is absent or ambiguous, ask for it directly; Calendar event listings cannot supply or authorize those missing facts.
 
 Finish with exactly one terminal action. Call ready_to_create only with the planId returned by the current evaluation. Call needs_user_input when human input is required, using concise natural language. After evaluation, submit every returned issue code and every offered option ID in the structured handoff fields; option IDs must never appear in the human-facing message. Do not invent options or scheduling facts.
