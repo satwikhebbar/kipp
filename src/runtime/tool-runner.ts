@@ -7,7 +7,11 @@ export const MAX_TOOL_CALLS = 4
 const REQUIRED_HANDOFF_REPAIR_MESSAGE =
   "The previous response did not invoke a required handoff action. Call exactly one provided tool now; do not answer with prose."
 
-export type ToolRunFailureReason = "missing-required-handoff" | "tool-call-limit" | "provider-turn-limit"
+export type ToolRunFailureReason =
+  | "missing-required-handoff"
+  | "tool-call-limit"
+  | "provider-turn-limit"
+  | "tool-failed"
 
 export interface ToolExecutionSummary {
   tool: string
@@ -123,6 +127,7 @@ export async function runTools(
     )
     const successfulTools: string[] = []
     let handoffActionCompleted = false
+    let fatalToolFailure = false
     for (const call of response.toolCalls) {
       const definition = registry[call.name]
       const tool = definition ? call.name : "unknown"
@@ -150,6 +155,8 @@ export async function runTools(
       )
       toolCalls++
       if (result.ok) successfulTools.push(tool)
+      else if (["handler-failed", "invalid-output", "authorization-failed"].includes(result.category))
+        fatalToolFailure = true
       messages.push({ role: "tool", toolCallId: call.id, name: call.name, output: result })
       if (result.ok && options.handoffTools?.includes(call.name)) handoffActionCompleted = true
     }
@@ -157,6 +164,17 @@ export async function runTools(
       return {
         messages,
         completed: true,
+        providerTurns: turn + 1,
+        toolCallCount: toolCalls,
+        toolNames,
+        toolExecutions,
+        usage,
+      }
+    if (fatalToolFailure)
+      return {
+        messages,
+        completed: false,
+        failureReason: "tool-failed",
         providerTurns: turn + 1,
         toolCallCount: toolCalls,
         toolNames,

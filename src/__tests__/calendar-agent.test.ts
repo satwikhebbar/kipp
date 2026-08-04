@@ -87,4 +87,39 @@ describe("Calendar agent contracts", () => {
     expect(result).toMatchObject({ ok: true, output: { kind: "ready", planId: expect.any(String) } })
     expect(ledger.records).toHaveLength(1)
   })
+
+  it("rejects a default horizon when the transcript supplied an explicit occurrence count", async () => {
+    const tool = createEvaluateCalendarCandidateTool(
+      {
+        getBusyIntervals: vi.fn().mockResolvedValue([]),
+        ledger: createCalendarPlanLedger(),
+        version: 1,
+        expiresAt: Date.parse("2026-08-04T00:00:00.000Z"),
+        timeZone: "Asia/Kolkata",
+      },
+      6,
+    )
+    const guard = new ToolGuard({ [tool.name]: tool }, [tool.name])
+    const proposal = {
+      title: "Substack metrics review",
+      firstDate: "2026-08-08",
+      dateIsExplicit: true,
+      startTime: "09:00",
+      timeIsExplicit: true,
+      durationMinutes: 30,
+      classification: "ordinary",
+      recurrence: { cadence: "biweekly" },
+      recurrenceIsExplicit: true,
+    }
+
+    await expect(
+      guard.execute(tool.name, { kind: "recurring", proposal: { ...proposal, end: { mode: "default_horizon" } } }),
+    ).resolves.toMatchObject({ ok: false, category: "invalid-input" })
+    await expect(
+      guard.execute(tool.name, {
+        kind: "recurring",
+        proposal: { ...proposal, end: { mode: "count", occurrences: 6 } },
+      }),
+    ).resolves.toMatchObject({ ok: true, output: { kind: "ready", facts: { occurrenceCount: 6 } } })
+  })
 })

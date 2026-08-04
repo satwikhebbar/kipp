@@ -24,6 +24,8 @@ const EVENT_LIST_FETCH_LIMIT = String(MAX_VISIBLE_EVENTS + 1)
 const MAX_EVENT_LIST_RANGE_DAYS = 31
 const MILLIS_PER_DAY = 86_400_000
 const MAX_EVENT_LIST_RANGE_MS = MAX_EVENT_LIST_RANGE_DAYS * MILLIS_PER_DAY
+const MIN_FREEBUSY_SPLIT_RANGE_MS = MILLIS_PER_DAY
+const GOOGLE_TIME_RANGE_TOO_LONG = "timeRangeTooLong"
 
 export interface BusyInterval {
   start: string
@@ -163,8 +165,23 @@ export class GoogleCalendarError extends Error {
     readonly kind: "authorization" | "transient" | "permanent",
     /** Safe HTTP status when Google returned a response; response contents are never retained. */
     readonly status?: number,
+    /** Sanitized Google error reason token; never contains the provider message or request data. */
+    readonly providerReason?: string,
   ) {
     super(message)
+  }
+}
+
+/** Reads only Google's bounded machine reason/status token from an error response. */
+async function googleErrorReason(response: Response): Promise<string | undefined> {
+  try {
+    const data = (await response.json()) as {
+      error?: { status?: unknown; errors?: Array<{ reason?: unknown }> }
+    }
+    const candidate = data.error?.errors?.[0]?.reason ?? data.error?.status
+    return typeof candidate === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(candidate) ? candidate : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -238,15 +255,48 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     throw lastFailure ?? new GoogleCalendarError("Google Calendar request failed", "permanent")
   }
 
-  async function getBusyIntervals(timeMin: string, timeMax: string): Promise<BusyInterval[]> {
+  async function getBusyWindow(timeMin: string, timeMax: string): Promise<BusyInterval[]> {
     const response = await request("/freeBusy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ timeMin, timeMax, items: [{ id: PRIMARY_CALENDAR_ID }] }),
     })
-    if (!response.ok) throw new GoogleCalendarError("Calendar availability could not be read", "permanent")
+    if (!response.ok)
+      throw new GoogleCalendarError(
+        "Calendar availability could not be read",
+        "permanent",
+        response.status,
+        await googleErrorReason(response),
+      )
     const data = (await response.json()) as GoogleCalendarFreeBusyResponse
     return data.calendars?.[PRIMARY_CALENDAR_ID]?.busy ?? []
+  }
+
+  /** Bisects an availability request only when Google reports its undocumented range limit. */
+  async function getBusyRange(rangeStart: number, rangeEnd: number): Promise<BusyInterval[]> {
+    try {
+      return await getBusyWindow(new Date(rangeStart).toISOString(), new Date(rangeEnd).toISOString())
+    } catch (error) {
+      if (
+        !(error instanceof GoogleCalendarError) ||
+        error.providerReason !== GOOGLE_TIME_RANGE_TOO_LONG ||
+        rangeEnd - rangeStart <= MIN_FREEBUSY_SPLIT_RANGE_MS
+      )
+        throw error
+      const midpoint = rangeStart + Math.floor((rangeEnd - rangeStart) / 2)
+      const [earlier, later] = await Promise.all([getBusyRange(rangeStart, midpoint), getBusyRange(midpoint, rangeEnd)])
+      return [...earlier, ...later]
+    }
+  }
+
+  /** Reads availability without relying on an undocumented Google maximum interval. */
+  async function getBusyIntervals(timeMin: string, timeMax: string): Promise<BusyInterval[]> {
+    const rangeStart = Date.parse(timeMin)
+    const rangeEnd = Date.parse(timeMax)
+    if (!Number.isFinite(rangeStart) || !Number.isFinite(rangeEnd) || rangeEnd <= rangeStart)
+      throw new GoogleCalendarError("Calendar availability range is invalid", "permanent")
+
+    return getBusyRange(rangeStart, rangeEnd)
   }
 
   async function listEvents(timeMin: string, timeMax: string): Promise<CalendarEventList> {

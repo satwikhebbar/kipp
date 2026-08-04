@@ -109,6 +109,21 @@ export const evaluateCalendarCandidateInputSchema = z.discriminatedUnion("kind",
   z.object({ kind: z.literal("recurring"), proposal: recurringCandidateSchema }).strict(),
 ])
 
+/** Narrows the evaluator contract when an unambiguous numeric occurrence count is present in user input. */
+function evaluatorInputSchema(explicitOccurrenceCount?: number): z.ZodType {
+  if (explicitOccurrenceCount === undefined) return evaluateCalendarCandidateInputSchema
+  const countEndSchema = z
+    .object({ mode: z.literal("count"), occurrences: z.literal(explicitOccurrenceCount) })
+    .strict()
+    .describe(`The user explicitly requested exactly ${explicitOccurrenceCount} occurrences; preserve this count.`)
+  return z
+    .object({
+      kind: z.literal("recurring"),
+      proposal: recurringCandidateSchema.extend({ end: countEndSchema }).strict(),
+    })
+    .strict()
+}
+
 const listCalendarEventsInputSchema = z
   .object({
     timeMin: z.string().datetime({ offset: true }),
@@ -189,12 +204,15 @@ export function createListCalendarEventsTool(calendar: Pick<GoogleCalendarClient
 }
 
 /** Creates the comprehensive deterministic candidate evaluation tool for one bounded Calendar session. */
-export function createEvaluateCalendarCandidateTool(context: CalendarEvaluationContext): ToolDefinition {
+export function createEvaluateCalendarCandidateTool(
+  context: CalendarEvaluationContext,
+  explicitOccurrenceCount?: number,
+): ToolDefinition {
   return {
     name: CALENDAR_AGENT_TOOL.EVALUATE_CANDIDATE,
     description:
       "Validate and evaluate exactly one complete one-off or recurring candidate. Returns typed issues, authorized choices, or an opaque plan ID; it never creates a Calendar event.",
-    input: evaluateCalendarCandidateInputSchema,
+    input: evaluatorInputSchema(explicitOccurrenceCount),
     output: calendarEvaluationOutputSchema,
     privacy: "private",
     batching: "isolated",

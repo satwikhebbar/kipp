@@ -188,6 +188,35 @@ describe("runTools", () => {
     expect(generate.mock.calls[2][0].tools.map((tool: { name: string }) => tool.name)).toEqual(["finish"])
   })
 
+  it("stops immediately after a handler failure instead of spending a repair turn", async () => {
+    const failing = {
+      ...registry.echo,
+      name: "failing",
+      handler: vi.fn(async () => {
+        throw new Error("upstream failed")
+      }),
+    }
+    const generate = vi.fn().mockResolvedValue({
+      toolCalls: [{ id: "failure", name: "failing", input: { value: "candidate" } }],
+      usage: {},
+    })
+
+    const result = await runTools(
+      { generate },
+      { failing },
+      { allowedTools: ["failing"], requireHandoff: true, toolChoice: "required" },
+      [{ role: "user", text: "start" }],
+    )
+
+    expect(result).toMatchObject({
+      completed: false,
+      failureReason: "tool-failed",
+      providerTurns: 1,
+      toolCallCount: 1,
+    })
+    expect(generate).toHaveBeenCalledOnce()
+  })
+
   it("stops after a handoff tool without an unnecessary provider follow-up", async () => {
     const generate = vi.fn().mockResolvedValue({
       toolCalls: [{ id: "one", name: "echo", input: { value: "hello" } }],

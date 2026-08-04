@@ -130,6 +130,78 @@ describe("bounded Calendar agent session", () => {
     expect(result.providerTurns).toBe(3)
   })
 
+  it("repairs a dropped explicit occurrence count before issuing a plan", async () => {
+    const proposal = {
+      title: "Substack metrics review",
+      firstDate: "2026-08-08",
+      dateIsExplicit: true,
+      startTime: "09:00",
+      timeIsExplicit: true,
+      durationMinutes: 30,
+      classification: "ordinary",
+      recurrence: { cadence: "biweekly" },
+      recurrenceIsExplicit: true,
+    }
+    let turn = 0
+    const provider: ToolProviderClient = {
+      generate: vi.fn(async ({ messages }) => {
+        turn++
+        if (turn === 1)
+          return {
+            toolCalls: [
+              {
+                id: "dropped-count",
+                name: "evaluate_calendar_candidate",
+                input: { kind: "recurring", proposal: { ...proposal, end: { mode: "default_horizon" } } },
+              },
+            ],
+            usage: { inputTokens: 0, outputTokens: 0 },
+          }
+        if (turn === 2)
+          return {
+            toolCalls: [
+              {
+                id: "preserved-count",
+                name: "evaluate_calendar_candidate",
+                input: { kind: "recurring", proposal: { ...proposal, end: { mode: "count", occurrences: 6 } } },
+              },
+            ],
+            usage: { inputTokens: 0, outputTokens: 0 },
+          }
+        return {
+          toolCalls: [
+            {
+              id: "ready",
+              name: "ready_to_create",
+              input: { planId: toolOutput(messages, "evaluate_calendar_candidate").planId },
+            },
+          ],
+          usage: { inputTokens: 0, outputTokens: 0 },
+        }
+      }),
+    }
+
+    const sessionOptions = options()
+    const result = await runCalendarAgentSession(
+      provider,
+      [
+        { role: "user", text: "Schedule a recurring review of Substack metrics" },
+        { role: "user", text: "Saturday, 9AM, biweekly, 30min, 6 times" },
+      ],
+      sessionOptions,
+    )
+
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({
+        tool: "evaluate_calendar_candidate",
+        outcome: "failed",
+        failureCategory: "invalid-input",
+      }),
+    )
+    expect(sessionOptions.evaluation.getBusyIntervals).toHaveBeenCalledOnce()
+  })
+
   it("repairs a choice handoff that exposes its opaque option ID", async () => {
     let turn = 0
     const provider: ToolProviderClient = {

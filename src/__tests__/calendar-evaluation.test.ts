@@ -73,6 +73,36 @@ describe("Calendar candidate evaluation", () => {
     expect(ledger.records[0]?.plan).toMatchObject({ kind: "recurring", occurrences: { length: 3 } })
   })
 
+  it("evaluates an Aug 8 biweekly series with the default horizon without throwing", async () => {
+    const ledger = createCalendarPlanLedger()
+    const getBusyIntervals = vi.fn().mockResolvedValue([])
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "recurring",
+        proposal: {
+          title: "Substack metrics review",
+          firstDate: "2026-08-08",
+          dateIsExplicit: true,
+          startTime: "09:00",
+          timeIsExplicit: true,
+          durationMinutes: 30,
+          classification: "ordinary",
+          recurrence: { cadence: "biweekly" },
+          recurrenceIsExplicit: true,
+          end: { mode: "default_horizon" },
+        },
+      },
+      { ...CONTEXT, ledger, getBusyIntervals, now: Date.parse("2026-08-04T08:10:00.000Z") },
+    )
+
+    expect(result).toMatchObject({
+      kind: "ready",
+      planId: expect.any(String),
+      facts: { candidateKind: "recurring", occurrenceCount: 14, localStartTime: "09:00" },
+    })
+    expect(getBusyIntervals).toHaveBeenCalledOnce()
+  })
+
   it("distinguishes a valid recurring adjustment from having no available time", async () => {
     const result = await evaluateCalendarCandidate(
       {

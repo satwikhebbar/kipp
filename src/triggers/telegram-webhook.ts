@@ -8,7 +8,13 @@ import { logRuntime } from "../runtime/logging"
 import { type Env, INTERACTION_KIND } from "../types"
 
 const LABEL_TRUNCATE_LENGTH = 80
-const ADD_COMMAND_PREFIX_LENGTH = 5
+const ASCII_SPACE_CODE_POINT = 32
+
+interface TelegramMessageEntity {
+  type: string
+  offset: number
+  length: number
+}
 
 interface TelegramUser {
   id: number
@@ -21,6 +27,7 @@ interface TelegramMessage {
   from?: TelegramUser
   chat: { id: number; type: string }
   text?: string
+  entities?: TelegramMessageEntity[]
   reply_to_message?: {
     message_id: number
     from?: TelegramUser
@@ -38,6 +45,63 @@ interface TelegramUpdate {
   update_id: number
   message?: TelegramMessage
   callback_query?: TelegramCallbackQuery
+}
+
+interface TelegramCommand {
+  name: string
+  argument: string
+}
+
+const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "calendar"])
+
+/** Reads a Telegram slash command from its bot_command entity, with a text fallback for test and legacy updates. */
+function telegramCommand(message: TelegramMessage): TelegramCommand | null {
+  const text = message.text
+  if (!text) return null
+  const entity = message.entities?.find((candidate) => candidate.type === "bot_command" && candidate.offset === 0)
+  const token = entity ? text.slice(0, entity.length) : text.match(/^\/[^\s]+/u)?.[0]
+  if (!token) return null
+  const parsed = token.match(/^\/([a-z0-9_]+)(?:@[a-z0-9_]+)?$/iu)
+  if (!parsed) return null
+  const remainder = text.slice(token.length)
+  if (remainder && !/^\s/u.test(remainder)) return null
+  return { name: parsed[1].toLowerCase(), argument: remainder.trim() }
+}
+
+/** Produces privacy-safe command-boundary metadata without retaining message text or command arguments. */
+function telegramIngressDetails(
+  message: TelegramMessage,
+  command: TelegramCommand | null,
+): Readonly<Record<string, string | number | boolean>> {
+  const text = message.text ?? ""
+  const commandEntity = message.entities?.find((candidate) => candidate.type === "bot_command")
+  const fallbackTokenLength = text.match(/^\/[^\s]+/u)?.[0].length ?? 0
+  const tokenLength = commandEntity?.offset === 0 ? commandEntity.length : fallbackTokenLength
+  const separatorCodePoint = tokenLength > 0 && tokenLength < text.length ? (text.codePointAt(tokenLength) ?? -1) : -1
+  const separatorKind =
+    separatorCodePoint === -1
+      ? "end-or-unavailable"
+      : separatorCodePoint === ASCII_SPACE_CODE_POINT
+        ? "ascii-space"
+        : /^\s$/u.test(String.fromCodePoint(separatorCodePoint))
+          ? "other-whitespace"
+          : "non-whitespace"
+  const commandToken = tokenLength > 0 ? text.slice(0, tokenLength) : ""
+  return {
+    messageId: message.message_id,
+    chatType: message.chat.type,
+    textLength: text.length,
+    startsWithSlash: text.startsWith("/"),
+    commandEntityPresent: Boolean(commandEntity),
+    commandEntityOffset: commandEntity?.offset ?? -1,
+    commandEntityLength: commandEntity?.length ?? 0,
+    botAddressed: commandToken.includes("@"),
+    separatorKind,
+    separatorCodePoint,
+    parsedCommand: command ? (KNOWN_TELEGRAM_COMMANDS.has(command.name) ? command.name : "other") : "none",
+    calendarParsed: command?.name === "calendar",
+    replyToBot: message.reply_to_message?.from?.is_bot === true,
+  }
 }
 
 /** Checks if a Telegram user ID is allowed, or allows all if no restriction is configured. */
@@ -98,6 +162,12 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
   if (!verifyUser(env, msg.from.id)) return new Response("Forbidden", { status: 403 })
 
   const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+  const command = telegramCommand(msg)
+  logRuntime(env, {
+    event: "telegram-message-ingress",
+    outcome: "started",
+    details: telegramIngressDetails(msg, command),
+  })
 
   if (msg.reply_to_message?.from?.is_bot) {
     await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
@@ -108,7 +178,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     return new Response("OK")
   }
 
-  if (msg.text === "/generate") {
+  if (command?.name === "generate" && !command.argument) {
     logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
     const client = createGitHubClient(env)
     const ideas = parseIdeas((await client.readFile("ideas.md")).content)
@@ -127,17 +197,13 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     return new Response("OK")
   }
 
-  if (msg.text === "/calendar") {
+  if (command?.name === "calendar" && !command.argument) {
     await tg.sendMessage(msg.chat.id, CALENDAR_HELP)
     return new Response("OK")
   }
 
-  if (msg.text.startsWith("/calendar ")) {
-    const requestText = msg.text.slice("/calendar ".length).trim()
-    if (!requestText) {
-      await tg.sendMessage(msg.chat.id, CALENDAR_HELP)
-      return new Response("OK")
-    }
+  if (command?.name === "calendar") {
+    const requestText = command.argument
     if (!env.CALENDAR_WORKFLOW) {
       await tg.sendMessage(msg.chat.id, "Calendar scheduling is not configured yet.")
       return new Response("OK")
@@ -153,7 +219,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
     const client = createGitHubClient(env)
     const text = msg.text
 
-    if (text.startsWith("/add")) {
+    if (command?.name === "add") {
       let savedId = ""
       await client.mutateFile("ideas.md", (c) => {
         const items = parseIdeas(c)
@@ -163,7 +229,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
           status: "raw" as const,
           created: new Date().toISOString(),
           source: "telegram" as const,
-          body: text.slice(ADD_COMMAND_PREFIX_LENGTH).trim(),
+          body: command.argument,
           correlation: { telegramChatId: String(msg.chat.id) },
         })
         return serializeIdeas(items)

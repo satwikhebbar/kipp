@@ -102,7 +102,11 @@ export async function runAgentCenteredCalendarWorkflow(
       logAgentSession(env, event.instanceId, sessionStep.session)
 
       if (sessionStep.session.calendarFailureKind)
-        throw new GoogleCalendarError("Calendar agent read failed", sessionStep.session.calendarFailureKind)
+        throw new GoogleCalendarError(
+          "Calendar agent read failed",
+          sessionStep.session.calendarFailureKind,
+          sessionStep.session.calendarFailureStatus,
+        )
       if (!sessionStep.session.completed || !sessionStep.session.terminal) {
         await notify(
           env,
@@ -521,6 +525,16 @@ function logAgentSession(
       toolCallCount: session.toolCallCount,
       toolRunCompleted: session.completed,
     },
+    ...(session.calendarFailureKind
+      ? {
+          details: {
+            calendarReadFailureKind: session.calendarFailureKind,
+            calendarReadFailureStage: session.calendarFailureStage ?? "calendar-read",
+            calendarReadHttpStatus: session.calendarFailureStatus ?? -1,
+            calendarReadProviderReason: session.calendarFailureProviderReason ?? "unavailable",
+          },
+        }
+      : {}),
   })
 }
 

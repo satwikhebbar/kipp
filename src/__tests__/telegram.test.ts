@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const mockFetch = vi.hoisted(() => vi.fn())
 vi.stubGlobal("fetch", mockFetch)
@@ -74,6 +74,7 @@ describe("createTelegramClient", () => {
 
 describe("handleTelegramWebhook", () => {
   beforeEach(() => mockFetch.mockReset())
+  afterEach(() => vi.restoreAllMocks())
 
   it("rejects invalid webhook secret", async () => {
     const res = await handleTelegramWebhook(
@@ -422,5 +423,92 @@ Body text`
     expect(calendarWorkflow.create).toHaveBeenCalledWith({
       params: { chatId: "100", requestText: "Call Jamie tomorrow at 7pm", telegramMessageId: 9 },
     })
+  })
+
+  it("routes an entity-addressed Calendar command separated by Telegram whitespace", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) })
+    const env = mockEnv()
+    const calendarWorkflow = { create: vi.fn().mockResolvedValue({ id: "calendar-1" }) }
+    env.CALENDAR_WORKFLOW = calendarWorkflow as never
+    const command = "/calendar@KippBot"
+    const body = JSON.stringify({
+      update_id: 6,
+      message: {
+        message_id: 10,
+        from: { id: 42 },
+        chat: { id: 100, type: "private" },
+        text: `${command}\u00a0Schedule a recurring review of substack metrics`,
+        entities: [{ type: "bot_command", offset: 0, length: command.length }],
+      },
+    })
+
+    await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+
+    expect(calendarWorkflow.create).toHaveBeenCalledWith({
+      params: {
+        chatId: "100",
+        requestText: "Schedule a recurring review of substack metrics",
+        telegramMessageId: 10,
+      },
+    })
+    expect(mockFetch).not.toHaveBeenCalledWith(
+      expect.stringContaining("sendMessage"),
+      expect.objectContaining({ body: expect.stringContaining("Unknown command") }),
+    )
+  })
+
+  it("logs privacy-safe command ingress metadata at info level", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) })
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    const env = { ...mockEnv(), LOG_LEVEL: "info" as const }
+    const calendarWorkflow = { create: vi.fn().mockResolvedValue({ id: "calendar-1" }) }
+    env.CALENDAR_WORKFLOW = calendarWorkflow as never
+    const command = "/calendar@KippBot"
+    const requestText = "Private review details"
+
+    await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          update_id: 7,
+          message: {
+            message_id: 11,
+            from: { id: 42 },
+            chat: { id: 100, type: "private" },
+            text: `${command}\u00a0${requestText}`,
+            entities: [{ type: "bot_command", offset: 0, length: command.length }],
+          },
+        }),
+      }),
+      env as never,
+    )
+
+    const ingress = log.mock.calls
+      .map(([entry]) => JSON.parse(String(entry)) as { event?: string; details?: Record<string, unknown> })
+      .find((entry) => entry.event === "telegram-message-ingress")
+    expect(ingress?.details).toEqual({
+      messageId: 11,
+      chatType: "private",
+      textLength: `${command}\u00a0${requestText}`.length,
+      startsWithSlash: true,
+      commandEntityPresent: true,
+      commandEntityOffset: 0,
+      commandEntityLength: command.length,
+      botAddressed: true,
+      separatorKind: "other-whitespace",
+      separatorCodePoint: 160,
+      parsedCommand: "calendar",
+      calendarParsed: true,
+      replyToBot: false,
+    })
+    expect(log.mock.calls.flat().join(" ")).not.toContain(requestText)
   })
 })

@@ -179,6 +179,63 @@ describe("Google Calendar client", () => {
     ).resolves.toEqual(busy)
   })
 
+  it("bisects timeRangeTooLong FreeBusy requests and combines every successful result", async () => {
+    const fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { timeMin: string; timeMax: string }
+      if (Date.parse(body.timeMax) - Date.parse(body.timeMin) > 31 * 86_400_000)
+        return response(400, { error: { errors: [{ reason: "timeRangeTooLong" }] } })
+      return response(200, {
+        calendars: {
+          primary: { busy: [{ start: body.timeMin, end: body.timeMax }] },
+        },
+      })
+    })
+    vi.stubGlobal("fetch", fetch)
+
+    const intervals = await createGoogleCalendarClient(await environment()).getBusyIntervals(
+      "2026-08-08T00:00:00.000Z",
+      "2027-02-09T00:00:00.000Z",
+    )
+
+    expect(fetch).toHaveBeenCalledTimes(15)
+    expect(intervals).toHaveLength(8)
+    const windows = fetch.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string)) as Array<{
+      timeMin: string
+      timeMax: string
+    }>
+    expect(windows[0]?.timeMin).toBe("2026-08-08T00:00:00.000Z")
+    expect(windows[0]?.timeMax).toBe("2027-02-09T00:00:00.000Z")
+    const successfulWindows = intervals.map(({ start, end }) => ({ timeMin: start, timeMax: end }))
+    expect(successfulWindows[0]?.timeMin).toBe("2026-08-08T00:00:00.000Z")
+    expect(successfulWindows.at(-1)?.timeMax).toBe("2027-02-09T00:00:00.000Z")
+    expect(
+      successfulWindows.every(
+        (window, index) =>
+          Date.parse(window.timeMax) - Date.parse(window.timeMin) <= 31 * 86_400_000 &&
+          (index === 0 || window.timeMin === successfulWindows[index - 1]?.timeMax),
+      ),
+    ).toBe(true)
+  })
+
+  it("surfaces only safe FreeBusy failure metadata", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response(400, {
+          error: {
+            status: "INVALID_ARGUMENT",
+            message: "must not be surfaced",
+            errors: [{ reason: "timeRangeEmpty" }],
+          },
+        }),
+      ),
+    )
+
+    await expect(
+      createGoogleCalendarClient(await environment()).getBusyIntervals(EVENT.start, EVENT.end),
+    ).rejects.toMatchObject({ kind: "permanent", status: 400, providerReason: "timeRangeEmpty" })
+  })
+
   it("lists only the privacy-safe event projection across pages and reports truncation", async () => {
     const projected = (index: number) => ({
       id: `event-${index}`,

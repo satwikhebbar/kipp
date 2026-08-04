@@ -150,7 +150,7 @@ function request(body: Record<string, unknown>): Request {
   })
 }
 
-function message(text: string, messageId = 1, replyTo?: number): Request {
+function message(text: string, messageId = 1, replyTo?: number, entities?: unknown[]): Request {
   return request({
     update_id: messageId,
     message: {
@@ -158,6 +158,7 @@ function message(text: string, messageId = 1, replyTo?: number): Request {
       from: { id: 42, is_bot: false },
       chat: { id: 100, type: "private" },
       text,
+      ...(entities ? { entities } : {}),
       ...(replyTo ? { reply_to_message: { message_id: replyTo, from: { id: 7, is_bot: true } } } : {}),
     },
   })
@@ -299,6 +300,35 @@ describe("agent-centered Calendar Telegram integration", () => {
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
+  })
+
+  it("routes a Telegram entity-addressed Calendar command through the complete workflow", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    queueReady(ONE_OFF)
+    const command = "/calendar@KippBot"
+
+    await handleTelegramWebhook(
+      message(`${command}\u00a0Call Jamie on 2026-07-28 at 7pm`, 1, undefined, [
+        { type: "bot_command", offset: 0, length: command.length },
+      ]),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    await waitForMessageText(network, "Added: Call Jamie")
+    calendar.timeout()
+    await run
+
+    expect(calendar.created).toHaveLength(1)
+    expect((calendar.created[0].params as { params: { requestText: string } }).params.requestText).toBe(
+      "Call Jamie on 2026-07-28 at 7pm",
+    )
+    expect(network.getState().telegramMessages.every((candidate) => !candidate.text?.includes("Unknown command"))).toBe(
+      true,
+    )
   })
 
   it("creates one native recurring parent and bounded instances from Telegram", async () => {
