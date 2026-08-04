@@ -141,6 +141,53 @@ describe("runTools", () => {
     })
   })
 
+  it("keeps a tool available after invalid input so the provider can repair it", async () => {
+    const evaluate = { ...registry.echo, name: "evaluate" }
+    const finish = { ...registry.echo, name: "finish" }
+    const generate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "invalid-evaluate", name: "evaluate", input: { value: 42 } }],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "valid-evaluate", name: "evaluate", input: { value: "candidate" } }],
+        usage: {},
+      })
+      .mockResolvedValueOnce({
+        toolCalls: [{ id: "finish", name: "finish", input: { value: "authorized" } }],
+        usage: {},
+      })
+
+    const result = await runTools(
+      { generate },
+      { evaluate, finish },
+      {
+        allowedTools: ["evaluate", "finish"],
+        handoffTools: ["finish"],
+        requireHandoff: true,
+        toolChoice: "required",
+        nextAllowedTools: (successful) => (successful.includes("evaluate") ? ["finish"] : ["evaluate", "finish"]),
+      },
+      [{ role: "user", text: "start" }],
+    )
+
+    expect(result).toMatchObject({ completed: true, providerTurns: 3, toolCallCount: 3 })
+    expect(result.toolExecutions).toEqual([
+      {
+        tool: "evaluate",
+        outcome: "failed",
+        failureCategory: "invalid-input",
+        validationPaths: ["value"],
+        validationErrors: ["value: expected string"],
+      },
+      { tool: "evaluate", outcome: "succeeded" },
+      { tool: "finish", outcome: "succeeded" },
+    ])
+    expect(generate.mock.calls[1][0].tools.map((tool: { name: string }) => tool.name)).toEqual(["evaluate", "finish"])
+    expect(generate.mock.calls[2][0].tools.map((tool: { name: string }) => tool.name)).toEqual(["finish"])
+  })
+
   it("stops after a handoff tool without an unnecessary provider follow-up", async () => {
     const generate = vi.fn().mockResolvedValue({
       toolCalls: [{ id: "one", name: "echo", input: { value: "hello" } }],

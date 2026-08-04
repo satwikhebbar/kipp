@@ -121,7 +121,7 @@ export async function runTools(
     const allowedNonHandoffCalls = response.toolCalls.filter(
       (call) => allowedTools.includes(call.name) && !options.handoffTools?.includes(call.name),
     )
-    const executedTools: string[] = []
+    const successfulTools: string[] = []
     let handoffActionCompleted = false
     for (const call of response.toolCalls) {
       const definition = registry[call.name]
@@ -149,7 +149,7 @@ export async function runTools(
             },
       )
       toolCalls++
-      if (!batchingRejected) executedTools.push(tool)
+      if (result.ok) successfulTools.push(tool)
       messages.push({ role: "tool", toolCallId: call.id, name: call.name, output: result })
       if (result.ok && options.handoffTools?.includes(call.name)) handoffActionCompleted = true
     }
@@ -163,7 +163,7 @@ export async function runTools(
         toolExecutions,
         usage,
       }
-    allowedTools = options.nextAllowedTools?.(executedTools) ?? allowedTools
+    allowedTools = options.nextAllowedTools?.(successfulTools) ?? allowedTools
   }
   return {
     messages,

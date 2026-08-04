@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
 import type { ToolConversationMessage } from "../providers/llm"
+import { toolDeclaration } from "../providers/llm"
 import type { ToolDefinition, ToolRegistry } from "../runtime/tools"
 
 const mockFetch = vi.hoisted(() => vi.fn())
@@ -371,6 +372,37 @@ describe("DeepSeek provider", () => {
       malformed.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] }),
     ).rejects.toThrow("malformed tool arguments")
     expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("tool declaration projection", () => {
+  it("preserves descriptions on nested union shapes", () => {
+    const describedTool: ToolDefinition = {
+      ...ECHO_TOOL,
+      input: z.object({
+        recurrence: z
+          .discriminatedUnion("cadence", [
+            z
+              .object({ cadence: z.literal("weekly") })
+              .strict()
+              .describe("Weekly shape"),
+            z
+              .object({ cadence: z.literal("biweekly") })
+              .strict()
+              .describe("Biweekly shape"),
+          ])
+          .describe("Choose one cadence shape"),
+      }),
+    }
+
+    expect(toolDeclaration(describedTool).parameters).toMatchObject({
+      properties: {
+        recurrence: {
+          description: "Choose one cadence shape",
+          anyOf: [{ description: "Weekly shape" }, { description: "Biweekly shape" }],
+        },
+      },
+    })
   })
 })
 

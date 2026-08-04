@@ -91,17 +91,19 @@ function zodProperty(schema: unknown): Record<string, unknown> {
   const unwrapped = unwrapZodProperty(schema)
   const definition = unwrapped._def
   const typeName = definition?.typeName
+  const described = (property: Record<string, unknown>): Record<string, unknown> =>
+    unwrapped.description ? { ...property, description: unwrapped.description } : property
   if (typeName === "ZodObject") {
     const entries = Object.entries(definition?.shape?.() ?? {})
-    return {
+    return described({
       type: "object",
       properties: Object.fromEntries(entries.map(([name, value]) => [name, zodProperty(value)])),
       required: entries.filter(([, value]) => !isOptionalZodProperty(value)).map(([name]) => name),
       additionalProperties: false,
-    }
+    })
   }
   if (typeName === "ZodDiscriminatedUnion" || typeName === "ZodUnion")
-    return { anyOf: (definition?.options ?? []).map((option) => zodProperty(option)) }
+    return described({ anyOf: (definition?.options ?? []).map((option) => zodProperty(option)) })
   if (typeName === "ZodNumber")
     return { type: definition?.checks?.some((check) => check.kind === "int") ? "integer" : "number" }
   if (typeName === "ZodBoolean") return { type: "boolean" }
@@ -119,6 +121,7 @@ function literalProperty(value: unknown): Record<string, unknown> {
 }
 
 type ZodProperty = {
+  description?: string
   _def?: {
     typeName?: string
     innerType?: ZodProperty
