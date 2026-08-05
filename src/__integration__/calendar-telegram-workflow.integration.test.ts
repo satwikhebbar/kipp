@@ -519,7 +519,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     expect(mockReconcileManagedSeries).toHaveBeenCalledWith(expect.anything(), [])
   })
 
-  it("exits a recurring conflict cancellation without any Calendar mutation", async () => {
+  it("acknowledges a recurring conflict cancellation, answers its callback, and makes no Calendar mutation", async () => {
     const network = createFakeNetwork()
     vitest.stubGlobal("fetch", network.fetch)
     const router = createFakeInteractionRouter()
@@ -536,11 +536,37 @@ describe("agent-centered Calendar Telegram integration", () => {
     const choiceIndex = await waitForMessageText(network, "safe alternative")
     await waitForWorkflowWait(calendar)
     await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 2)), runtimeEnv)
+    await waitForMessageText(network, "Cancelled")
     await run
 
+    expect(network.getState().answeredCallbacks).toContain("cq-10")
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()
     expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
     expect(mockReconcileManagedSeries).not.toHaveBeenCalled()
+  })
+
+  it("acknowledges an OAuth reconnection cancellation and makes no Calendar mutation", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    queueReady(ONE_OFF)
+    mockBusyIntervals
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new MockGoogleCalendarError("disconnected", "authorization"))
+
+    await handleTelegramWebhook(message("/calendar Call Jamie on 2026-07-28 at 7pm"), runtimeEnv)
+    const run = startWorkflow(calendar, runtimeEnv)
+    const reconnectIndex = await waitForMessageText(network, "Google Calendar is not connected")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, reconnectIndex, 1)), runtimeEnv)
+    await waitForMessageText(network, "Cancelled")
+    await run
+
+    expect(network.getState().answeredCallbacks).toContain("cq-10")
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
   })
 
   it("rejects an accepted recurring adjustment when fresh availability changes", async () => {
