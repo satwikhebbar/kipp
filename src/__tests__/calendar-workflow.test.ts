@@ -204,10 +204,12 @@ describe("agent-centered CalendarWorkflow", () => {
   it("revalidates and writes one exact one-off plan", async () => {
     queueReady(ONE_OFF)
 
-    await run(createStep({ type: "timeout" }))
+    const step = createStep({ type: "timeout" })
+    await run(step)
 
     expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(step.do).toHaveBeenCalledWith("calendar-agent-revalidate-0", expect.any(Function))
     expect(mockCreateManagedEvent).toHaveBeenCalledWith(
       expect.objectContaining({ summary: "Call Jamie", start: "2026-07-28T13:30:00.000Z" }),
     )

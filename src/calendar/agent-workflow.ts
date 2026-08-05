@@ -212,7 +212,17 @@ export async function runAgentCenteredCalendarWorkflow(
           await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION)
           return
         }
-        if (!(await revalidateExactPlan(calendar, consumed.plan, baseline, timeZone, expiresAt))) {
+        if (
+          !(await revalidateExactPlanInStep(
+            env,
+            step,
+            `calendar-agent-revalidate-${turn}`,
+            consumed.plan,
+            baseline,
+            timeZone,
+            expiresAt,
+          ))
+        ) {
           messages.push(availabilityChangedMessage())
           continue
         }
@@ -238,7 +248,17 @@ export async function runAgentCenteredCalendarWorkflow(
         await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION)
         return
       }
-      if (!(await revalidateExactPlan(calendar, authorized.plan, baseline, timeZone, expiresAt))) {
+      if (
+        !(await revalidateExactPlanInStep(
+          env,
+          step,
+          `calendar-agent-revalidate-${turn}`,
+          authorized.plan,
+          baseline,
+          timeZone,
+          expiresAt,
+        ))
+      ) {
         messages.push(availabilityChangedMessage())
         continue
       }
@@ -310,6 +330,21 @@ async function promptForAuthorizationRecovery(
     details: { version, turn },
   })
   return accepted
+}
+
+/** Runs the post-decision Calendar read durably so a stalled provider call cannot hang the workflow runner. */
+async function revalidateExactPlanInStep(
+  env: Env,
+  step: WorkflowStep,
+  name: string,
+  expected: CalendarPlan,
+  baseline: CalendarPlan | null,
+  timeZone: string,
+  expiresAt: number,
+): Promise<boolean> {
+  return (await step.do(name, () =>
+    revalidateExactPlan(createGoogleCalendarClient(env), expected, baseline, timeZone, expiresAt),
+  )) as boolean
 }
 
 /** Re-runs deterministic evaluation and accepts only the exact previously authorized plan. */
