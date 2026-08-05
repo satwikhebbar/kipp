@@ -77,6 +77,7 @@ const RECURRING = {
 
 const FIRST_CONFLICT = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
 const SECOND_CONFLICT = [{ start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" }]
+const PRODUCTION_TEST_ORIGIN = "https://calendar.example.test"
 
 function toolResult(messages: ToolConversationMessage[], name: string): Record<string, unknown> {
   const message = [...messages].reverse().find((candidate) => candidate.role === "tool" && candidate.name === name)
@@ -172,26 +173,29 @@ function queueEvaluationQuestion(candidate: typeof ONE_OFF | typeof RECURRING, m
   })
 }
 
-function request(body: Record<string, unknown>): Request {
-  return new Request("http://localhost", {
+function request(body: Record<string, unknown>, origin = "http://localhost"): Request {
+  return new Request(origin, {
     method: "POST",
     headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
     body: JSON.stringify(body),
   })
 }
 
-function message(text: string, messageId = 1, replyTo?: number, entities?: unknown[]): Request {
-  return request({
-    update_id: messageId,
-    message: {
-      message_id: messageId,
-      from: { id: 42, is_bot: false },
-      chat: { id: 100, type: "private" },
-      text,
-      ...(entities ? { entities } : {}),
-      ...(replyTo ? { reply_to_message: { message_id: replyTo, from: { id: 7, is_bot: true } } } : {}),
+function message(text: string, messageId = 1, replyTo?: number, entities?: unknown[], origin?: string): Request {
+  return request(
+    {
+      update_id: messageId,
+      message: {
+        message_id: messageId,
+        from: { id: 42, is_bot: false },
+        chat: { id: 100, type: "private" },
+        text,
+        ...(entities ? { entities } : {}),
+        ...(replyTo ? { reply_to_message: { message_id: replyTo, from: { id: 7, is_bot: true } } } : {}),
+      },
     },
-  })
+    origin,
+  )
 }
 
 function callback(token: string, updateId = 10): Request {
@@ -786,7 +790,11 @@ describe("agent-centered Calendar Telegram integration", () => {
     vitest.stubGlobal("fetch", network.fetch)
     const router = createFakeInteractionRouter()
     const calendar = liveWorkflowBinding()
-    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    const runtimeEnv = env({
+      INTERACTION_ROUTER: router.namespace,
+      CALENDAR_WORKFLOW: calendar as never,
+      GOOGLE_CALENDAR_REDIRECT_ORIGIN: "",
+    })
     mockBusyIntervals
       .mockResolvedValueOnce([])
       .mockRejectedValueOnce(new MockGoogleCalendarError("disconnected", "authorization"))
@@ -796,11 +804,20 @@ describe("agent-centered Calendar Telegram integration", () => {
     queueReady(RECURRING)
 
     await handleTelegramWebhook(
-      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      message(
+        "/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences",
+        1,
+        undefined,
+        undefined,
+        PRODUCTION_TEST_ORIGIN,
+      ),
       runtimeEnv,
     )
     const run = startWorkflow(calendar, runtimeEnv)
     const reconnectIndex = await waitForMessageText(network, "Reconnect, then tap Retry")
+    expect(network.getState().telegramMessages[reconnectIndex]?.text).toContain(
+      `${PRODUCTION_TEST_ORIGIN}/setup/google-calendar`,
+    )
     await waitForWorkflowWait(calendar)
     await handleTelegramWebhook(callback(callbackToken(network, reconnectIndex)), runtimeEnv)
     await waitForMessageText(network, "Added: Weekly review", reconnectIndex)

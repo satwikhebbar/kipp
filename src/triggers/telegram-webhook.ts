@@ -150,14 +150,14 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   }
 
   if (update.message) {
-    return handleMessage(update.message, env)
+    return handleMessage(update.message, env, new URL(request.url).origin)
   }
 
   return new Response("OK")
 }
 
 /** Processes a Telegram message: commands, replies, and routed interactions. */
-async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> {
+async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string): Promise<Response> {
   if (!msg.text || !msg.from || msg.from.is_bot) return new Response("OK")
   if (!verifyUser(env, msg.from.id)) return new Response("Forbidden", { status: 403 })
 
@@ -209,7 +209,7 @@ async function handleMessage(msg: TelegramMessage, env: Env): Promise<Response> 
       return new Response("OK")
     }
     await env.CALENDAR_WORKFLOW.create({
-      params: { chatId: String(msg.chat.id), requestText, telegramMessageId: msg.message_id },
+      params: { chatId: String(msg.chat.id), requestText, telegramMessageId: msg.message_id, setupOrigin },
     })
     await tg.sendMessage(msg.chat.id, "Scheduling that now.")
     return new Response("OK")

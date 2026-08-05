@@ -6,6 +6,8 @@ export interface CalendarWorkflowParams {
   chatId: string
   requestText: string
   telegramMessageId: number
+  /** Trusted origin of the Telegram webhook request, used for OAuth recovery links. */
+  setupOrigin?: string
 }
 
 /** Durable entrypoint for the bounded agent-centered Calendar workflow. */

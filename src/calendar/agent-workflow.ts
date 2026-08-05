@@ -110,6 +110,18 @@ export async function runAgentCenteredCalendarWorkflow(
       messages = sessionStep.session.messages
       logAgentSession(env, event.instanceId, sessionStep.session)
 
+      if (sessionStep.session.calendarFailureKind === "authorization" && !retryUsed) {
+        const retry = await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn)
+        if (retry) {
+          retryUsed = true
+          messages.push({
+            role: "system",
+            text: "Calendar authorization was restored. Re-evaluate the request before requesting a write.",
+          })
+          continue
+        }
+        return
+      }
       if (sessionStep.session.calendarFailureKind)
         throw new GoogleCalendarError(
           "Calendar agent read failed",
@@ -243,19 +255,7 @@ export async function runAgentCenteredCalendarWorkflow(
       messages.push(editBaselineMessage(consumed.plan), { role: "user", text: correction })
     } catch (error) {
       if (error instanceof GoogleCalendarError && error.kind === "authorization" && !retryUsed) {
-        const retry = await promptForActions(
-          env,
-          step,
-          event,
-          ++interactionVersion,
-          `calendar-agent-reconnect-${turn}`,
-          `${calendarUnavailableMessage(env)}\n\nReconnect, then tap Retry within 15 minutes.`,
-          [
-            ["Retry", INTERACTION_KIND.CALENDAR_RETRY],
-            ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],
-          ],
-        )
-        if (retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY) {
+        if (await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn)) {
           retryUsed = true
           messages.push({
             role: "system",
@@ -280,6 +280,29 @@ export async function runAgentCenteredCalendarWorkflow(
   }
 
   await notify(env, step, event.payload.chatId, "I still need clearer scheduling details. Please start a new request.")
+}
+
+/** Prompts once for Calendar reconnection without treating expected authorization state as a workflow exception. */
+async function promptForAuthorizationRecovery(
+  env: Env,
+  step: WorkflowStep,
+  event: WorkflowEvent<CalendarWorkflowParams>,
+  version: number,
+  turn: number,
+): Promise<boolean> {
+  const retry = await promptForActions(
+    env,
+    step,
+    event,
+    version,
+    `calendar-agent-reconnect-${turn}`,
+    `${calendarUnavailableMessage(env, event.payload.setupOrigin)}\n\nReconnect, then tap Retry within 15 minutes.`,
+    [
+      ["Retry", INTERACTION_KIND.CALENDAR_RETRY],
+      ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],
+    ],
+  )
+  return retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY
 }
 
 /** Re-runs deterministic evaluation and accepts only the exact previously authorized plan. */
@@ -509,14 +532,14 @@ function confirmationMessage(plan: CalendarPlan, editing: boolean): string {
 }
 
 /** Returns the configured browser URL for Google Calendar OAuth recovery. */
-function calendarSetupUrl(env: Env): string {
-  const origin = env.GOOGLE_CALENDAR_REDIRECT_ORIGIN?.replace(/\/+$/, "")
-  return origin ? `${origin}/setup/google-calendar` : "/setup/google-calendar"
+function calendarSetupUrl(env: Env, setupOrigin?: string): string {
+  const origin = env.GOOGLE_CALENDAR_REDIRECT_ORIGIN?.trim() || setupOrigin?.trim()
+  return origin ? `${origin.replace(/\/+$/, "")}/setup/google-calendar` : "/setup/google-calendar"
 }
 
 /** Renders the fixed operational message used when Calendar authorization is missing. */
-function calendarUnavailableMessage(env: Env): string {
-  return `Google Calendar is not connected. Open ${calendarSetupUrl(env)} to connect it, then try again.`
+function calendarUnavailableMessage(env: Env, setupOrigin?: string): string {
+  return `Google Calendar is not connected. Open ${calendarSetupUrl(env, setupOrigin)} to connect it, then try again.`
 }
 
 /** Emits metadata-only session and tool lifecycle records without transcript contents. */

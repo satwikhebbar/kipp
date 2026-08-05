@@ -421,7 +421,12 @@ Body text`
     )
 
     expect(calendarWorkflow.create).toHaveBeenCalledWith({
-      params: { chatId: "100", requestText: "Call Jamie tomorrow at 7pm", telegramMessageId: 9 },
+      params: {
+        chatId: "100",
+        requestText: "Call Jamie tomorrow at 7pm",
+        telegramMessageId: 9,
+        setupOrigin: "http://localhost",
+      },
     })
   })
 
@@ -456,6 +461,7 @@ Body text`
         chatId: "100",
         requestText: "Schedule a recurring review of substack metrics",
         telegramMessageId: 10,
+        setupOrigin: "http://localhost",
       },
     })
     expect(mockFetch).not.toHaveBeenCalledWith(
