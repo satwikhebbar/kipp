@@ -344,16 +344,21 @@ describe("agent-centered CalendarWorkflow", () => {
   })
 
   it.each([
-    ["cancelled", { type: "event", payload: { text: "__calendar-conflict-cancel__" } }],
-    ["expired", { type: "timeout" }],
-  ])("does not write when a conflict choice is %s", async (_label, interaction) => {
+    ["cancelled", { type: "event", payload: { text: "__calendar-conflict-cancel__" } }, true],
+    ["expired", { type: "timeout" }, false],
+  ])("acknowledges only an actual conflict cancel and never writes when %s", async (_label, interaction, ack) => {
     mockBusyIntervals.mockResolvedValue([{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }])
     queueChoice(ONE_OFF)
+    const telegram = telegramMock()
 
     await run(createStep(interaction))
 
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()
     expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+    const sentTexts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(sentTexts.some((text) => text.includes("Cancelled"))).toBe(ack)
   })
 
   it("does not silently substitute when an accepted option changes before write", async () => {
@@ -447,6 +452,23 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(mockGenerate.mock.calls[2]?.[0].messages).toContainEqual(
       expect.objectContaining({ role: "system", text: expect.stringContaining("authorization was restored") }),
     )
+  })
+
+  it("acknowledges and does not write when reconnection is cancelled", async () => {
+    queueReady(ONE_OFF)
+    mockBusyIntervals
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new MockGoogleCalendarError("disconnected", "authorization"))
+    const telegram = telegramMock()
+
+    await run(createStep({ type: "event", payload: { text: "__calendar-cancel__" } }))
+
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+    const sentTexts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(sentTexts.some((text) => text.includes("Cancelled"))).toBe(true)
   })
 
   it("keeps dynamic request context out of the static agent instructions", async () => {

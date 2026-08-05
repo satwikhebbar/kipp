@@ -5,6 +5,7 @@ import { INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
 export interface FakeState {
   githubFiles: Map<string, string>
   telegramMessages: Array<{ chatId: number | string; text: string; replyMarkup?: Record<string, unknown> }>
+  answeredCallbacks: string[]
   linkedinDrafts: Array<{ authorUrn: string; text: string }>
   linkedinUrls: string[]
   nextMessageId: number
@@ -44,6 +45,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
   const state: FakeState = {
     githubFiles: new Map(Object.entries(config?.githubFiles ?? {})),
     telegramMessages: [],
+    answeredCallbacks: [],
     linkedinDrafts: [],
     linkedinUrls: [],
     nextMessageId: 100,
@@ -80,6 +82,10 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
 
     if (urlStr.includes("api.telegram.org/bot")) {
       const parsed = JSON.parse(opts?.body as string) as Record<string, unknown>
+      if (urlStr.includes("/answerCallbackQuery")) {
+        state.answeredCallbacks.push(parsed.callback_query_id as string)
+        return respond({ ok: true })
+      }
       const msg = {
         chatId: (parsed.chat_id ?? parsed.chatId) as number | string,
         text: parsed.text as string,

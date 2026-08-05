@@ -33,6 +33,7 @@ const MAX_MULTI_ACTION_LABEL_CHARACTERS = 16
 const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try again shortly."
 const CALENDAR_AGENT_UNAVAILABLE = "I couldn't reach the calendar agent. Please try again shortly."
 const CALENDAR_AGENT_NO_DECISION = "The calendar agent didn't return a scheduling decision. Please retry your request."
+const CALENDAR_CANCELLED = "Cancelled. No calendar event was created."
 
 type CalendarActionResponse =
   | { type: "timeout" }
@@ -191,7 +192,10 @@ export async function runAgentCenteredCalendarWorkflow(
           messages.push({ role: "user", text: response.text })
           continue
         }
-        if (response.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL) return
+        if (response.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL) {
+          await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED)
+          return
+        }
         const selected = options[response.actionIndex]
         if (!selected) {
           const replacement = await promptForReply(
@@ -323,11 +327,13 @@ async function promptForAuthorizationRecovery(
     ],
   )
   const accepted = retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY
+  const cancelled = retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_CANCEL
+  if (cancelled) await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED)
   logRuntime(env, {
     workflow: event.instanceId,
     event: "calendar-authorization-retry",
     outcome: accepted ? "succeeded" : "ignored",
-    details: { version, turn },
+    details: { version, turn, cancelled },
   })
   return accepted
 }
