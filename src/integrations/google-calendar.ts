@@ -8,6 +8,8 @@ const GOOGLE_CALENDAR_API_URL = "https://www.googleapis.com/calendar/v3"
 const REFRESH_SKEW_MS = 60_000
 const MAX_TRANSIENT_RETRIES = 2
 const RETRY_DELAY_MS = 250
+/** Prevents an unavailable upstream Calendar API from leaving a Workflow run indefinitely active. */
+const GOOGLE_CALENDAR_REQUEST_TIMEOUT_MS = 10_000
 const TOKEN_EXPIRY_UNIT_MS = 1_000
 const PRIMARY_CALENDAR_ID = "primary"
 const CALENDAR_EVENT_CONFLICT_STATUS = HTTP_STATUS.CONFLICT
@@ -243,6 +245,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         const response = await fetch(`${GOOGLE_CALENDAR_API_URL}${path}`, {
           ...init,
           headers: { Authorization: `Bearer ${token}`, ...init.headers },
+          signal: AbortSignal.timeout(GOOGLE_CALENDAR_REQUEST_TIMEOUT_MS),
         })
         if (response.status === HTTP_STATUS.UNAUTHORIZED || response.status === HTTP_STATUS.FORBIDDEN)
           throw new GoogleCalendarError("Google Calendar requires reconnection", "authorization", response.status)

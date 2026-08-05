@@ -302,7 +302,14 @@ async function promptForAuthorizationRecovery(
       ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],
     ],
   )
-  return retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY
+  const accepted = retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY
+  logRuntime(env, {
+    workflow: event.instanceId,
+    event: "calendar-authorization-retry",
+    outcome: accepted ? "succeeded" : "ignored",
+    details: { version, turn },
+  })
+  return accepted
 }
 
 /** Re-runs deterministic evaluation and accepts only the exact previously authorized plan. */

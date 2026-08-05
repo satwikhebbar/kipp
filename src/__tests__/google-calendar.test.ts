@@ -102,6 +102,7 @@ describe("Google Calendar client", () => {
       reminders: { useDefault: false, overrides: [{ method: "popup", minutes: EVENT.reminderMinutes }] },
       extendedProperties: { private: { "kipp.requestId": EVENT.requestId } },
     })
+    expect(request.signal).toBeInstanceOf(AbortSignal)
   })
 
   it("creates a native recurring parent from an adapter-generated rule", async () => {
