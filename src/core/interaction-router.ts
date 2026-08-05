@@ -29,6 +29,7 @@ const PLAIN_TEXT_INTERACTION_KINDS = [
   INTERACTION_KIND.REVISION_FEEDBACK,
   INTERACTION_KIND.CALENDAR_CLARIFICATION,
   INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
+  INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
   INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
 ] as const
 
@@ -136,7 +137,7 @@ export class InteractionRouterDO implements DurableObject {
         : input.plainText !== undefined
           ? this.ctx.storage.sql
               .exec(
-                "SELECT * FROM interactions WHERE kind IN (?, ?, ?, ?) AND consumed_update_id IS NULL ORDER BY rowid DESC LIMIT 1",
+                "SELECT * FROM interactions WHERE kind IN (?, ?, ?, ?, ?) AND consumed_update_id IS NULL ORDER BY rowid DESC LIMIT 1",
                 ...PLAIN_TEXT_INTERACTION_KINDS,
               )
               .toArray()

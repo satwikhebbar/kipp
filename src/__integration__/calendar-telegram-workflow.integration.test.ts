@@ -505,7 +505,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 1)), runtimeEnv)
     const replacementIndex = await waitForMessageText(network, "Reply with another time")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(message("Use 8pm", 2, network.getState().nextMessageId - 1), runtimeEnv)
+    await handleTelegramWebhook(message("Use 8pm", 2), runtimeEnv)
     await waitForMessageText(network, "at 20:00", replacementIndex)
     calendar.timeout()
     await run
