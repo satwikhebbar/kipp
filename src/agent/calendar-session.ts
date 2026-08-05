@@ -54,6 +54,7 @@ export interface CalendarAgentSessionOptions {
 export type CalendarAgentSessionResult = AgentSessionResult<CalendarTerminalOutcome> & {
   calendarFailureKind?: GoogleCalendarError["kind"]
   calendarFailureStatus?: number
+  calendarFailureRetryCount?: number
   calendarFailureStage?: string
   calendarFailureProviderReason?: string
 }
@@ -68,6 +69,7 @@ export async function runCalendarAgentSession(
   let latestEvaluation: CalendarEvaluation | null = null
   let calendarFailureKind: GoogleCalendarError["kind"] | undefined
   let calendarFailureStatus: number | undefined
+  let calendarFailureRetryCount: number | undefined
   let calendarFailureStage: string | undefined
   let calendarFailureProviderReason: string | undefined
   const listTool = createListCalendarEventsTool(options.calendar)
@@ -84,6 +86,7 @@ export async function runCalendarAgentSession(
         if (error instanceof GoogleCalendarError) {
           calendarFailureKind = error.kind
           calendarFailureStatus = error.status
+          calendarFailureRetryCount = error.retryCount
           calendarFailureProviderReason = error.providerReason
           calendarFailureStage =
             error.message === "Calendar availability could not be read"
@@ -181,6 +184,7 @@ export async function runCalendarAgentSession(
     usage: result.usage,
     ...(calendarFailureKind ? { calendarFailureKind } : {}),
     ...(calendarFailureStatus === undefined ? {} : { calendarFailureStatus }),
+    ...(calendarFailureRetryCount === undefined ? {} : { calendarFailureRetryCount }),
     ...(calendarFailureStage ? { calendarFailureStage } : {}),
     ...(calendarFailureProviderReason ? { calendarFailureProviderReason } : {}),
   }

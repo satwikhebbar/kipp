@@ -266,8 +266,7 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
             ? list.find((item) => item.botMessageId === body.replyToMessageId)
             : [...list].reverse().find((item) => PLAIN_TEXT_INTERACTION_KINDS.has(item.kind) && !item.consumed)
         if (!found) return Response.json({ interaction: null })
-        if (found.expiresAt <= Date.now() || (found.consumed && found.consumed !== body.telegramUpdateId))
-          return Response.json({ interaction: null })
+        if (found.expiresAt <= Date.now() || found.consumed) return Response.json({ interaction: null })
         found.consumed = body.telegramUpdateId as number
         found.consumedAt = now
         return Response.json({

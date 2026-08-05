@@ -115,6 +115,8 @@ export async function runAgentCenteredCalendarWorkflow(
           "Calendar agent read failed",
           sessionStep.session.calendarFailureKind,
           sessionStep.session.calendarFailureStatus,
+          undefined,
+          sessionStep.session.calendarFailureRetryCount,
         )
       if (!sessionStep.session.completed || !sessionStep.session.terminal) {
         await notify(
@@ -268,6 +270,9 @@ export async function runAgentCenteredCalendarWorkflow(
         event: "calendar-workflow-failure",
         outcome: "failed",
         failureCategory: error instanceof GoogleCalendarError ? `calendar-${error.kind}` : "calendar-agent-operation",
+        ...(error instanceof GoogleCalendarError
+          ? { details: { httpStatus: error.status ?? -1, retryCount: error.retryCount } }
+          : {}),
       })
       await notify(env, step, event.payload.chatId, CALENDAR_FAILURE)
       return
@@ -404,6 +409,12 @@ async function writePlanAndConfirm(
     ])
   } catch (error) {
     if (!(error instanceof CalendarInteractionOperationError) || error.stage !== "notify") return null
+    logRuntime(env, {
+      workflow: event.instanceId,
+      event: "calendar-confirmation",
+      outcome: "failed",
+      failureCategory: "confirmation-recovery-started",
+    })
     try {
       edit = await promptForActions(
         env,
@@ -541,6 +552,7 @@ function logAgentSession(
             calendarReadFailureKind: session.calendarFailureKind,
             calendarReadFailureStage: session.calendarFailureStage ?? "calendar-read",
             calendarReadHttpStatus: session.calendarFailureStatus ?? -1,
+            calendarReadRetryCount: session.calendarFailureRetryCount ?? 0,
             calendarReadProviderReason: session.calendarFailureProviderReason ?? "unavailable",
           },
         }

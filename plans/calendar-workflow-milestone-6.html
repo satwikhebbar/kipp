@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp Calendar — Milestone 6 Implementation Plan</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --red:#f87171; --code:#020617; } * { box-sizing:border-box; } body { max-width:1080px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; } h1,h2 { line-height:1.25; color:#f8fafc; } h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; } h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; } p,li { max-width:94ch; } .lede { color:var(--muted); font-size:1.1rem; } .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; } .note { border-left-color:var(--amber); } .risk { border-left-color:var(--red); } .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; } code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; } table { width:100%; border-collapse:collapse; margin:20px 0; } th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#cbd5e1; background:#1e293b; } ol>li { margin:14px 0; } @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp Calendar — Milestone 6 Implementation Plan</h1>
+    <p class="lede">Harden the completed Calendar v1 workflow for real webhook delivery and operational handoff. This phase closes reliability and documentation gaps without expanding Calendar product scope.</p>
+    <div class="callout"><strong>Outcome:</strong> every Calendar mutation remains deterministic and idempotent through bounded transient failures; a successful write is recovered only by bounded confirmation delivery; duplicate Telegram updates are harmless; metadata-only failure telemetry makes failures diagnosable; and a new operator can configure, deploy, validate, and troubleshoot Calendar v1 from repository documentation alone.<br /><span class="tag">Bounded retry</span><span class="tag">No duplicate writes</span><span class="tag">Privacy-safe telemetry</span><span class="tag">Operator handoff</span></div>
+
+    <h2>1. Scope and invariants</h2>
+    <table><thead><tr><th>Included</th><th>Excluded</th></tr></thead><tbody>
+      <tr><td>Google transient retry correctness and backoff coverage; idempotent uncertain-write recovery; confirmation-only delivery recovery; webhook and interaction duplicate tests; safe lifecycle logs; exhaustive existing decision-branch tests; Google/Telegram/Cloudflare setup, local dev-bot smoke, deployment, and troubleshooting instructions.</td><td>New Calendar capabilities, post-window management, ETag protection for manual edits, dashboards/alerts, background retries, multiple calendars, event-detail disclosure, new LLM behavior, generic workflow-runtime extraction, or changes to the approved scheduling policy.</td></tr>
+    </tbody></table>
+    <ul>
+      <li>Only deterministic workflow code may create, update, delete, or reconcile Calendar events. The model never sees credentials, raw Calendar API payloads, or write authority.</li>
+      <li>A Telegram message identity maps to one opaque Calendar event/series identity. Retries and redeliveries reuse it; a separately sent message remains an intentional new request.</li>
+      <li>Retry only transient network, 429, and 5xx failures, for at most two retries with bounded backoff. Authorization and permanent failures do not retry; no background retry is added.</li>
+      <li>After a write has succeeded, recovery may retry delivery of the deterministic confirmation only. It must never recreate, update, or re-reconcile the Calendar event merely because Telegram delivery was uncertain.</li>
+      <li>Logs contain opaque workflow/session/interaction identifiers, outcome category, safe HTTP/reason categories, duration, and retry count only—never request text, event data, token/OAuth material, provider bodies, or Telegram contents.</li>
+    </ul>
+
+    <h2>2. Existing contracts and targeted changes</h2>
+    <table><thead><tr><th>Area</th><th>Current contract</th><th>Milestone 6 change</th></tr></thead><tbody>
+      <tr><td><code>src/integrations/google-calendar.ts</code></td><td>Stable IDs plus POST-conflict and uncertain-write lookup prevent duplicate creates; request handling declares two transient retries.</td><td>Make the declared retry loop effective for transient <code>GoogleCalendarError</code>s, retain original safe status/reason metadata, record attempt counts at the boundary, and test network/429/5xx, permanent, and authorization outcomes.</td></tr>
+      <tr><td><code>src/calendar-agent-workflow.ts</code></td><td>Fresh revalidation precedes a single write; successful writes enter a confirmation/Edit wait; a notification failure takes a confirmation-only recovery path.</td><td>Make recovery state and telemetry explicit, prove notification failure cannot repeat the write step, and cover first/second confirmation failure, stale/replayed actions, reconnect/Retry, and post-write edit paths.</td></tr>
+      <tr><td><code>src/interaction-router.ts</code> and Telegram trigger</td><td>Opaque, versioned, expiring registrations claim callbacks/replies before a workflow resume.</td><td>Add integration characterization for duplicate webhook updates, repeated callback delivery, wrong chat, stale token/version, expiry, and transient router/Telegram delivery behavior across Calendar controls.</td></tr>
+      <tr><td><code>src/runtime/logging.ts</code></td><td>Console JSON is gated by <code>LOG_LEVEL=info</code> and accepts metadata-only fields.</td><td>Define event names/outcome taxonomy and emit bounded retry, Calendar request failure, confirmation recovery, duplicate/ignored interaction, and terminal workflow records. Add redaction assertions that inspect captured logs.</td></tr>
+      <tr><td>README and architecture docs</td><td>Contain baseline OAuth, local development, testing, and deployment instructions.</td><td>Add a Calendar-specific operator runbook: Google configuration/scopes/redirects, Cloudflare variables and secrets, dev-bot setup, pre-deploy gate, controlled create/inspect/remove smoke, reconnect procedure, log lookup, and symptom-to-safe-action troubleshooting.</td></tr>
+    </tbody></table>
+    <div class="callout note"><strong>Implementation observation:</strong> the Google client currently constructs a transient error for retryable HTTP responses but its generic error catch exits the loop immediately. The first implementation slice is to correct that behavior with focused tests before broadening coverage.</div>
+
+    <h2>3. Reliability state model</h2>
+    <table><thead><tr><th>Condition</th><th>Allowed work</th><th>User-visible result</th></tr></thead><tbody>
+      <tr><td>Transient read/write failure before outcome is known</td><td>At most two same-identity attempts; after an uncertain create, verify the managed event before another create.</td><td>Concise temporary failure after the bounded budget, or normal continuation when the operation succeeds/reconciles.</td></tr>
+      <tr><td>Permanent request/policy failure</td><td>No retry and no mutation beyond work already known to have completed.</td><td>Concise safe failure; no provider body or Calendar content.</td></tr>
+      <tr><td>Authorization failure</td><td>Use the existing 15-minute reconnect then explicit one-shot Retry flow.</td><td>Reconnect guidance, then a user-initiated retry or cancellation.</td></tr>
+      <tr><td>Calendar write succeeded; confirmation send fails</td><td>Do not enter the write step again. Attempt bounded confirmation-only recovery with the same deterministic copy and fresh valid Edit interaction only if delivery succeeds.</td><td>Either confirmation/Edit, or a loggable safe delivery failure; never a duplicate event.</td></tr>
+      <tr><td>Duplicate or stale Telegram delivery</td><td>Router claim/acknowledgement is idempotent; consumed, expired, mismatched, and superseded interactions dispatch no new action.</td><td>Callback acknowledgement where Telegram requires it; no Calendar mutation or second workflow transition.</td></tr>
+    </tbody></table>
+
+    <h2>4. Verification matrix</h2>
+    <table><thead><tr><th>Layer</th><th>Required coverage</th></tr></thead><tbody>
+      <tr><td>Google client unit</td><td>Success; network failure; 429 and each 5xx class retrying exactly twice; bounded backoff; no retry for 4xx/permanent/authorization; transient exhaust; POST conflict lookup; uncertain create lookup; update/delete/reconciliation error classification; no response body in errors/logs.</td></tr>
+      <tr><td>Calendar workflow unit</td><td>One-off and recurrence create/update; fresh revalidation; authorization reconnect plus one Retry; failure before write; confirmation first-send failure then recovery; recovery failure; no repeated write after confirmation failure; Edit and full-series Edit; every cancellation path; exhausted interaction/session budgets.</td></tr>
+      <tr><td>Telegram/router integration</td><td>Command redelivery; duplicate callback and reply; callback acknowledgement; stale/consumed/expired/wrong-chat/unknown registrations; replacement invalidation; duplicate delivery during confirmation recovery; no duplicate Calendar calls.</td></tr>
+      <tr><td>Observability tests</td><td>One structured record per operational transition with safe categories/retry counts; logging disabled outside <code>info</code>; captured records never contain request text, title, description, location, token, OAuth code, provider body, or raw Telegram payload.</td></tr>
+      <tr><td>System</td><td><code>pnpm check</code>, unit, integration, and credential-gated provider contract suites. Controlled dev-bot smoke creates a uniquely labeled short-lived one-off and supported series in the connected primary calendar, inspects required fields and duplicate behavior, exercises a safe recovery/reconnect path where feasible, then removes test events in cleanup.</td></tr>
+    </tbody></table>
+
+    <h2>5. Documentation and deployment handoff</h2>
+    <ol>
+      <li>Document the minimum Google Cloud configuration: Calendar API, OAuth Web application, exact production and local callback URIs, consent ownership, and primary-calendar-only permission boundary.</li>
+      <li>Document Cloudflare configuration by secret versus non-secret variable, Durable Object/Workflow migrations, Access protection/bypass route, Telegram webhook secret, timezone, and production-safe logging settings.</li>
+      <li>Provide a reproducible local dev-bot flow: isolated bot, tunnel, webhook registration, OAuth redirect origin, safe test-event naming, inspection, and mandatory cleanup.</li>
+      <li>Make the pre-deploy command sequence explicit, including automated checks, required environment review, deployment, dev-bot smoke, and post-deploy log inspection.</li>
+      <li>Add a troubleshooting table for unconnected/revoked Google authorization, redirect mismatch, webhook authentication failure, missing workflow/router bindings, transient Google failure, confirmation-delivery failure, stale controls, duplicate updates, and how to collect metadata-only logs.</li>
+      <li>Update architecture request flows and module/deployment inventory only where the delivered retry/recovery/logging contracts change deployed behavior.</li>
+    </ol>
+
+    <h2>6. Delivery sequence and acceptance</h2>
+    <ol>
+      <li>Claim Beads issue <code>agent-harness-0sg.6</code> and record this plan.</li>
+      <li>Correct and test bounded Google transient retry classification/backoff while preserving idempotent uncertain-write verification.</li>
+      <li>Harden confirmation-only recovery and add workflow/integration proof that a completed mutation is never repeated.</li>
+      <li>Complete duplicate-delivery, stale-control, cancellation, reconnect, failure, recurrence, and privacy-log decision matrices; create linked Beads follow-ups only for genuinely out-of-scope defects.</li>
+      <li>Implement the Calendar operator runbook and update architecture documents as needed.</li>
+      <li>Run full automated checks and the controlled dev-bot smoke. Record exact evidence in Beads; leave the milestone open until smoke and documentation acceptance are complete.</li>
+    </ol>
+    <div class="callout risk"><strong>Release constraint:</strong> do not deploy through the production bot. The roadmap requires the separate development bot and cleanup of every temporary test event. Commit, push, and issue closure remain subject to explicit authorization and successful acceptance evidence.</div>
+  </body>
+</html>

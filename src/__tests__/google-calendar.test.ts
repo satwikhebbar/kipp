@@ -340,6 +340,7 @@ describe("Google Calendar client", () => {
   it.each([
     [400, "permanent", 1],
     [401, "authorization", 1],
+    [429, "transient", 3],
     [500, "transient", 3],
   ] as const)("classifies a reconciliation list failure (%i) as %s", async (status, kind, calls) => {
     const fetch = vi.fn().mockResolvedValue(response(status))
@@ -349,8 +350,38 @@ describe("Google Calendar client", () => {
       createGoogleCalendarClient(await environment()).reconcileManagedSeries(EVENT, []),
     ).rejects.toMatchObject({
       kind,
+      ...(kind === "transient" ? { status, retryCount: 2 } : {}),
     })
     expect(fetch).toHaveBeenCalledTimes(calls)
+  })
+
+  it("logs bounded transient retry metadata without Calendar payloads", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    const fetch = vi.fn().mockResolvedValue(response(500, { error: { message: EVENT.summary } }))
+    vi.stubGlobal("fetch", fetch)
+    const env = await environment()
+    env.LOG_LEVEL = "info"
+
+    await expect(createGoogleCalendarClient(env).deleteManagedEvent(EVENT.id)).rejects.toMatchObject({
+      kind: "transient",
+      retryCount: 2,
+    })
+
+    expect(
+      log.mock.calls
+        .map(([entry]) => JSON.parse(String(entry)))
+        .filter((entry) => entry.event === "google-calendar-request"),
+    ).toEqual([
+      expect.objectContaining({
+        outcome: "failed",
+        retryCount: 1,
+        failureCategory: "calendar-transient",
+        details: { httpStatus: 500 },
+      }),
+      expect.objectContaining({ retryCount: 2 }),
+    ])
+    expect(log.mock.calls.flat().join(" ")).not.toContain(EVENT.summary)
+    log.mockRestore()
   })
 
   it.each([200, 404])("deletes managed parents idempotently for provider status %i", async (status) => {

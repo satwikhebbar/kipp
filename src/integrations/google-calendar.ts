@@ -1,6 +1,7 @@
 import { createTokenVault } from "../core/token-vault-client"
 import { type Env, type GoogleCalendarTokens, TOKEN_PROVIDER } from "../core/types"
 import { HTTP_STATUS, isTransientHttpStatus } from "../runtime/http"
+import { logRuntime } from "../runtime/logging"
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const GOOGLE_CALENDAR_API_URL = "https://www.googleapis.com/calendar/v3"
@@ -167,6 +168,8 @@ export class GoogleCalendarError extends Error {
     readonly status?: number,
     /** Sanitized Google error reason token; never contains the provider message or request data. */
     readonly providerReason?: string,
+    /** Number of retry attempts already made; metadata only. */
+    readonly retryCount = 0,
   ) {
     super(message)
   }
@@ -244,13 +247,36 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         if (response.status === HTTP_STATUS.UNAUTHORIZED || response.status === HTTP_STATUS.FORBIDDEN)
           throw new GoogleCalendarError("Google Calendar requires reconnection", "authorization", response.status)
         if (response.ok || !isTransientHttpStatus(response.status)) return response
-        lastFailure = new GoogleCalendarError("Google Calendar is temporarily unavailable", "transient")
+        lastFailure = new GoogleCalendarError(
+          "Google Calendar is temporarily unavailable",
+          "transient",
+          response.status,
+          undefined,
+          attempt,
+        )
       } catch (error) {
-        if (error instanceof GoogleCalendarError) throw error
-        lastFailure = new GoogleCalendarError("Google Calendar is temporarily unavailable", "transient")
+        if (error instanceof GoogleCalendarError) {
+          if (error.kind !== "transient") throw error
+          lastFailure = new GoogleCalendarError(error.message, error.kind, error.status, error.providerReason, attempt)
+        } else
+          lastFailure = new GoogleCalendarError(
+            "Google Calendar is temporarily unavailable",
+            "transient",
+            undefined,
+            undefined,
+            attempt,
+          )
       }
-      if (attempt < MAX_TRANSIENT_RETRIES)
+      if (attempt < MAX_TRANSIENT_RETRIES) {
+        logRuntime(env, {
+          event: "google-calendar-request",
+          outcome: "failed",
+          retryCount: attempt + 1,
+          failureCategory: "calendar-transient",
+          details: { httpStatus: lastFailure.status ?? -1 },
+        })
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * (attempt + 1)))
+      }
     }
     throw lastFailure ?? new GoogleCalendarError("Google Calendar request failed", "permanent")
   }

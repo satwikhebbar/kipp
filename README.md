@@ -282,6 +282,48 @@ pnpm deploy
 The deploy command runs the pre-deployment checks and deploys with
 `wrangler.prod.toml`. `pnpm dev` uses `wrangler.local.toml`.
 
+### Calendar operational runbook
+
+Before the first deployment, create a Google OAuth **Web application**, enable
+the Google Calendar API, and register the exact callback URI used by Kipp:
+
+```text
+https://<worker-host>/auth/google-calendar/callback
+```
+
+For local development, register `http://localhost:8787/auth/google-calendar/callback`
+and set `GOOGLE_CALENDAR_REDIRECT_ORIGIN=http://localhost:8787`. The Google
+client requires only `calendar.events.owned` and `calendar.events.freebusy`; it
+operates on the connected account's primary calendar. Store
+`GOOGLE_CALENDAR_CLIENT_ID` and `GOOGLE_CALENDAR_CLIENT_SECRET` as secrets, not
+in either Wrangler configuration file.
+
+Before deploying a Calendar change, confirm that production has the
+`CALENDAR_WORKFLOW`, `TOKEN_VAULT`, and `INTERACTION_ROUTER` bindings from the
+checked-in Wrangler configuration; the Access-protected Google setup route; the
+Telegram webhook secret and allowed user ID; an IANA `TIMEZONE`; and production
+token-encryption keys. Use `LOG_LEVEL=info` only when structured operational
+logs are required. Those records contain outcome categories, opaque workflow or
+interaction IDs, safe failure details, and retry counts—never Calendar content,
+Telegram text, OAuth codes, tokens, or provider response bodies.
+
+Run `pnpm check`, then `pnpm deploy`. Validate the deployed slice only with the
+separate development Telegram bot: connect its Google account through
+`/setup/google-calendar`, create a uniquely labelled, short-lived `/calendar`
+test event (and one supported short test series when recurrence changes), inspect
+the primary calendar fields and confirmation/Edit behavior, and delete every
+test event during cleanup. Do not point the production bot at this smoke route.
+
+| Symptom | Safe operator action |
+| --- | --- |
+| “Google Calendar is not connected” or a revoked token | Open the protected `/setup/google-calendar` route, complete consent, then use the existing **Retry** control within 15 minutes. OAuth completion never creates an event automatically. |
+| Google rejects the OAuth redirect | Match the Google Console redirect URI exactly to the deployed host and `GOOGLE_CALENDAR_REDIRECT_ORIGIN`, then begin a new setup attempt. |
+| `/calendar` reports that Calendar is not configured | Verify the workflow binding and both Google OAuth secrets in the target Cloudflare environment; do not add credentials to tracked configuration. |
+| A request fails temporarily | Retry only through a new user request or the explicit authorization-recovery control. Kipp's client makes at most two transient retries and reuses the same opaque event identity; do not run manual duplicate creates. |
+| A confirmation is missing after a Calendar write | Check metadata-only Worker logs by opaque workflow ID. Confirmation recovery never repeats the Calendar write, so inspect the primary calendar before sending another request. |
+| A button has no effect | It may be consumed, superseded, wrong-chat, or past the 15-minute expiry. Start a new `/calendar` request rather than replaying controls. |
+| Telegram returns webhook authentication failures | Reconcile the webhook `secret_token` with `TELEGRAM_WEBHOOK_SECRET`, keep the webhook bypass limited to `/webhook/telegram`, and retain Access protection for setup and administrative routes. |
+
 ## Repository layout
 
 ```text

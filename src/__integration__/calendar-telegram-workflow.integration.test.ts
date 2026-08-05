@@ -874,4 +874,25 @@ describe("agent-centered Calendar Telegram integration", () => {
 
     expect(calendar.getReceivedEvents()).toHaveLength(0)
   })
+
+  it("acknowledges but dispatches a duplicate Calendar callback only once", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = createFakeWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    router.register(100, {
+      interactionId: "confirmation-edit",
+      version: 1,
+      workflowId: "calendar-wf",
+      kind: INTERACTION_KIND.CALENDAR_EDIT,
+      callbackToken: "confirmation-edit",
+      interactionGroup: "calendar",
+    })
+
+    await handleTelegramWebhook(callback("confirmation-edit", 10), runtimeEnv)
+    await handleTelegramWebhook(callback("confirmation-edit", 10), runtimeEnv)
+
+    expect(calendar.getReceivedEvents()).toHaveLength(1)
+  })
 })

@@ -163,8 +163,7 @@ export class InteractionRouterDO implements DurableObject {
     this.removeExpiredOrOldConsumedInteractions()
     const row = this.findInteraction({ token, replyTo, plainText })
     if (!row || row.expires_at <= Date.now()) return json({ interaction: null })
-    if (row.consumed_update_id !== null && row.consumed_update_id !== numericUpdateId)
-      return json({ interaction: null })
+    if (row.consumed_update_id !== null) return json({ interaction: null })
     this.claimInteraction(row.interaction_id, numericUpdateId)
     const interaction: ResolvedInteraction = {
       interactionId: row.interaction_id,
