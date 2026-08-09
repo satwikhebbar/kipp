@@ -37,6 +37,7 @@ describe("Calendar agent contracts", () => {
       durationMinutes: 30,
       classification: "maintenance",
       recurrenceIsExplicit: true,
+      needsClarification: false,
       end: { mode: "default_horizon" },
     }
 
@@ -55,6 +56,29 @@ describe("Calendar agent contracts", () => {
         proposal: { ...proposal, recurrence: { cadence: "monthly" } },
       }).success,
     ).toBe(false)
+  })
+
+  it("requires recurring candidates to declare whether explicit configuration is supported", () => {
+    const proposal = {
+      title: "Quarterly review",
+      firstDate: "2026-09-26",
+      dateIsExplicit: true,
+      startTime: "11:30",
+      timeIsExplicit: true,
+      durationMinutes: 30,
+      classification: "ordinary" as const,
+      recurrence: { cadence: "weekly" as const, weekdays: { mode: "first_date_weekday" as const } },
+      recurrenceIsExplicit: true,
+      end: { mode: "default_horizon" },
+    }
+
+    expect(evaluateCalendarCandidateInputSchema.safeParse({ kind: "recurring", proposal }).success).toBe(false)
+    expect(
+      evaluateCalendarCandidateInputSchema.safeParse({
+        kind: "recurring",
+        proposal: { ...proposal, needsClarification: false },
+      }).success,
+    ).toBe(true)
   })
 
   it("returns hostile event titles as inert projected data", async () => {
@@ -140,6 +164,7 @@ describe("Calendar agent contracts", () => {
       classification: "ordinary",
       recurrence: { cadence: "biweekly" },
       recurrenceIsExplicit: true,
+      needsClarification: false,
     }
 
     await expect(

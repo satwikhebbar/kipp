@@ -2,6 +2,7 @@ export const CALENDAR_ISSUE_CODES = [
   "ambiguous_request",
   "missing_information",
   "unsupported_recurrence",
+  "unsupported_configuration",
   "missing_date",
   "invalid_first_date",
   "invalid_end_date",
@@ -48,6 +49,8 @@ export function legacyCalendarIssueMessage(issue: CalendarValidationIssue): stri
       return "Please tell me the missing scheduling details."
     case "unsupported_recurrence":
       return "Please choose a supported recurrence."
+    case "unsupported_configuration":
+      return "That configuration is not supported. I can schedule daily, weekly, biweekly, monthly, or bimonthly recurrence within six months."
     case "missing_date":
       return "Please tell me the date."
     case "invalid_first_date":

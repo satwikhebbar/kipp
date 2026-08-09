@@ -71,6 +71,7 @@ const RECURRING = {
     classification: "ordinary" as const,
     recurrence: { cadence: "weekly" as const, weekdays: { mode: "first_date_weekday" as const } },
     recurrenceIsExplicit: true,
+    needsClarification: false,
     end: { mode: "count" as const, occurrences: 3 },
   },
 }

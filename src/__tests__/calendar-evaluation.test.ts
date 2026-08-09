@@ -58,6 +58,7 @@ describe("Calendar candidate evaluation", () => {
           classification: "ordinary",
           recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
           recurrenceIsExplicit: true,
+          needsClarification: false,
           end: { mode: "count", occurrences: 3 },
         },
       },
@@ -89,6 +90,7 @@ describe("Calendar candidate evaluation", () => {
           classification: "ordinary",
           recurrence: { cadence: "biweekly" },
           recurrenceIsExplicit: true,
+          needsClarification: false,
           end: { mode: "default_horizon" },
         },
       },
@@ -117,6 +119,7 @@ describe("Calendar candidate evaluation", () => {
           classification: "ordinary",
           recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
           recurrenceIsExplicit: true,
+          needsClarification: false,
           end: { mode: "count", occurrences: 3 },
         },
       },
@@ -155,6 +158,7 @@ describe("Calendar candidate evaluation", () => {
           classification: "ordinary",
           recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
           recurrenceIsExplicit: false,
+          needsClarification: false,
           end: { mode: "default_horizon" },
         },
       },
@@ -167,6 +171,35 @@ describe("Calendar candidate evaluation", () => {
         { code: "missing_date", field: "firstDate" },
         { code: "unsupported_recurrence", field: "recurrence" },
       ],
+    })
+    expect(getBusyIntervals).not.toHaveBeenCalled()
+  })
+
+  it("asks before scheduling when an explicit unsupported recurrence is requested", async () => {
+    const getBusyIntervals = vi.fn()
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "recurring",
+        proposal: {
+          title: "Quarterly investment review",
+          firstDate: "2026-09-26",
+          dateIsExplicit: true,
+          startTime: "11:30",
+          timeIsExplicit: true,
+          durationMinutes: 30,
+          classification: "ordinary",
+          recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+          recurrenceIsExplicit: true,
+          needsClarification: true,
+          end: { mode: "default_horizon" },
+        },
+      },
+      { ...CONTEXT, ledger: createCalendarPlanLedger(), getBusyIntervals },
+    )
+
+    expect(result).toEqual({
+      kind: "needs_input",
+      issues: [{ code: "unsupported_configuration", field: "recurrence" }],
     })
     expect(getBusyIntervals).not.toHaveBeenCalled()
   })
