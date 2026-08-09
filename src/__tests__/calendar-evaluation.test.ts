@@ -203,4 +203,30 @@ describe("Calendar candidate evaluation", () => {
     })
     expect(getBusyIntervals).not.toHaveBeenCalled()
   })
+
+  it("flags an explicit unsupported configuration on a valid-date one-off without asking for the date", async () => {
+    const getBusyIntervals = vi.fn()
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "one_off",
+        proposal: {
+          title: "Quarterly investment review",
+          localDate: "2026-09-26",
+          startTime: "11:30",
+          durationMinutes: 30,
+          dateIsExplicit: true,
+          timeIsExplicit: true,
+          classification: "ordinary",
+          needsClarification: true,
+        },
+      },
+      { ...CONTEXT, ledger: createCalendarPlanLedger(), getBusyIntervals },
+    )
+
+    expect(result).toEqual({
+      kind: "needs_input",
+      issues: [{ code: "unsupported_configuration", field: "recurrence" }],
+    })
+    expect(getBusyIntervals).not.toHaveBeenCalled()
+  })
 })
