@@ -19,6 +19,7 @@ const MONTHLY: RecurringProposal = {
   classification: "ordinary",
   recurrence: { cadence: "monthly", anchor: { mode: "day_of_month" } },
   recurrenceIsExplicit: true,
+  needsClarification: false,
   end: { mode: "count", occurrences: 4 },
 }
 
@@ -173,6 +174,12 @@ describe("Calendar recurrence policy", () => {
       { code: "invalid_duration_increment", field: "durationMinutes", params: { increment: 15 } },
       { code: "missing_or_invalid_time", field: "startTime" },
       { code: "invalid_first_date", field: "firstDate" },
+    ])
+  })
+
+  it("flags an explicit unsupported recurrence configuration before any scheduling", () => {
+    expect(validateRecurringProposalIssues({ ...MONTHLY, needsClarification: true })).toEqual([
+      { code: "unsupported_configuration", field: "recurrence" },
     ])
   })
 

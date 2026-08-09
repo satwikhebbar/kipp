@@ -130,6 +130,74 @@ describe("bounded Calendar agent session", () => {
     expect(result.providerTurns).toBe(3)
   })
 
+  it("forces the unsupported_configuration reason into an explicit-unsupported clarification", async () => {
+    const quarterly = {
+      kind: "recurring",
+      proposal: {
+        title: "Quarterly investment review",
+        firstDate: "2026-09-26",
+        dateIsExplicit: true,
+        startTime: "11:30",
+        timeIsExplicit: true,
+        durationMinutes: 30,
+        classification: "ordinary",
+        recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+        recurrenceIsExplicit: true,
+        needsClarification: true,
+        end: { mode: "default_horizon" },
+      },
+    }
+    const provider = providerWith(
+      {
+        toolCalls: [{ id: "evaluate-quarterly", name: "evaluate_calendar_candidate", input: quarterly }],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      {
+        toolCalls: [
+          {
+            id: "omitted-reason",
+            name: "needs_user_input",
+            input: {
+              message: "What cadence should I use?",
+              reasonCodes: ["missing_date"],
+              interaction: { kind: "reply" },
+            },
+          },
+        ],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      {
+        toolCalls: [
+          {
+            id: "complete-clarification",
+            name: "needs_user_input",
+            input: {
+              message:
+                "Quarterly recurrence isn't supported. I can do daily, weekly, biweekly, monthly, or bimonthly within six months. Which cadence should I schedule?",
+              reasonCodes: ["unsupported_configuration"],
+              interaction: { kind: "reply" },
+            },
+          },
+        ],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+    )
+
+    const result = await runCalendarAgentSession(
+      provider,
+      [{ role: "user", text: "Quarterly Investment Review starting Sep 26, 11:30am for 30min" }],
+      options(),
+    )
+
+    expect(result.terminal).toMatchObject({
+      kind: "needs_user_input",
+      reasonCodes: ["unsupported_configuration"],
+    })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "needs_user_input", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+  })
+
   it("repairs a dropped explicit occurrence count before issuing a plan", async () => {
     const proposal = {
       title: "Substack metrics review",
@@ -141,6 +209,7 @@ describe("bounded Calendar agent session", () => {
       classification: "ordinary",
       recurrence: { cadence: "biweekly" },
       recurrenceIsExplicit: true,
+      needsClarification: false,
     }
     let turn = 0
     const provider: ToolProviderClient = {
@@ -225,6 +294,7 @@ describe("bounded Calendar agent session", () => {
                     classification: "ordinary",
                     recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
                     recurrenceIsExplicit: true,
+                    needsClarification: false,
                     end: { mode: "count", occurrences: 3 },
                   },
                 },

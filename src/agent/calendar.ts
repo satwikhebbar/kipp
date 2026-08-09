@@ -42,7 +42,11 @@ export const oneOffCandidateSchema = z
     description: z.string().optional(),
     location: z.string().optional(),
     reminderMinutes: z.number().int().optional(),
-    needsClarification: z.boolean(),
+    needsClarification: z
+      .boolean()
+      .describe(
+        "True only when the user explicitly requested a configuration outside the supported boundary, such as an unsupported recurrence cadence or calendar setting.",
+      ),
   })
   .strict()
 
@@ -115,6 +119,11 @@ export const recurringCandidateSchema = z
     recurrenceIsExplicit: z
       .boolean()
       .describe("True only when the user explicitly supplied or confirmed a supported recurrence cadence."),
+    needsClarification: z
+      .boolean()
+      .describe(
+        "True only when the user explicitly requested a configuration outside the supported boundary. Supported recurrence cadences are daily, weekly, biweekly, monthly, and bimonthly within a six-month horizon. Never silently substitute a supported cadence or downgrade an explicit unsupported recurrence to a one-off; set this to true instead.",
+      ),
     end: recurrenceEndSchema,
     description: z.string().optional(),
     location: z.string().optional(),

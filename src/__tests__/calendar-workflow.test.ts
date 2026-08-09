@@ -68,6 +68,7 @@ const RECURRING = {
     classification: "ordinary" as const,
     recurrence: { cadence: "weekly" as const, weekdays: { mode: "first_date_weekday" as const } },
     recurrenceIsExplicit: true,
+    needsClarification: false,
     end: { mode: "count" as const, occurrences: 3 },
   },
 }
@@ -241,6 +242,66 @@ describe("agent-centered CalendarWorkflow", () => {
       text: "Call Jamie tomorrow at 7pm",
     })
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("clarifies an explicit unsupported recurrence before writing instead of degrading it", async () => {
+    const quarterly = {
+      ...RECURRING,
+      proposal: {
+        ...RECURRING.proposal,
+        title: "Quarterly investment review",
+        firstDate: "2026-09-26",
+        needsClarification: true,
+      },
+    }
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [{ id: "evaluate-quarterly", name: "evaluate_calendar_candidate", input: quarterly }],
+      usage: {},
+    })
+    mockGenerate.mockImplementationOnce(async ({ messages }: { messages: ToolConversationMessage[] }) => {
+      const evaluation = toolResult(messages, "evaluate_calendar_candidate") as {
+        issues: Array<{ code: string }>
+      }
+      return {
+        toolCalls: [
+          {
+            id: "clarify-quarterly",
+            name: "needs_user_input",
+            input: {
+              message:
+                "Quarterly recurrence isn't supported. I can schedule daily, weekly, biweekly, monthly, or bimonthly within six months. Which cadence should I use?",
+              reasonCodes: evaluation.issues.map((issue) => issue.code),
+              interaction: { kind: "reply" },
+            },
+          },
+        ],
+        usage: {},
+      }
+    })
+    mockGenerate.mockResolvedValueOnce({
+      toolCalls: [{ id: "evaluate-weekly", name: "evaluate_calendar_candidate", input: RECURRING }],
+      usage: {},
+    })
+    mockGenerate.mockImplementationOnce(async ({ messages }: { messages: ToolConversationMessage[] }) => ({
+      toolCalls: [
+        {
+          id: "ready-weekly",
+          name: "ready_to_create",
+          input: { planId: toolResult(messages, "evaluate_calendar_candidate").planId },
+        },
+      ],
+      usage: {},
+    }))
+
+    await run(
+      createStep({ type: "event", payload: { text: "Weekly is fine" } }, { type: "timeout" }),
+      "Quarterly Investment Review starting Sep 26, 11:30am for 30min",
+    )
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ summary: "Weekly review", recurrence: [expect.stringContaining("COUNT=3")] }),
+    )
   })
 
   it("recovers when the provider batches a fresh evaluation with a premature handoff", async () => {
