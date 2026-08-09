@@ -112,7 +112,13 @@ describe("bounded Calendar agent session", () => {
             name: "needs_user_input",
             input: {
               message: "Please provide a title, date, valid time, and duration in 15-minute increments.",
-              reasonCodes: ["missing_date", "invalid_title", "invalid_duration_increment", "missing_or_invalid_time"],
+              reasonCodes: [
+                "unsupported_configuration",
+                "missing_date",
+                "invalid_title",
+                "invalid_duration_increment",
+                "missing_or_invalid_time",
+              ],
               interaction: { kind: "reply" },
             },
           },

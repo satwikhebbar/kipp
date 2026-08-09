@@ -154,7 +154,8 @@ export function reminderMinutes(proposal: OneOffProposal): number {
 /** Returns every independently discoverable one-off policy violation as typed, value-free facts. */
 export function validateProposalIssues(proposal: OneOffProposal): CalendarValidationIssue[] {
   const issues: CalendarValidationIssue[] = []
-  if (proposal.needsClarification || !proposal.localDate || !DATE_PATTERN.test(proposal.localDate))
+  if (proposal.needsClarification) issues.push({ code: "unsupported_configuration", field: "recurrence" })
+  if (!proposal.localDate || !DATE_PATTERN.test(proposal.localDate))
     issues.push({ code: "missing_date", field: "localDate" })
   if (!proposal.title.trim() || proposal.title.length > MAX_EVENT_TITLE_LENGTH)
     issues.push({ code: "invalid_title", field: "title", params: { maxCharacters: MAX_EVENT_TITLE_LENGTH } })
