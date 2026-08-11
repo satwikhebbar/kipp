@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp Calendar — Owner-Visible Conflict Disclosure and Rescheduling (Design)</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --red:#f87171; --code:#020617; } * { box-sizing:border-box; } body { max-width:1080px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; } h1,h2,h3 { line-height:1.25; color:#f8fafc; } h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; } h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; } h3 { margin-top:28px; font-size:1.12rem; } p,li { max-width:94ch; } .lede { color:var(--muted); font-size:1.1rem; } .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; } .note { border-left-color:var(--amber); } .risk { border-left-color:var(--red); } .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; } code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; } pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); } table { width:100%; border-collapse:collapse; margin:20px 0; } th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#cbd5e1; background:#1e293b; } ol>li { margin:14px 0; } @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp Calendar — Owner-Visible Conflict Disclosure and Rescheduling</h1>
+    <p class="lede">Design for GitHub issue #40: let the authenticated Calendar owner learn, on request, which existing event occupies a requested time and — only after seeing the proposed change and confirming — have Kipp move that event deterministically. The model never receives event details, OAuth material, or write authority, and the FreeBusy-only default experience is unchanged until this is approved and implemented.</p>
+    <div class="callout"><strong>Outcome:</strong> the owner taps <em>Why is this time busy?</em>, sees a deterministic summary (title + times) of every overlapping event, and can choose to reschedule a single, non-recurring, non-all-day event. Any move requires a second explicit confirmation of the exact proposed change, is performed by deterministic workflow code with ETag concurrency and idempotent recovery, auto-creates the original request at the freed time, offers a 15-minute full-revert Undo, and leaves no model-visible or log-visible event detail.<br /><span class="tag">Design only</span><span class="tag">No model access</span><span class="tag">Explicit confirmation</span><span class="tag">ETag concurrency</span><span class="tag">Undo</span></div>
+
+    <h2>1. Scope and invariants</h2>
+    <table><thead><tr><th>Included</th><th>Excluded</th></tr></thead><tbody>
+      <tr><td>Owner-initiated disclosure of the conflicting event(s) (title + times only) on the primary calendar; owner-approved, deterministic rescheduling of one existing non-recurring, non-all-day conflicting event; auto-creation of the original request at the freed time; explicit two-step confirmation; ETag-guarded move and undo; idempotent recovery; 15-minute expiry; integration/security coverage.</td><td>Any automatic disclosure, move, cancel, overwrite, or deletion of an existing event; model-visible event details; new OAuth scopes; moving recurring-series or all-day events (disclosed but not movable); moving events on non-primary calendars; post-window management; changing the current FreeBusy-only conflict message or its defaults.</td></tr>
+    </tbody></table>
+    <ul>
+      <li>The default conflict experience is byte-for-byte unchanged. The disclosure and reschedule options are added actions; the existing best-alternative, <em>Try another time</em>, and <em>Cancel</em> flow remains the default path.</li>
+      <li>The model never receives event summaries, titles, times, descriptions, locations, attendees, ETags, or raw Calendar responses. Only the authenticated owner may see the disclosure, only by tapping the disclosure action.</li>
+      <li>No existing event is moved unless the owner first sees the exact proposed change and then confirms it with a dedicated button.</li>
+      <li>Only deterministic workflow code performs reads for disclosure and writes for rescheduling. The move is ETag-guarded, idempotent, and reversible within the 15-minute interaction window.</li>
+      <li>Recurring-series and all-day conflicting events may be disclosed (title + times) but never rescheduled; recurring series already have their own adjustment flow.</li>
+    </ul>
+
+    <h2>2. Authorization boundary</h2>
+    <p>The existing security model already provides every boundary this feature needs; no OAuth scope change is required.</p>
+    <table><thead><tr><th>Boundary</th><th>Mechanism</th></tr></thead><tbody>
+      <tr><td>Telegram identity</td><td>The existing allow-list (<code>TELEGRAM_ALLOWED_USER_ID</code>) and per-chat interaction router already restrict all bot interactions to the authenticated owner. The disclosure is only ever rendered into the owner's chat, in response to the owner's own button tap.</td></tr>
+      <tr><td>Google identity</td><td>All reads and writes use the single connected Calendar account through the existing encrypted token vault. Kipp cannot select or change accounts.</td></tr>
+      <tr><td>Scope</td><td>The current scopes (<code>calendar.events.owned</code> + <code>calendar.events.freebusy</code>) already permit reading a bounded projection of primary-calendar events (used today by <code>list_calendar_events</code>) and updating events on owned calendars. The primary calendar is owned, so the reschedule write is within the existing consent surface.</td></tr>
+      <tr><td>Model boundary</td><td>The model sees only the unchanged privacy-safe conflict message and its existing typed options. The disclosure read and the reschedule write happen in workflow code, never inside the agent session or a model tool. There is no write tool.</td></tr>
+      <tr><td>Mutation authority</td><td>Only <code>runAgentCenteredCalendarWorkflow</code> may call the new client operations, and only after the owner has confirmed the exact proposed change.</td></tr>
+    </tbody></table>
+    <div class="callout note"><strong>Authorization failure behavior:</strong> if reading the conflicting event or moving it fails with an authorization error (token revoked, scope missing, 401/403), the workflow does not disclose and does not move. It routes through the existing reconnect-then-Retry flow, never leaking whether an event exists or any of its fields.</div>
+
+    <h2>3. Owner-visible disclosure policy</h2>
+    <p><strong>Minimum disclosed fields:</strong> the overlapping event's title and its start/end times, plus the all-day flag when set. Nothing else: never description, location, attendees, organizer, links, conferencing data, transparency/visibility state, extended properties, or raw provider metadata.</p>
+    <table><thead><tr><th>Field</th><th>Disclosed to owner</th><th>Visible to model</th><th>In logs</th></tr></thead><tbody>
+      <tr><td>Title (summary)</td><td>Yes, on owner request</td><td>No (only via the existing bounded <code>list_calendar_events</code> projection, unchanged)</td><td>No</td></tr>
+      <tr><td>Start/end times</td><td>Yes, on owner request</td><td>No</td><td>No</td></tr>
+      <tr><td>All-day flag</td><td>Yes, as part of the time line</td><td>No</td><td>No</td></tr>
+      <tr><td>ETag</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Description, location, attendees, links, conferencing, extendedProperties</td><td>No</td><td>No</td><td>No</td></tr>
+    </tbody></table>
+    <h3>Why this is safe in Telegram</h3>
+    <ul>
+      <li>The disclosure is rendered by a fixed workflow template, not by the model, so event titles are plain text that cannot change behavior. No <code>parse_mode</code> is used, so titles cannot inject formatting, links, or markup.</li>
+      <li>The message is delivered only to the owner's private chat through the allow-listed Telegram flow, on demand.</li>
+      <li>No Calendar event link, URL, or external identifier is included.</li>
+    </ul>
+    <p>Titles are treated as untrusted data end to end: the disclosure template prints them verbatim as plain text; no instruction-like content in a title can reach a prompt or a decision.</p>
+
+    <h2>4. Interaction flow</h2>
+    <p>The current conflict state machine is extended with deterministic sub-steps. The model's <code>needs_user_input</code> terminal is unchanged; the workflow adds one action to the existing button set and then drives the disclosure/reschedule sub-flow itself.</p>
+    <pre>
+Conflict detected (FreeBusy, unchanged)
+  → existing message + existing buttons
+  + [Why is this time busy?]  (new, deterministic)
+    → read overlapping event(s) via client (workflow-owned)
+    → list each event: "T (14:00–15:00)" + actions
+      [Reschedule &lt;title&gt;] [Try another time] [Cancel]
+      → [Reschedule &lt;title&gt;] (only for single, non-recurring,
+        non-all-day events)
+        → propose nearest free slot preserving duration (deterministic)
+        → "Move T from 14:00–15:00 to 18:00–19:00?" + actions
+          [Move it] [Cancel]
+          → [Move it]
+            → ETag-guarded idempotent update
+            → auto-create the original request at the freed time
+              (fresh revalidation, existing write path)
+            → confirmation + [Undo] [Continue]
+              → [Undo]: restore the moved event AND remove the
+                created request (full revert, ETag-guarded) → confirm
+              → [Continue]: finish normally
+    </pre>
+    <table><thead><tr><th>Step</th><th>Trigger</th><th>Deterministic action</th></tr></thead><tbody>
+      <tr><td>Disclose</td><td>Owner taps <em>Why is this time busy?</em></td><td>Read events overlapping the requested interval via a workflow-only client method; render one line per overlapping event (title + times).</td></tr>
+      <tr><td>Choose event</td><td>Owner taps <em>Reschedule &lt;title&gt;</em></td><td>Reschedule is offered per event, only when that event is single, non-recurring, and non-all-day. Multiple overlapping events are each listed with their own reschedule action; recurring/all-day conflicts are disclosed but not movable.</td></tr>
+      <tr><td>Propose move</td><td>Owner taps <em>Reschedule &lt;title&gt;</em></td><td>Reuse the existing candidate-slot search to find the nearest same-day free slot for the existing event, preserving its duration and reminder semantics.</td></tr>
+      <tr><td>Confirm</td><td>Owner taps <em>Move it</em></td><td>Fresh read of the event, capture its ETag, issue the guarded update, verify by re-read on uncertain outcome.</td></tr>
+      <tr><td>Create</td><td>Move confirmed (auto)</td><td>Re-validate the original request against the freed time and create it through the existing deterministic write path, confirming with the standard Add/Edit confirmation.</td></tr>
+      <tr><td>Undo</td><td>Owner taps <em>Undo</em> within 15 minutes</td><td>Full revert: restore the moved event's original times (ETag-guarded) and remove the created request, returning to the pre-move state; then confirm.</td></tr>
+      <tr><td>Continue</td><td>Owner taps <em>Continue</em></td><td>Finish the workflow normally; the original request is already created.</td></tr>
+    </tbody></table>
+    <div class="callout note"><strong>Progressive disclosure:</strong> no event detail appears until the owner taps the disclosure action. The default conflict message, the best-alternative option, and the <em>Try another time</em> / <em>Cancel</em> behavior are untouched.</div>
+
+    <h2>5. Deterministic update semantics</h2>
+    <h3>5.1 ETag / concurrency</h3>
+    <ul>
+      <li>Add an ETag-capable read and update to the Google client, used only by the reschedule/undo path. The existing create/update/reconcile paths keep their current behavior.</li>
+      <li>The move sends <code>If-Match: &lt;etag&gt;</code> captured from a fresh read immediately before the write. A <code>412 Precondition Failed</code> is a typed <code>precondition-failed</code> outcome, not an error body: the workflow surfaces a safe "availability changed" message, performs no overwrite, and re-evaluates. The owner's pending choice is preserved via the existing plan/option ledger.</li>
+      <li>If the event was deleted or is not found (<code>404</code>), the workflow reports the safe "availability changed" outcome and re-evaluates; it never recreates a moved event.</li>
+    </ul>
+    <h3>5.2 Idempotency</h3>
+    <ul>
+      <li>The move derives its identity from (event id, requested original start, proposed target start). On an uncertain write (network failure after Google applied it), the workflow re-reads the event and treats the move as complete if the event is already at the target start/end — the same verify-by-read pattern <code>createManagedEvent</code> already uses. No duplicate move is performed.</li>
+      <li>The original request is created only after the move is verified, using the existing managed-event identity (chat/message id), so its create is idempotent as today. An uncertain create is resolved by re-read before retry.</li>
+      <li>Undo is a full revert: restore the moved event's original times and delete the created request. Each half is idempotent via verify-by-read (restore only if not already at original; delete tolerates already-absent).</li>
+      <li>Telegram webhook redelivery of the same button resumes the same durable workflow step; it cannot re-issue a second write.</li>
+    </ul>
+    <h3>5.3 Expiry and staleness</h3>
+    <ul>
+      <li>All new interactions (disclosure choice, move confirmation, undo) reuse the existing 15-minute interaction TTL and router versioning. Expired or superseded buttons are ignored; version checks already reject stale callbacks.</li>
+      <li>The original start/end and the created request's identity are retained only in workflow step state for the 15-minute window, then discarded. There is no post-window management.</li>
+    </ul>
+    <h3>5.4 Logging and audit</h3>
+    <ul>
+      <li>Logs record only opaque workflow/event identifiers, outcome categories, HTTP status, and the typed concurrency outcome. Event titles, times, descriptions, locations, and ETag values are never logged.</li>
+      <li>Add redaction assertions that inspect captured logs and prove no title, time, or event content appears.</li>
+    </ul>
+
+    <h2>6. Client and workflow surface changes</h2>
+    <table><thead><tr><th>Location</th><th>Change</th></tr></thead><tbody>
+      <tr><td><code>src/integrations/google-calendar.ts</code></td><td>Extend the event read to capture <code>etag</code> (workflow-only). Add <code>findConflictingEvents(timeMin, timeMax, requestedStart, requestedEnd)</code> returning minimal snapshots <code>{ id, title, start, end, allDay, etag }</code> for events overlapping the requested interval, and an ETag-guarded update returning <code>{ ok } | { ok:false, reason: "precondition-failed" | "not-found" | "authorization" | "permanent" }</code>. The existing <code>list_calendar_events</code> projection and its model schema are unchanged.</td></tr>
+      <tr><td><code>src/calendar/evaluation.ts</code> / <code>plan.ts</code></td><td>No change to evaluation outcomes or the opaque plan/option ledger; the move operates on a workflow-resolved event identity, never a model-facing ID.</td></tr>
+      <tr><td><code>src/calendar/agent-workflow.ts</code></td><td>Add the deterministic disclosure/reschedule/undo sub-flow and the new interaction kinds. Reuse <code>promptForActions</code>, the existing cancellation text, the existing deterministic write path (for auto-create and for the revert delete), and the reconnect/retry paths.</td></tr>
+      <tr><td><code>src/core/types.ts</code></td><td>Add interaction kinds: <code>calendar-conflict-disclose</code>, <code>calendar-conflict-reschedule</code>, <code>calendar-conflict-move</code>, <code>calendar-conflict-undo</code>.</td></tr>
+      <tr><td>Agent prompt / <code>calendar-session.ts</code></td><td>No change. The disclosure is never part of model context; the prompt already forbids exposing private event fields.</td></tr>
+    </tbody></table>
+
+    <h2>7. Verification plan</h2>
+    <table><thead><tr><th>Layer</th><th>Coverage</th></tr></thead><tbody>
+      <tr><td>Client unit</td><td><code>findConflictingEvents</code> overlap filtering and projection (title/times/all-day only); ETag captured on read; guarded update sends <code>If-Match</code>; 412 → <code>precondition-failed</code>; 404 → <code>not-found</code>; 401/403 → <code>authorization</code>; uncertain-write verify-by-read is idempotent.</td></tr>
+      <tr><td>Disclosure rendering</td><td>Template renders only title + times + all-day; multiple overlapping events each render one line with their own reschedule action; recurring/all-day events are disclosed but never movable; no description/location/attendees/links ever rendered; plain-text escaping (no parse mode).</td></tr>
+      <tr><td>Workflow unit</td><td>Disclosure action appears only for <code>requested_time_conflicts</code>; propose-move picks the nearest same-day free slot preserving duration; two-step confirmation cannot be skipped; Cancel at every step mutates nothing and reuses the existing cancellation text; after a confirmed move the original request is auto-created at the freed time through the deterministic write path; Undo within the window performs a full revert (restore moved event + delete created request); stale/expired/wrong-version buttons are ignored.</td></tr>
+      <tr><td>Security / no-model-access</td><td>Assert the model-visible conflict message and all tool inputs/outputs contain no title, time, or event field of the conflicting event; disclosure text appears only in the owner-directed Telegram payload; captured logs contain no title, time, description, or ETag.</td></tr>
+      <tr><td>Integration</td><td>Full fake-Google journey: conflict → disclose → reschedule → confirm → move → auto-create original request → Undo performs full revert. Plus: multi-event overlap listing, recurring/all-day disclose-only, ETag mismatch (412) path, event-deleted path, authorization-failure path at each step, expiry/staleness, duplicate webhook delivery, and confirmation-delivery recovery without a second write.</td></tr>
+      <tr><td>System</td><td><code>pnpm check</code>, full unit/integration suites, and the controlled dev-bot smoke described in the roadmap (create a labeled short-lived conflicting event, disclose, reschedule, undo, then clean up).</td></tr>
+    </tbody></table>
+
+    <h2>8. Delivery sequence</h2>
+    <ol>
+      <li>Claim Beads issue <code>agent-harness-ve2</code> (external <code>gh-40</code>) and record this design as its plan reference.</li>
+      <li>Implement the client read/update with ETag support and its focused unit tests.</li>
+      <li>Implement the workflow disclosure/reschedule/undo sub-flow with the new interaction kinds and unit coverage.</li>
+      <li>Add security/no-model-access and integration coverage, including the ETag, authorization-failure, and expiry branches.</li>
+      <li>Run all quality gates, inspect the diff and repository status, record automated evidence in Beads, and leave the issue open until the required dev-bot smoke test passes and this design is approved.</li>
+    </ol>
+    <div class="callout risk"><strong>Approval gate:</strong> this is a design-only deliverable. No production code changes are made until the design is approved. Until then the FreeBusy-only conflict experience stays exactly as shipped.</div>
+  </body>
+</html>
