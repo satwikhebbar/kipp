@@ -100,6 +100,7 @@ export type RecurrenceAvailability =
       kind: "adjustments"
       occurrences: RecurringOccurrence[]
       adjustments: RecurrenceAdjustment[]
+      conflicts: RecurringOccurrence[]
       rrule: string
       humanCadence: string
       reminderMinutes: number
@@ -108,6 +109,7 @@ export type RecurrenceAvailability =
       kind: "common-alternative"
       localStartTime: string
       occurrences: RecurringOccurrence[]
+      conflicts: RecurringOccurrence[]
       rrule: string
       humanCadence: string
       reminderMinutes: number
@@ -474,16 +476,16 @@ export function evaluateRecurrenceAvailability(
           break
         }
       }
-      if (!replacement) return commonAlternative(proposal, expanded, busy, timeZone, now, preferred)
+      if (!replacement) return commonAlternative(proposal, expanded, busy, timeZone, now, preferred, conflicts)
       adjustments.push({
         localDate: conflict.localDate,
         requestedStartTime: proposal.startTime as string,
         scheduled: replacement,
       })
     }
-    return { kind: "adjustments", occurrences: requested, adjustments, ...base }
+    return { kind: "adjustments", occurrences: requested, adjustments, conflicts, ...base }
   }
-  return commonAlternative(proposal, expanded, busy, timeZone, now, preferred)
+  return commonAlternative(proposal, expanded, busy, timeZone, now, preferred, conflicts)
 }
 
 /** Finds the nearest one clock time that is safe for the complete series. */
@@ -494,6 +496,7 @@ function commonAlternative(
   timeZone: string,
   now: number,
   preferred: number | null,
+  conflicts: RecurringOccurrence[],
 ): RecurrenceAvailability {
   for (const minute of candidateMinutes(preferred).sort(
     (left, right) => Math.abs(left - (preferred ?? left)) - Math.abs(right - (preferred ?? right)),
@@ -511,6 +514,7 @@ function commonAlternative(
         kind: "common-alternative",
         localStartTime: time,
         occurrences,
+        conflicts,
         rrule: expanded.rrule,
         humanCadence: expanded.humanCadence,
         reminderMinutes: reminderMinutes(proposal),
