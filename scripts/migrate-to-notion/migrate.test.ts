@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createGitHubClient } from "../../src/integrations/github"
 import { createNotionClient } from "../../src/integrations/notion"
 import { createIdeaManager, type IdeaManager } from "../../src/linkedin/ideas/manager"
-import { migrateFile, runMigration } from "./migrate"
+import { main, migrateFile, runMigration } from "./migrate"
 
 const NOTION_DS = "ds-1"
 
@@ -55,6 +55,25 @@ created: 2026-06-01T12:00:00Z
 
 Archived body`
 
+const DRAFTED_MD = `---
+id: 3
+title: Drafted idea
+status: drafted
+source: substack
+created: 2026-07-03T09:00:00Z
+---
+
+Raw preamble body.
+
+## Draft
+
+This is the LLM draft.
+
+## Critique
+
+- [x] Clarity: Good
+- [ ] Hook: Needs work`
+
 interface StoredPage {
   kippId: number
   idempotencyKey?: string
@@ -81,11 +100,11 @@ function createNotionStub(store: NotionPageStore, failCreate = false) {
   return vi.fn(async (url: RequestInfo | URL, opts?: RequestInit) => {
     const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
     if (urlStr === `https://api.notion.com/v1/data_sources/${NOTION_DS}/query`) {
-      const body = JSON.parse(opts?.body as string) as { filter?: { property: string; rich_text?: { equals?: string } } }
+      const body = JSON.parse(opts?.body as string) as {
+        filter?: { property: string; rich_text?: { equals?: string } }
+      }
       const key = body.filter?.property === "Idempotency Key" ? body.filter.rich_text?.equals : undefined
-      const results = key
-        ? [...store.pages.values()].filter((p) => p.idempotencyKey === key).map(pageJson)
-        : []
+      const results = key ? [...store.pages.values()].filter((p) => p.idempotencyKey === key).map(pageJson) : []
       return respond({ object: "list", results, has_more: false, next_cursor: null })
     }
     if (urlStr === "https://api.notion.com/v1/pages" && opts?.method === "POST") {
@@ -113,7 +132,13 @@ function createNotionStub(store: NotionPageStore, failCreate = false) {
     if (markdownMatch) {
       const stored = store.pages.get(markdownMatch[1])
       if (!stored) return respond({ message: "object_not_found" }, 404)
-      return respond({ object: "page_markdown", id: markdownMatch[1], markdown: stored.markdown, truncated: false, unknown_block_ids: [] })
+      return respond({
+        object: "page_markdown",
+        id: markdownMatch[1],
+        markdown: stored.markdown,
+        truncated: false,
+        unknown_block_ids: [],
+      })
     }
     throw new Error(`Unexpected notion fetch: ${opts?.method ?? "GET"} ${urlStr}`)
   })
@@ -176,6 +201,21 @@ describe("migrateFile", () => {
     expect(stored.markdown).toBe("Archived body")
     expect(stored.status).toBe("finalized")
   })
+
+  it("excludes draft and critique sections from the migrated page markdown", async () => {
+    const store: NotionPageStore = { pages: new Map() }
+    const notionFetch = createNotionStub(store)
+    stubNetwork(notionFetch, { "ideas.md": DRAFTED_MD, "archive.md": "" })
+
+    const report = await migrateFile(manager(store), githubClient(), "ideas.md")
+    expect(report.created).toBe(1)
+    const stored = [...store.pages.values()][0]
+    expect(stored.markdown).toBe("Raw preamble body.")
+    expect(stored.markdown).not.toContain("## Draft")
+    expect(stored.markdown).not.toContain("## Critique")
+    expect(stored.markdown).not.toContain("This is the LLM draft.")
+    expect(stored.markdown).not.toContain("Clarity: Good")
+  })
 })
 
 describe("runMigration", () => {
@@ -218,5 +258,40 @@ describe("runMigration", () => {
     expect(report.skipped).toBe(0)
     expect(report.failures).toHaveLength(2)
     expect(report.failures.every((f) => f.key.startsWith("legacy:backlog:"))).toBe(true)
+  })
+})
+
+describe("migrate CLI", () => {
+  it("exits non-zero when the migration report has failures", async () => {
+    const store: NotionPageStore = { pages: new Map() }
+    const notionFetch = createNotionStub(store, true)
+    stubNetwork(notionFetch, { "ideas.md": IDEAS_MD, "archive.md": ARCHIVE_MD })
+
+    const savedEnv = { ...process.env }
+    const savedExitCode = process.exitCode
+    process.exitCode = undefined
+    Object.assign(process.env, CONFIG)
+    let exitCode: number | undefined
+    try {
+      await main()
+      exitCode = process.exitCode
+    } finally {
+      process.env = savedEnv
+      process.exitCode = savedExitCode
+    }
+    expect(exitCode).toBe(1)
+  })
+
+  it("fails fast when a required environment variable is missing", async () => {
+    const savedEnv = { ...process.env }
+    const savedExitCode = process.exitCode
+    process.exitCode = undefined
+    delete process.env.GITHUB_PAT
+    try {
+      await expect(main()).rejects.toThrow("Missing required environment variable")
+    } finally {
+      process.env = savedEnv
+      process.exitCode = savedExitCode
+    }
   })
 })

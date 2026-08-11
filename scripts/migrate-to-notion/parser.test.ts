@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest"
-import {
-  isIdeaStart,
-  parseIdea,
-  parseIdeas,
-  parseYamlLine,
-  serializeIdea,
-} from "./parser"
+import { isIdeaStart, parseIdea, parseIdeas, parseYamlLine, serializeIdea } from "./parser"
+
 const RAW_IDEA = `---
 id: 1
 title: A test idea

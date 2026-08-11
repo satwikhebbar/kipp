@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url"
 import { createGitHubClient } from "../../src/integrations/github"
 import { createNotionClient } from "../../src/integrations/notion"
 import { createIdeaManager, type IdeaManager } from "../../src/linkedin/ideas/manager"
-import { type LegacyIdea, fullBody, parseIdeas } from "./parser"
+import { type LegacyIdea, parseIdeas } from "./parser"
 
 const LEGACY_PREFIXES = { "ideas.md": "legacy:backlog:", "archive.md": "legacy:archive:" } as const
 
@@ -43,7 +43,7 @@ export async function migrateFile(
         title: idea.title,
         status: idea.status,
         source: idea.source,
-        body: fullBody(idea),
+        body: idea.body,
         substackUrl: idea.substackUrl,
         chatId: idea.correlation?.telegramChatId,
         idempotencyKey: key,
@@ -102,7 +102,7 @@ function envConfig(env: NodeJS.ProcessEnv): MigrationConfig {
   }
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const config = envConfig(process.env)
   const report = await runMigration(config)
   console.log(JSON.stringify(report, null, 2))

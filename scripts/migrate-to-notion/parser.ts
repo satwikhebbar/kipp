@@ -1,4 +1,10 @@
-export type LegacyIdeaStatus = "raw" | "drafted" | "awaiting-feedback" | "awaiting-feedback-expired" | "finalized" | "skipped"
+export type LegacyIdeaStatus =
+  | "raw"
+  | "drafted"
+  | "awaiting-feedback"
+  | "awaiting-feedback-expired"
+  | "finalized"
+  | "skipped"
 
 export type LegacySource = "substack" | "telegram" | "manual"
 
@@ -150,11 +156,6 @@ function buildBody(idea: LegacyIdea): string {
   if (idea.draft) parts.push(`\n\n## Draft\n\n${idea.draft}`)
   if (idea.critique) parts.push(`\n\n## Critique\n\n${idea.critique}`)
   return parts.join("")
-}
-
-/** Returns the complete body markdown to store on the Notion page (preamble + draft + critique). */
-export function fullBody(idea: LegacyIdea): string {
-  return buildBody(idea)
 }
 
 /** Serializes one idea to the constrained Markdown/frontmatter representation stored in the backlog. */
