@@ -1,14 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { nextId } from "../linkedin/backlog/id-generator"
 import {
   isIdeaStart,
   parseIdea,
   parseIdeas,
   parseYamlLine,
   serializeIdea,
-  serializeIdeas,
-} from "../linkedin/backlog/parser"
-
+} from "./parser"
 const RAW_IDEA = `---
 id: 1
 title: A test idea
@@ -243,13 +240,6 @@ describe("parseIdeas / serializeIdeas", () => {
     expect(ideas).toHaveLength(6)
     expect(ideas.map((i) => i.id)).toEqual(["1", "5", "10", "12", "15", "3"])
   })
-
-  it("serializeIdeas roundtrips all statuses", () => {
-    const ideas = parseIdeas(ALL_IDEAS.join("\n"))
-    const serialized = serializeIdeas(ideas)
-    const reparsed = parseIdeas(serialized)
-    expect(reparsed).toEqual(ideas)
-  })
 })
 
 it("parseIdeas handles --- in draft body without corrupting adjacent ideas", () => {
@@ -273,9 +263,9 @@ describe("duplicate ID handling", () => {
     expect(ideas[1].id).toBe("1")
   })
 
-  it("serializeIdeas preserves duplicate IDs", () => {
+  it("serializeIdea roundtrips duplicate IDs", () => {
     const ideas = parseIdeas(`${RAW_IDEA}\n${RAW_IDEA}`)
-    const serialized = serializeIdeas(ideas)
+    const serialized = ideas.map((idea) => serializeIdea(idea)).join("\n")
     const reparsed = parseIdeas(serialized)
     expect(reparsed).toHaveLength(2)
   })
@@ -334,16 +324,5 @@ describe("isIdeaStart", () => {
 
   it("returns false for --- with missing next line", () => {
     expect(isIdeaStart(["---", undefined as unknown as string], 0)).toBe(false)
-  })
-})
-
-describe("nextId", () => {
-  it("returns max + 1", () => {
-    const ideas = parseIdeas(ALL_IDEAS.join("\n"))
-    expect(nextId(ideas)).toBe(16)
-  })
-
-  it("returns 1 for empty list", () => {
-    expect(nextId([])).toBe(1)
   })
 })

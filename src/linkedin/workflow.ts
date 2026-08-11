@@ -6,11 +6,12 @@ import { createInteractionRouter, type InteractionRegistration } from "../core/i
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "../core/types"
 import { createGitHubClient } from "../integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integrations/linkedin"
+import { createNotionClient } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createToolProvider, resolveModel } from "../providers"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
-import { createBacklogManager } from "./backlog/manager"
+import { createIdeaManager } from "./ideas/manager"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
 import { resolvePrompt } from "./prompts/resolver"
 
@@ -121,7 +122,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
   }
 
   private async _run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep): Promise<PipelineWorkflowOutcome> {
-    const { ideaId, ideaTitle, ideaBody, substackBody } = event.payload
+    const { pageId, ideaId } = event.payload
 
     const stepDo = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
       const wrapped: () => Promise<T> = async () => {
@@ -161,7 +162,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const model = resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
 
       const client = createGitHubClient(this.env)
-      const manager = createBacklogManager(client)
+      const manager = createIdeaManager(createNotionClient(this.env))
 
       const stylePaths = [this.env.PROMPT_STYLE_PATH, "style-prompt.md"].filter(Boolean) as string[]
       const promptResolution = await resolvePrompt(client, stylePaths, DEFAULT_STYLE_PROMPT)
@@ -176,10 +177,11 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         },
       })
       const stylePrompt = promptResolution.content
+
+      const idea = await manager.getIdea(pageId)
       const initialMessages = createLinkedInConversation(stylePrompt, {
-        title: ideaTitle,
-        body: ideaBody,
-        substackBody,
+        title: idea.title,
+        body: idea.body,
       })
       const session = await runLinkedInToolSession(provider, initialMessages)
       logRuntime(this.env, {
@@ -195,10 +197,6 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       if (!session.terminal) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
       const draft = session.terminal.response
       const messages = session.messages
-
-      const ideas = await manager.readIdeas()
-      const idea = ideas.find((i) => i.id === ideaId)
-      if (!idea) throw new Error(`Idea ${ideaId} not found`)
 
       const usage = session.usage
       const cost = computeCost(usage, model)
@@ -230,15 +228,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           transcriptCharacters: JSON.stringify(messages).length,
         },
       })
-      await manager.updateIdea(ideaId, {
-        draft,
-        status: "awaiting-feedback",
-        correlation: { ...idea.correlation, workflowInstanceId: event.instanceId },
-        costUsd: cost.totalCostUsd ?? undefined,
-        costInputTokens: usage.inputTokens,
-        costOutputTokens: usage.outputTokens,
-        costModel: model,
-      })
+      await manager.updateIdea(pageId, { status: "awaiting-feedback" })
       return nextState
     })
 
@@ -292,9 +282,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       })
       if (reply.type === "timeout") {
         await stepDo(`timeout-${i}`, async () => {
-          const client = createGitHubClient(this.env)
-          const manager = createBacklogManager(client)
-          await manager.updateIdea(ideaId, { status: "awaiting-feedback-expired" })
+          const manager = createIdeaManager(createNotionClient(this.env))
+          await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
         })
         return { outcome: "feedback-expired" }
       }
@@ -379,29 +368,15 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           details: { urn: publication.urn || "unavailable" },
         })
 
-        const finalCostLine = await stepDo("archive", async () => {
-          const client = createGitHubClient(this.env)
-          const manager = createBacklogManager(client)
-          const ideas = await manager.readIdeas()
-          const idea = ideas.find((i) => i.id === ideaId)
-          let line = ""
-          if (idea) {
-            const model = idea.costModel ?? state.model ?? ""
-            if (model) {
-              const cost = computeCost(
-                { inputTokens: idea.costInputTokens ?? 0, outputTokens: idea.costOutputTokens ?? 0 },
-                model,
-              )
-              line = formatCostLine(cost)
-            }
-            await manager.moveToArchive(idea)
-          }
-          return line
+        await stepDo("archive", async () => {
+          const manager = createIdeaManager(createNotionClient(this.env))
+          const idea = await manager.getIdea(pageId)
+          await manager.moveToArchive(idea)
         })
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
           await stepDo("notify-published", async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-            await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${finalCostLine}`)
+            await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${state.costLine}`)
           })
         }
         const completion = await stepDo("workflow-complete", async () =>
@@ -437,12 +412,8 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         if (!session.terminal)
           throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
         const nextDraft = session.terminal.response
-        const client = createGitHubClient(this.env)
-        const manager = createBacklogManager(client)
-        const ideas = await manager.readIdeas()
-        const idea = ideas.find((i) => i.id === ideaId)
-        const prevInput = idea?.costInputTokens ?? state.costInputTokens ?? 0
-        const prevOutput = idea?.costOutputTokens ?? state.costOutputTokens ?? 0
+        const prevInput = state.costInputTokens ?? 0
+        const prevOutput = state.costOutputTokens ?? 0
         const stepUsage = session.usage
         const cumulativeUsage: LLMUsage = {
           inputTokens: prevInput + stepUsage.inputTokens,
@@ -457,13 +428,6 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           costOutputTokens: cumulativeUsage.outputTokens,
           costLine,
           model,
-        })
-        await manager.updateIdea(ideaId, {
-          draft: nextDraft,
-          costUsd: cost.totalCostUsd ?? undefined,
-          costInputTokens: cumulativeUsage.inputTokens,
-          costOutputTokens: cumulativeUsage.outputTokens,
-          costModel: model,
         })
         return nextState
       })

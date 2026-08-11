@@ -14,6 +14,7 @@ import { handleRssCron } from "./triggers/rss"
 import { handleTelegramWebhook } from "./triggers/telegram-webhook"
 import { handleTokenCheckCron } from "./triggers/token-check"
 
+export { IdeaIngestDO } from "./core/idea-ingest"
 export { InteractionRouterDO } from "./core/interaction-router"
 export { TokenVaultDO } from "./core/token-vault"
 export { PipelineWorkflow } from "./linkedin/workflow"

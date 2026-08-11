@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { PipelineWorkflow } from "../linkedin/workflow"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import { createFakeInteractionRouter, createFakeNetwork } from "./setup"
+import { createFakeInteractionRouter, createFakeNetwork, type FakeNotionPage } from "./setup"
 
 vi.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -29,6 +29,9 @@ function baseEnv(overrides?: Partial<Env>): Env {
     SUBSTACK_RSS_URL: "",
     POSTING_CADENCE_DAYS: "7",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
     ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
     DEPLOYMENT_ENV: "development",
     TOKEN_VAULT: {
@@ -139,19 +142,18 @@ describe("security-boundaries", () => {
     const stepDo = vi.fn(async (_name: string, fn: () => unknown) => fn())
     const waitForEvent = vi.fn()
 
-    const { fetch: harnessFetch } = createFakeNetwork({
-      githubFiles: {
-        "ideas.md": `---
-id: 1
-status: raw
-created: 2026-07-01T12:00:00Z
-source: manual
-correlation:
-  telegramChatId: "42"
----
+    const RAW_PAGE: FakeNotionPage = {
+      pageId: "page_1",
+      kippId: 1,
+      title: "Test idea",
+      status: "raw",
+      source: "manual",
+      markdown: "Body content",
+      chatId: "42",
+    }
 
-Body content`,
-      },
+    const { fetch: harnessFetch } = createFakeNetwork({
+      notionPages: [RAW_PAGE],
       llmResponses: [
         {
           choices: [
@@ -209,7 +211,7 @@ Body content`,
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(
       {
-        payload: { ideaId: "1", ideaBody: "Body content" },
+        payload: { pageId: "page_1", ideaId: "1", source: "manual" },
         instanceId: "wf-1",
         timestamp: new Date(),
         workflowName: "",

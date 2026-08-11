@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kipp — Move LinkedIn Workflow to Notion (Issue #53)</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --red:#f87171; --code:#020617; }
+      * { box-sizing:border-box; }
+      body { max-width:1040px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; }
+      h1,h2,h3 { line-height:1.25; color:#f8fafc; }
+      h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; }
+      h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; }
+      h3 { margin-top:28px; font-size:1.12rem; }
+      p,li { max-width:90ch; }
+      .lede { color:var(--muted); font-size:1.1rem; }
+      .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; }
+      .note { border-left-color:var(--amber); }
+      .danger { border-left-color:var(--red); }
+      .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; }
+      code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; }
+      pre { overflow:auto; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--code); }
+      pre code { padding:0; color:var(--ink); }
+      table { width:100%; border-collapse:collapse; margin:20px 0; }
+      th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+      th { color:#cbd5e1; background:#1e293b; }
+      ol>li { margin:14px 0; }
+      a { color:#93c5fd; }
+      .status { color:var(--green); font-weight:700; }
+      .yes { color:var(--green); } .no { color:var(--red); } .keep { color:var(--amber); }
+      @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kipp — Move LinkedIn Workflow to Notion</h1>
+    <p class="lede">Replace the GitHub <code>ideas.md</code> + <code>archive.md</code> Contents-API storage with a single Notion Ideas data source as the canonical human-facing store, per the storage research in <a href="kipp-storage-options-proposal.html">issue #7</a>. Implements GitHub issue #53.</p>
+
+    <div class="callout">
+      <strong>Status:</strong> Revised for plan-review round 3 (2026-08-11); ready for round-4 re-review.<br />
+      <strong>Outcome:</strong> the LinkedIn pipeline creates, retrieves, and updates independently addressable Notion records; exact random access by Kipp ID; a bounded queued integration with retry and idempotency; Markdown export remains a portable backup, not the transactional write path.<br />
+      <span class="tag">Notion</span><span class="tag">Cloudflare Workers</span><span class="tag">Notion-Version 2026-03-11</span><span class="tag">unique_id</span><span class="tag">IdeaIngest DO</span>
+    </div>
+
+    <h2>1. Scope and boundaries</h2>
+    <table>
+      <thead><tr><th>Included</th><th>Explicitly excluded</th></tr></thead>
+      <tbody>
+        <tr><td>Notion integration client with rate limiting, retry, and idempotency</td><td>Migrating unrelated workflows (Calendar stays untouched)</td></tr>
+        <tr><td>Single Notion data source (status as select property; no separate archive)</td><td>Treating a vector index as canonical storage or the authority for mutations</td></tr>
+        <tr><td>Notion <code>unique_id</code> as the human-readable Kipp ID</td><td>Switching the Kipp ID format to a prefix (KIPP-…) — plain sequential numbers are kept</td></tr>
+        <tr><td>Removing dead Idea fields (teaser, draft, critique, cost*) and cleaning every call site</td><td>Creating a Notion Tasks database (future work)</td></tr>
+        <tr><td>One-time migration script (parser/archive moved to <code>scripts/migrate-to-notion/</code>)</td><td>Dual-write transition period — migration is a clean cutover</td></tr>
+        <tr><td>Keeping GitHub for style-prompt resolution only</td><td>Moving the style prompt to Notion or a wrangler var</td></tr>
+        <tr><td><code>IdeaIngestDO</code>: atomic create for new ideas (rss, <code>/add</code>); one page-keyed claim record + deterministic instance id for <em>every</em> workflow start (rss main, cadence, <code>/generate</code>)</td><td>Multiple concurrent cadence cron instances (a single scheduled cron is assumed)</td></tr>
+        <tr><td>Docs: Notion model, integration setup, operational limits, export/backup, recovery</td><td>Public OAuth Notion integration — internal integration token is used</td></tr>
+      </tbody>
+    </table>
+
+    <h2>2. Confirmed decisions</h2>
+    <p>The full design tree was interviewed in rounds; plan-review rounds 1 and 2 (Codex verdicts 2026-08-11) closed the remaining gaps. Every open question is resolved before implementation. Summary:</p>
+    <table>
+      <thead><tr><th>#</th><th>Decision</th><th>Choice</th></tr></thead>
+      <tbody>
+        <tr><td>Q1</td><td>API version</td><td>Official Notion API, header <code>Notion-Version: 2026-03-11</code> (current supported version)</td></tr>
+        <tr><td>Q2</td><td>Query endpoint</td><td><code>POST /v1/data_sources/:data_source_id/query</code>; the queryable unit is a <em>data source</em>, not a database</td></tr>
+        <tr><td>Q3</td><td>Draft/critique placement</td><td>Not stored in Notion at all — live in Cloudflare Workflow step state</td></tr>
+        <tr><td>Q4</td><td>Archive model</td><td>Single data source; <code>finalized</code> is a status value</td></tr>
+        <tr><td>Q5</td><td>Property schema</td><td>Minimal: Title, Kipp ID, Status, Source, Substack URL, Chat ID, Idempotency Key</td></tr>
+        <tr><td>Q6</td><td>Style prompt source</td><td>Keep in GitHub (unchanged)</td></tr>
+        <tr><td>Q7</td><td>Rate limiting</td><td>350 ms inter-request delay, gated by <code>NOTION_FREE_TIER</code> env var</td></tr>
+        <tr><td>Q8</td><td>Kipp ID</td><td>Notion <code>unique_id</code> property — read-only, auto-assigned at creation; surfaced as <code>properties["Kipp ID"].unique_id.number</code></td></tr>
+        <tr><td>Q9</td><td>Parser/archive/id-generator</td><td>Move to <code>scripts/migrate-to-notion/</code>; <code>id-generator.ts</code> deleted</td></tr>
+        <tr><td>Q10</td><td>Auth model</td><td>Internal Notion integration (secret token)</td></tr>
+        <tr><td>Q11</td><td>Free-tier switch</td><td>Boolean <code>NOTION_FREE_TIER</code> env var</td></tr>
+        <tr><td>Q12</td><td>Dead-field cleanup</td><td>Drop teaser, draft, critique, cost*, stale correlation fields across the codebase</td></tr>
+        <tr><td>Q13</td><td>Page body content</td><td>Raw idea body text as Notion-flavored Markdown, nothing else</td></tr>
+        <tr><td>Q14</td><td>ID continuity during migration</td><td>Accept discontinuity — new Notion Kipp IDs are assigned; the old ID is preserved only as the Idempotency Key</td></tr>
+        <tr><td>Q15</td><td>Integration test mocking</td><td>Extend <code>createFakeNetwork</code> with Notion HTTP routes; drop obsolete GitHub mocks</td></tr>
+        <tr><td>Q16</td><td>Setup + docs</td><td>Documentation-only guide; README updated and linked</td></tr>
+        <tr><td>Q17</td><td>GitHub boundary</td><td>Keep GitHub client for prompt resolution only; no idea reads/writes</td></tr>
+        <tr><td>Q18</td><td>Non-transient errors</td><td>Throw (matches existing <code>GithubError</code> pattern); no Result wrapper</td></tr>
+        <tr><td>Q19</td><td>Directory name</td><td>Rename <code>src/linkedin/backlog/</code> → <code>src/linkedin/ideas/</code></td></tr>
+        <tr><td>Q20</td><td>Create idempotency identity</td><td>Caller-supplied stable external key stored as an <code>Idempotency Key</code> property; lookup-first create (migration + tests)</td></tr>
+        <tr><td>Q21</td><td>List vs body APIs</td><td>Data-source queries return <strong>metadata only</strong>; body retrieval is a separate <code>getIdea(id)</code> markdown call</td></tr>
+        <tr><td>Q22</td><td>Atomic ingest</td><td>Page-keyed <code>IdeaIngestDO</code> claim with a durable crash-safe workflow-start state machine (deterministic pageId-based instance id + idempotent create) so duplicate delivery, DO crashes, and later instance failures still yield exactly one page and one workflow</td></tr>
+        <tr><td>Q23</td><td>Markdown truncation policy</td><td>Immediate failure on <code>truncated: true</code> or any <code>unknown_block_ids</code>; no refetch/merge path (see §3.3)</td></tr>
+        <tr><td>Q24</td><td>Workflow ownership</td><td>Every workflow start (rss main, cadence, <code>/generate</code>) funnels through the page-keyed claim <code>start</code> — same record and instance id per pageId; exactly one workflow instance under any race</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3. Notion data model</h2>
+    <h3>3.1 Ideas data source — properties</h3>
+    <table>
+      <thead><tr><th>Property</th><th>Notion type</th><th>Why a property</th></tr></thead>
+      <tbody>
+        <tr><td>Title</td><td><code>title</code></td><td>Required by Notion; fuzzy lookup candidates</td></tr>
+        <tr><td>Kipp ID</td><td><code>unique_id</code></td><td>Exact lookup; immutable; read-only and auto-assigned</td></tr>
+        <tr><td>Status</td><td><code>status</code></td><td>Filtered by cadence, <code>/generate</code>, workflow</td></tr>
+        <tr><td>Source</td><td><code>select</code></td><td>substack | telegram | manual</td></tr>
+        <tr><td>Substack URL</td><td><code>url</code></td><td><strong>Queryable — RSS dedup filters on it</strong></td></tr>
+        <tr><td>Chat ID</td><td><code>rich_text</code></td><td>Workflow Telegram notification routing</td></tr>
+        <tr><td>Idempotency Key</td><td><code>rich_text</code></td><td>Caller-supplied stable identity for idempotent create and migration reruns (see §3.5)</td></tr>
+      </tbody>
+    </table>
+    <div class="callout note">
+      <strong>Page body:</strong> the original idea <code>body</code> text as Notion-flavored Markdown. Drafts, critiques, cost metrics, and workflow correlation state are <em>not</em> written to Notion. Drafts and cumulative cost live in Cloudflare Workflow step state; interactions live in the Interaction Router DO.
+    </div>
+    <p>Status values: <code>raw | drafted | awaiting-feedback | awaiting-feedback-expired | finalized | skipped</code>. "Archiving" is a PATCH of Status to <code>finalized</code>; there is no archive database and no retention cleanup job.</p>
+
+    <h3>3.2 Idea interface after cleanup</h3>
+    <pre><code>interface Idea {
+  pageId: string              // Notion page id (page_…); claim/start and property PATCHes address it
+  id: string                  // unique_id number, as string (properties["Kipp ID"].unique_id.number)
+  title?: string              // Notion Title property
+  status: IdeaStatus
+  created: string             // ISO timestamp (page.created_time)
+  source: Source              // substack | telegram | manual
+  body: string                // page body (Notion-flavored Markdown); present only after getIdea()
+  substackUrl?: string
+  idempotencyKey?: string     // caller-supplied external key (see §3.5)
+  correlation?: { telegramChatId?: string }
+}</code></pre>
+    <p><code>IdeaSummary</code> is the metadata-only shape returned by list/query operations (same fields minus <code>body</code>; <code>pageId</code> is present on both). The <code>Idea</code> type is the hydrated shape with <code>body</code> populated.</p>
+
+    <h3>3.3 Pinned wire contract — Notion API <code>Notion-Version: 2026-03-11</code></h3>
+    <p>All requests send <code>Notion-Version: 2026-03-11</code> (required on every request) and <code>Authorization: Bearer &lt;NOTION_API_KEY&gt;</code>. The queryable unit is the <strong>data source</strong>; a Notion database is a container that owns child data sources, and the query endpoint addresses the data source, not the database. Payloads below are the fixtures the unit tests and <code>FakeNetwork</code> assert against.</p>
+    <h4>Endpoints and required capabilities</h4>
+    <table>
+      <thead><tr><th>Endpoint</th><th>Purpose</th><th>Connection capability</th></tr></thead>
+      <tbody>
+        <tr><td><code>POST /v1/pages</code></td><td>Create page with properties + markdown body</td><td><code>insert_content</code> + <code>insert_property</code></td></tr>
+        <tr><td><code>PATCH /v1/pages/:page_id</code></td><td>Update page properties</td><td><code>update_property</code></td></tr>
+        <tr><td><code>GET /v1/pages/:page_id/markdown</code></td><td>Read page body as markdown</td><td><code>read_content</code></td></tr>
+        <tr><td><code>PATCH /v1/pages/:page_id/markdown</code></td><td>Replace page body as markdown</td><td><code>update_content</code></td></tr>
+        <tr><td><code>POST /v1/data_sources/:data_source_id/query</code></td><td>Query pages by filter/sort; cursor paginated; metadata only</td><td><code>read_content</code></td></tr>
+      </tbody>
+    </table>
+    <p>Note: the markdown guide pins <code>insert_property</code> / <code>update_property</code> for property writes even though the capabilities reference page names only content capabilities; setup grants the connection content <em>and</em> property capabilities.</p>
+    <h4>Create a page with markdown</h4>
+    <pre><code>// POST /v1/pages
+{
+  "parent": {
+    "type": "data_source_id",
+    "data_source_id": "&lt;ds&gt;"
+  },
+  "properties": {
+    "Title":           { "title": [{ "type": "text", "text": { "content": "Idea title" } }] },
+    "Status":          { "status": { "name": "raw" } },
+    "Source":          { "select": { "name": "substack" } },
+    "Substack URL":    { "url": "https://…" },
+    "Chat ID":         { "rich_text": [{ "type": "text", "text": { "content": "12345" } }] },
+    "Idempotency Key": { "rich_text": [{ "type": "text", "text": { "content": "rss:…:0" } }] }
+  },
+  "markdown": "# Idea title\n\nbody…"
+}
+// Kipp ID is OMITTED from properties: unique_id is auto-assigned and read-only.
+// children/content are mutually exclusive with markdown. allow_async:true → 202 async_task (poll status_url).
+// → 200 standard page object:
+// {
+//   "object": "page",
+//   "id": "page_…",
+//   "created_time": "…",
+//   "parent": { "type": "data_source_id", "data_source_id": "…" },
+//   "properties": {
+//     "Kipp ID": { "id": "…", "type": "unique_id", "unique_id": { "prefix": null, "number": 42 } },
+//     …
+//   }
+// }
+</code></pre>
+    <h4>Query a data source</h4>
+    <pre><code>// POST /v1/data_sources/:data_source_id/query
+{
+  "filter": { "property": "Status", "status": { "equals": "raw" } },
+  "sorts":   [{ "property": "Kipp ID", "direction": "ascending" }],
+  "page_size": 100,
+  "start_cursor": "&lt;cursor&gt;"
+}
+// → 200 list object (NOT keyed under "pages"):
+// {
+//   "object": "list",
+//   "results": [
+//     { "object": "page", "id": "page_…", "created_time": "…", "properties": { "Kipp ID": { "type": "unique_id", "unique_id": { "prefix": null, "number": 42 } }, … } }
+//   ],
+//   "has_more": false,
+//   "next_cursor": null,
+//   "type": "page_or_data_source",
+//   "page_or_data_source": {}
+// }
+// Client loops start_cursor until has_more=false. No markdown body is returned by query.
+// At the 10,000-result-per-query cap the response carries
+// request_status: { "type": "incomplete", "incomplete_reason": "query_result_limit_reached" }.
+</code></pre>
+    <h4>Retrieve / update page markdown</h4>
+    <pre><code>// GET /v1/pages/:page_id/markdown
+// → 200 page_markdown object (all fields required):
+// {
+//   "object": "page_markdown",
+//   "id": "&lt;page-uuid&gt;",
+//   "markdown": "# …",
+//   "truncated": false,
+//   "unknown_block_ids": []
+// }
+
+// PATCH /v1/pages/:page_id/markdown  — body must carry exactly one command
+{ "type": "replace_content", "replace_content": { "new_str": "# Revised\n\n…", "allow_deleting_content": false } }
+// → 200 page_markdown object (same shape as GET)
+</code></pre>
+    <h4>Markdown truncation semantics</h4>
+    <p>There is <strong>no</strong> <code>next_page_id</code> / <code>next_cursor</code> in a markdown response. Very large pages (over ~20,000 blocks) return <code>truncated: true</code>; blocks that could not be converted to markdown (unsupported block types, or blocks the integration cannot access) are listed in <code>unknown_block_ids</code> (up to 100 ids) and render as <code>&lt;unknown …/&gt;</code>. The Notion docs' recovery flow re-fetches each unknown id as a <code>page_id</code> to retrieve the subtree; a re-fetch of an inaccessible block returns <code>object_not_found</code> (404).</p>
+    <p><strong>Client policy in <code>getIdea(id)</code> — immediate failure, no recovery path:</strong></p>
+    <ol>
+      <li><code>GET /v1/pages/:id/markdown</code>. A <code>404 object_not_found</code> (page inaccessible to the integration) throws <code>NotionError</code>.</li>
+      <li>If <code>truncated: true</code> <em>or</em> <code>unknown_block_ids</code> is non-empty → throw <code>NotionError</code>. <code>getIdea</code> returns a body only when the response is complete and fully converted; a partial or placeholder-containing body is never drafted from.</li>
+      <li>The refetch/merge path from the docs is <strong>not implemented</strong>: one reachable policy (fail) is kept over an unreachable recovery path. Idea bodies are self-authored and short (RSS sub-idea ≤ 300 chars, Telegram ≤ 4096, manual), so a truncated or partly-converted response signals a corrupted or oversized page and must fail loudly. If recovery is ever needed it is a separate, tested algorithm.</li>
+    </ol>
+    <pre><code>// Policy fixtures (client tests assert these):
+// GET /v1/pages/:id/markdown → 404 object_not_found (page inaccessible) → NotionError
+// GET /v1/pages/:id/markdown → 200 { truncated: true, … }              → NotionError
+// GET /v1/pages/:id/markdown → 200 { unknown_block_ids: ["blk_…"], … }  → NotionError
+// No nested-refetch/merge fixtures exist: the recovery path is removed.</code></pre>
+
+    <h3>3.4 PATCH property updates</h3>
+    <pre><code>// PATCH /v1/pages/:page_id  — properties only
+{ "properties": { "Status": { "status": { "name": "finalized" } } } }
+// → 200 page object (partial or full)
+</code></pre>
+
+    <h3>3.5 Idempotency identity</h3>
+    <p><code>unique_id</code> is read-only and auto-assigned at page creation, so it cannot be the pre-create idempotency key. Instead, <strong>every producer supplies a stable external key</strong>, stored in the <code>Idempotency Key</code> rich_text property:</p>
+    <table>
+      <thead><tr><th>Producer</th><th>Key shape</th></tr></thead>
+      <tbody>
+        <tr><td>RSS main idea</td><td><code>rss:{guid}:0</code> (0 = main)</td></tr>
+        <tr><td>RSS side idea (i-th)</td><td><code>rss:{guid}:{i}</code></td></tr>
+        <tr><td>Telegram <code>/add</code></td><td><code>tg:{chatId}:{telegramMessageId}</code></td></tr>
+        <tr><td>Migration</td><td><code>legacy:backlog:{oldId}</code> / <code>legacy:archive:{oldId}</code></td></tr>
+      </tbody>
+    </table>
+    <h4>Atomic runtime ingest — <code>IdeaIngestDO</code></h4>
+    <p>Lookup-then-create-then-reconcile is only eventual: two callers that both pass the lookup could both create and each start a workflow, producing duplicate drafts/publishes. Runtime creation and every workflow start therefore go through a new Durable Object <code>IdeaIngestDO</code> (binding <code>IDEA_INGEST</code>), whose storage is the commit point. Two kinds of record, one responsibility each:</p>
+    <ul>
+      <li><code>ingest({ key, idea, startWorkflow })</code> — DO id <code>ingest:{key}</code>; adopt-or-create the page and persist the key→<code>pageId</code> mapping. If <code>startWorkflow</code>, it delegates the start to the page-keyed claim record below. Used by rss main, rss side, <code>/add</code>.</li>
+      <li><code>start({ pageId, ideaId, source })</code> — DO id <code>claim:{pageId}</code>; the <strong>single ownership record for a page's workflow</strong>. Used by the ingest delegation, cadence, and <code>/generate</code>.</li>
+    </ul>
+    <h5>Page create (safe)</h5>
+    <ol>
+      <li>Read the key's record from DO storage.</li>
+      <li>If no <code>pageId</code> recorded: query Notion by <code>Idempotency Key</code>; if a page exists, adopt it; else create the page via the Notion client, then persist <code>{ pageId }</code>.</li>
+      <li>A crash anywhere in step 2 is recovered on retry because step 2 re-checks Notion before creating — storage is the commit point and the create is lookup-guarded, so the page is exactly-once.</li>
+    </ol>
+    <h5>Workflow ownership and start — one record per pageId (crash-safe)</h5>
+    <p>An external <code>PIPELINE_WORKFLOW</code> call cannot be atomic with a DO storage write, so workflow-start is its own durable state machine keyed by <strong>pageId</strong>, not by the entry point. The claim record <code>claim:{pageId}</code> holds <code>{ status: "unstarted" | "started", instanceId, lastRestartAt? }</code> and derives the deterministic instance id <code>instanceId = "kipp-" + sha256(pageId).slice(0, 32)</code>. Because every start route — RSS ingest delegation, cadence, <code>/generate</code> — funnels through this one record and id, a given page maps to exactly one Workflow instance regardless of how it was triggered.</p>
+    <p>Cloudflare Workflows accepts a client-supplied instance id (<code>create({ id })</code>; pattern <code>^[a-zA-Z0-9_][a-zA-Z0-9-_]*$</code>, ≤ 100 chars) and <code>createBatch</code> is <em>idempotent</em>: an id already in use within retention is skipped, not duplicated. <code>get(id).status()</code> and <code>instance.restart()</code> provide inspection and repair.</p>
+    <p><strong>Start procedure:</strong></p>
+    <ol>
+      <li>If <code>unstarted</code> → call <code>PIPELINE_WORKFLOW.createBatch([{ id: instanceId, params }])</code>.
+        <ul>
+          <li>Batch returns the new instance → persist <code>started</code> + <code>instanceId</code>; return it.</li>
+          <li>Batch returns empty (id already exists — a previous attempt survived) → <code>PIPELINE_WORKFLOW.get(instanceId)</code>; if <code>errored</code>/<code>terminated</code>, <code>restart()</code> it; persist <code>started</code>; return it.</li>
+          <li>Any other error propagates; the record stays <code>unstarted</code> and the caller's retry re-enters at this step.</li>
+        </ul>
+      </li>
+      <li>If <code>started</code> (fast path, incl. post-start repair) → <code>get(instanceId).status()</code>:
+        <ul>
+          <li><code>errored</code>/<code>terminated</code> → if <code>now - lastRestartAt &gt; WORKFLOW_REPAIR_COOLDOWN_MS</code> (default 1 hour), <code>restart()</code> the <em>same</em> instance and persist <code>lastRestartAt</code>. A terminal failure after the <code>started</code> write is therefore repaired on the next start, not orphaned.</li>
+          <li><code>queued</code>/<code>running</code>/<code>waiting</code>/<code>paused</code>/<code>complete</code>/<code>unknown</code> → return as-is. <code>complete</code> is never re-run: the work already finished.</li>
+          <li>Return <code>{ workflowInstanceId, alreadyStarted: true }</code>.</li>
+        </ul>
+      </li>
+    </ol>
+    <p>The cooldown is a single field and comparison that makes concurrent repair callers idempotent (DO calls serialize; the second caller sees a fresh <code>lastRestartAt</code> and skips) and stops a permanently-errored instance from being restarted on every duplicate delivery. It is a constant, not a config knob; it can be raised if repair churn ever matters.</p>
+    <table>
+      <thead><tr><th>Window</th><th>Record on retry</th><th>Outcome</th></tr></thead>
+      <tbody>
+        <tr><td>Crash before <code>createBatch</code> returns</td><td><code>unstarted</code></td><td>Re-issue with the same deterministic id → exactly one workflow</td></tr>
+        <tr><td>Crash after create succeeds, before <code>started</code> persisted</td><td><code>unstarted</code></td><td>Re-issue: id already exists → batch returns empty → <code>get</code> adopts the <em>same</em> instance → exactly one workflow</td></tr>
+        <tr><td>Instance <code>errored</code>/<code>terminated</code> while <code>unstarted</code></td><td><code>unstarted</code></td><td><code>get</code> + <code>restart()</code> re-runs the single instance — self-healing, no duplicate</td></tr>
+        <tr><td>Instance <code>errored</code>/<code>terminated</code> after <code>started</code> persisted</td><td><code>started</code></td><td>Fast path checks <code>get(id).status()</code> → <code>restart()</code> the same instance (cooldown-bounded) → repaired, still exactly one instance</td></tr>
+        <tr><td><code>createBatch</code> throws (non-idempotency error)</td><td><code>unstarted</code></td><td>Error propagates; caller retry re-enters and re-issues</td></tr>
+      </tbody>
+    </table>
+    <p>Because the instance id is deterministic and pageId-keyed, and create is idempotent, no duplicate instance is ever created — no downstream workflow claiming is required. The workflow payload is the event passed to the instance: <code>{ pageId, ideaId, source, … }</code> (for <code>ingest</code>, <code>ideaId</code> is known once the page is created, before the start is delegated).</p>
+    <h5>Existing-idea starts (cadence and <code>/generate</code>)</h5>
+    <p>Cadence and <code>/generate</code> can race to start the same existing raw idea; the Status transition happens only after generation, so it cannot guard two starts. Both call the page-keyed claim <code>start({ pageId, ideaId, source })</code> — the same record and instance id RSS ingest uses. The first caller persists <code>started</code>; a concurrent caller re-enters and receives the same <code>workflowInstanceId</code> — exactly one workflow instance. A non-first caller can skip post-start work (e.g. cadence's publish-after-approval polling) using <code>alreadyStarted</code>.</p>
+    <h4>Non-atomic paths</h4>
+    <ul>
+      <li><strong>Migration</strong> runs as a single local process and bypasses the DO (direct <code>createIdea</code>), which is inherently single-threaded; it must not run concurrently with itself, and the cutover precondition (no <code>awaiting-feedback</code> idea) prevents overlap with runtime ingest.</li>
+    </ul>
+
+    <h2>4. Architecture and flow</h2>
+    <h3>4.1 Notion integration client (<code>src/integrations/notion.ts</code>)</h3>
+    <ul>
+      <li>Factory <code>createNotionClient(env)</code> using <code>NOTION_API_KEY</code>, <code>NOTION_IDEAS_DATA_SOURCE_ID</code>.</li>
+      <li>Endpoints used per §3.3: <code>POST /v1/pages</code>, <code>PATCH /v1/pages/:id</code>, <code>GET/PATCH /v1/pages/:id/markdown</code>, <code>POST /v1/data_sources/:id/query</code>.</li>
+      <li>Rate limiting: 350 ms minimum spacing between requests when <code>NOTION_FREE_TIER !== "false"</code>; a static <code>NOTION_RATE_LIMIT_DELAY_MS</code> constant controls the delay value.</li>
+      <li>Retry: 429/529/5xx honored with <code>Retry-After</code> and exponential backoff + jitter, max 3 attempts. Non-transient (400/401/403/404/409) throw a <code>NotionError</code> immediately.</li>
+      <li>Query pagination: loop <code>start_cursor</code> until <code>has_more=false</code> (bounded page count, e.g. max 100 pages); abort with <code>NotionError</code> if <code>request_status.type === "incomplete"</code>.</li>
+      <li>Markdown retrieval per §3.3 policy: immediate failure on <code>truncated: true</code>, non-empty <code>unknown_block_ids</code>, or 404; never return a partial or placeholder body.</li>
+      <li>Property reads: <code>unique_id</code> parsed from <code>properties["Kipp ID"].unique_id.number</code>; <code>Status</code> from <code>properties.Status.status.name</code>.</li>
+    </ul>
+    <h3>4.2 Idea manager (<code>src/linkedin/ideas/manager.ts</code>)</h3>
+    <p>Rewritten over the Notion client. Query operations return <strong>metadata only</strong> (<code>IdeaSummary[]</code>); body retrieval is explicit:</p>
+    <table>
+      <thead><tr><th>Method</th><th>Behavior</th></tr></thead>
+      <tbody>
+        <tr><td><code>listIdeas(filter?)</code></td><td>Query data source, paginated, metadata only → <code>IdeaSummary[]</code></td></tr>
+        <tr><td><code>getIdea(id)</code></td><td>Get page metadata + body via <code>GET /v1/pages/:id/markdown</code> with §3.3 failure policy → <code>Idea</code></td></tr>
+        <tr><td><code>getIdeasByStatus(s)</code></td><td><code>listIdeas</code> with Status filter; metadata only</td></tr>
+        <tr><td><code>getNextIdea()</code></td><td>Query Status = raw, sort ascending, first result; hydrate its body via <code>getIdea</code> → <code>Idea</code></td></tr>
+        <tr><td><code>createIdea(input)</code></td><td>§3.5 idempotent create (lookup-first); returns <code>Idea</code> with assigned Kipp ID + body. Used by migration and tests; runtime uses <code>IdeaIngestDO</code></td></tr>
+        <tr><td><code>updateIdea(id, update)</code></td><td>PATCH page properties (and <code>/markdown</code> via <code>replace_content</code> when body changes)</td></tr>
+        <tr><td><code>moveToArchive(idea)</code></td><td>PATCH Status → <code>finalized</code></td></tr>
+        <tr><td><code>findBySubstackUrl(url)</code></td><td>Query with Substack URL filter; metadata (RSS dedup)</td></tr>
+        <tr><td><code>findByIdempotencyKey(key)</code></td><td>Query with Idempotency Key filter; used by ingest + migration reruns</td></tr>
+        <tr><td><code>getLatestFinalizedTimestamp()</code></td><td>Query Status = finalized, sort by last_edited_time desc, first result (cadence)</td></tr>
+      </tbody>
+    </table>
+    <p><code>writeIdeas()</code> is dropped (ideas are created one at a time).</p>
+
+    <h3>4.3 Caller changes (body-retrieval mapping)</h3>
+    <table>
+      <thead><tr><th>File</th><th>Change</th></tr></thead>
+      <tbody>
+        <tr><td><code>src/core/idea-ingest.ts</code> (new) + <code>IdeaIngestDO</code></td><td>Adopt-or-create page on <code>ingest:{key}</code>; delegate every workflow start to the page-keyed claim <code>start</code> (deterministic pageId-based instance id, crash-safe, started-path repair) (§3.5)</td></tr>
+        <tr><td><code>src/linkedin/workflow.ts</code></td><td>Use <code>getIdea(ideaId)</code> for the chatId/correlation lookup in the generate step; keep GitHub client only for <code>resolvePrompt()</code>; remove dead cost reads and draft persistence. <code>run(event)</code> reads <code>event.payload</code> (pageId, ideaId, source) — no downstream claim step needed (deterministic id makes start exactly-once, §3.5)</td></tr>
+        <tr><td><code>src/triggers/rss.ts</code></td><td>Dedup via <code>findBySubstackUrl</code>; build main/side ideas with <code>rss:{guid}:{i}</code> keys; ingest main via DO (<code>startWorkflow: true</code>), side ideas via DO (<code>startWorkflow: false</code>); drop GitHub and <code>teaser</code></td></tr>
+        <tr><td><code>src/triggers/cadence.ts</code></td><td>In-flight check + <code>getLatestFinalizedTimestamp()</code> via metadata queries; next raw idea via <code>getNextIdea()</code> (hydrated body); start its workflow via the claim object <code>start({ pageId, ideaId, source })</code>; drop GitHub entirely</td></tr>
+        <tr><td><code>src/triggers/telegram-webhook.ts</code></td><td><code>/add</code> → DO ingest with <code>tg:{chatId}:{messageId}</code> (<code>startWorkflow: false</code>); <code>/generate</code> → <code>getNextIdea()</code> for the body, then claim object <code>start({ pageId, ideaId, source })</code>; drop GitHub entirely</td></tr>
+        <tr><td><code>src/core/types.ts</code></td><td>Env: add Notion vars + <code>IDEA_INGEST</code> DO binding. Idea: remove dead fields, add <code>pageId</code> + <code>idempotencyKey</code>; add <code>IdeaSummary</code>. Remove <code>ArchivedIdea</code>.</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Body-retrieval discipline:</strong> every caller that needs <code>idea.body</code> (cadence, <code>/generate</code>, and the workflow's chatId lookup) routes through <code>getIdea</code>/<code>getNextIdea</code>; triggers that hold the body at creation time (rss, <code>/add</code>) use the value from the ingest result and never re-query it.</p>
+
+    <h2>5. Environment and configuration</h2>
+    <table>
+      <thead><tr><th>Variable</th><th>Kind</th><th>Where</th></tr></thead>
+      <tbody>
+        <tr><td><code>NOTION_API_KEY</code></td><td>secret</td><td><code>.dev.vars</code>, <code>wrangler secret put</code></td></tr>
+        <tr><td><code>NOTION_IDEAS_DATA_SOURCE_ID</code></td><td>var</td><td><code>wrangler.toml [vars]</code>, <code>wrangler.local.toml</code></td></tr>
+        <tr><td><code>NOTION_FREE_TIER</code></td><td>var</td><td>default <code>"true"</code>; set <code>"false"</code> to disable the 350 ms delay</td></tr>
+      </tbody>
+    </table>
+    <p>Wrangler: new <code>[[durable_objects.bindings]]</code> for <code>IDEA_INGEST</code> and a new <code>[[migrations]]</code> entry. GitHub vars (<code>GITHUB_PAT</code>, <code>DATA_REPO_OWNER</code>, <code>DATA_REPO_NAME</code>) remain for style-prompt resolution.</p>
+
+    <h2>6. Migration and rollback</h2>
+    <h3>6.1 One-time migration</h3>
+    <ol>
+      <li>Manual setup first (see docs): create internal integration with the capabilities from §3.3, create the Ideas data source with the exact property schema, share it with the integration.</li>
+      <li>Run <code>scripts/migrate-to-notion/</code> (self-contained parser + archive + migrate runner). It runs as a local Node script, outside the Worker <code>Env</code>, and reads its own configuration from the process environment: <code>GITHUB_PAT</code>, <code>DATA_REPO_OWNER</code>, <code>DATA_REPO_NAME</code> (selects the source data repo + authenticates the GitHub reads) and <code>NOTION_API_KEY</code>, <code>NOTION_IDEAS_DATA_SOURCE_ID</code> (authenticates and addresses the Notion writes).
+        <ul>
+          <li>Read <code>ideas.md</code> and <code>archive.md</code> from the GitHub data repo via the existing GitHub client.</li>
+          <li>For each idea, create a Notion page with mapped properties and body markdown, keyed by <code>legacy:backlog:{oldId}</code> / <code>legacy:archive:{oldId}</code>.</li>
+          <li><strong>Deterministic idempotency:</strong> before each create, query by the <code>legacy:…</code> Idempotency Key and skip any already present. The Idempotency Key property <em>is</em> the persisted migration ledger — no separate ledger file. Rerunning after a partial failure creates only the missing pages. Single-threaded: it must not run concurrently with itself.</li>
+          <li>Report success/failure counts; do not delete <code>ideas.md</code> / <code>archive.md</code>.</li>
+        </ul>
+      </li>
+      <li>Deploy the new code. GitHub files become inert history.</li>
+    </ol>
+    <div class="callout note">
+      <strong>ID continuity:</strong> Notion assigns new sequential Kipp IDs. Old GitHub IDs are preserved only as <code>legacy:</code> Idempotency Keys (Q14). A workflow must not be in-flight across the cutover — confirm no idea is in <code>awaiting-feedback</code> before migrating.
+    </div>
+    <h3>6.2 Rollback</h3>
+    <p>Revert the code deploy (git revert of this branch's commits) and re-point. GitHub <code>ideas.md</code>/<code>archive.md</code> are untouched by migration, so the pre-Notion code path works unchanged. <strong>Data-loss boundary:</strong> Notion writes are not copied back to GitHub. Ideas created in Notion during the post-cutover window are invisible to the reverted GitHub path and must be re-added manually or accepted as lost; the migration ledger is Notion-only, so a rollback does not replay those pages into <code>ideas.md</code>.</p>
+
+    <h2>7. Tests</h2>
+    <table>
+      <thead><tr><th>Area</th><th>Coverage</th></tr></thead>
+      <tbody>
+        <tr><td><code>notion-client.test.ts</code> (new)</td><td>Rate limiter on/off, retry on 429/529/5xx, <code>Retry-After</code> honored, throws on 400/401/403/404; exact fixtures from §3.3 (create request/response, query <code>results</code> list + <code>unique_id</code> property shape, <code>page_markdown</code> GET/PATCH, <code>replace_content</code> payload); query pagination loop (<code>has_more</code>/<code>next_cursor</code>); markdown policy fixtures: throws on <code>truncated: true</code>, throws on non-empty <code>unknown_block_ids</code>, throws on 404 (no refetch/merge path)</td></tr>
+        <tr><td><code>idea-ingest.test.ts</code> (new)</td><td>Two concurrent same-key <code>ingest</code> calls → one retained page + one workflow instance; lost-response retry returns the stored record; adopt-existing (key already present in Notion) path; crash windows: (a) crash before <code>createBatch</code> returns → retry yields exactly one instance, (b) crash after create succeeds but before <code>started</code> persisted → idempotent re-issue adopts the same instance; started-path repair: instance <code>errored</code>/<code>terminated</code> <em>after</em> <code>started</code> persisted → <code>get(id).status()</code> + <code>restart()</code> (cooldown-bounded), and two concurrent repair callers → exactly one <code>restart()</code>; unified ownership: RSS-ingest delegation and cadence/<code>/generate</code> <code>start</code> derive the same pageId-based instance id</td></tr>
+        <tr><td><code>ideas.test.ts</code> (was backlog.test.ts)</td><td>listIdeas/getIdea split, getIdeasByStatus, getNextIdea hydrates body, updateIdea, moveToArchive, findBySubstackUrl, findByIdempotencyKey; removed archive-cleanup and dropped-field tests</td></tr>
+        <tr><td><code>rss.test.ts</code></td><td>Dedup via <code>findBySubstackUrl</code>, idempotency key shape <code>rss:{guid}:{i}</code>, idea creation via ingest, no <code>teaser</code> assertions</td></tr>
+        <tr><td><code>cadence.test.ts</code></td><td>Status-based in-flight check, latest-finalized query, next raw idea via <code>getNextIdea()</code> (body hydrated for workflow params)</td></tr>
+        <tr><td><code>migrate.test.ts</code> (new)</td><td>Rerun after simulated partial failure creates only missing pages (keyed by <code>legacy:</code> keys), no duplicates, correct file → key mapping</td></tr>
+        <tr><td>Integration <code>setup.ts</code></td><td>FakeNetwork gains Notion HTTP routes (create/query/get-markdown/patch, pagination, truncation, <code>unknown_block_ids</code>); stale GitHub idea/archive mocks removed; <code>FakeState</code> tracks Notion pages; <code>IDEA_INGEST</code> DO bound in the test harness (with a fake Workflows binding exposing idempotent <code>createBatch</code>, <code>get</code>, <code>restart</code>)</td></tr>
+        <tr><td>Integration tests</td><td>Duplicate RSS/Telegram delivery starts exactly one workflow (one retained page, one instance id); concurrent cadence + <code>/generate</code> on the same raw idea starts exactly one workflow instance; <strong>RSS ingest racing with cadence or <code>/generate</code> for the same page starts exactly one workflow instance</strong>; rss-to-backlog and telegram-to-backlog assert Notion pages instead of GitHub files; workflow-approval-to-linkedin-draft still green</td></tr>
+      </tbody>
+    </table>
+    <p>Quality gates: <code>pnpm lint</code>, <code>pnpm run docs</code>, <code>pnpm typecheck</code>, <code>pnpm test</code>, <code>pnpm test:integration</code>.</p>
+
+    <h2>8. Documentation</h2>
+    <ul>
+      <li><code>docs/notion-storage-model.md</code> (new): schema, internal-integration setup guide (database + child data source, required capabilities), env vars (incl. the data-source ID), API version + markdown truncation/unknown-block failure policy, rate-limit behavior + <code>NOTION_FREE_TIER</code>, workflow-start idempotency (deterministic instance id, <code>createBatch</code>/<code>get</code>/<code>restart</code> repair), Markdown export/backup, recovery path, rollback data-loss boundary, operational limits.</li>
+      <li><code>README.md</code>: architecture diagram swaps GitHub repo for Notion; "LinkedIn drafting" section updated; setup section links the new doc.</li>
+    </ul>
+
+    <h2>9. Implementation order</h2>
+    <ol>
+      <li>Env/types: add Notion vars + <code>IDEA_INGEST</code> DO to <code>Env</code>, <code>wrangler.toml</code>, <code>wrangler.local.toml</code>.</li>
+      <li>Notion integration client (<code>src/integrations/notion.ts</code>) + unit tests with §3.3 fixtures.</li>
+      <li>Idea model cleanup in <code>core/types.ts</code> (<code>Idea</code> + <code>IdeaSummary</code>, drop dead fields) + call-site cleanup.</li>
+      <li>Rename <code>backlog/</code> → <code>ideas/</code>; rewrite manager; move parser/archive/id-generator to <code>scripts/migrate-to-notion/</code>.</li>
+      <li>Build <code>IdeaIngestDO</code> (create-or-adopt page on <code>ingest:{key}</code>; pageId-keyed crash-safe workflow-start state machine incl. started-path repair on <code>claim:{pageId}</code>) + unit tests incl. crash windows and concurrent repair callers.</li>
+      <li>Update workflow, rss, cadence, telegram-webhook (body-retrieval mapping + DO ingest per §4.3).</li>
+      <li>Migration script + rerun-after-partial-failure tests.</li>
+      <li>Remaining tests (unit + integration + FakeNetwork extension).</li>
+      <li>Docs (new doc + README).</li>
+      <li>Run full quality gates; commit; publish implementation handoff.</li>
+    </ol>
+  </body>
+</html>

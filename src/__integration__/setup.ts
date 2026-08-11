@@ -1,9 +1,24 @@
 import { vi } from "vitest"
 import { CONSUMED_INTERACTION_RETENTION_MS } from "../core/interaction-router"
-import { INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
+import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
+import { createNotionClient } from "../integrations/notion"
+import { createIdeaManager, type IdeaInput } from "../linkedin/ideas/manager"
+
+export interface FakeNotionPage {
+  pageId: string
+  kippId: number
+  title: string
+  status: string
+  source: string
+  markdown: string
+  chatId?: string
+  substackUrl?: string
+  idempotencyKey?: string
+}
 
 export interface FakeState {
   githubFiles: Map<string, string>
+  notionPages: Map<string, FakeNotionPage>
   telegramMessages: Array<{ chatId: number | string; text: string; replyMarkup?: Record<string, unknown> }>
   answeredCallbacks: string[]
   linkedinDrafts: Array<{ authorUrn: string; text: string }>
@@ -13,6 +28,7 @@ export interface FakeState {
 
 export interface FakeNetworkConfig {
   githubFiles?: Record<string, string>
+  notionPages?: FakeNotionPage[]
   llmResponses?: unknown[]
   rssFeedUrl?: string
   rssFeedXml?: string
@@ -41,9 +57,30 @@ function respond(body: unknown, status = 200) {
   }
 }
 
+function notionPageJson(p: FakeNotionPage) {
+  const properties: Record<string, unknown> = {
+    "Kipp ID": { unique_id: { prefix: null, number: p.kippId } },
+    Status: { status: { name: p.status } },
+    Source: { select: { name: p.source } },
+    Title: { title: [{ type: "text", text: { content: p.title } }] },
+  }
+  if (p.chatId) properties["Chat ID"] = { rich_text: [{ type: "text", text: { content: p.chatId } }] }
+  if (p.substackUrl) properties["Substack URL"] = { url: p.substackUrl }
+  if (p.idempotencyKey)
+    properties["Idempotency Key"] = { rich_text: [{ type: "text", text: { content: p.idempotencyKey } }] }
+  return {
+    object: "page",
+    id: p.pageId,
+    created_time: "2026-07-01T12:00:00Z",
+    last_edited_time: "2026-07-02T12:00:00Z",
+    properties,
+  }
+}
+
 export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
   const state: FakeState = {
     githubFiles: new Map(Object.entries(config?.githubFiles ?? {})),
+    notionPages: new Map((config?.notionPages ?? []).map((page) => [page.pageId, { ...page }])),
     telegramMessages: [],
     answeredCallbacks: [],
     linkedinDrafts: [],
@@ -60,6 +97,98 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
 
   const fetch = vi.fn(async (url: RequestInfo | URL, opts?: RequestInit) => {
     const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
+
+    if (urlStr.includes("api.notion.com")) {
+      if (urlStr.endsWith("/query")) {
+        const body = JSON.parse((opts?.body as string) ?? "{}") as {
+          filter?: {
+            property?: string
+            status?: { equals?: string }
+            url?: { equals?: string }
+            rich_text?: { equals?: string }
+          }
+          sorts?: Array<{ property?: string; direction?: string }>
+        }
+        let results = [...state.notionPages.values()]
+        const filter = body.filter
+        if (filter?.property === "Status") results = results.filter((p) => p.status === filter.status?.equals)
+        if (filter?.property === "Substack URL") results = results.filter((p) => p.substackUrl === filter.url?.equals)
+        if (filter?.property === "Idempotency Key")
+          results = results.filter((p) => p.idempotencyKey === filter.rich_text?.equals)
+        if (body.sorts?.[0]?.property === "Kipp ID") results = results.sort((a, b) => a.kippId - b.kippId)
+        return respond({ object: "list", results: results.map(notionPageJson), has_more: false, next_cursor: null })
+      }
+
+      if (urlStr === "https://api.notion.com/v1/pages" && opts?.method === "POST") {
+        const body = JSON.parse(opts.body as string) as {
+          properties: Record<
+            string,
+            {
+              title?: Array<{ text: { content: string } }>
+              status?: { name?: string }
+              select?: { name?: string }
+              rich_text?: Array<{ text: { content: string } }>
+              url?: string
+            }
+          >
+          markdown?: string
+        }
+        const nextKippId = Math.max(0, ...[...state.notionPages.values()].map((p) => p.kippId)) + 1
+        const page: FakeNotionPage = {
+          pageId: `page_${nextKippId}`,
+          kippId: nextKippId,
+          title: body.properties.Title?.title?.[0]?.text?.content ?? "",
+          status: body.properties.Status?.status?.name ?? "raw",
+          source: body.properties.Source?.select?.name ?? "manual",
+          markdown: body.markdown ?? "",
+          chatId: body.properties["Chat ID"]?.rich_text?.[0]?.text?.content,
+          substackUrl: body.properties["Substack URL"]?.url,
+          idempotencyKey: body.properties["Idempotency Key"]?.rich_text?.[0]?.text?.content,
+        }
+        state.notionPages.set(page.pageId, page)
+        return respond(notionPageJson(page))
+      }
+
+      const markdown = urlStr.match(/\/v1\/pages\/([^/]+)\/markdown$/)
+      if (markdown) {
+        const page = state.notionPages.get(markdown[1])
+        if (!page) return respond({ message: "object_not_found" }, 404)
+        if (opts?.method === "PATCH") {
+          const body = JSON.parse(opts.body as string) as { replace_content?: { new_str?: string } }
+          if (body.replace_content?.new_str !== undefined) page.markdown = body.replace_content.new_str
+        }
+        return respond({
+          object: "page_markdown",
+          id: page.pageId,
+          markdown: page.markdown,
+          truncated: false,
+          unknown_block_ids: [],
+        })
+      }
+
+      const pageMatch = urlStr.match(/\/v1\/pages\/([^/]+)$/)
+      if (pageMatch) {
+        const page = state.notionPages.get(pageMatch[1])
+        if (!page) return respond({ message: "object_not_found" }, 404)
+        if (opts?.method === "PATCH") {
+          const body = JSON.parse(opts.body as string) as {
+            properties: Record<
+              string,
+              {
+                status?: { name?: string }
+                title?: Array<{ text: { content: string } }>
+                rich_text?: Array<{ text: { content: string } }>
+              }
+            >
+          }
+          const props = body.properties ?? {}
+          if (props.Status) page.status = props.Status.status?.name ?? page.status
+          if (props.Title) page.title = props.Title.title?.[0]?.text?.content ?? page.title
+          if (props["Chat ID"]) page.chatId = props["Chat ID"].rich_text?.[0]?.text?.content
+        }
+        return respond(notionPageJson(page))
+      }
+    }
 
     if (urlStr.includes("api.github.com/repos/")) {
       const match = urlStr.match(/\/repos\/([^/]+)\/([^/]+)\/contents\/(.+)/)
@@ -157,6 +286,11 @@ export function createFakeWorkflowBinding() {
     return { id }
   })
 
+  const createBatch = vi.fn(async (items: Array<{ id: string; params: unknown }>) => {
+    created.push(...items)
+    return items
+  })
+
   const get = vi.fn((instanceId: string) => ({
     sendEvent: vi.fn((event: unknown) => {
       receivedEvents.push({ instanceId, event })
@@ -165,6 +299,7 @@ export function createFakeWorkflowBinding() {
 
   return {
     create,
+    createBatch,
     get,
     getCreated: () => [...created],
     getReceivedEvents: () => [...receivedEvents],
@@ -173,9 +308,87 @@ export function createFakeWorkflowBinding() {
       receivedEvents.length = 0
       idCounter = 0
       create.mockClear()
+      createBatch.mockClear()
       get.mockClear()
     },
   }
+}
+
+const INSTANCE_ID_HASH_CHARS = 32
+
+/** Mirrors the deterministic workflow instance id derivation used by IdeaIngestDO. */
+async function claimInstanceId(pageId: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pageId))
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+  return `kipp-${hex.slice(0, INSTANCE_ID_HASH_CHARS)}`
+}
+
+/**
+ * In-memory stand-in for the IdeaIngest Durable Object namespace, faithful to
+ * the real adopt-or-create ingest and deterministic workflow-start semantics.
+ */
+export function createFakeIdeaIngest(env: Env): DurableObjectNamespace {
+  const storage = new Map<string, unknown>()
+  const manager = () => createIdeaManager(createNotionClient(env))
+  const namespace = {
+    idFromName: (name: string) => name as never,
+    get: (_id: { toString: () => string }) => ({
+      fetch: async (url: string | Request, init?: RequestInit) => {
+        const path = new URL(typeof url === "string" ? url : url.url).pathname
+        const body = JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>
+
+        if (path === "/ingest") {
+          const { key, idea, startWorkflow } = body as {
+            key: string
+            idea: IdeaInput
+            startWorkflow?: boolean
+          }
+          const record = storage.get(`ingest:${key}`) as { pageId: string; ideaId: string } | undefined
+          let pageId: string
+          let ideaId: string
+          if (record) {
+            pageId = record.pageId
+            ideaId = record.ideaId
+          } else {
+            const created = await manager().createIdea({ ...idea, idempotencyKey: key })
+            pageId = created.pageId
+            ideaId = created.id
+            storage.set(`ingest:${key}`, { pageId, ideaId })
+          }
+          let workflowInstanceId: string | undefined
+          let alreadyStarted: boolean | undefined
+          if (startWorkflow) {
+            const started = await namespace.get({ toString: () => `claim:${pageId}` }).fetch("http://ingest/start", {
+              method: "POST",
+              body: JSON.stringify({ pageId, ideaId, source: idea.source }),
+            })
+            const result = (await started.json()) as { workflowInstanceId: string; alreadyStarted: boolean }
+            workflowInstanceId = result.workflowInstanceId
+            alreadyStarted = result.alreadyStarted
+          }
+          return Response.json({ pageId, ideaId, workflowInstanceId, alreadyStarted })
+        }
+
+        if (path === "/start") {
+          const { pageId, ideaId, source } = body as { pageId: string; ideaId: string; source: string }
+          const instanceId = await claimInstanceId(pageId)
+          const claimKey = `claim:${pageId}`
+          const record = storage.get(claimKey) as { status: string; instanceId?: string } | undefined
+          if (!record || record.status === "unstarted") {
+            const created = await env.PIPELINE_WORKFLOW.createBatch([
+              { id: instanceId, params: { pageId, ideaId, source } },
+            ])
+            storage.set(claimKey, { status: "started", instanceId })
+            return Response.json({ workflowInstanceId: instanceId, alreadyStarted: created.length === 0 })
+          }
+          return Response.json({ workflowInstanceId: record.instanceId ?? instanceId, alreadyStarted: true })
+        }
+
+        return new Response("Not found", { status: 404 })
+      },
+    }),
+  }
+  return namespace as unknown as DurableObjectNamespace
 }
 
 const REVISION_FEEDBACK_KIND = INTERACTION_KIND.REVISION_FEEDBACK

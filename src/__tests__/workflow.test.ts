@@ -73,6 +73,94 @@ function b64(s: string): string {
   return btoa(binary)
 }
 
+const STYLE_PROMPT = "Professional tone."
+
+interface HarnessPage {
+  id: string
+  kippId: number
+  title: string
+  status: string
+  source: string
+  markdown: string
+  chatId?: string
+}
+
+function pageJson(page: HarnessPage) {
+  const properties: Record<string, unknown> = {
+    "Kipp ID": { unique_id: { prefix: null, number: page.kippId } },
+    Status: { status: { name: page.status } },
+    Source: { select: { name: page.source } },
+    Title: { title: [{ type: "text", text: { content: page.title } }] },
+  }
+  if (page.chatId) properties["Chat ID"] = { rich_text: [{ type: "text", text: { content: page.chatId } }] }
+  return {
+    object: "page",
+    id: page.id,
+    created_time: "2026-07-01T12:00:00Z",
+    last_edited_time: "2026-07-02T12:00:00Z",
+    properties,
+  }
+}
+
+/** Builds a fetch mock that routes GitHub prompt reads, Notion page/markdown/PATCH, Telegram, and LinkedIn. */
+function buildFetch(pages: HarnessPage[], opts: { linkedinStatus?: number; linkedinBody?: string } = {}) {
+  const patches: { pageId: string; body: Record<string, unknown> }[] = []
+  const telegramTexts: string[] = []
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    const ok = (body: unknown, status = 200) =>
+      new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      })
+    if (url.includes("api.notion.com")) {
+      const md = url.match(/\/v1\/pages\/([^/]+)\/markdown$/)
+      if (md) {
+        const page = pages.find((p) => p.id === md[1])
+        if (!page) return ok({ message: "object_not_found" }, 404)
+        return ok({
+          object: "page_markdown",
+          id: page.id,
+          markdown: page.markdown,
+          truncated: false,
+          unknown_block_ids: [],
+        })
+      }
+      const pageMatch = url.match(/\/v1\/pages\/([^/]+)$/)
+      if (pageMatch) {
+        const page = pages.find((p) => p.id === pageMatch[1])
+        if (!page) return ok({ message: "object_not_found" }, 404)
+        if (init?.method === "PATCH") {
+          const body = JSON.parse((init.body as string) ?? "{}") as Record<string, unknown>
+          patches.push({ pageId: page.id, body })
+          const status = (body.properties as Record<string, { status?: { name?: string } }>)?.Status?.status?.name
+          if (status) page.status = status
+          return ok({ object: "page", id: page.id })
+        }
+        return ok(pageJson(page))
+      }
+    }
+    if (url.includes("api.github.com")) {
+      const path = url.split("/contents/")[1] ?? ""
+      const content = path === "style-prompt.md" ? STYLE_PROMPT : ""
+      return ok({ content: b64(content), sha: "s1", encoding: "base64" })
+    }
+    if (url.includes("api.telegram.org")) {
+      const body = JSON.parse((init?.body as string) ?? "{}") as { text?: string }
+      telegramTexts.push(body.text ?? "")
+      return ok({ ok: true, result: { message_id: 100 } })
+    }
+    if (url.includes("api.linkedin.com")) {
+      return ok(
+        opts.linkedinBody ?? { id: "urn:li:draft:123", "x-restli-id": "urn:li:draft:123" },
+        opts.linkedinStatus ?? 201,
+      )
+    }
+    throw new Error(`Unexpected fetch: ${url}`)
+  })
+  return { fetchMock, patches, telegramTexts }
+}
+
 function mockEnv(): Env {
   return {
     GITHUB_PAT: "pat",
@@ -90,12 +178,19 @@ function mockEnv(): Env {
     LINKEDIN_ACCESS_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
     TOKEN_VAULT: {
       idFromName: () => "mock-do-id",
       get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ tokens: null }))) }),
     } as never,
     INTERACTION_ROUTER: {
       idFromName: () => "mock-router-id",
+      get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ ok: true }))) }),
+    } as never,
+    IDEA_INGEST: {
+      idFromName: () => "mock-ingest-id",
       get: () => ({ fetch: () => Promise.resolve(new Response(JSON.stringify({ ok: true }))) }),
     } as never,
     TOKEN_ENCRYPTION_KEY_IDS: "test-key",
@@ -106,19 +201,22 @@ function mockEnv(): Env {
   }
 }
 
-const STYLE_PROMPT = "Professional tone."
+const BASE_PAGE: HarnessPage = {
+  id: "page_1",
+  kippId: 1,
+  title: "Test idea",
+  status: "raw",
+  source: "manual",
+  markdown: "Body content",
+  chatId: "42",
+}
 
-const mockIdeas = `---
-id: 1
-title: Test idea
-status: raw
-created: 2026-07-01T12:00:00Z
-source: manual
-correlation:
-  telegramChatId: "42"
----
-
-Body content`
+function patchedStatuses(patches: { body: Record<string, unknown> }[]): string[] {
+  return patches.map((p) => {
+    const props = p.body.properties as { Status?: { status?: { name?: string } } } | undefined
+    return props?.Status?.status?.name ?? ""
+  })
+}
 
 describe("PipelineWorkflow", () => {
   const stepDo = vi.fn()
@@ -138,7 +236,7 @@ describe("PipelineWorkflow", () => {
 
   function makeEvent() {
     return {
-      payload: { ideaId: "1", ideaTitle: "Test idea", ideaBody: "Body content" },
+      payload: { pageId: "page_1", ideaId: "1", source: "manual" },
       instanceId: "wf-1",
       timestamp: new Date(),
       workflowName: "",
@@ -146,28 +244,13 @@ describe("PipelineWorkflow", () => {
   }
 
   it("generates draft, notifies, finalizes on approval", async () => {
-    const responses = [
-      { text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-    ]
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
@@ -181,28 +264,13 @@ describe("PipelineWorkflow", () => {
   })
 
   it("times out when no feedback received, marking idea as expired", async () => {
-    const responses = [
-      { text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-    ]
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, patches } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent.mockResolvedValue({ type: "timeout" })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
@@ -215,45 +283,21 @@ describe("PipelineWorkflow", () => {
     expect(stepDo).not.toHaveBeenCalledWith("notify-published", expect.any(Function))
     expect(stepDo).not.toHaveBeenCalledWith("archive", expect.any(Function))
     expect(stepDo).not.toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
+    expect(patchedStatuses(patches)).toContain("awaiting-feedback-expired")
   })
 
   it("does not leak LinkedIn token in Telegram error message or console.error on publish failure", async () => {
-    const responses = [
-      { text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-    ]
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
-    let telegramText = ""
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (url?.includes?.(".linkedin-tokens.json"))
-          return { ok: false, status: 404, text: () => Promise.resolve("Not found") }
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.linkedin.com"))
-          return {
-            ok: false,
-            status: 401,
-            text: () => Promise.resolve(JSON.stringify({ error: "invalid_token", access_token: "leaked-secret-abc" })),
-          }
-        if (url?.includes?.("api.telegram.org")) {
-          const body = JSON.parse(opts?.body as string) as { text?: string }
-          telegramText = body.text ?? ""
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE], {
+      linkedinStatus: 401,
+      linkedinBody: JSON.stringify({ error: "invalid_token", access_token: "leaked-secret-abc" }),
+    })
+    vi.stubGlobal("fetch", fetchMock)
 
     waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
 
@@ -276,6 +320,7 @@ describe("PipelineWorkflow", () => {
 
     expect(stepDo).toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify-publish-failed", expect.any(Function))
+    const telegramText = telegramTexts[telegramTexts.length - 1]
     expect(telegramText).not.toContain("leaked-secret-abc")
     expect(telegramText).not.toContain("valid-token")
     expect(telegramText).toContain("HTTP 401")
@@ -286,33 +331,14 @@ describe("PipelineWorkflow", () => {
   })
 
   it("reports a token vault failure safely when approving", async () => {
-    const responses = [
-      { text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-    ]
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
-    let telegramText = ""
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org")) {
-          const body = JSON.parse(opts?.body as string) as { text?: string }
-          telegramText = body.text ?? ""
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
@@ -333,38 +359,20 @@ describe("PipelineWorkflow", () => {
 
     expect(stepDo).not.toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify-publish-failed", expect.any(Function))
-    expect(telegramText).toBe("❌ LinkedIn publish failed. Please try approving again.")
+    expect(telegramTexts[telegramTexts.length - 1]).toBe("❌ LinkedIn publish failed. Please try approving again.")
   })
 
   it("revises on feedback and notifies on second approval without LinkedIn", async () => {
     const responses = [
       { text: "First draft", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: false, feedback: "Weak opening" }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
       { text: "Revised draft", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-      { text: "Revised with feedback", usage: { inputTokens: 5, outputTokens: 3 } },
     ]
     let callIdx = 0
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "Make it shorter" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
@@ -381,15 +389,7 @@ describe("PipelineWorkflow", () => {
   it("revision generator receives style, initial request, earlier drafts, and Telegram feedback in order", async () => {
     const responses = [
       { text: "First draft", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
       { text: "Revised with feedback", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
     ]
     let callIdx = 0
     const genCalls: { messages: { role: string; content: string }[] }[] = []
@@ -399,17 +399,8 @@ describe("PipelineWorkflow", () => {
       genCalls.push(opts as { messages: { role: string; content: string }[] })
       return responses[callIdx++]
     })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "Make it more academic" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
@@ -419,8 +410,7 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    // The compatibility mock skips the legacy critique fixture before returning the native revision handoff.
-    const reviseMessages = genCalls[2].messages
+    const reviseMessages = genCalls[1].messages
     expect(reviseMessages[0]).toEqual({
       role: "system",
       content: expect.stringContaining(`Style instructions:\n${STYLE_PROMPT}`),
@@ -439,10 +429,6 @@ describe("PipelineWorkflow", () => {
   it("second revision also receives the first feedback and first revised draft", async () => {
     const responses = [
       { text: "Initial draft", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
       { text: "Revised one", usage: { inputTokens: 5, outputTokens: 3 } },
       { text: "Revised two", usage: { inputTokens: 5, outputTokens: 3 } },
     ]
@@ -454,17 +440,8 @@ describe("PipelineWorkflow", () => {
       genCalls.push(opts as { messages: { role: string; content: string }[] })
       return responses[callIdx++]
     })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "first feedback" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "second feedback" } })
@@ -475,8 +452,7 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    // genCalls: [draft, critique, revise1, revise2]
-    const secondReviseMessages = genCalls[3].messages
+    const secondReviseMessages = genCalls[2].messages
     expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "first feedback")).toBe(true)
     expect(secondReviseMessages.some((m) => m.role === "assistant" && m.content === "Revised one")).toBe(true)
     expect(secondReviseMessages.some((m) => m.role === "user" && m.content === "second feedback")).toBe(true)
@@ -485,11 +461,6 @@ describe("PipelineWorkflow", () => {
   it("Revise More (__revise__) adds no synthetic transcript message; the next real reply changes history", async () => {
     const responses = [
       { text: "Initial draft", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-      { text: "Revised after __revise__", usage: { inputTokens: 5, outputTokens: 3 } },
       { text: "Revised after real reply", usage: { inputTokens: 5, outputTokens: 3 } },
     ]
     let callIdx = 0
@@ -500,17 +471,8 @@ describe("PipelineWorkflow", () => {
       genCalls.push(opts as { messages: { role: string; content: string }[] })
       return responses[callIdx++]
     })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "__revise__" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "actually make it shorter" } })
@@ -521,38 +483,25 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    // genCalls: [draft, critique, revise after real reply]; __revise__ only opens a feedback interaction.
-    expect(genCalls).toHaveLength(3)
-    const firstReviseMessages = genCalls[2].messages
+    expect(genCalls).toHaveLength(2)
+    const firstReviseMessages = genCalls[1].messages
     expect(firstReviseMessages.some((m) => m.content === "__revise__")).toBe(false)
     const lastAssistantBeforeInstruction = [...firstReviseMessages].reverse().find((m) => m.role === "assistant")
     expect(lastAssistantBeforeInstruction?.content).toBe("Initial draft")
     expect(firstReviseMessages.some((m) => m.role === "user" && m.content === "actually make it shorter")).toBe(true)
   })
 
-  it("throws TranscriptTooLargeError before any ideas.md update when the generate transcript is oversized", async () => {
+  it("throws TranscriptTooLargeError before any Notion update when the generate transcript is oversized", async () => {
     testRun()
-    const putCalls: { url: string; opts?: RequestInit }[] = []
-    mockCreateGenerator
-      .mockResolvedValueOnce({ text: "big draft", usage: { inputTokens: 5, outputTokens: 3 } })
-      .mockResolvedValueOnce({
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      })
+    mockCreateGenerator.mockResolvedValueOnce({
+      text: "big draft",
+      usage: { inputTokens: 5, outputTokens: 3 },
+    })
     mockAssertStepOutputSize.mockImplementation(() => {
       throw new TranscriptTooLargeError("too big", 950 * 1024, 900 * 1024)
     })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") putCalls.push({ url, opts })
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, patches } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })
@@ -560,36 +509,17 @@ describe("PipelineWorkflow", () => {
     await expect(
       (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep()),
     ).rejects.toThrow("too big")
-    expect(putCalls.some((c) => c.url.includes("ideas.md"))).toBe(false)
+    expect(patches).toHaveLength(0)
   })
 
   it("includes cost line in initial Telegram notification", async () => {
-    const responses = [
-      { text: "My draft content", usage: { inputTokens: 100000, outputTokens: 50000 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 500, outputTokens: 200 },
-      },
-    ]
+    const responses = [{ text: "My draft content", usage: { inputTokens: 100000, outputTokens: 50000 } }]
     let callIdx = 0
-    const telegramTexts: string[] = []
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        if (url?.includes?.("api.telegram.org")) {
-          const body = JSON.parse(opts?.body as string) as { text?: string }
-          telegramTexts.push(body.text ?? "")
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
@@ -605,49 +535,17 @@ describe("PipelineWorkflow", () => {
     expect(notifyMsg).toContain("deepseek-v4-flash")
   })
 
-  it("cumulative cost across revisions persists and appears in revised notification", async () => {
+  it("cumulative cost across revisions appears in revised notification", async () => {
     const responses = [
       { text: "First draft", usage: { inputTokens: 100, outputTokens: 50 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: false, feedback: "Weak opening" }]),
-        usage: { inputTokens: 30, outputTokens: 10 },
-      },
       { text: "Revised draft", usage: { inputTokens: 200, outputTokens: 80 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 40, outputTokens: 15 },
-      },
-      // feedback loop revise-0: revise agent called once
-      { text: "Feedback revised", usage: { inputTokens: 50, outputTokens: 25 } },
     ]
     let callIdx = 0
-    const telegramTexts: string[] = []
-    const fileStore: Record<string, string> = {
-      "ideas.md": mockIdeas,
-      "style-prompt.md": STYLE_PROMPT,
-    }
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (url?.includes?.("api.telegram.org")) {
-          const body = JSON.parse(opts?.body as string) as { text?: string }
-          telegramTexts.push(body.text ?? "")
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        }
-        const path = url.split("/contents/")[1] ?? ""
-        if (opts?.method === "PUT" && path in fileStore) {
-          const reqBody = JSON.parse(opts?.body as string) as { content?: string }
-          fileStore[path] = atob(reqBody.content ?? "")
-          return { ok: true, json: () => Promise.resolve({}) }
-        }
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        const content = fileStore[path] ?? ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "Make it punchier" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
@@ -657,10 +555,6 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    const finalIdeaContent = fileStore["ideas.md"]
-    expect(finalIdeaContent).toContain("costInputTokens: 300")
-    expect(finalIdeaContent).toContain("costOutputTokens: 130")
-
     const notifyMsg = telegramTexts.find((t) => t.startsWith("*Revised draft for idea"))
     expect(notifyMsg).toBeDefined()
     expect(notifyMsg).toContain("Est. cost:")
@@ -668,163 +562,34 @@ describe("PipelineWorkflow", () => {
     expect(notifyMsg).toContain("130 out")
   })
 
-  it("cost fields persist through archive", async () => {
-    const archiveMockIdeas = `---
-id: 1
-title: Test idea
-status: raw
-created: 2026-07-01T12:00:00Z
-source: manual
-correlation:
-  telegramChatId: "42"
-costInputTokens: "15"
-costOutputTokens: "7"
-costModel: deepseek-v4-flash
-costUsd: "0.0000021"
----
-
-Body content`
-    const responses = [
-      { text: "My draft", usage: { inputTokens: 10, outputTokens: 5 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 2 },
-      },
-    ]
+  it("marks idea expired without Telegram when no chatId is resolved", async () => {
+    const responses = [{ text: "Draft", usage: { inputTokens: 100, outputTokens: 50 } }]
     let callIdx = 0
-    let archivePutContent = ""
-
-    testRun()
-    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (url?.includes?.("api.telegram.org"))
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        if (opts?.method === "PUT" && url.includes("contents/archive.md")) {
-          const reqBody = JSON.parse(opts?.body as string) as { content?: string }
-          archivePutContent = atob(reqBody.content ?? "")
-          return { ok: true, json: () => Promise.resolve({}) }
-        }
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? archiveMockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
-    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
-
-    const wf = new PipelineWorkflow({} as never, {} as never)
-    Object.assign(wf, {
-      env: {
-        ...mockEnv(),
-        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
-        LINKEDIN_ACCESS_TOKEN: "valid-token",
-        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
-        LINKEDIN_CLIENT_ID: "client-id",
-        LINKEDIN_CLIENT_SECRET: "client-secret",
-        DEPLOYMENT_ENV: "development",
-      },
-    })
-
-    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
-
-    expect(archivePutContent).toContain("costInputTokens: 15")
-    expect(archivePutContent).toContain("costOutputTokens: 7")
-  })
-
-  it("accumulates cost on idea without telegramChatId", async () => {
-    const noChatIdea = `---
-id: 1
-title: No chat
-status: raw
-created: 2026-07-01T12:00:00Z
-source: manual
----
-
-Body`
-    const responses = [
-      { text: "Draft", usage: { inputTokens: 100, outputTokens: 50 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 50, outputTokens: 20 },
-      },
-    ]
-    let callIdx = 0
-    let telegramCalled = false
-    const fileStore: Record<string, string> = {
-      "ideas.md": noChatIdea,
-      "style-prompt.md": STYLE_PROMPT,
-    }
+    const noChatPage = { ...BASE_PAGE, chatId: undefined }
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
     waitForEvent.mockResolvedValue({ type: "timeout" })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (url?.includes?.("api.telegram.org")) {
-          telegramCalled = true
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        }
-        const path = url.split("/contents/")[1] ?? ""
-        if (opts?.method === "PUT" && path in fileStore) {
-          const reqBody = JSON.parse(opts?.body as string) as { content?: string }
-          fileStore[path] = atob(reqBody.content ?? "")
-          return { ok: true, json: () => Promise.resolve({}) }
-        }
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        const content = fileStore[path] ?? ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, patches, telegramTexts } = buildFetch([noChatPage])
+    vi.stubGlobal("fetch", fetchMock)
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: { ...mockEnv(), TELEGRAM_ALLOWED_USER_ID: "" } })
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    expect(telegramCalled).toBe(false)
-    expect(fileStore["ideas.md"]).toContain("costInputTokens: 100")
-    expect(fileStore["ideas.md"]).toContain("costOutputTokens: 50")
+    expect(telegramTexts).toHaveLength(0)
+    expect(patchedStatuses(patches)).toContain("awaiting-feedback-expired")
   })
 
   it("includes cost line in publish notification when one token dimension is zero", async () => {
-    const telegramTexts: string[] = []
-    const fileStore: Record<string, string> = {
-      "ideas.md": mockIdeas,
-      "style-prompt.md": STYLE_PROMPT,
-    }
-    const responses = [
-      { text: "Draft content", usage: { inputTokens: 0, outputTokens: 50 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 0, outputTokens: 10 },
-      },
-    ]
+    const responses = [{ text: "Draft content", usage: { inputTokens: 0, outputTokens: 50 } }]
     let callIdx = 0
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (url?.includes?.("api.telegram.org")) {
-          const body = JSON.parse(opts?.body as string) as { text?: string }
-          telegramTexts.push(body.text ?? "")
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        }
-        const path = url.split("/contents/")[1] ?? ""
-        if (opts?.method === "PUT" && path in fileStore) {
-          const reqBody = JSON.parse(opts?.body as string) as { content?: string }
-          fileStore[path] = atob(reqBody.content ?? "")
-          return { ok: true, json: () => Promise.resolve({}) }
-        }
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        const content = fileStore[path] ?? ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
@@ -864,32 +629,14 @@ Body`
       sleep: vi.fn(),
       sleepUntil: vi.fn(),
     }
-    const responses = [
-      { text: "Draft content", usage: { inputTokens: 5, outputTokens: 3 } },
-      {
-        text: JSON.stringify([{ check: "Hook", passed: true, feedback: null }]),
-        usage: { inputTokens: 5, outputTokens: 3 },
-      },
-    ]
+    const responses = [{ text: "Draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIndex = 0
-    let telegramSends = 0
     let registrationAttempts = 0
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIndex++])
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-        if (url?.includes?.("api.telegram.org")) {
-          if (JSON.parse(opts?.body as string).text?.startsWith("*Draft")) telegramSends++
-          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-        }
-        if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-        const path = url.split("/contents/")[1]
-        const content = path === "ideas.md" ? mockIdeas : path === "style-prompt.md" ? STYLE_PROMPT : ""
-        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
-      }),
-    )
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
     const router = {
       idFromName: () => "router-id",
       get: () => ({
@@ -907,7 +654,7 @@ Body`
     ).rejects.toThrow("Interaction router /register failed")
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), retryingStep)
 
-    expect(telegramSends).toBe(1)
+    expect(telegramTexts.filter((t) => t.startsWith("*Draft")).length).toBe(1)
     expect(sendStep).toHaveBeenCalledWith("register-notify-interactions", expect.any(Function))
   })
 

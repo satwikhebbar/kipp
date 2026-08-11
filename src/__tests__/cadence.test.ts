@@ -1,17 +1,78 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { handleCadenceCron } from "../triggers/cadence"
 
-const mockFetch = vi.hoisted(() => vi.fn())
-vi.stubGlobal("fetch", mockFetch)
+const NOTION_DS = "ds-1"
 
-function b64(s: string): string {
-  const bytes = new TextEncoder().encode(s)
-  let bin = ""
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
-  return btoa(bin)
+interface NotionPage {
+  id: string
+  created_time: string
+  last_edited_time: string
+  properties: Record<string, unknown>
+  markdown: string
+}
+
+function statusPage(id: string, kippId: number, status: string, lastEdited = "2026-07-02T12:00:00Z") {
+  return {
+    id,
+    created_time: "2026-07-01T12:00:00Z",
+    last_edited_time: lastEdited,
+    properties: {
+      "Kipp ID": { unique_id: { prefix: null, number: kippId } },
+      Status: { status: { name: status } },
+      Source: { select: { name: "manual" } },
+      Title: { title: [{ type: "text", text: { content: `Idea ${kippId}` } }] },
+    },
+    markdown: `Body of idea ${kippId}`,
+  }
+}
+
+function notionFetch(pages: NotionPage[]) {
+  return vi.fn(async (url: RequestInfo | URL, opts?: RequestInit) => {
+    const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
+    const respond = (body: unknown, status = 200) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(body),
+      text: () => Promise.resolve(typeof body === "string" ? body : JSON.stringify(body)),
+      headers: new Map(),
+    })
+    if (urlStr === `https://api.notion.com/v1/data_sources/${NOTION_DS}/query`) {
+      const body = JSON.parse(opts?.body as string) as { filter?: { property: string; status?: { equals?: string } } }
+      const filterStatus = body.filter?.property === "Status" ? body.filter.status?.equals : undefined
+      let results = filterStatus
+        ? pages.filter((p) => (p.properties.Status as { status: { name: string } }).status.name === filterStatus)
+        : [...pages]
+      results = results.sort(
+        (a, b) =>
+          (a.properties["Kipp ID"] as { unique_id: { number: number } }).unique_id.number -
+          (b.properties["Kipp ID"] as { unique_id: { number: number } }).unique_id.number,
+      )
+      return respond({ object: "list", results, has_more: false, next_cursor: null })
+    }
+    const markdownMatch = urlStr.match(/\/v1\/pages\/([^/]+)\/markdown$/)
+    if (markdownMatch) {
+      const page = pages.find((p) => p.id === markdownMatch[1])
+      if (!page) return respond({ message: "object_not_found" }, 404)
+      return respond({
+        object: "page_markdown",
+        id: page.id,
+        markdown: page.markdown,
+        truncated: false,
+        unknown_block_ids: [],
+      })
+    }
+    const pageMatch = urlStr.match(/\/v1\/pages\/([^/]+)$/)
+    if (pageMatch) {
+      const page = pages.find((p) => p.id === pageMatch[1])
+      if (!page) return respond({ message: "object_not_found" }, 404)
+      return respond(page)
+    }
+    throw new Error(`Unexpected fetch ${urlStr}`)
+  })
 }
 
 function mockEnv() {
+  const startMocks = new Map<string, ReturnType<typeof vi.fn>>()
   return {
     GITHUB_PAT: "pat",
     DATA_REPO_OWNER: "o",
@@ -26,153 +87,98 @@ function mockEnv() {
     LINKEDIN_CLIENT_ID: "",
     LINKEDIN_CLIENT_SECRET: "",
     LINKEDIN_ACCESS_TOKEN: "",
-    LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: NOTION_DS,
+    NOTION_FREE_TIER: "false",
+    IDEA_INGEST: {
+      idFromName: (name: string) => ({ name }),
+      get: (id: { name: string }) => {
+        let fetchMock = startMocks.get(id.name)
+        if (!fetchMock) {
+          fetchMock = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({ workflowInstanceId: "wf-1", alreadyStarted: false }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          )
+          startMocks.set(id.name, fetchMock)
+        }
+        return { fetch: fetchMock }
+      },
+    },
+    startMocks,
     PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
   }
 }
 
-const RAW_IDEA = `---
-id: 1
-title: Old raw idea
-status: raw
-created: 2026-06-01T12:00:00Z
-source: manual
----
-
-Need to post about this`
-
-const IN_FLIGHT = `---
-id: 2
-title: In flight
-status: awaiting-feedback
-created: 2026-07-10T12:00:00Z
-source: manual
----
-
-Waiting for feedback`
-
-const RECENT_ARCHIVE = `---
-id: 10
-title: Recent post
-status: finalized
-created: 2026-07-08T12:00:00Z
-source: manual
-body: Recently posted
----
-
-Final content`
-
-const STALE_ARCHIVE = `---
-id: 9
-title: Old post
-status: finalized
-created: 2026-06-20T12:00:00Z
-source: manual
-body: Old content
----
-
-Final content`
-
-const RECENTLY_FINALIZED = `---
-id: 11
-title: Recently finalized
-status: finalized
-created: 2026-06-01T12:00:00Z
-finalized: 2026-07-10T12:00:00Z
-source: manual
-body: Finalized yesterday
----
-
-Final content`
+const NOW = new Date("2026-07-12T12:00:00.000Z").getTime()
 
 beforeEach(() => {
-  vi.spyOn(Date, "now").mockReturnValue(new Date("2026-07-12T12:00:00.000Z").getTime())
+  vi.spyOn(Date, "now").mockReturnValue(NOW)
 })
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
-
-function setupMockedFetch(responses: Array<{ content?: string; sha?: string } | { ok: boolean }>) {
-  let idx = 0
-  mockFetch.mockImplementation(async (_url: string, _opts?: RequestInit) => {
-    const r = responses[idx++]
-    if (!r) throw new Error("unexpected fetch")
-    if ("ok" in r) return r as Response
-    return {
-      ok: true,
-      json: () => Promise.resolve({ content: b64(r.content ?? ""), sha: r.sha ?? "s1" }),
-    }
-  })
-}
 
 describe("handleCadenceCron", () => {
   it("skips when an idea is awaiting-feedback", async () => {
-    setupMockedFetch([
-      { content: IN_FLIGHT, sha: "s1" },
-      { content: RECENT_ARCHIVE, sha: "s2" },
-    ])
+    vi.stubGlobal("fetch", notionFetch([statusPage("p1", 1, "awaiting-feedback")]))
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
     expect(result.started).toBe(false)
-    expect(env.PIPELINE_WORKFLOW.create).not.toHaveBeenCalled()
+    expect(env.startMocks.size).toBe(0)
   })
 
-  it("skips when archive has a recently finalized idea", async () => {
-    setupMockedFetch([
-      { content: RAW_IDEA, sha: "s1" },
-      { content: RECENT_ARCHIVE, sha: "s2" },
-    ])
+  it("skips when an idea is awaiting-feedback-expired", async () => {
+    vi.stubGlobal("fetch", notionFetch([statusPage("p1", 1, "awaiting-feedback-expired")]))
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
     expect(result.started).toBe(false)
-    expect(env.PIPELINE_WORKFLOW.create).not.toHaveBeenCalled()
+    expect(env.startMocks.size).toBe(0)
   })
 
-  it("starts workflow when no finalized idea exists", async () => {
-    setupMockedFetch([
-      { content: RAW_IDEA, sha: "s1" },
-      { content: "", sha: "s2" },
-    ])
+  it("skips when a finalized idea was edited recently", async () => {
+    vi.stubGlobal("fetch", notionFetch([statusPage("p2", 2, "finalized", "2026-07-10T12:00:00Z")]))
+    const env = mockEnv()
+    const result = await handleCadenceCron(env as never)
+    expect(result.started).toBe(false)
+    expect(env.startMocks.size).toBe(0)
+  })
+
+  it("starts a workflow for the oldest raw idea when cadence is due", async () => {
+    vi.stubGlobal(
+      "fetch",
+      notionFetch([
+        statusPage("p2", 2, "raw", "2026-07-02T12:00:00Z"),
+        statusPage("p1", 1, "raw", "2026-07-02T12:00:00Z"),
+      ]),
+    )
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
     expect(result.started).toBe(true)
-    expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalledWith({
-      params: { ideaId: "1", ideaTitle: "Old raw idea", ideaBody: "Need to post about this" },
-    })
-  })
-
-  it("starts workflow when latest finalized is stale", async () => {
-    setupMockedFetch([
-      { content: RAW_IDEA, sha: "s1" },
-      { content: STALE_ARCHIVE, sha: "s2" },
-    ])
-    const env = mockEnv()
-    const result = await handleCadenceCron(env as never)
-    expect(result.started).toBe(true)
-    expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalledTimes(1)
+    expect(result.ideaId).toBe("wf-1")
+    const claimMock = env.startMocks.get("claim:p1")!
+    expect(claimMock).toBeDefined()
+    const [, init] = claimMock.mock.calls[0]
+    const body = JSON.parse(init.body)
+    expect(body).toMatchObject({ pageId: "p1", ideaId: "1", source: "manual" })
   })
 
   it("returns started:false when no raw ideas exist", async () => {
-    setupMockedFetch([
-      { content: "", sha: "s1" },
-      { content: STALE_ARCHIVE, sha: "s2" },
-    ])
+    vi.stubGlobal("fetch", notionFetch([]))
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
     expect(result.started).toBe(false)
-    expect(env.PIPELINE_WORKFLOW.create).not.toHaveBeenCalled()
+    expect(env.startMocks.size).toBe(0)
   })
 
-  it("uses finalized date over created for cadence check", async () => {
-    setupMockedFetch([
-      { content: RAW_IDEA, sha: "s1" },
-      { content: RECENTLY_FINALIZED, sha: "s2" },
-    ])
+  it("uses last_edited_time of the most recent finalized idea for the cadence check", async () => {
+    vi.stubGlobal("fetch", notionFetch([statusPage("p2", 2, "finalized", "2026-07-10T12:00:00Z")]))
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
     expect(result.started).toBe(false)
-    expect(env.PIPELINE_WORKFLOW.create).not.toHaveBeenCalled()
   })
 })

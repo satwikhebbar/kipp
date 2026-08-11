@@ -3,6 +3,7 @@ export interface Env {
   CALENDAR_WORKFLOW?: Workflow
   TOKEN_VAULT: DurableObjectNamespace
   INTERACTION_ROUTER: DurableObjectNamespace
+  IDEA_INGEST: DurableObjectNamespace
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_WEBHOOK_SECRET: string
   TELEGRAM_ALLOWED_USER_ID: string
@@ -29,6 +30,9 @@ export interface Env {
   GITHUB_PAT: string
   DATA_REPO_OWNER: string
   DATA_REPO_NAME: string
+  NOTION_API_KEY: string
+  NOTION_IDEAS_DATA_SOURCE_ID: string
+  NOTION_FREE_TIER?: string
   SUBSTACK_RSS_URL: string
   POSTING_CADENCE_DAYS: string
   WAIT_FOR_FEEDBACK_HOURS: string
@@ -39,13 +43,6 @@ export type IdeaStatus = "raw" | "drafted" | "awaiting-feedback" | "awaiting-fee
 
 export type Source = "substack" | "telegram" | "manual"
 
-export interface Correlation {
-  telegramChatId?: string
-  botMessageId?: number
-  workflowInstanceId?: string
-  pendingRevision?: string
-}
-
 export interface WorkflowCost {
   totalInputTokens: number
   totalOutputTokens: number
@@ -54,33 +51,29 @@ export interface WorkflowCost {
 }
 
 export interface Idea {
+  pageId: string
+  id: string
+  title?: string
+  status: IdeaStatus
+  created: string
+  source: Source
+  body: string
+  substackUrl?: string
+  idempotencyKey?: string
+  correlation?: { telegramChatId?: string }
+}
+
+/** Metadata-only shape returned by list/query operations; body is absent. */
+export interface IdeaSummary {
+  pageId: string
   id: string
   title?: string
   status: IdeaStatus
   created: string
   source: Source
   substackUrl?: string
-  teaser?: string
-  body: string
-  draft?: string
-  critique?: string
-  correlation?: Correlation
-  finalized?: string
-  costUsd?: number
-  costInputTokens?: number
-  costOutputTokens?: number
-  costModel?: string
-}
-
-export interface ArchivedIdea {
-  id: string
-  title: string
-  finalized: string
-  linkedinUrl: string
-  linkedinUrn: string
-  draftText: string
-  totalTokens: number
-  revisionCount: number
+  idempotencyKey?: string
+  correlation?: { telegramChatId?: string }
 }
 
 export interface LLMUsage {
@@ -105,10 +98,9 @@ export interface ClassificationResult {
 }
 
 export interface WorkflowParams {
+  pageId: string
   ideaId: string
-  ideaTitle?: string
-  ideaBody: string
-  substackBody?: string
+  source: Source
   /** Originating Telegram chat for failure notification; defaults to the operator chat. */
   chatId?: string
 }

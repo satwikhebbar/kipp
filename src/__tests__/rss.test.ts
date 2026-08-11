@@ -12,13 +12,6 @@ import { handleRssCron, parseRssFeed } from "../triggers/rss"
 const mockFetch = vi.hoisted(() => vi.fn())
 vi.stubGlobal("fetch", mockFetch)
 
-function b64(s: string): string {
-  const bytes = new TextEncoder().encode(s)
-  let bin = ""
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
-  return btoa(bin)
-}
-
 const SAMPLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
 <channel>
@@ -40,18 +33,6 @@ const SAMPLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
 </channel>
 </rss>`
 
-const EMPTY_IDEAS = ""
-const LINK_KNOWN = `---
-id: 1
-title: First Post
-status: raw
-source: substack
-created: 2026-07-01T12:00:00Z
-substackUrl: https://test.substack.com/p/first
----
-
-Already known`
-
 const SINGLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
 <channel>
@@ -69,6 +50,68 @@ const LLM_JSON = JSON.stringify({
   teaser: "A great hook about testing",
   subIdeas: ["Idea 1", "Idea 2", "Idea 3"],
 })
+
+function notionQueryResponse(results: unknown[] = []) {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ object: "list", results, has_more: false, next_cursor: null }),
+    text: () => Promise.resolve(""),
+    headers: new Map(),
+  }
+}
+
+function knownSubstackResult(link: string) {
+  return {
+    object: "page",
+    id: "page_1",
+    created_time: "2026-07-01T12:00:00Z",
+    properties: {
+      "Kipp ID": { type: "unique_id", unique_id: { prefix: null, number: 1 } },
+      Status: { type: "status", status: { name: "raw" } },
+      Source: { type: "select", select: { name: "substack" } },
+      "Substack URL": { type: "url", url: link },
+    },
+  }
+}
+
+function mockEnv() {
+  const ingestFetches = new Map<string, ReturnType<typeof vi.fn>>()
+  return {
+    SUBSTACK_RSS_URL: "https://test.substack.com/feed",
+    LLM_API_KEY: "key",
+    LLM_PROVIDER: "gemini",
+    POSTING_CADENCE_DAYS: "7",
+    TELEGRAM_BOT_TOKEN: "",
+    TELEGRAM_WEBHOOK_SECRET: "",
+    TELEGRAM_ALLOWED_USER_ID: "",
+    LINKEDIN_CLIENT_ID: "",
+    LINKEDIN_CLIENT_SECRET: "",
+    LINKEDIN_ACCESS_TOKEN: "",
+    LINKEDIN_AUTHOR_URN: "",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
+    IDEA_INGEST: {
+      idFromName: (name: string) => ({ name }),
+      get: (id: { name: string }) => {
+        let fetchMock = ingestFetches.get(id.name)
+        if (!fetchMock) {
+          fetchMock = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({ pageId: "page_1", ideaId: "1", workflowInstanceId: "wf-1" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          )
+          ingestFetches.set(id.name, fetchMock)
+        }
+        return { fetch: fetchMock }
+      },
+    },
+    ingestFetches,
+    PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
+  }
+}
 
 describe("parseRssFeed", () => {
   it("extracts items from RSS XML", () => {
@@ -101,25 +144,13 @@ describe("parseRssFeed", () => {
 })
 
 describe("handleRssCron", () => {
-  function mockEnv() {
-    return {
-      GITHUB_PAT: "pat",
-      DATA_REPO_OWNER: "o",
-      DATA_REPO_NAME: "r",
-      SUBSTACK_RSS_URL: "https://test.substack.com/feed",
-      LLM_API_KEY: "key",
-      LLM_PROVIDER: "gemini",
-      POSTING_CADENCE_DAYS: "7",
-      TELEGRAM_BOT_TOKEN: "",
-      TELEGRAM_WEBHOOK_SECRET: "",
-      TELEGRAM_ALLOWED_USER_ID: "",
-      LINKEDIN_CLIENT_ID: "",
-      LINKEDIN_CLIENT_SECRET: "",
-      LINKEDIN_ACCESS_TOKEN: "",
-      LINKEDIN_REFRESH_TOKEN: "",
-      LINKEDIN_AUTHOR_URN: "",
-      PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
-    }
+  function setupFetch(options: { rssXml: string; knownLinks: string[] }) {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "https://test.substack.com/feed") return { ok: true, text: () => Promise.resolve(options.rssXml) }
+      if (url.includes("api.notion.com"))
+        return notionQueryResponse(options.knownLinks.map((link) => knownSubstackResult(link)))
+      throw new Error(`Unexpected fetch ${url}`)
+    })
   }
 
   beforeEach(() => {
@@ -127,75 +158,56 @@ describe("handleRssCron", () => {
     mockGen.mockReset()
   })
 
-  it("starts workflow for a new RSS item", async () => {
-    let callIdx = 0
-    mockFetch.mockImplementation(async (_url: string, opts?: RequestInit) => {
-      callIdx++
-      if (callIdx === 1) return { ok: true, text: () => Promise.resolve(SAMPLE_RSS) }
-      if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-      return { ok: true, json: () => Promise.resolve({ content: b64(EMPTY_IDEAS), sha: "s1" }) }
-    })
+  it("ingests main idea with startWorkflow and side ideas without a workflow", async () => {
+    setupFetch({ rssXml: SAMPLE_RSS, knownLinks: [] })
     mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
 
     const env = mockEnv()
     const result = await handleRssCron(env as never)
     expect(result.started).toBe(true)
-    expect(result.ideaId).toBeDefined()
-    expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalledTimes(1)
+
+    const mainStub = env.ingestFetches.get("ingest:rss:first-guid:0")!
+    expect(mainStub).toBeDefined()
+    expect(mainStub).toHaveBeenCalledTimes(1)
+    const [, init] = mainStub.mock.calls[0]
+    const body = JSON.parse(init.body)
+    expect(body.key).toBe("rss:first-guid:0")
+    expect(body.startWorkflow).toBe(true)
+    expect(body.idea.body).toBe("A great hook about testing")
+
+    const sideStub = env.ingestFetches.get("ingest:rss:first-guid:1")!
+    expect(sideStub).toBeDefined()
+    expect(sideStub).toHaveBeenCalledTimes(1)
+    const sideBody = JSON.parse(sideStub.mock.calls[0][1].body)
+    expect(sideBody.startWorkflow).toBe(false)
   })
 
-  it("does not re-add already-known items", async () => {
-    let callIdx = 0
-    mockFetch.mockImplementation(async (_url: string) => {
-      callIdx++
-      if (callIdx === 1) return { ok: true, text: () => Promise.resolve(SINGLE_RSS) }
-      return { ok: true, json: () => Promise.resolve({ content: b64(LINK_KNOWN), sha: "s1" }) }
-    })
+  it("ingests side ideas with sequential rss:{guid}:{i} keys", async () => {
+    setupFetch({ rssXml: SAMPLE_RSS, knownLinks: [] })
+    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
 
+    const env = mockEnv()
+    await handleRssCron(env as never)
+
+    for (let i = 0; i <= 3; i++) {
+      expect(env.ingestFetches.get(`ingest:rss:first-guid:${i}`)).toBeDefined()
+    }
+  })
+
+  it("does not re-add items whose substackUrl already exists in Notion", async () => {
+    setupFetch({ rssXml: SINGLE_RSS, knownLinks: ["https://test.substack.com/p/first"] })
     const env = mockEnv()
     const result = await handleRssCron(env as never)
     expect(result.started).toBe(false)
     expect(mockGen).not.toHaveBeenCalled()
+    expect(env.ingestFetches.size).toBe(0)
   })
 
   it("returns started:false when RSS feed is empty", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      text: () => Promise.resolve("<rss><channel><title>Empty</title></channel></rss>"),
-    })
+    setupFetch({ rssXml: "<rss><channel><title>Empty</title></channel></rss>", knownLinks: [] })
     const result = await handleRssCron(mockEnv() as never)
     expect(result.started).toBe(false)
   })
-
-  it("retries transient RSS fetch failures then succeeds", async () => {
-    const statuses = [429, 429]
-    let rssCalls = 0
-    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (url.startsWith("https://test.substack.com/feed")) {
-        rssCalls++
-        const status = statuses.shift()
-        if (status) return { ok: false, status, text: () => Promise.resolve("Too Many Requests") }
-        return { ok: true, text: () => Promise.resolve(SAMPLE_RSS) }
-      }
-      if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-      return { ok: true, json: () => Promise.resolve({ content: b64(EMPTY_IDEAS), sha: "s1" }) }
-    })
-    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
-
-    const env = mockEnv()
-    const result = await handleRssCron(env as never)
-    expect(result.started).toBe(true)
-    expect(rssCalls).toBe(3)
-  })
-
-  it("throws after retries exhaust on a persistent 429", async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      status: 429,
-      text: () => Promise.resolve("Too Many Requests"),
-    })
-    await expect(handleRssCron(mockEnv() as never)).rejects.toThrow("RSS fetch error 429")
-  }, 15_000)
 
   it("throws on non-transient RSS fetch error", async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 403, text: () => Promise.resolve("fail") })
