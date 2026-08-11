@@ -66,6 +66,11 @@ const DEFAULT_RSS_RETRIES = 3
 const RSS_FETCH_MAX_RETRIES = 3
 const RSS_FETCH_BACKOFF_MS = 1_000
 
+/** Stable non-empty identity for an RSS item: its GUID when present, else its canonical link. */
+export function itemIdentity(item: Pick<RssItem, "guid" | "link">): string {
+  return item.guid ? `guid:${item.guid}` : `link:${item.link}`
+}
+
 /** Uses LLM to extract a teaser and sub-ideas from an RSS item's content. */
 async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<ExtractedIdeas> {
   const text = stripHtml(item.contentHtml).slice(0, RSS_CONTENT_TRUNCATE_LENGTH)
@@ -125,10 +130,11 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
   )
   const extracted = await llmExtractIdeas(gen, newItem)
 
+  const identity = itemIdentity(newItem)
   const { main, side } = buildIdeaInputs(newItem, extracted)
-  const mainResult = await ingest.ingest({ key: `rss:${newItem.guid}:0`, idea: main, startWorkflow: true })
+  const mainResult = await ingest.ingest({ key: `rss:${identity}:0`, idea: main, startWorkflow: true })
   for (let i = 0; i < side.length; i++) {
-    await ingest.ingest({ key: `rss:${newItem.guid}:${i + 1}`, idea: side[i], startWorkflow: false })
+    await ingest.ingest({ key: `rss:${identity}:${i + 1}`, idea: side[i], startWorkflow: false })
   }
 
   return { started: true, ideaId: mainResult.workflowInstanceId ?? mainResult.ideaId }
