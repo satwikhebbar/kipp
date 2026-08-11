@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --config wrangler.local.toml",
-    "webhook:dev": "bash scripts/dev-webhook.sh",
-    "deploy": "bash scripts/pre-deploy-check.sh && wrangler deploy --config wrangler.prod.toml",
+    "webhook:dev": "bash tools/dev-webhook.sh",
+    "deploy": "bash tools/pre-deploy-check.sh && wrangler deploy --config wrangler.prod.toml",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "lint:ci": "biome ci src/",
