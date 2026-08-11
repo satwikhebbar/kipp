@@ -200,7 +200,7 @@ export async function runAgentCenteredCalendarWorkflow(
         const replacementKind = options.some((option) => option.plan.kind === "recurring")
           ? INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME
           : INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE
-        const conflictIsOneOff = options.every((option) => option.plan.kind === "one_off")
+        const requestedTimeConflict = terminal.reasonCodes.includes("requested_time_conflicts")
         const response = await promptForActions(
           env,
           step,
@@ -211,7 +211,7 @@ export async function runAgentCenteredCalendarWorkflow(
           [
             ...options.map((option) => [option.label, option.kind] as [string, WorkflowInteractionKind]),
             ["Try another time", replacementKind],
-            ...(conflictIsOneOff
+            ...(requestedTimeConflict
               ? ([[CALENDAR_DISCLOSURE_LABEL, INTERACTION_KIND.CALENDAR_CONFLICT_DISCLOSE]] as Array<
                   [string, WorkflowInteractionKind]
                 >)
@@ -616,12 +616,24 @@ function authorizedOptions(
   return options
 }
 
-/** Returns the owner's requested one-off interval as epoch ms, or null when it cannot be derived. */
+/** Returns the owner's requested interval as epoch ms, or null when it cannot be derived. */
 function requestedStartEnd(plan: CalendarPlan, timeZone: string): { start: number; end: number } | null {
-  if (plan.kind !== "one_off" || !plan.proposal.startTime) return null
-  const start = zonedDateTimeToMillis(plan.proposal.localDate as string, plan.proposal.startTime, timeZone)
+  if (plan.kind === "one_off") {
+    if (!plan.proposal.startTime) return null
+    const start = zonedDateTimeToMillis(plan.proposal.localDate as string, plan.proposal.startTime, timeZone)
+    if (start === null) return null
+    return { start, end: start + plan.proposal.durationMinutes * MILLISECONDS_PER_MINUTE }
+  }
+  if (!plan.proposal.startTime || !plan.proposal.firstDate) return null
+  const start = zonedDateTimeToMillis(plan.proposal.firstDate, plan.proposal.startTime, timeZone)
   if (start === null) return null
   return { start, end: start + plan.proposal.durationMinutes * MILLISECONDS_PER_MINUTE }
+}
+
+/** Returns the day bounds for the requested interval, using the first occurrence for recurring plans. */
+function requestedDayBounds(plan: CalendarPlan, timeZone: string): { timeMin: string; timeMax: string } | null {
+  const localDate = plan.kind === "one_off" ? (plan.proposal.localDate as string) : (plan.proposal.firstDate as string)
+  return localDate ? calendarDayBounds(localDate, timeZone) : null
 }
 
 /** Renders the owner-visible disclosure body listing every overlapping event as plain text. */
@@ -653,9 +665,8 @@ async function handleConflictDisclosure(
   replacementKind: WorkflowInteractionKind,
   expiresAt: number,
 ): Promise<ConflictDisclosureResult> {
-  if (plan.kind !== "one_off") return { status: "ended", version }
   const requested = requestedStartEnd(plan, timeZone)
-  const bounds = calendarDayBounds(plan.proposal.localDate as string, timeZone)
+  const bounds = requestedDayBounds(plan, timeZone)
   if (!requested || !bounds) return { status: "ended", version }
   let v = version
   const calendar = createGoogleCalendarClient(env)
@@ -665,11 +676,14 @@ async function handleConflictDisclosure(
       bounds.timeMax,
       new Date(requested.start).toISOString(),
       new Date(requested.end).toISOString(),
+      timeZone,
     ),
   )) as ConflictEventSnapshot[]
   if (!snapshots.length) return { status: "availability-changed", version: v }
 
-  const movable = snapshots.filter((snapshot) => snapshot.movable)
+  // Recurring requests are disclosed but never rescheduled: moving a single event
+  // cannot free the whole series, so the disclosure is informational only.
+  const movable = plan.kind === "one_off" ? snapshots.filter((snapshot) => snapshot.movable) : []
   const seenStarts = new Map<string, number>()
   const actions: Array<[string, WorkflowInteractionKind]> = movable.map((snapshot) => {
     const startTime = localTimeAt(Date.parse(snapshot.start), timeZone)
@@ -696,6 +710,7 @@ async function handleConflictDisclosure(
   }
   if (disclosure.kind === replacementKind) return { status: "replacement", version: v }
   if (disclosure.kind !== INTERACTION_KIND.CALENDAR_CONFLICT_RESCHEDULE) return { status: "ended", version: v }
+  if (plan.kind !== "one_off") return { status: "ended", version: v }
   const snapshot = movable[disclosure.actionIndex]
   if (!snapshot) return { status: "availability-changed", version: v }
 

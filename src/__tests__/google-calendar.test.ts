@@ -610,6 +610,7 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T13:30:00.000Z",
       "2026-07-28T14:00:00.000Z",
+      "UTC",
     )
 
     expect(result.map(({ id, movable, etag }) => ({ id, movable, etag }))).toEqual([
@@ -621,6 +622,47 @@ describe("Google Calendar client", () => {
     ])
     expect(result.every(({ title }) => title)).toBe(true)
     expect(result.some((item) => "description" in item)).toBe(false)
+  })
+
+  it("treats an all-day date as a local-calendar day and blocks both sides of local midnight", async () => {
+    const allDay = {
+      items: [
+        { id: "holiday", summary: "Holiday", etag: "etag", start: { date: "2026-07-28" }, end: { date: "2026-07-29" } },
+      ],
+    }
+    const fetch = vi.fn().mockImplementation(async () => response(200, allDay))
+    vi.stubGlobal("fetch", fetch)
+    const client = createGoogleCalendarClient(await environment())
+
+    // 00:15 Asia/Kolkata is 2026-07-27T18:45:00.000Z; the all-day local day 07-28 starts 2026-07-27T18:30:00Z.
+    const afterLocalMidnight = await client.findConflictingEvents(
+      "2026-07-27T18:30:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-27T18:45:00.000Z",
+      "2026-07-27T19:00:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(afterLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
+
+    // 23:45 Asia/Kolkata is 2026-07-28T18:15:00.000Z; the all-day local day 07-28 ends 2026-07-28T18:30:00Z.
+    const beforeLocalMidnight = await client.findConflictingEvents(
+      "2026-07-27T18:30:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-28T18:15:00.000Z",
+      "2026-07-28T18:30:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(beforeLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
+
+    // 00:15 Asia/Kolkata on 07-29 is 2026-07-28T18:45:00.000Z, just past the local day 07-28 (ends 18:30Z).
+    const afterLocalMidnightNextDay = await client.findConflictingEvents(
+      "2026-07-27T18:30:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-28T18:45:00.000Z",
+      "2026-07-28T19:00:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(afterLocalMidnightNextDay.map(({ id }) => id)).toEqual([])
   })
 
   it("pages the conflicting-events read and propagates the page token", async () => {
@@ -655,6 +697,7 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T13:30:00.000Z",
       "2026-07-28T14:00:00.000Z",
+      "UTC",
     )
 
     expect(result.map(({ id }) => id)).toEqual(["event-1", "event-2"])
@@ -672,6 +715,7 @@ describe("Google Calendar client", () => {
         "2026-08-02T00:00:00.000Z",
         "2026-07-28T13:30:00.000Z",
         "2026-07-28T14:00:00.000Z",
+        "UTC",
       ),
     ).rejects.toMatchObject({ kind: "permanent" })
     expect(fetch).not.toHaveBeenCalled()

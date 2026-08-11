@@ -406,7 +406,7 @@ describe("agent-centered CalendarWorkflow", () => {
     }
     const labels = body.reply_markup.inline_keyboard[0]?.map((button) => button.text)
     expect(body.text).not.toContain("Option ID")
-    expect(labels).toEqual(["Use adjustments", "Try another time", "Cancel"])
+    expect(labels).toEqual(["Use adjustments", "Try another time", "Why this busy?", "Cancel"])
     expect(labels?.every((label) => label.length <= 16)).toBe(true)
   })
 
@@ -621,6 +621,56 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(texts.some((text) => text.includes("Moved Standup"))).toBe(true)
     expect(texts.some((text) => text.includes("Restored Standup"))).toBe(true)
     expect(texts.every((text) => !text.includes("existing-1"))).toBe(true)
+  })
+
+  it("discloses a recurring conflict as disclosure-only and never offers a reschedule action", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "series-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice(RECURRING)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+      "Weekly review every Tuesday at 7pm for 3 occurrences",
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(1)
+    expect(mockFindConflictingEvents).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      "Asia/Kolkata",
+    )
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    const messages = telegram.mock.calls.map(
+      ([, init]) =>
+        JSON.parse((init as RequestInit).body as string) as {
+          text: string
+          reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> }
+        },
+    )
+    const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
+    expect(disclosure?.text).toContain("Standup (19:00–19:30)")
+    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    expect(messages.some((candidate) => candidate.text.includes("Cancelled"))).toBe(true)
+    expect(messages.every((candidate) => !candidate.text.includes("series-1"))).toBe(true)
   })
 
   it("discloses non-movable events without a reschedule action and cancels cleanly", async () => {

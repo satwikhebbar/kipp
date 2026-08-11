@@ -542,7 +542,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const choiceIndex = await waitForMessageText(network, "safe alternative")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 2)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 3)), runtimeEnv)
     await waitForMessageText(network, "Cancelled")
     await run
 
@@ -989,5 +989,56 @@ describe("agent-centered Calendar Telegram integration", () => {
     expect(mockDeleteManagedEvent).toHaveBeenCalledTimes(1)
     expect(network.getState().answeredCallbacks.length).toBeGreaterThan(0)
     expect(network.getState().telegramMessages.every((candidate) => !candidate.text?.includes("existing-1"))).toBe(true)
+  })
+
+  it("discloses a recurring conflict through Telegram without offering a reschedule action", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals.mockResolvedValue(FIRST_CONFLICT)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "series-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice(RECURRING)
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const choiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 2)), runtimeEnv)
+    const disclosureIndex = await waitForMessageText(network, "occupied by", choiceIndex)
+    const disclosure = network.getState().telegramMessages[disclosureIndex]
+    expect(disclosure?.text).toContain("Standup (19:00–19:30)")
+    const keyboard = disclosure?.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>>
+    const labels = keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, disclosureIndex, 1)), runtimeEnv)
+    await waitForMessageText(network, "Cancelled", disclosureIndex)
+    await run
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      "Asia/Kolkata",
+    )
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(network.getState().telegramMessages.every((candidate) => !candidate.text?.includes("series-1"))).toBe(true)
   })
 })

@@ -1,3 +1,4 @@
+import { zonedDateTimeToMillis } from "../calendar/scheduling"
 import { createTokenVault } from "../core/token-vault-client"
 import { type Env, type GoogleCalendarTokens, TOKEN_PROVIDER } from "../core/types"
 import { HTTP_STATUS, isTransientHttpStatus } from "../runtime/http"
@@ -152,6 +153,7 @@ export interface GoogleCalendarClient {
     timeMax: string,
     requestedStart: string,
     requestedEnd: string,
+    timeZone: string,
   ): Promise<ConflictEventSnapshot[]>
   moveExistingEvent(id: string, start: string, end: string): Promise<ExistingEventUpdateResult>
 }
@@ -172,10 +174,13 @@ function isGoogleCalendarTokens(tokens: GoogleCalendarTokens | null | unknown): 
   )
 }
 
-/** Returns the epoch ms for a provider event boundary, treating all-day dates as UTC midnight instants. */
-function eventInstantMs(value: string, allDay: boolean): number | null {
-  const parsed = allDay ? Date.parse(`${value}T00:00:00.000Z`) : Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : null
+/** Returns the epoch ms for a provider event boundary; all-day dates are interpreted in the calendar time zone. */
+function eventInstantMs(value: string, allDay: boolean, timeZone: string): number | null {
+  if (!allDay) {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return zonedDateTimeToMillis(value, "00:00", timeZone)
 }
 
 /** Builds the Google Calendar API event payload from a managed event. */
@@ -558,6 +563,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     timeMax: string,
     requestedStart: string,
     requestedEnd: string,
+    timeZone: string,
   ): Promise<ConflictEventSnapshot[]> {
     const rangeStart = Date.parse(timeMin)
     const rangeEnd = Date.parse(timeMax)
@@ -594,8 +600,8 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         const start = item.start?.dateTime ?? item.start?.date
         const end = item.end?.dateTime ?? item.end?.date
         if (!item.id || !start || !end) continue
-        const startMs = eventInstantMs(start, allDay)
-        const endMs = eventInstantMs(end, allDay)
+        const startMs = eventInstantMs(start, allDay, timeZone)
+        const endMs = eventInstantMs(end, allDay, timeZone)
         if (startMs === null || endMs === null) continue
         if (!(startMs < requestedEndMs && endMs > requestedStartMs)) continue
         snapshots.push({
