@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { type Env, INTERACTION_KIND } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
+import {
+  createFakeIdeaIngest,
+  createFakeInteractionRouter,
+  createFakeNetwork,
+  createFakeWorkflowBinding,
+} from "./setup"
 
 function baseEnv(overrides?: Partial<Env>): Env {
-  return {
+  const env = {
     GITHUB_PAT: "pat",
     DATA_REPO_OWNER: "o",
     DATA_REPO_NAME: "r",
@@ -20,11 +25,16 @@ function baseEnv(overrides?: Partial<Env>): Env {
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
     TOKEN_VAULT: {} as never,
     INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
-  } as never
+  } as never as Env
+  env.IDEA_INGEST = createFakeIdeaIngest(env)
+  return env
 }
 
 function telegramCallbackRequest(body: Record<string, unknown>) {
@@ -227,19 +237,8 @@ Body`,
     expect(state.githubFiles.get("ideas.md")).toContain("pendingRevision: 100")
   })
 
-  it("routes /add while pendingRevision is active as a new idea, not revision feedback", async () => {
-    harness = createFakeNetwork({
-      githubFiles: {
-        "ideas.md": `---
-id: 1
-status: awaiting-feedback
-correlation:
-  workflowInstanceId: wf-one
-  pendingRevision: 100
----
-Body text`,
-      },
-    })
+  it("routes /add while a revision is pending as a new idea, not revision feedback", async () => {
+    harness = createFakeNetwork()
     vi.stubGlobal("fetch", harness.fetch)
     const env = baseEnv({ TELEGRAM_ALLOWED_USER_ID: "42", PIPELINE_WORKFLOW: binding as never })
 
@@ -258,9 +257,10 @@ Body text`,
     expect(res.status).toBe(200)
 
     const state = harness.getState()
-    const ideasMd = state.githubFiles.get("ideas.md")
-    expect(ideasMd).toContain("A new idea")
-    expect(ideasMd).toContain("pendingRevision: 100")
+    const pages = [...state.notionPages.values()]
+    expect(pages).toHaveLength(1)
+    expect(pages[0].markdown).toBe("A new idea")
+    expect(pages[0].source).toBe("telegram")
 
     expect(binding.getReceivedEvents().length).toBe(0)
   })

@@ -1,7 +1,8 @@
-import type { Env, Idea } from "../core/types"
-import { createGitHubClient, type GithubClient } from "../integrations/github"
-import { nextId } from "../linkedin/backlog/id-generator"
-import { parseIdeas, serializeIdeas } from "../linkedin/backlog/parser"
+import { createIdeaIngest } from "../core/idea-ingest"
+import type { Env } from "../core/types"
+import { createNotionClient } from "../integrations/notion"
+import type { IdeaInput } from "../linkedin/ideas/manager"
+import { createIdeaManager } from "../linkedin/ideas/manager"
 import { createGenerator, type GenerateFn, messages, parseLLMJson } from "../providers"
 import { isTransientHttpStatus } from "../runtime/http"
 
@@ -77,28 +78,20 @@ async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<Extracte
   return parsed
 }
 
-/** Builds main and side Idea objects from an RSS item and extracted content. */
-function buildIdeas(item: RssItem, extracted: ExtractedIdeas, existing: Idea[]): { main: Idea; side: Idea[] } {
-  const now = new Date().toISOString()
-  let id = nextId(existing)
-  const main: Idea = {
-    id: String(id),
+/** Builds main and side idea inputs from an RSS item and extracted content. */
+function buildIdeaInputs(item: RssItem, extracted: ExtractedIdeas): { main: IdeaInput; side: IdeaInput[] } {
+  const main: IdeaInput = {
     title: item.title,
     status: "raw",
-    created: now,
     source: "substack",
     substackUrl: item.link,
-    teaser: extracted.teaser,
     body: extracted.teaser,
   }
-  const side: Idea[] = []
+  const side: IdeaInput[] = []
   for (const sub of extracted.subIdeas.slice(0, MAX_SECTION_IDEAS)) {
-    id++
     side.push({
-      id: String(id),
       title: sub.slice(0, MAX_TITLE_LENGTH),
       status: "raw",
-      created: now,
       source: "substack",
       substackUrl: item.link,
       body: sub,
@@ -107,25 +100,21 @@ function buildIdeas(item: RssItem, extracted: ExtractedIdeas, existing: Idea[]):
   return { main, side }
 }
 
-/** Writes ideas to the ideas.md file, appending to existing entries. */
-async function writeIdeas(client: GithubClient, ideas: Idea[]): Promise<void> {
-  await client.mutateFile("ideas.md", (content) => {
-    const existing = parseIdeas(content)
-    existing.push(...ideas)
-    return serializeIdeas(existing)
-  })
-}
-
-/** Checks the RSS feed for new items and starts a workflow for the first unseen item. */
+/** Checks the RSS feed for new items and ingests the first unseen item into Notion. */
 export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaId?: string }> {
-  const client = createGitHubClient(env)
+  const manager = createIdeaManager(createNotionClient(env))
+  const ingest = createIdeaIngest(env)
 
   const items = await fetchRssItems(env.SUBSTACK_RSS_URL)
   if (items.length === 0) return { started: false }
 
-  const existing = parseIdeas((await client.readFile("ideas.md")).content)
-  const knownLinks = new Set(existing.map((i) => i.substackUrl).filter(Boolean))
-  const newItem = items.find((item) => !knownLinks.has(item.link))
+  let newItem: RssItem | null = null
+  for (const item of items) {
+    if (!(await manager.findBySubstackUrl(item.link))) {
+      newItem = item
+      break
+    }
+  }
   if (!newItem) return { started: false }
 
   const gen = createGenerator(
@@ -136,14 +125,13 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
   )
   const extracted = await llmExtractIdeas(gen, newItem)
 
-  const { main, side } = buildIdeas(newItem, extracted, existing)
-  await writeIdeas(client, [main, ...side])
+  const { main, side } = buildIdeaInputs(newItem, extracted)
+  const mainResult = await ingest.ingest({ key: `rss:${newItem.guid}:0`, idea: main, startWorkflow: true })
+  for (let i = 0; i < side.length; i++) {
+    await ingest.ingest({ key: `rss:${newItem.guid}:${i + 1}`, idea: side[i], startWorkflow: false })
+  }
 
-  const instance = await env.PIPELINE_WORKFLOW.create({
-    params: { ideaId: main.id, ideaTitle: main.title, ideaBody: main.body },
-  })
-
-  return { started: true, ideaId: instance.id }
+  return { started: true, ideaId: mainResult.workflowInstanceId ?? mainResult.ideaId }
 }
 
 /** Fetches and parses an RSS feed from a URL, retrying transient failures (429/5xx). */

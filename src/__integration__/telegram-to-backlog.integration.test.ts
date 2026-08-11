@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
+import {
+  createFakeIdeaIngest,
+  createFakeInteractionRouter,
+  createFakeNetwork,
+  createFakeWorkflowBinding,
+} from "./setup"
 
 function baseEnv(overrides?: Partial<Env>): Env {
-  return {
+  const env = {
     GITHUB_PAT: "pat",
     DATA_REPO_OWNER: "o",
     DATA_REPO_NAME: "r",
@@ -20,11 +25,16 @@ function baseEnv(overrides?: Partial<Env>): Env {
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
     TOKEN_VAULT: {} as never,
     INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
-  } as never
+  } as never as Env
+  env.IDEA_INGEST = createFakeIdeaIngest(env)
+  return env
 }
 
 function telegramRequest(body: unknown) {
@@ -40,7 +50,7 @@ describe("telegram-to-backlog", () => {
   let binding: ReturnType<typeof createFakeWorkflowBinding>
 
   beforeEach(() => {
-    harness = createFakeNetwork({ githubFiles: { "ideas.md": "" } })
+    harness = createFakeNetwork()
     binding = createFakeWorkflowBinding()
     vi.stubGlobal("fetch", harness.fetch)
   })
@@ -49,7 +59,7 @@ describe("telegram-to-backlog", () => {
     vi.unstubAllGlobals()
   })
 
-  it("handles /add by creating a raw idea in GitHub", async () => {
+  it("handles /add by creating a raw idea in Notion", async () => {
     const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
     const res = await handleTelegramWebhook(
       telegramRequest({
@@ -66,11 +76,13 @@ describe("telegram-to-backlog", () => {
     expect(res.status).toBe(200)
 
     const state = harness.getState()
-    const ideasMd = state.githubFiles.get("ideas.md")
-    expect(ideasMd).toContain("id: 1")
-    expect(ideasMd).toContain("status: raw")
-    expect(ideasMd).toContain("source: telegram")
-    expect(ideasMd).toContain("My post idea here")
+    const pages = [...state.notionPages.values()]
+    expect(pages).toHaveLength(1)
+    expect(pages[0].kippId).toBe(1)
+    expect(pages[0].status).toBe("raw")
+    expect(pages[0].source).toBe("telegram")
+    expect(pages[0].markdown).toBe("My post idea here")
+    expect(pages[0].chatId).toBe("100")
 
     expect(state.telegramMessages.length).toBe(1)
     expect(state.telegramMessages[0].text).toContain("Saved as idea")
@@ -93,31 +105,32 @@ describe("telegram-to-backlog", () => {
     expect(res.status).toBe(200)
 
     const state = harness.getState()
-    const ideasMd = state.githubFiles.get("ideas.md")
-    expect(ideasMd).toContain("id: 1")
-    expect(ideasMd).toContain("status: raw")
+    const pages = [...state.notionPages.values()]
+    expect(pages).toHaveLength(1)
+    expect(pages[0].kippId).toBe(1)
+    expect(pages[0].status).toBe("raw")
   })
 
   it("handles /generate by creating a workflow for the oldest raw idea", async () => {
     harness = createFakeNetwork({
-      githubFiles: {
-        "ideas.md": `---
-id: 2
-status: raw
-created: 2026-07-02T12:00:00Z
-source: manual
----
-
-Idea two
----
-id: 1
-status: raw
-created: 2026-07-01T12:00:00Z
-source: telegram
----
-
-Idea one`,
-      },
+      notionPages: [
+        {
+          pageId: "page_2",
+          kippId: 2,
+          title: "",
+          status: "raw",
+          source: "manual",
+          markdown: "Idea two",
+        },
+        {
+          pageId: "page_1",
+          kippId: 1,
+          title: "",
+          status: "raw",
+          source: "telegram",
+          markdown: "Idea one",
+        },
+      ],
     })
     vi.stubGlobal("fetch", harness.fetch)
 
@@ -138,7 +151,7 @@ Idea one`,
 
     const created = binding.getCreated()
     expect(created.length).toBe(1)
-    expect(created[0].params).toMatchObject({ params: { ideaId: "1", ideaBody: "Idea one" } })
+    expect(created[0].params).toMatchObject({ pageId: "page_1", ideaId: "1", source: "telegram" })
 
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
@@ -147,16 +160,16 @@ Idea one`,
 
   it("handles /generate with no raw ideas by returning a message", async () => {
     harness = createFakeNetwork({
-      githubFiles: {
-        "ideas.md": `---
-id: 1
-status: awaiting-feedback
-created: 2026-07-01T12:00:00Z
-source: manual
----
-
-Already in progress`,
-      },
+      notionPages: [
+        {
+          pageId: "page_1",
+          kippId: 1,
+          title: "",
+          status: "awaiting-feedback",
+          source: "manual",
+          markdown: "Already in progress",
+        },
+      ],
     })
     vi.stubGlobal("fetch", harness.fetch)
 

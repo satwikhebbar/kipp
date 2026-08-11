@@ -1,12 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { handleRssCron } from "../triggers/rss"
-import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
+import {
+  createFakeIdeaIngest,
+  createFakeInteractionRouter,
+  createFakeNetwork,
+  createFakeWorkflowBinding,
+} from "./setup"
 
 const RSS_FEED_URL = "https://newsletter.test/feed"
 
 function baseEnv(overrides?: Partial<Env>): Env {
-  return {
+  const env = {
     GITHUB_PAT: "pat",
     DATA_REPO_OWNER: "o",
     DATA_REPO_NAME: "r",
@@ -22,11 +27,16 @@ function baseEnv(overrides?: Partial<Env>): Env {
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: RSS_FEED_URL,
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
     TOKEN_VAULT: {} as never,
     INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
     ...overrides,
-  } as never
+  } as never as Env
+  env.IDEA_INGEST = createFakeIdeaIngest(env)
+  return env
 }
 
 const RSS_ITEM_XML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -56,7 +66,6 @@ describe("rss-to-backlog", () => {
 
   it("adds ideas for a new RSS item and starts a workflow", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": "" },
       llmResponses: [
         {
           choices: [
@@ -82,33 +91,35 @@ describe("rss-to-backlog", () => {
     expect(result.started).toBe(true)
 
     const state = getState()
-    const ideasMd = state.githubFiles.get("ideas.md")
-    expect(ideasMd).toContain("status: raw")
-    expect(ideasMd).toContain("source: substack")
-    expect(ideasMd).toContain("substackUrl: https://newsletter.test/ai-trends-2026")
-    expect(ideasMd).toContain("teaser: AI is evolving fast")
-    expect(ideasMd).toContain("LLM agents are the future")
-    expect(ideasMd).toContain("Tool use patterns")
-    expect(ideasMd).toContain("Safety considerations")
+    const pages = [...state.notionPages.values()]
+    const main = pages.find((p) => p.kippId === 1)!
+    expect(main.status).toBe("raw")
+    expect(main.source).toBe("substack")
+    expect(main.substackUrl).toBe("https://newsletter.test/ai-trends-2026")
+    expect(main.markdown).toBe("AI is evolving fast")
+    const sideMarkdown = pages.filter((p) => p.kippId > 1).map((p) => p.markdown)
+    expect(sideMarkdown).toContain("LLM agents are the future")
+    expect(sideMarkdown).toContain("Tool use patterns")
+    expect(sideMarkdown).toContain("Safety considerations")
 
     const created = binding.getCreated()
     expect(created.length).toBe(1)
-    expect(created[0].params).toMatchObject({ params: { ideaId: "1" } })
+    expect(created[0].params).toMatchObject({ pageId: main.pageId, ideaId: "1", source: "substack" })
   })
 
-  it("skips items whose substackUrl already exists in ideas.md", async () => {
+  it("skips items whose substackUrl already exists in Notion", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: {
-        "ideas.md": `---
-id: 1
-title: Existing idea
-status: raw
-source: substack
-substackUrl: https://newsletter.test/ai-trends-2026
----
-
-Existing content`,
-      },
+      notionPages: [
+        {
+          pageId: "page_1",
+          kippId: 1,
+          title: "Existing idea",
+          status: "raw",
+          source: "substack",
+          markdown: "Existing content",
+          substackUrl: "https://newsletter.test/ai-trends-2026",
+        },
+      ],
       llmResponses: [],
       rssFeedUrl: RSS_FEED_URL,
       rssFeedXml: RSS_ITEM_XML,
@@ -120,8 +131,7 @@ Existing content`,
     expect(result.started).toBe(false)
 
     const state = getState()
-    const ideasMd = state.githubFiles.get("ideas.md")
-    expect(ideasMd).not.toContain("AI is evolving fast")
+    expect([...state.notionPages.values()]).toHaveLength(1)
     expect(binding.getCreated().length).toBe(0)
   })
 

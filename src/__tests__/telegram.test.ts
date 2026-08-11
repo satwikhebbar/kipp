@@ -15,6 +15,7 @@ function b64(s: string): string {
 }
 
 function mockEnv() {
+  const ingestFetches = new Map<string, ReturnType<typeof vi.fn>>()
   return {
     GITHUB_PAT: "pat",
     DATA_REPO_OWNER: "o",
@@ -27,12 +28,31 @@ function mockEnv() {
     LINKEDIN_ACCESS_TOKEN: "",
     LINKEDIN_REFRESH_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
     PIPELINE_WORKFLOW: { create: vi.fn(), get: vi.fn() },
     CALENDAR_WORKFLOW: undefined as Workflow | undefined,
     INTERACTION_ROUTER: {
       idFromName: vi.fn(() => "router-id"),
       get: vi.fn(() => ({ fetch: vi.fn(async () => Response.json({ interaction: null })) })),
     },
+    IDEA_INGEST: {
+      idFromName: (name: string) => ({ name }),
+      get: (id: { name: string }) => {
+        let fetchMock = ingestFetches.get(id.name)
+        if (!fetchMock) {
+          fetchMock = vi
+            .fn()
+            .mockResolvedValue(
+              Response.json({ pageId: "page_1", ideaId: "1", workflowInstanceId: "wf-1", alreadyStarted: false }),
+            )
+          ingestFetches.set(id.name, fetchMock)
+        }
+        return { fetch: fetchMock }
+      },
+    },
+    ingestFetches,
   }
 }
 
@@ -297,17 +317,13 @@ Idea 2`
   })
 
   it("handles quick-capture message", async () => {
-    const putBodies: string[] = []
-    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (opts?.method === "PUT") {
-        putBodies.push(opts.body as string)
-        return { ok: true, json: () => Promise.resolve({}) }
-      }
+    mockFetch.mockImplementation(async (url: string) => {
       if (url?.includes?.("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-      return { ok: true, json: () => Promise.resolve({ content: b64(""), sha: "s1" }) }
+      throw new Error(`Unexpected fetch ${url}`)
     })
 
+    const env = mockEnv()
     const body = JSON.stringify({
       update_id: 1,
       message: {
@@ -323,35 +339,55 @@ Idea 2`
         headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
         body,
       }),
-      mockEnv() as never,
+      env as never,
     )
     expect(res.status).toBe(200)
-    expect(putBodies.length).toBeGreaterThanOrEqual(1)
-    const decoded = atob(JSON.parse(putBodies[0]).content)
-    expect(decoded).toContain("id: 1")
-    expect(decoded).toContain("Quick idea here")
+    const stub = env.ingestFetches.get("ingest:tg:100:5")!
+    expect(stub).toHaveBeenCalledTimes(1)
+    const reqBody = JSON.parse(stub.mock.calls[0][1].body)
+    expect(reqBody.key).toBe("tg:100:5")
+    expect(reqBody.startWorkflow).toBe(false)
+    expect(reqBody.idea).toMatchObject({ source: "telegram", body: "Quick idea here", chatId: "100" })
   })
 
   it("handles /generate command", async () => {
-    const RAW = `---
-id: 1
-title: Raw idea
-status: raw
-created: 2026-07-01T12:00:00Z
-source: manual
----
+    const page = {
+      object: "page",
+      id: "page_1",
+      created_time: "2026-07-01T12:00:00Z",
+      last_edited_time: "2026-07-02T12:00:00Z",
+      properties: {
+        "Kipp ID": { unique_id: { prefix: null, number: 1 } },
+        Status: { status: { name: "raw" } },
+        Source: { select: { name: "manual" } },
+        Title: { title: [{ type: "text", text: { content: "Raw idea" } }] },
+      },
+    }
+    const okJson = (obj: unknown) =>
+      new Response(JSON.stringify(obj), { status: 200, headers: { "Content-Type": "application/json" } })
 
-Body text`
-
-    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (opts?.method === "PUT") return { ok: true, json: () => Promise.resolve({}) }
-      if (url?.includes?.("api.telegram.org"))
+    mockFetch.mockImplementation(async (url: string) => {
+      const u = String(url)
+      if (u.includes("api.notion.com")) {
+        if (u.endsWith("/query")) return okJson({ object: "list", results: [page], has_more: false, next_cursor: null })
+        const md = u.match(/\/v1\/pages\/([^/]+)\/markdown$/)
+        if (md)
+          return okJson({
+            object: "page_markdown",
+            id: md[1],
+            markdown: "Body text",
+            truncated: false,
+            unknown_block_ids: [],
+          })
+        const pm = u.match(/\/v1\/pages\/([^/]+)$/)
+        if (pm) return okJson(page)
+      }
+      if (u.includes("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-      return { ok: true, json: () => Promise.resolve({ content: b64(RAW), sha: "s1" }) }
+      throw new Error(`Unexpected fetch ${u}`)
     })
 
     const env = mockEnv()
-    env.PIPELINE_WORKFLOW.create = vi.fn().mockResolvedValue({ id: "wf-1" })
 
     const body = JSON.stringify({
       update_id: 2,
@@ -371,9 +407,10 @@ Body text`
       env as never,
     )
     expect(res.status).toBe(200)
-    expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalledWith({
-      params: expect.objectContaining({ ideaId: "1", ideaTitle: "Raw idea", ideaBody: "Body text", chatId: "100" }),
-    })
+    const startStub = env.ingestFetches.get("claim:page_1")!
+    expect(startStub).toHaveBeenCalledTimes(1)
+    const startBody = JSON.parse(startStub.mock.calls[0][1].body)
+    expect(startBody).toMatchObject({ pageId: "page_1", ideaId: "1", source: "manual" })
   })
 
   it("shows Calendar help without invoking an LLM or workflow", async () => {

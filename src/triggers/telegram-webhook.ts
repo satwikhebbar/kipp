@@ -1,10 +1,10 @@
 import { CALENDAR_HELP } from "../calendar/messages"
+import { createIdeaIngest } from "../core/idea-ingest"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
-import { createGitHubClient, GithubError } from "../integrations/github"
+import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
-import { nextId } from "../linkedin/backlog/id-generator"
-import { parseIdeas, serializeIdeas } from "../linkedin/backlog/parser"
+import { createIdeaManager } from "../linkedin/ideas/manager"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
 
@@ -186,19 +186,17 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
     if (command?.name === "generate" && !command.argument) {
       logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
-      const client = createGitHubClient(env)
-      const ideas = parseIdeas((await client.readFile("ideas.md")).content)
-      const rawIdeas = ideas.filter((i) => i.status === "raw")
-      if (rawIdeas.length === 0) {
+      const manager = createIdeaManager(createNotionClient(env))
+      const idea = await manager.getNextIdea()
+      if (!idea) {
         await tg.sendMessage(msg.chat.id, "No raw ideas to generate from.")
         return new Response("OK")
       }
-      const raw = rawIdeas.sort((a, b) => Number(a.id) - Number(b.id))[0]
-      await env.PIPELINE_WORKFLOW.create({
-        params: { ideaId: raw.id, ideaTitle: raw.title, ideaBody: raw.body, chatId: String(msg.chat.id) },
-      })
-      const label = raw.title ?? raw.body.slice(0, LABEL_TRUNCATE_LENGTH)
-      await tg.sendMessage(msg.chat.id, `Started workflow for idea #${raw.id}: ${label}`)
+      const ingest = createIdeaIngest(env)
+      const result = await ingest.start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })
+      const label = idea.title ?? idea.body.slice(0, LABEL_TRUNCATE_LENGTH)
+      const verb = result.alreadyStarted ? "Workflow already running" : "Started workflow"
+      await tg.sendMessage(msg.chat.id, `${verb} for idea #${idea.id}: ${label}`)
       logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
       return new Response("OK")
     }
@@ -222,25 +220,25 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
     }
 
     {
-      const client = createGitHubClient(env)
       const text = msg.text
 
       if (command?.name === "add") {
-        let savedId = ""
-        await client.mutateFile("ideas.md", (c) => {
-          const items = parseIdeas(c)
-          savedId = String(nextId(items))
-          items.push({
-            id: savedId,
+        if (!command.argument) {
+          await tg.sendMessage(msg.chat.id, "Usage: /add <idea text>")
+          return new Response("OK")
+        }
+        const ingest = createIdeaIngest(env)
+        const result = await ingest.ingest({
+          key: `tg:${msg.chat.id}:${msg.message_id}`,
+          idea: {
             status: "raw" as const,
-            created: new Date().toISOString(),
             source: "telegram" as const,
             body: command.argument,
-            correlation: { telegramChatId: String(msg.chat.id) },
-          })
-          return serializeIdeas(items)
+            chatId: String(msg.chat.id),
+          },
+          startWorkflow: false,
         })
-        await tg.sendMessage(msg.chat.id, `Saved as idea #${savedId}.`)
+        await tg.sendMessage(msg.chat.id, `Saved as idea #${result.ideaId}.`)
         return new Response("OK")
       }
 
@@ -274,7 +272,7 @@ async function handleBoundaryError(env: Env, chatId: number | undefined, err: un
   logRuntime(env, {
     event: "telegram-update",
     outcome: "failed",
-    failureCategory: err instanceof GithubError ? "storage-error" : "unhandled",
+    failureCategory: err instanceof NotionError ? "storage-error" : "unhandled",
   })
   console.error(new Date().toISOString(), "[telegram-webhook] unhandled error:", err)
   if (env.TELEGRAM_BOT_TOKEN && chatId !== undefined) {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { PipelineWorkflow } from "../linkedin/workflow"
-import { createFakeInteractionRouter, createFakeNetwork, createFakeStep } from "./setup"
+import { createFakeInteractionRouter, createFakeNetwork, createFakeStep, type FakeNotionPage } from "./setup"
 
 vi.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -39,6 +39,9 @@ function baseEnv(overrides?: Partial<Env>): Env {
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",
     WAIT_FOR_FEEDBACK_HOURS: "168",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
     TOKEN_VAULT: mockDoNamespace(),
     INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
     PIPELINE_WORKFLOW: {} as never,
@@ -46,17 +49,15 @@ function baseEnv(overrides?: Partial<Env>): Env {
   } as never
 }
 
-const RAW_IDEA = `---
-id: 1
-title: Test idea
-status: raw
-created: 2026-07-01T12:00:00Z
-source: manual
-correlation:
-  telegramChatId: "42"
----
-
-Body content`
+const RAW_PAGE: FakeNotionPage = {
+  pageId: "page_1",
+  kippId: 1,
+  title: "Test idea",
+  status: "raw",
+  source: "manual",
+  markdown: "Body content",
+  chatId: "42",
+}
 
 function linkedInToolResponse(response: string, id: string) {
   return {
@@ -87,7 +88,7 @@ function makeStep() {
 
 function makeEvent() {
   return {
-    payload: { ideaId: "1", ideaTitle: "Test idea", ideaBody: "Body content" },
+    payload: { pageId: "page_1", ideaId: "1", source: "manual" },
     instanceId: "wf-1",
     timestamp: new Date(),
     workflowName: "",
@@ -97,7 +98,7 @@ function makeEvent() {
 describe("workflow-approval-to-linkedin-draft", () => {
   it("generates draft, notifies, publishes to LinkedIn, and archives on approval", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA, "archive.md": "" },
+      notionPages: [RAW_PAGE],
       llmResponses: [DRAFT_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
@@ -138,16 +139,12 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(state.linkedinUrls).toHaveLength(1)
     expect(state.linkedinUrls[0]).toContain("/v2/ugcPosts")
 
-    const archive = state.githubFiles.get("archive.md")
-    expect(archive).toContain("id: 1")
-    expect(archive).toContain("status: finalized")
-    expect(archive).toContain("workflowInstanceId: wf-1")
-    expect(state.githubFiles.get("ideas.md")).not.toContain("id: 1")
+    expect(state.notionPages.get("page_1")?.status).toBe("finalized")
   })
 
   it("notifies but does not publish when no LinkedIn token is available", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA },
+      notionPages: [RAW_PAGE],
       llmResponses: [DRAFT_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
@@ -175,7 +172,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
 
   it("revises on feedback then publishes on subsequent approval", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA, "archive.md": "" },
+      notionPages: [RAW_PAGE],
       llmResponses: [DRAFT_RESPONSE, REVISE_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
@@ -210,7 +207,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
 
   it("marks idea as expired when feedback times out after revision", async () => {
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA },
+      notionPages: [RAW_PAGE],
       llmResponses: [DRAFT_RESPONSE, REVISE_RESPONSE],
     })
     vi.stubGlobal("fetch", fetch)
@@ -234,8 +231,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(step.getCalledSteps()).not.toContain("linkedin-publish")
     expect(step.getCalledSteps()).not.toContain("archive")
 
-    const ideasMd = getState().githubFiles.get("ideas.md")
-    expect(ideasMd).toContain("status: awaiting-feedback-expired")
+    expect(getState().notionPages.get("page_1")?.status).toBe("awaiting-feedback-expired")
   })
 
   it("denies a hallucinated publishing tool before approval or any LinkedIn mutation", async () => {
@@ -257,7 +253,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
       usage: { prompt_tokens: 1, completion_tokens: 1 },
     }
     const { fetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA },
+      notionPages: [RAW_PAGE],
       llmResponses: [deniedResponse, deniedResponse, deniedResponse],
     })
     vi.stubGlobal("fetch", fetch)
@@ -280,13 +276,13 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(step.getCalledSteps()).not.toContain("linkedin-publish")
     expect(step.getCalledSteps()).not.toContain("archive")
     expect(getState().linkedinDrafts).toHaveLength(0)
-    expect(getState().githubFiles.get("ideas.md")).toContain("status: raw")
+    expect(getState().notionPages.get("page_1")?.status).toBe("raw")
   })
 
   it("fails safely on a native provider error without creating an approvable draft", async () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
     const { fetch: harnessFetch, getState } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA },
+      notionPages: [RAW_PAGE],
     })
     vi.stubGlobal(
       "fetch",
@@ -320,14 +316,14 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(step.getCalledSteps()).not.toContain("notify")
     expect(step.getCalledSteps()).not.toContain("linkedin-publish")
     expect(getState().linkedinDrafts).toHaveLength(0)
-    expect(getState().githubFiles.get("ideas.md")).toContain("status: raw")
+    expect(getState().notionPages.get("page_1")?.status).toBe("raw")
   })
 
   it("does not leak LinkedIn token in Telegram error on publish failure", async () => {
     const telegramTexts: string[] = []
 
     const { fetch: harnessFetch } = createFakeNetwork({
-      githubFiles: { "ideas.md": RAW_IDEA },
+      notionPages: [RAW_PAGE],
       llmResponses: [DRAFT_RESPONSE],
     })
 

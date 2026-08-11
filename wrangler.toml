@@ -13,6 +13,10 @@ class_name = "TokenVaultDO"
 name = "INTERACTION_ROUTER"
 class_name = "InteractionRouterDO"
 
+[[durable_objects.bindings]]
+name = "IDEA_INGEST"
+class_name = "IdeaIngestDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TokenVaultDO"]
@@ -20,6 +24,10 @@ new_sqlite_classes = ["TokenVaultDO"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["InteractionRouterDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["IdeaIngestDO"]
 
 # Cloudflare Workflow binding
 [[workflows]]
@@ -58,5 +66,9 @@ TOKEN_ENCRYPTION_KEY_IDS = "k20260720a"
 # GOOGLE_CALENDAR_REDIRECT_ORIGIN = "https://linkedin-pipeline.your-name.workers.dev"
 # Path to style prompt in the data repo. Falls back to src/linkedin/prompts/defaults.ts if not set or file missing.
 # PROMPT_STYLE_PATH = "prompts/style-prompt.md"
+
+# --- Notion (Ideas data source) ---
+NOTION_IDEAS_DATA_SOURCE_ID = "your-notion-data-source-id"
+# NOTION_FREE_TIER = "false"   # set to "false" to disable the 350 ms request throttle
 
 # --- Secrets (set via `wrangler secrets put`; for local dev set in .dev.vars) ---
