@@ -616,33 +616,46 @@ function authorizedOptions(
   return options
 }
 
-/** Returns the owner's requested interval as epoch ms, or null when it cannot be derived. */
-function requestedStartEnd(plan: CalendarPlan, timeZone: string): { start: number; end: number } | null {
+/** Returns the owner-requested disclosure interval(s), or empty when they cannot be derived. */
+function requestedDisclosureIntervals(
+  plan: CalendarPlan,
+  timeZone: string,
+): Array<{ start: number; end: number; timeMin: string; timeMax: string }> {
   if (plan.kind === "one_off") {
-    if (!plan.proposal.startTime) return null
-    const start = zonedDateTimeToMillis(plan.proposal.localDate as string, plan.proposal.startTime, timeZone)
-    if (start === null) return null
-    return { start, end: start + plan.proposal.durationMinutes * MILLISECONDS_PER_MINUTE }
+    if (!plan.proposal.startTime || !plan.proposal.localDate) return []
+    const start = zonedDateTimeToMillis(plan.proposal.localDate, plan.proposal.startTime, timeZone)
+    if (start === null) return []
+    const bounds = calendarDayBounds(plan.proposal.localDate, timeZone)
+    if (!bounds) return []
+    return [
+      {
+        start,
+        end: start + plan.proposal.durationMinutes * MILLISECONDS_PER_MINUTE,
+        timeMin: bounds.timeMin,
+        timeMax: bounds.timeMax,
+      },
+    ]
   }
-  if (!plan.proposal.startTime || !plan.proposal.firstDate) return null
-  const start = zonedDateTimeToMillis(plan.proposal.firstDate, plan.proposal.startTime, timeZone)
-  if (start === null) return null
-  return { start, end: start + plan.proposal.durationMinutes * MILLISECONDS_PER_MINUTE }
-}
-
-/** Returns the day bounds for the requested interval, using the first occurrence for recurring plans. */
-function requestedDayBounds(plan: CalendarPlan, timeZone: string): { timeMin: string; timeMax: string } | null {
-  const localDate = plan.kind === "one_off" ? (plan.proposal.localDate as string) : (plan.proposal.firstDate as string)
-  return localDate ? calendarDayBounds(localDate, timeZone) : null
+  const conflicts = plan.requestedConflicts.length ? plan.requestedConflicts : plan.occurrences
+  const intervals: Array<{ start: number; end: number; timeMin: string; timeMax: string }> = []
+  for (const occurrence of conflicts) {
+    const start = Date.parse(occurrence.start)
+    const end = Date.parse(occurrence.end)
+    const bounds = calendarDayBounds(occurrence.localDate, timeZone)
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !bounds) continue
+    intervals.push({ start, end, timeMin: bounds.timeMin, timeMax: bounds.timeMax })
+  }
+  return intervals
 }
 
 /** Renders the owner-visible disclosure body listing every overlapping event as plain text. */
-function disclosureMessage(snapshots: ConflictEventSnapshot[], timeZone: string): string {
+function disclosureMessage(snapshots: ConflictEventSnapshot[], timeZone: string, showDates: boolean): string {
   const lines = snapshots.map((snapshot) => {
     const range = snapshot.allDay
       ? "all day"
       : `${localTimeAt(Date.parse(snapshot.start), timeZone)}–${localTimeAt(Date.parse(snapshot.end), timeZone)}`
-    return `• ${snapshot.title} (${range})`
+    const when = showDates ? `${localDateAt(Date.parse(snapshot.start), timeZone)} ${range}` : range
+    return `• ${snapshot.title} (${when})`
   })
   return `Your requested time is occupied by:\n${lines.join("\n")}\n\nChoose an event to reschedule, try another time, or cancel.`
 }
@@ -665,21 +678,27 @@ async function handleConflictDisclosure(
   replacementKind: WorkflowInteractionKind,
   expiresAt: number,
 ): Promise<ConflictDisclosureResult> {
-  const requested = requestedStartEnd(plan, timeZone)
-  const bounds = requestedDayBounds(plan, timeZone)
-  if (!requested || !bounds) return { status: "ended", version }
+  const intervals = requestedDisclosureIntervals(plan, timeZone)
+  if (!intervals.length) return { status: "ended", version }
   let v = version
   const calendar = createGoogleCalendarClient(env)
-  const snapshots = (await step.do(`calendar-conflict-disclose-${turn}`, () =>
-    calendar.findConflictingEvents(
-      bounds.timeMin,
-      bounds.timeMax,
-      new Date(requested.start).toISOString(),
-      new Date(requested.end).toISOString(),
-      timeZone,
-    ),
-  )) as ConflictEventSnapshot[]
+  const snapshots = (await step.do(`calendar-conflict-disclose-${turn}`, async () => {
+    const seen = new Map<string, ConflictEventSnapshot>()
+    for (const interval of intervals) {
+      const found = (await calendar.findConflictingEvents(
+        interval.timeMin,
+        interval.timeMax,
+        new Date(interval.start).toISOString(),
+        new Date(interval.end).toISOString(),
+        timeZone,
+      )) as ConflictEventSnapshot[]
+      for (const snapshot of found) if (!seen.has(snapshot.id)) seen.set(snapshot.id, snapshot)
+    }
+    return [...seen.values()]
+  })) as ConflictEventSnapshot[]
   if (!snapshots.length) return { status: "availability-changed", version: v }
+  const requested = intervals[0] as { start: number; end: number; timeMin: string; timeMax: string }
+  const bounds = { timeMin: requested.timeMin, timeMax: requested.timeMax }
 
   // Recurring requests are disclosed but never rescheduled: moving a single event
   // cannot free the whole series, so the disclosure is informational only.
@@ -699,7 +718,7 @@ async function handleConflictDisclosure(
     event,
     ++v,
     `calendar-conflict-disclosure-${turn}`,
-    disclosureMessage(snapshots, timeZone),
+    disclosureMessage(snapshots, timeZone, intervals.length > 1),
     actions,
   )
   if (disclosure.type === "timeout") return { status: "ended", version: v }

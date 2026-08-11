@@ -118,6 +118,7 @@ async function evaluateRecurringCandidate(
       proposal,
       occurrences: availability.occurrences,
       adjustments: [],
+      requestedConflicts: [],
       rrule: availability.rrule,
       humanCadence: availability.humanCadence,
       reminderMinutes: availability.reminderMinutes,
@@ -128,15 +129,12 @@ async function evaluateRecurringCandidate(
       localStartTime: availability.occurrences[0]?.localStartTime ?? proposal.startTime ?? "",
     })
   }
-  const adjustedProposal =
-    availability.kind === "common-alternative"
-      ? { ...proposal, startTime: availability.localStartTime, timeIsExplicit: true }
-      : proposal
   const optionPlan: CalendarPlan = {
     kind: "recurring",
-    proposal: adjustedProposal,
+    proposal,
     occurrences: availability.occurrences,
     adjustments: availability.kind === "adjustments" ? availability.adjustments : [],
+    requestedConflicts: availability.conflicts,
     rrule: availability.rrule,
     humanCadence: availability.humanCadence,
     reminderMinutes: availability.reminderMinutes,

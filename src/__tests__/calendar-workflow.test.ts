@@ -673,6 +673,116 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(messages.every((candidate) => !candidate.text.includes("series-1"))).toBe(true)
   })
 
+  it("discloses a later recurring occurrence conflict instead of an availability change", async () => {
+    const conflict = [{ start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "series-2",
+        title: "Standup",
+        start: "2026-08-04T13:30:00.000Z",
+        end: "2026-08-04T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice(RECURRING)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+      "Weekly review every Tuesday at 7pm for 3 occurrences",
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(1)
+    expect(mockFindConflictingEvents).toHaveBeenCalledWith(
+      "2026-08-03T18:30:00.000Z",
+      "2026-08-04T18:30:00.000Z",
+      "2026-08-04T13:30:00.000Z",
+      "2026-08-04T14:00:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    const messages = telegram.mock.calls.map(
+      ([, init]) =>
+        JSON.parse((init as RequestInit).body as string) as {
+          text: string
+          reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> }
+        },
+    )
+    const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
+    expect(disclosure?.text).toContain("Standup (19:00–19:30)")
+    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    expect(messages.some((candidate) => candidate.text.includes("Availability changed"))).toBe(false)
+  })
+
+  it("discloses multiple conflicting recurring occurrences as one dated aggregate", async () => {
+    const conflict = [
+      { start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" },
+      { start: "2026-08-18T13:30:00.000Z", end: "2026-08-18T14:00:00.000Z" },
+    ]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValueOnce([
+      {
+        id: "series-a",
+        title: "Standup",
+        start: "2026-08-04T13:30:00.000Z",
+        end: "2026-08-04T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    mockFindConflictingEvents.mockResolvedValueOnce([
+      {
+        id: "series-b",
+        title: "Retro",
+        start: "2026-08-18T13:30:00.000Z",
+        end: "2026-08-18T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice({
+      ...RECURRING,
+      proposal: { ...RECURRING.proposal, end: { mode: "count" as const, occurrences: 5 } },
+    })
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+      "Weekly review every Tuesday at 7pm for 5 occurrences",
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(2)
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    const messages = telegram.mock.calls.map(
+      ([, init]) =>
+        JSON.parse((init as RequestInit).body as string) as {
+          text: string
+          reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> }
+        },
+    )
+    const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
+    expect(disclosure?.text).toContain("Standup (2026-08-04 19:00–19:30)")
+    expect(disclosure?.text).toContain("Retro (2026-08-18 19:00–19:30)")
+    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    expect(messages.every((candidate) => !candidate.text.includes("series-a"))).toBe(true)
+    expect(messages.every((candidate) => !candidate.text.includes("series-b"))).toBe(true)
+  })
+
   it("discloses non-movable events without a reschedule action and cancels cleanly", async () => {
     const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
     mockBusyIntervals.mockResolvedValue(conflict)
