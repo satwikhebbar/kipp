@@ -10,18 +10,19 @@
   </head>
   <body>
     <h1>Kipp Calendar — Owner-Visible Conflict Disclosure and Rescheduling</h1>
-    <p class="lede">Design for GitHub issue #40: let the authenticated Calendar owner learn, on request, which existing event occupies a requested time and — only after seeing the proposed change and confirming — have Kipp move that event deterministically. The model never receives event details, OAuth material, or write authority, and the FreeBusy-only default experience is unchanged until this is approved and implemented.</p>
-    <div class="callout"><strong>Outcome:</strong> the owner taps <em>Why is this time busy?</em>, sees a deterministic summary (title + times) of every overlapping event, and can choose to reschedule a single, non-recurring, non-all-day event. Any move requires a second explicit confirmation of the exact proposed change, is performed by deterministic workflow code with ETag concurrency and idempotent recovery, auto-creates the original request at the freed time, offers a 15-minute full-revert Undo, and leaves no model-visible or log-visible event detail.<br /><span class="tag">Design only</span><span class="tag">No model access</span><span class="tag">Explicit confirmation</span><span class="tag">ETag concurrency</span><span class="tag">Undo</span></div>
+    <p class="lede">Design for GitHub issue #40: let the authenticated Calendar owner learn, on request, which existing event occupies a requested time and — only after seeing the proposed change and confirming — have Kipp move that event deterministically. This path introduces no new event detail to model context, OAuth material, or write authority, and the FreeBusy-only default experience is unchanged until the design is approved and implemented.</p>
+    <div class="callout"><strong>Outcome:</strong> the owner taps <em>Why is this time busy?</em>, sees a deterministic summary (title + times) of every overlapping event, and can choose to reschedule a single, non-recurring, non-all-day event. Any move requires a second explicit confirmation of the exact proposed change, is performed by deterministic workflow code with ETag concurrency and idempotent recovery, auto-creates the original request at the freed time, offers a 15-minute full-revert Undo, and is governed by a persisted phase machine that compensates or reports safely when the non-atomic writes cannot complete.<br /><span class="tag">Design only</span><span class="tag">No new model access</span><span class="tag">Explicit confirmation</span><span class="tag">ETag concurrency</span><span class="tag">Undo</span></div>
 
     <h2>1. Scope and invariants</h2>
     <table><thead><tr><th>Included</th><th>Excluded</th></tr></thead><tbody>
-      <tr><td>Owner-initiated disclosure of the conflicting event(s) (title + times only) on the primary calendar; owner-approved, deterministic rescheduling of one existing non-recurring, non-all-day conflicting event; auto-creation of the original request at the freed time; explicit two-step confirmation; ETag-guarded move and undo; idempotent recovery; 15-minute expiry; integration/security coverage.</td><td>Any automatic disclosure, move, cancel, overwrite, or deletion of an existing event; model-visible event details; new OAuth scopes; moving recurring-series or all-day events (disclosed but not movable); moving events on non-primary calendars; post-window management; changing the current FreeBusy-only conflict message or its defaults.</td></tr>
+      <tr><td>Owner-initiated disclosure of the conflicting event(s) (title + times only) on the primary calendar; owner-approved, deterministic rescheduling of one existing non-recurring, non-all-day conflicting event; auto-creation of the original request at the freed time; explicit two-step confirmation; ETag-guarded move and undo; a persisted phase record that makes the non-atomic writes recoverable; opaque per-event selection; 15-minute expiry; integration/security coverage.</td><td>Any automatic disclosure, move, cancel, overwrite, or deletion of an existing event; adding event detail to model context; new OAuth scopes; moving recurring-series or all-day events (disclosed but not movable); moving events on non-primary calendars; post-window management; changing the current FreeBusy-only conflict message or its defaults; changing the existing bounded <code>list_calendar_events</code> projection.</td></tr>
     </tbody></table>
     <ul>
       <li>The default conflict experience is byte-for-byte unchanged. The disclosure and reschedule options are added actions; the existing best-alternative, <em>Try another time</em>, and <em>Cancel</em> flow remains the default path.</li>
-      <li>The model never receives event summaries, titles, times, descriptions, locations, attendees, ETags, or raw Calendar responses. Only the authenticated owner may see the disclosure, only by tapping the disclosure action.</li>
+      <li>This path adds no <em>new</em> event detail to model context. The pre-existing bounded <code>list_calendar_events</code> projection (title + timing, used only to resolve references) is unchanged; the disclosure snapshots never enter the agent transcript or any tool input/output — they exist only in workflow-owned state and are rendered by deterministic workflow code.</li>
+      <li>Only the authenticated owner may see the disclosure, only by tapping the disclosure action.</li>
       <li>No existing event is moved unless the owner first sees the exact proposed change and then confirms it with a dedicated button.</li>
-      <li>Only deterministic workflow code performs reads for disclosure and writes for rescheduling. The move is ETag-guarded, idempotent, and reversible within the 15-minute interaction window.</li>
+      <li>Only deterministic workflow code performs reads for disclosure and writes for rescheduling. The move is ETag-guarded, idempotent, reversible within the 15-minute interaction window, and every partial outcome is compensated or reported per §5.5.</li>
       <li>Recurring-series and all-day conflicting events may be disclosed (title + times) but never rescheduled; recurring series already have their own adjustment flow.</li>
     </ul>
 
@@ -31,16 +32,16 @@
       <tr><td>Telegram identity</td><td>The existing allow-list (<code>TELEGRAM_ALLOWED_USER_ID</code>) and per-chat interaction router already restrict all bot interactions to the authenticated owner. The disclosure is only ever rendered into the owner's chat, in response to the owner's own button tap.</td></tr>
       <tr><td>Google identity</td><td>All reads and writes use the single connected Calendar account through the existing encrypted token vault. Kipp cannot select or change accounts.</td></tr>
       <tr><td>Scope</td><td>The current scopes (<code>calendar.events.owned</code> + <code>calendar.events.freebusy</code>) already permit reading a bounded projection of primary-calendar events (used today by <code>list_calendar_events</code>) and updating events on owned calendars. The primary calendar is owned, so the reschedule write is within the existing consent surface.</td></tr>
-      <tr><td>Model boundary</td><td>The model sees only the unchanged privacy-safe conflict message and its existing typed options. The disclosure read and the reschedule write happen in workflow code, never inside the agent session or a model tool. There is no write tool.</td></tr>
+      <tr><td>Model boundary</td><td>Kipp's normative contract already lets the model see a bounded <code>list_calendar_events</code> projection (title + timing) to resolve references (see <code>docs/calendar-workflow-spec.md</code>, "Event titles and timing may be model-visible through the bounded projection"). This feature promises only that it introduces no <em>new</em> event detail: the conflict-disclosure snapshots are fetched by workflow code, held in workflow-owned state, rendered by a fixed template, and never passed into the agent session, its transcript, or any tool. There is no write tool.</td></tr>
       <tr><td>Mutation authority</td><td>Only <code>runAgentCenteredCalendarWorkflow</code> may call the new client operations, and only after the owner has confirmed the exact proposed change.</td></tr>
     </tbody></table>
     <div class="callout note"><strong>Authorization failure behavior:</strong> if reading the conflicting event or moving it fails with an authorization error (token revoked, scope missing, 401/403), the workflow does not disclose and does not move. It routes through the existing reconnect-then-Retry flow, never leaking whether an event exists or any of its fields.</div>
 
     <h2>3. Owner-visible disclosure policy</h2>
     <p><strong>Minimum disclosed fields:</strong> the overlapping event's title and its start/end times, plus the all-day flag when set. Nothing else: never description, location, attendees, organizer, links, conferencing data, transparency/visibility state, extended properties, or raw provider metadata.</p>
-    <table><thead><tr><th>Field</th><th>Disclosed to owner</th><th>Visible to model</th><th>In logs</th></tr></thead><tbody>
-      <tr><td>Title (summary)</td><td>Yes, on owner request</td><td>No (only via the existing bounded <code>list_calendar_events</code> projection, unchanged)</td><td>No</td></tr>
-      <tr><td>Start/end times</td><td>Yes, on owner request</td><td>No</td><td>No</td></tr>
+    <table><thead><tr><th>Field</th><th>Disclosed to owner (on request)</th><th>Added to model context by this path</th><th>In logs</th></tr></thead><tbody>
+      <tr><td>Title (summary)</td><td>Yes</td><td>No. (The pre-existing bounded <code>list_calendar_events</code> projection already exposes title+timing to the model to resolve references; this path adds none.)</td><td>No</td></tr>
+      <tr><td>Start/end times</td><td>Yes</td><td>No</td><td>No</td></tr>
       <tr><td>All-day flag</td><td>Yes, as part of the time line</td><td>No</td><td>No</td></tr>
       <tr><td>ETag</td><td>No</td><td>No</td><td>No</td></tr>
       <tr><td>Description, location, attendees, links, conferencing, extendedProperties</td><td>No</td><td>No</td><td>No</td></tr>
@@ -50,93 +51,131 @@
       <li>The disclosure is rendered by a fixed workflow template, not by the model, so event titles are plain text that cannot change behavior. No <code>parse_mode</code> is used, so titles cannot inject formatting, links, or markup.</li>
       <li>The message is delivered only to the owner's private chat through the allow-listed Telegram flow, on demand.</li>
       <li>No Calendar event link, URL, or external identifier is included.</li>
+      <li>Titles are untrusted data end to end: they appear only as plain text in the owner-visible body and in no button label, callback payload, model context, or log.</li>
     </ul>
-    <p>Titles are treated as untrusted data end to end: the disclosure template prints them verbatim as plain text; no instruction-like content in a title can reach a prompt or a decision.</p>
 
-    <h2>4. Interaction flow</h2>
+    <h2>4. Interaction flow and opaque event selection</h2>
     <p>The current conflict state machine is extended with deterministic sub-steps. The model's <code>needs_user_input</code> terminal is unchanged; the workflow adds one action to the existing button set and then drives the disclosure/reschedule sub-flow itself.</p>
     <pre>
 Conflict detected (FreeBusy, unchanged)
   → existing message + existing buttons
   + [Why is this time busy?]  (new, deterministic)
     → read overlapping event(s) via client (workflow-owned)
-    → list each event: "T (14:00–15:00)" + actions
-      [Reschedule &lt;title&gt;] [Try another time] [Cancel]
-      → [Reschedule &lt;title&gt;] (only for single, non-recurring,
-        non-all-day events)
+    → build server-side selection map: selectionId → snapshot
+    → list each event in the body: "T (14:00–15:00)" + actions
+      [Reschedule 14:00] [Try another time] [Cancel]
+      → [Reschedule 14:00] resolves by selectionId to ONE snapshot
+        (only for single, non-recurring, non-all-day events)
         → propose nearest free slot preserving duration (deterministic)
         → "Move T from 14:00–15:00 to 18:00–19:00?" + actions
           [Move it] [Cancel]
           → [Move it]
-            → ETag-guarded idempotent update
+            → ETag-guarded idempotent update (phase machine, §5.5)
             → auto-create the original request at the freed time
-              (fresh revalidation, existing write path)
+              (fresh revalidation, existing write path, §5.5)
             → confirmation + [Undo] [Continue]
-              → [Undo]: restore the moved event AND remove the
-                created request (full revert, ETag-guarded) → confirm
+              → [Undo]: full revert (restore moved event, then delete
+                the created request), phase machine §5.5 → confirm
               → [Continue]: finish normally
     </pre>
     <table><thead><tr><th>Step</th><th>Trigger</th><th>Deterministic action</th></tr></thead><tbody>
-      <tr><td>Disclose</td><td>Owner taps <em>Why is this time busy?</em></td><td>Read events overlapping the requested interval via a workflow-only client method; render one line per overlapping event (title + times).</td></tr>
-      <tr><td>Choose event</td><td>Owner taps <em>Reschedule &lt;title&gt;</em></td><td>Reschedule is offered per event, only when that event is single, non-recurring, and non-all-day. Multiple overlapping events are each listed with their own reschedule action; recurring/all-day conflicts are disclosed but not movable.</td></tr>
-      <tr><td>Propose move</td><td>Owner taps <em>Reschedule &lt;title&gt;</em></td><td>Reuse the existing candidate-slot search to find the nearest same-day free slot for the existing event, preserving its duration and reminder semantics.</td></tr>
-      <tr><td>Confirm</td><td>Owner taps <em>Move it</em></td><td>Fresh read of the event, capture its ETag, issue the guarded update, verify by re-read on uncertain outcome.</td></tr>
-      <tr><td>Create</td><td>Move confirmed (auto)</td><td>Re-validate the original request against the freed time and create it through the existing deterministic write path, confirming with the standard Add/Edit confirmation.</td></tr>
-      <tr><td>Undo</td><td>Owner taps <em>Undo</em> within 15 minutes</td><td>Full revert: restore the moved event's original times (ETag-guarded) and remove the created request, returning to the pre-move state; then confirm.</td></tr>
+      <tr><td>Disclose</td><td>Owner taps <em>Why is this time busy?</em></td><td>Read events overlapping the requested interval via a workflow-only client method; build the selection map; render one line per overlapping event (title + times).</td></tr>
+      <tr><td>Choose event</td><td>Owner taps <em>Reschedule &lt;time&gt;</em></td><td>Resolve the opaque selection to exactly one snapshot. Reschedule is offered per event only when that event is single, non-recurring, and non-all-day. Multiple overlapping events are each listed with their own action; recurring/all-day conflicts are disclosed but not movable.</td></tr>
+      <tr><td>Propose move</td><td>Owner taps <em>Reschedule &lt;time&gt;</em></td><td>Reuse the existing candidate-slot search to find the nearest same-day free slot for the existing event, preserving its duration and reminder semantics.</td></tr>
+      <tr><td>Confirm</td><td>Owner taps <em>Move it</em></td><td>Enter the phase machine (§5.5): fresh read, capture ETag, issue the guarded patch, verify by re-read on uncertain outcome.</td></tr>
+      <tr><td>Create</td><td>Move verified (auto)</td><td>Re-validate the original request against the freed time and create it through the existing deterministic write path, confirming with the standard Add/Edit confirmation. If creation fails, compensate per §5.5.</td></tr>
+      <tr><td>Undo</td><td>Owner taps <em>Undo</em> within 15 minutes</td><td>Full revert per §5.5: restore the moved event's original times (ETag-guarded), then delete the created request, returning to the pre-move state; then confirm. If either half fails, report per §5.5.</td></tr>
       <tr><td>Continue</td><td>Owner taps <em>Continue</em></td><td>Finish the workflow normally; the original request is already created.</td></tr>
     </tbody></table>
     <div class="callout note"><strong>Progressive disclosure:</strong> no event detail appears until the owner taps the disclosure action. The default conflict message, the best-alternative option, and the <em>Try another time</em> / <em>Cancel</em> behavior are untouched.</div>
 
+    <h3>4.1 Opaque, durable per-event selection</h3>
+    <p>The existing <code>WorkflowInteraction</code> carries a kind and an opaque interaction ID — never an event ID — and <code>promptForActions</code> already binds each action to its own random <code>interactionId</code>/<code>callbackToken</code>. The disclosure sub-flow reuses exactly this: each movable event's <em>Reschedule</em> action is registered under kind <code>calendar-conflict-reschedule</code> with its own opaque interaction ID, while the workflow keeps a server-side selection map in step state mapping that opaque ID to the snapshot (<code>{ eventId, title, start, end, allDay, etag }</code>). A resolved callback returns only the opaque interaction ID; the workflow looks the snapshot up in its own state. No Calendar event ID or title ever enters Telegram callback data, the router, or a button label.</p>
+    <ul>
+      <li><strong>Version / TTL:</strong> the selection map lives in workflow step state and inherits the 15-minute interaction TTL. Router versioning already invalidates superseded actions; a new evaluation or a re-entered disclosure replaces the map, so a stale button resolves to an unknown/superseded selection and yields the safe "availability changed" outcome.</li>
+      <li><strong>Duplicate delivery:</strong> the router claim is idempotent, so a re-delivered callback resumes the same durable step and cannot re-issue a move. The selection is consumed on first successful resolution; a repeat resolves as already-used.</li>
+      <li><strong>Label policy:</strong> button labels never contain raw titles. The existing multi-action label limit is <code>MAX_MULTI_ACTION_LABEL_CHARACTERS = 16</code> (see <code>src/calendar/agent-workflow.ts</code>); each per-event label is derived from the event start time only (e.g. <code>Reschedule 14:00</code>), disambiguated with a numeric suffix when two movable events share a start time (<code>14:00 (1)</code>, <code>14:00 (2)</code>). Arbitrary-length, untrusted titles appear only in the owner-visible message body as plain text.</li>
+    </ul>
+
     <h2>5. Deterministic update semantics</h2>
     <h3>5.1 ETag / concurrency</h3>
     <ul>
-      <li>Add an ETag-capable read and update to the Google client, used only by the reschedule/undo path. The existing create/update/reconcile paths keep their current behavior.</li>
+      <li>Add an ETag-capable read and guarded patch to the Google client, used only by the reschedule/undo path. The existing create/update/reconcile paths keep their current behavior.</li>
       <li>The move sends <code>If-Match: &lt;etag&gt;</code> captured from a fresh read immediately before the write. A <code>412 Precondition Failed</code> is a typed <code>precondition-failed</code> outcome, not an error body: the workflow surfaces a safe "availability changed" message, performs no overwrite, and re-evaluates. The owner's pending choice is preserved via the existing plan/option ledger.</li>
       <li>If the event was deleted or is not found (<code>404</code>), the workflow reports the safe "availability changed" outcome and re-evaluates; it never recreates a moved event.</li>
+      <li>The external-event move and restore are <strong>guarded partial updates (PATCH)</strong> that change only <code>start</code>/<code>end</code> (retaining the event's timezone), so fields that are not in the disclosure snapshot — description, location, attendees, reminders, visibility, and so on — are preserved. The existing full-PUT path remains correct for Kipp-managed events because Kipp owns every field of those events.</li>
     </ul>
     <h3>5.2 Idempotency</h3>
     <ul>
       <li>The move derives its identity from (event id, requested original start, proposed target start). On an uncertain write (network failure after Google applied it), the workflow re-reads the event and treats the move as complete if the event is already at the target start/end — the same verify-by-read pattern <code>createManagedEvent</code> already uses. No duplicate move is performed.</li>
       <li>The original request is created only after the move is verified, using the existing managed-event identity (chat/message id), so its create is idempotent as today. An uncertain create is resolved by re-read before retry.</li>
-      <li>Undo is a full revert: restore the moved event's original times and delete the created request. Each half is idempotent via verify-by-read (restore only if not already at original; delete tolerates already-absent).</li>
+      <li>Undo is a full revert: restore the moved event's original times and delete the created request. Each half is idempotent via verify-by-read (restore only if not already at original; delete tolerates already-absent), and the halves are ordered per §5.5.</li>
       <li>Telegram webhook redelivery of the same button resumes the same durable workflow step; it cannot re-issue a second write.</li>
     </ul>
     <h3>5.3 Expiry and staleness</h3>
     <ul>
       <li>All new interactions (disclosure choice, move confirmation, undo) reuse the existing 15-minute interaction TTL and router versioning. Expired or superseded buttons are ignored; version checks already reject stale callbacks.</li>
-      <li>The original start/end and the created request's identity are retained only in workflow step state for the 15-minute window, then discarded. There is no post-window management.</li>
+      <li>The operation phase record, selection map, original start/end, and created request identity are retained only in workflow step state for the 15-minute window, then discarded. There is no post-window management.</li>
     </ul>
     <h3>5.4 Logging and audit</h3>
     <ul>
-      <li>Logs record only opaque workflow/event identifiers, outcome categories, HTTP status, and the typed concurrency outcome. Event titles, times, descriptions, locations, and ETag values are never logged.</li>
+      <li>Logs record only opaque workflow/interaction identifiers, the persisted operation phase, outcome categories, HTTP status, and the typed concurrency outcome. Event titles, times, descriptions, locations, and ETag values are never logged.</li>
       <li>Add redaction assertions that inspect captured logs and prove no title, time, or event content appears.</li>
     </ul>
 
+    <h3>5.5 Recoverable phase machine for non-atomic writes</h3>
+    <p>The move → create and the undo (restore → delete) sequences are not atomic. The workflow persists one <code>RescheduleOperation</code> phase record for the whole 15-minute recovery window, holding the moved event's opaque identity, original start/end and ETag, target start/end, the created request's managed identity, and the selection ID.</p>
+    <pre>
+move → create:  move-pending → move-verified → create-pending → created
+undo:           created → restore-pending → restored → delete-pending → undone
+failure:        any phase → failed        (compensation attempted first)
+    </pre>
+    <table><thead><tr><th>Phase</th><th>Action</th><th>Verified terminal? success claimed?</th></tr></thead><tbody>
+      <tr><td><code>move-pending</code></td><td>Fresh read, capture ETag, guarded PATCH to target times. On uncertain outcome, re-read: at target → <code>move-verified</code>; else bounded retry; else <code>failed</code>.</td><td>No</td></tr>
+      <tr><td><code>move-verified</code> → <code>create-pending</code></td><td>Create the original request through the existing idempotent deterministic path.</td><td>No</td></tr>
+      <tr><td><code>created</code></td><td>Creation verified by re-read. Send the confirmation with <em>Undo</em> / <em>Continue</em>.</td><td>Yes — success is claimed only after this is verified.</td></tr>
+      <tr><td><code>restore-pending</code> (Undo)</td><td>Fresh read, capture current ETag, guarded PATCH the moved event back to original times; verify by re-read.</td><td>No</td></tr>
+      <tr><td><code>restored</code> → <code>delete-pending</code></td><td>Delete the created request (idempotent; tolerates already-absent).</td><td>No</td></tr>
+      <tr><td><code>undone</code></td><td>Both halves verified. Confirm "restored &lt;title&gt; and removed the created block".</td><td>Yes — Undo success is claimed only after both halves verify.</td></tr>
+      <tr><td><code>failed</code></td><td>Automated recovery could not reach a verified terminal state. Send the fixed safe message (§5.6) and log the phase.</td><td>No — success is never claimed.</td></tr>
+    </tbody></table>
+    <h3>5.6 Compensation and owner-facing outcomes for partial writes</h3>
+    <table><thead><tr><th>Scenario</th><th>Prescribed behavior</th></tr></thead><tbody>
+      <tr><td>Create fails (permanently) after the move verified</td><td>Compensate in the same step: guarded PATCH the moved event back to its original times. If compensation verifies → phase <code>undone</code>; message: "I couldn't create your block, so I restored &lt;title&gt; to its original time." If compensation also fails (ETag conflict or transient exhausted) → phase <code>failed</code>; message: "I moved &lt;title&gt; to &lt;target&gt; but couldn't create your block or restore it. Please check your Calendar." No success is claimed.</td></tr>
+      <tr><td>Undo restore hits an ETag conflict or fails</td><td>Do <em>not</em> delete the created request (the owner loses nothing). Phase <code>failed</code>; message: "I couldn't restore &lt;title&gt; because it changed externally. The new block stays. Please check your Calendar." Undo success is never claimed.</td></tr>
+      <tr><td>Undo delete fails after restore verified</td><td>Retry the delete (idempotent) with the existing bounded transient retry; on exhaustion, phase <code>failed</code> with a safe message that the block may remain and to check the Calendar. Restore is not repeated.</td></tr>
+      <tr><td>Transient uncertainty at any guarded write</td><td>Re-read and verify the intended terminal state before advancing; never duplicate the write. Bounded retries use the existing transient policy.</td></tr>
+      <tr><td>Expiry or stale action during any phase</td><td>The phase record is discarded; no further writes occur; the already-verified outcome stands. No post-window management.</td></tr>
+    </tbody></table>
+    <p>Messages in this section name only fields already owner-visible (title + times) and point to the Calendar for manual inspection; they never include event IDs, ETags, or technical detail.</p>
+
     <h2>6. Client and workflow surface changes</h2>
     <table><thead><tr><th>Location</th><th>Change</th></tr></thead><tbody>
-      <tr><td><code>src/integrations/google-calendar.ts</code></td><td>Extend the event read to capture <code>etag</code> (workflow-only). Add <code>findConflictingEvents(timeMin, timeMax, requestedStart, requestedEnd)</code> returning minimal snapshots <code>{ id, title, start, end, allDay, etag }</code> for events overlapping the requested interval, and an ETag-guarded update returning <code>{ ok } | { ok:false, reason: "precondition-failed" | "not-found" | "authorization" | "permanent" }</code>. The existing <code>list_calendar_events</code> projection and its model schema are unchanged.</td></tr>
-      <tr><td><code>src/calendar/evaluation.ts</code> / <code>plan.ts</code></td><td>No change to evaluation outcomes or the opaque plan/option ledger; the move operates on a workflow-resolved event identity, never a model-facing ID.</td></tr>
-      <tr><td><code>src/calendar/agent-workflow.ts</code></td><td>Add the deterministic disclosure/reschedule/undo sub-flow and the new interaction kinds. Reuse <code>promptForActions</code>, the existing cancellation text, the existing deterministic write path (for auto-create and for the revert delete), and the reconnect/retry paths.</td></tr>
-      <tr><td><code>src/core/types.ts</code></td><td>Add interaction kinds: <code>calendar-conflict-disclose</code>, <code>calendar-conflict-reschedule</code>, <code>calendar-conflict-move</code>, <code>calendar-conflict-undo</code>.</td></tr>
+      <tr><td><code>src/integrations/google-calendar.ts</code></td><td>Extend the event read to capture <code>etag</code> (workflow-only). Add <code>findConflictingEvents(timeMin, timeMax, requestedStart, requestedEnd)</code> returning minimal snapshots <code>{ id, title, start, end, allDay, etag }</code> for events overlapping the requested interval, and an ETag-guarded <strong>patch</strong> (<code>PATCH /calendars/primary/events/{id}</code> with <code>If-Match</code>, changing only <code>start</code>/<code>end</code>) returning <code>{ ok } | { ok:false, reason: "precondition-failed" | "not-found" | "authorization" | "permanent" }</code>. The existing <code>list_calendar_events</code> projection and its model schema are unchanged.</td></tr>
+      <tr><td><code>src/calendar/agent-workflow.ts</code></td><td>Add the deterministic disclosure/reschedule/undo sub-flow, the selection map (§4.1), and the persisted phase machine (§5.5). Reuse <code>promptForActions</code>, the existing cancellation text, the existing deterministic write path (for auto-create and the revert delete), and the reconnect/retry paths.</td></tr>
+      <tr><td><code>src/calendar/evaluation.ts</code> / <code>plan.ts</code></td><td>No change to evaluation outcomes or the opaque plan/option ledger; the move operates on a workflow-resolved snapshot, never a model-facing ID.</td></tr>
+      <tr><td><code>src/core/types.ts</code></td><td>Add interaction kinds: <code>calendar-conflict-disclose</code>, <code>calendar-conflict-reschedule</code>, <code>calendar-conflict-move</code>, <code>calendar-conflict-undo</code>. No new payload field for a selected event is added to <code>WorkflowInteraction</code>; selection resolution is server-side (§4.1).</td></tr>
       <tr><td>Agent prompt / <code>calendar-session.ts</code></td><td>No change. The disclosure is never part of model context; the prompt already forbids exposing private event fields.</td></tr>
     </tbody></table>
 
     <h2>7. Verification plan</h2>
     <table><thead><tr><th>Layer</th><th>Coverage</th></tr></thead><tbody>
-      <tr><td>Client unit</td><td><code>findConflictingEvents</code> overlap filtering and projection (title/times/all-day only); ETag captured on read; guarded update sends <code>If-Match</code>; 412 → <code>precondition-failed</code>; 404 → <code>not-found</code>; 401/403 → <code>authorization</code>; uncertain-write verify-by-read is idempotent.</td></tr>
-      <tr><td>Disclosure rendering</td><td>Template renders only title + times + all-day; multiple overlapping events each render one line with their own reschedule action; recurring/all-day events are disclosed but never movable; no description/location/attendees/links ever rendered; plain-text escaping (no parse mode).</td></tr>
-      <tr><td>Workflow unit</td><td>Disclosure action appears only for <code>requested_time_conflicts</code>; propose-move picks the nearest same-day free slot preserving duration; two-step confirmation cannot be skipped; Cancel at every step mutates nothing and reuses the existing cancellation text; after a confirmed move the original request is auto-created at the freed time through the deterministic write path; Undo within the window performs a full revert (restore moved event + delete created request); stale/expired/wrong-version buttons are ignored.</td></tr>
-      <tr><td>Security / no-model-access</td><td>Assert the model-visible conflict message and all tool inputs/outputs contain no title, time, or event field of the conflicting event; disclosure text appears only in the owner-directed Telegram payload; captured logs contain no title, time, description, or ETag.</td></tr>
-      <tr><td>Integration</td><td>Full fake-Google journey: conflict → disclose → reschedule → confirm → move → auto-create original request → Undo performs full revert. Plus: multi-event overlap listing, recurring/all-day disclose-only, ETag mismatch (412) path, event-deleted path, authorization-failure path at each step, expiry/staleness, duplicate webhook delivery, and confirmation-delivery recovery without a second write.</td></tr>
+      <tr><td>Client unit</td><td><code>findConflictingEvents</code> overlap filtering and projection (title/times/all-day only); ETag captured on read; guarded patch sends <code>If-Match</code> and changes only <code>start</code>/<code>end</code> (assert other fields are absent from the body); 412 → <code>precondition-failed</code>; 404 → <code>not-found</code>; 401/403 → <code>authorization</code>; uncertain-write verify-by-read is idempotent.</td></tr>
+      <tr><td>Disclosure rendering</td><td>Template renders only title + times + all-day; multiple overlapping events each render one line with a time-derived button label; recurring/all-day events are disclosed but never movable; no description/location/attendees/links ever rendered; plain-text escaping (no parse mode); labels respect the 16-character limit for arbitrary-length titles.</td></tr>
+      <tr><td>Opaque selection</td><td>A resolved callback returns only an opaque interaction ID; the workflow maps it to exactly one snapshot; unknown/superseded/expired selections yield the safe "availability changed" outcome; duplicate callback delivery is consumed once; no event ID or title appears in callback data, router state, or labels.</td></tr>
+      <tr><td>Workflow unit</td><td>Disclosure action appears only for <code>requested_time_conflicts</code>; propose-move picks the nearest same-day free slot preserving duration; two-step confirmation cannot be skipped; Cancel at every step mutates nothing and reuses the existing cancellation text; after a verified move the original request is auto-created at the freed time; Undo within the window performs a full revert; stale/expired/wrong-version buttons are ignored.</td></tr>
+      <tr><td>Phase machine / partial writes</td><td>Create-failure-after-move compensates (event restored) with the prescribed message; compensation failure reaches <code>failed</code> with the safe message; Undo restore ETag-conflict keeps the created request and reports; Undo delete failure retries then reports; transient uncertainty at each write resolves by re-read without a second move/create/delete; success is only claimed after the terminal phase verifies.</td></tr>
+      <tr><td>Security / no <em>new</em> model access</td><td>Assert that the disclosure snapshots never appear in the agent transcript or any tool input/output; the model-visible conflict message and the pre-existing <code>list_calendar_events</code> projection are unchanged by this feature; disclosure text appears only in the owner-directed Telegram payload; captured logs contain no title, time, description, or ETag.</td></tr>
+      <tr><td>Integration</td><td>Full fake-Google journey: conflict → disclose → reschedule → confirm → move → auto-create original request → Undo performs full revert. Plus: multi-event overlap listing, recurring/all-day disclose-only, ETag mismatch (412) path, event-deleted path, create-failure compensation, authorization-failure path at each step, expiry/staleness, duplicate webhook delivery, and confirmation-delivery recovery without a second write.</td></tr>
       <tr><td>System</td><td><code>pnpm check</code>, full unit/integration suites, and the controlled dev-bot smoke described in the roadmap (create a labeled short-lived conflicting event, disclose, reschedule, undo, then clean up).</td></tr>
     </tbody></table>
 
     <h2>8. Delivery sequence</h2>
     <ol>
       <li>Claim Beads issue <code>agent-harness-ve2</code> (external <code>gh-40</code>) and record this design as its plan reference.</li>
-      <li>Implement the client read/update with ETag support and its focused unit tests.</li>
-      <li>Implement the workflow disclosure/reschedule/undo sub-flow with the new interaction kinds and unit coverage.</li>
-      <li>Add security/no-model-access and integration coverage, including the ETag, authorization-failure, and expiry branches.</li>
+      <li>Implement the client read/ETag-guarded patch with its focused unit tests.</li>
+      <li>Implement the workflow disclosure sub-flow, the opaque selection map, and the persisted phase machine with the new interaction kinds and unit coverage.</li>
+      <li>Add security/no-new-model-access, phase-machine, and integration coverage, including the ETag, compensation, authorization-failure, and expiry branches.</li>
       <li>Run all quality gates, inspect the diff and repository status, record automated evidence in Beads, and leave the issue open until the required dev-bot smoke test passes and this design is approved.</li>
     </ol>
     <div class="callout risk"><strong>Approval gate:</strong> this is a design-only deliverable. No production code changes are made until the design is approved. Until then the FreeBusy-only conflict experience stays exactly as shipped.</div>
