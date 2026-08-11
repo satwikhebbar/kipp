@@ -7,7 +7,7 @@ vi.mock("../providers/index", async () => ({
   parseLLMJson: (await vi.importActual("../providers/llm")).parseLLMJson,
 }))
 
-import { handleRssCron, parseRssFeed } from "../triggers/rss"
+import { handleRssCron, itemIdentity, parseRssFeed } from "../triggers/rss"
 
 const mockFetch = vi.hoisted(() => vi.fn())
 vi.stubGlobal("fetch", mockFetch)
@@ -42,6 +42,24 @@ const SINGLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
     <guid>first-guid</guid>
     <pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate>
     <description>Known item</description>
+  </item>
+</channel>
+</rss>`
+
+const NO_GUID_RSS = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <item>
+    <title>GUIDless One</title>
+    <link>https://test.substack.com/p/one</link>
+    <pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate>
+    <description>First item without a GUID</description>
+  </item>
+  <item>
+    <title>GUIDless Two</title>
+    <link>https://test.substack.com/p/two</link>
+    <pubDate>Tue, 11 Jul 2026 09:00:00 GMT</pubDate>
+    <description>Second item without a GUID</description>
   </item>
 </channel>
 </rss>`
@@ -145,10 +163,16 @@ describe("parseRssFeed", () => {
 
 describe("handleRssCron", () => {
   function setupFetch(options: { rssXml: string; knownLinks: string[] }) {
-    mockFetch.mockImplementation(async (url: string) => {
+    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === "https://test.substack.com/feed") return { ok: true, text: () => Promise.resolve(options.rssXml) }
-      if (url.includes("api.notion.com"))
-        return notionQueryResponse(options.knownLinks.map((link) => knownSubstackResult(link)))
+      if (url.includes("api.notion.com")) {
+        const filter = JSON.parse((init?.body as string) ?? "{}").filter
+        const equals = filter?.url?.equals
+        const results = equals
+          ? options.knownLinks.filter((link) => link === equals).map((link) => knownSubstackResult(link))
+          : options.knownLinks.map((link) => knownSubstackResult(link))
+        return notionQueryResponse(results)
+      }
       throw new Error(`Unexpected fetch ${url}`)
     })
   }
@@ -166,16 +190,16 @@ describe("handleRssCron", () => {
     const result = await handleRssCron(env as never)
     expect(result.started).toBe(true)
 
-    const mainStub = env.ingestFetches.get("ingest:rss:first-guid:0")!
+    const mainStub = env.ingestFetches.get("ingest:rss:guid:first-guid:0")!
     expect(mainStub).toBeDefined()
     expect(mainStub).toHaveBeenCalledTimes(1)
     const [, init] = mainStub.mock.calls[0]
     const body = JSON.parse(init.body)
-    expect(body.key).toBe("rss:first-guid:0")
+    expect(body.key).toBe("rss:guid:first-guid:0")
     expect(body.startWorkflow).toBe(true)
     expect(body.idea.body).toBe("A great hook about testing")
 
-    const sideStub = env.ingestFetches.get("ingest:rss:first-guid:1")!
+    const sideStub = env.ingestFetches.get("ingest:rss:guid:first-guid:1")!
     expect(sideStub).toBeDefined()
     expect(sideStub).toHaveBeenCalledTimes(1)
     const sideBody = JSON.parse(sideStub.mock.calls[0][1].body)
@@ -190,7 +214,7 @@ describe("handleRssCron", () => {
     await handleRssCron(env as never)
 
     for (let i = 0; i <= 3; i++) {
-      expect(env.ingestFetches.get(`ingest:rss:first-guid:${i}`)).toBeDefined()
+      expect(env.ingestFetches.get(`ingest:rss:guid:first-guid:${i}`)).toBeDefined()
     }
   })
 
@@ -201,6 +225,42 @@ describe("handleRssCron", () => {
     expect(result.started).toBe(false)
     expect(mockGen).not.toHaveBeenCalled()
     expect(env.ingestFetches.size).toBe(0)
+  })
+
+  it("uses GUID-derived keys when a GUID is present and link-derived keys when it is not", () => {
+    expect(itemIdentity({ guid: "first-guid", link: "https://test.substack.com/p/first" })).toBe("guid:first-guid")
+    expect(itemIdentity({ guid: "", link: "https://test.substack.com/p/one" })).toBe(
+      "link:https://test.substack.com/p/one",
+    )
+  })
+
+  it("ingests GUID-less items independently and stays idempotent on repeat", async () => {
+    setupFetch({ rssXml: NO_GUID_RSS, knownLinks: [] })
+    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
+    const env = mockEnv()
+
+    await handleRssCron(env as never)
+    const firstKey = "ingest:rss:link:https://test.substack.com/p/one:0"
+    const firstStub = env.ingestFetches.get(firstKey)!
+    expect(firstStub).toBeDefined()
+    expect(JSON.parse(firstStub.mock.calls[0][1].body).key).toBe("rss:link:https://test.substack.com/p/one:0")
+
+    setupFetch({ rssXml: NO_GUID_RSS, knownLinks: ["https://test.substack.com/p/one"] })
+    await handleRssCron(env as never)
+    const secondKey = "ingest:rss:link:https://test.substack.com/p/two:0"
+    const secondStub = env.ingestFetches.get(secondKey)!
+    expect(secondStub).toBeDefined()
+    expect(secondKey).not.toBe(firstKey)
+    expect(JSON.parse(secondStub.mock.calls[0][1].body).key).toBe("rss:link:https://test.substack.com/p/two:0")
+
+    setupFetch({
+      rssXml: NO_GUID_RSS,
+      knownLinks: ["https://test.substack.com/p/one", "https://test.substack.com/p/two"],
+    })
+    const repeat = await handleRssCron(env as never)
+    expect(repeat.started).toBe(false)
+    expect(env.ingestFetches.get(firstKey)).toHaveBeenCalledTimes(1)
+    expect(env.ingestFetches.get(secondKey)).toHaveBeenCalledTimes(1)
   })
 
   it("returns started:false when RSS feed is empty", async () => {
