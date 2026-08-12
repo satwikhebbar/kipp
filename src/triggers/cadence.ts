@@ -23,7 +23,7 @@ export async function handleCadenceCron(env: Env): Promise<{
   const cutoff = Date.now() - cadenceDays * MS_PER_DAY
   if (latestFinalized > cutoff) return { started: false }
 
-  const [idea] = await manager.getIdeasByStatus("raw")
+  const [idea] = await manager.getIdeasByStatuses(["raw"])
   if (!idea) return { started: false }
 
   const result = await ingest.start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })

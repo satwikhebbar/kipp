@@ -24,7 +24,6 @@ export interface IdeaUpdate {
 export interface IdeaManager {
   listIdeas(): Promise<IdeaSummary[]>
   getIdea(pageId: string): Promise<Idea>
-  getIdeasByStatus(status: IdeaStatus): Promise<IdeaSummary[]>
   getIdeasByStatuses(statuses: IdeaStatus[]): Promise<IdeaSummary[]>
   getNextIdea(): Promise<Idea | null>
   createIdea(input: IdeaInput): Promise<Idea>
@@ -49,11 +48,6 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
     const page = await client.getPage(pageId)
     const body = await client.getPageMarkdown(pageId)
     return pageToIdea(page, body)
-  }
-
-  async function getIdeasByStatus(status: IdeaStatus): Promise<IdeaSummary[]> {
-    const pages = await client.queryPages({ property: "Status", status: { equals: status } }, KIPP_ID_ASCENDING)
-    return pages.map(pageToSummary)
   }
 
   async function getIdeasByStatuses(statuses: IdeaStatus[]): Promise<IdeaSummary[]> {
@@ -136,7 +130,6 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
   return {
     listIdeas,
     getIdea,
-    getIdeasByStatus,
     getIdeasByStatuses,
     getNextIdea,
     createIdea,
