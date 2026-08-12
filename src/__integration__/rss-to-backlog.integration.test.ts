@@ -64,6 +64,9 @@ describe("rss-to-backlog", () => {
     expect(main.status).toBe("raw")
     expect(main.source).toBe("substack")
     expect(main.substackUrl).toBe("https://newsletter.test/ai-trends-2026")
+    expect(main.substackBody).toBe(
+      "This year AI has seen dramatic advances in reasoning, tool use, and autonomous agents.",
+    )
     expect(main.markdown).toBe("AI is evolving fast")
     const sideMarkdown = pages.filter((p) => p.kippId > 1).map((p) => p.markdown)
     expect(sideMarkdown).toContain("LLM agents are the future")
