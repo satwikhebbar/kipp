@@ -83,9 +83,18 @@ function fakeClient(seed: StoredPage[] = []) {
     async queryPages(filter, sorts) {
       let results = [...pages.values()].map((stored) => stored.page)
       if (filter) {
+        const orClauses = (filter.or as Array<{ property?: string; status?: { equals?: string } }> | undefined) ?? []
+        const statuses = orClauses
+          .filter((clause) => clause.property === "Status")
+          .map((clause) => clause.status?.equals)
+          .filter((value): value is string => Boolean(value))
         const property = filter.property as string
         const value = (filter[property] ?? filter.status ?? filter.url ?? filter.rich_text) as { equals?: string }
         results = results.filter((p) => {
+          if (statuses.length > 0) {
+            const status = (p.properties.Status as { status?: { name: string } } | undefined)?.status?.name
+            return statuses.includes(status ?? "")
+          }
           const prop = p.properties[property] as
             | { equals?: string }
             | { status?: { name: string } }
@@ -144,15 +153,18 @@ describe("createIdeaManager", () => {
     expect(idea.id).toBe("1")
   })
 
-  it("getIdeasByStatus filters by status", async () => {
+  it("getIdeasByStatuses filters by statuses", async () => {
     const { client } = fakeClient([
       { page: page("p1", 1, "raw", "telegram"), markdown: "one" },
       { page: page("p2", 2, "finalized", "manual"), markdown: "two" },
+      { page: page("p3", 3, "awaiting-feedback", "manual"), markdown: "three" },
     ])
     const manager = createIdeaManager(client)
-    const raw = await manager.getIdeasByStatus("raw")
+    const raw = await manager.getIdeasByStatuses(["raw"])
     expect(raw).toHaveLength(1)
     expect(raw[0].id).toBe("1")
+    const pending = await manager.getIdeasByStatuses(["raw", "awaiting-feedback"])
+    expect(pending.map((i) => i.id)).toEqual(["1", "3"])
   })
 
   it("getNextIdea returns the lowest raw idea with hydrated body", async () => {
