@@ -430,13 +430,13 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           costLine,
           model,
         })
-        runningInputTokens = cumulativeUsage.inputTokens
-        runningOutputTokens = cumulativeUsage.outputTokens
-        latestCostLine = costLine
         return nextState
       })
       currentDraft = revised.draft
       currentMessages = revised.messages
+      runningInputTokens = revised.costInputTokens
+      runningOutputTokens = revised.costOutputTokens
+      latestCostLine = revised.costLine
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
         const notification = await stepDo(`notify-revised-${i}`, async () => {

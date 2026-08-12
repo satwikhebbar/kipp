@@ -16,7 +16,7 @@ export function createFakeIdeaIngestStub(payload: Record<string, unknown>): Fake
     get: (id: { name: string }) => {
       let fetchMock = ingestFetches.get(id.name)
       if (!fetchMock) {
-        fetchMock = vi.fn().mockResolvedValue(Response.json(payload))
+        fetchMock = vi.fn().mockImplementation(async () => Response.json(payload))
         ingestFetches.set(id.name, fetchMock)
       }
       return { fetch: fetchMock }
