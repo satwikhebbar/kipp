@@ -59,7 +59,6 @@ export interface IdeaSummary {
   created: string
   source: Source
   substackUrl?: string
-  substackBody?: string
   idempotencyKey?: string
   correlation?: { telegramChatId?: string }
 }

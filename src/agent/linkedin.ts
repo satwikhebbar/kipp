@@ -25,7 +25,6 @@ export type LinkedInToolSessionResult = AgentSessionResult<LinkedInTerminalOutco
 /** Builds the canonical native-tool transcript for a new LinkedIn response. */
 export function createLinkedInConversation(stylePrompt: string, input: DraftInput): ToolConversationMessage[] {
   const source = [input.title ? `Topic: ${input.title}` : "Topic: LinkedIn post", `Context:\n${input.body}`]
-  if (input.substackBody) source.push(`Reference material:\n${input.substackBody}`)
   return [
     { role: "system", text: `${LINKEDIN_AGENT_PROMPT}\n\nStyle instructions:\n${stylePrompt}` },
     { role: "user", text: source.join("\n\n") },

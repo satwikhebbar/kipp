@@ -60,7 +60,6 @@ function stripHtml(html: string): string {
 }
 
 const RSS_CONTENT_TRUNCATE_LENGTH = 6000
-const SUBSTACK_BODY_MAX_LENGTH = 2000 // Notion rich_text property limit
 const MAX_SECTION_IDEAS = 4
 const MAX_TITLE_LENGTH = 80
 const DEFAULT_RSS_RETRIES = 3
@@ -84,18 +83,12 @@ async function llmExtractIdeas(gen: GenerateFn, item: RssItem, text: string): Pr
 }
 
 /** Builds main and side idea inputs from an RSS item and extracted content. */
-function buildIdeaInputs(
-  item: RssItem,
-  extracted: ExtractedIdeas,
-  referenceBody: string,
-): { main: IdeaInput; side: IdeaInput[] } {
-  const substackBody = referenceBody.slice(0, SUBSTACK_BODY_MAX_LENGTH)
+function buildIdeaInputs(item: RssItem, extracted: ExtractedIdeas): { main: IdeaInput; side: IdeaInput[] } {
   const main: IdeaInput = {
     title: item.title,
     status: "raw",
     source: "substack",
     substackUrl: item.link,
-    substackBody,
     body: extracted.teaser,
   }
   const side: IdeaInput[] = []
@@ -105,7 +98,6 @@ function buildIdeaInputs(
       status: "raw",
       source: "substack",
       substackUrl: item.link,
-      substackBody,
       body: sub,
     })
   }
@@ -140,7 +132,7 @@ export async function handleRssCron(env: Env): Promise<{
   const extracted = await llmExtractIdeas(gen, newItem, referenceBody)
 
   const identity = itemIdentity(newItem)
-  const { main, side } = buildIdeaInputs(newItem, extracted, referenceBody)
+  const { main, side } = buildIdeaInputs(newItem, extracted)
   const mainResult = await ingest.ingest({ key: `rss:${identity}:0`, idea: main, startWorkflow: true })
   for (let i = 0; i < side.length; i++) {
     await ingest.ingest({ key: `rss:${identity}:${i + 1}`, idea: side[i], startWorkflow: false })

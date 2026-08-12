@@ -31,7 +31,6 @@ export interface NotionPagePropertiesInput {
   status?: IdeaStatus
   source?: Source
   substackUrl?: string
-  substackBody?: string
   chatId?: string
   idempotencyKey?: string
 }
@@ -214,8 +213,6 @@ function buildProperties(input: NotionPagePropertiesInput): Record<string, unkno
   if (input.status) props.Status = { status: { name: input.status } }
   if (input.source) props.Source = { select: { name: input.source } }
   if (input.substackUrl) props["Substack URL"] = { url: input.substackUrl }
-  if (input.substackBody)
-    props["Substack Body"] = { rich_text: [{ type: "text", text: { content: input.substackBody } }] }
   if (input.chatId) props["Chat ID"] = { rich_text: [{ type: "text", text: { content: input.chatId } }] }
   if (input.idempotencyKey)
     props["Idempotency Key"] = { rich_text: [{ type: "text", text: { content: input.idempotencyKey } }] }
@@ -260,11 +257,6 @@ function readSubstackUrl(props: Record<string, NotionProperty>): string | undefi
   return props["Substack URL"]?.url
 }
 
-/** Reads the Substack reference body rich-text segment. */
-function readSubstackBody(props: Record<string, NotionProperty>): string | undefined {
-  return props["Substack Body"]?.rich_text?.[0]?.text?.content
-}
-
 /** Reads the first Idempotency Key rich-text segment. */
 function readIdempotencyKey(props: Record<string, NotionProperty>): string | undefined {
   return props["Idempotency Key"]?.rich_text?.[0]?.text?.content
@@ -287,7 +279,6 @@ export function pageToSummary(page: NotionPage): IdeaSummary {
     created: page.created_time,
     source: readSource(props) ?? "manual",
     substackUrl: readSubstackUrl(props),
-    substackBody: readSubstackBody(props),
     idempotencyKey: readIdempotencyKey(props),
     correlation: chatId ? { telegramChatId: chatId } : undefined,
   }
