@@ -7,7 +7,6 @@ export interface IdeaInput {
   source: Source
   body: string
   substackUrl?: string
-  substackBody?: string
   chatId?: string
   idempotencyKey?: string
 }
@@ -16,7 +15,6 @@ export interface IdeaUpdate {
   title?: string
   status?: IdeaStatus
   substackUrl?: string
-  substackBody?: string
   chatId?: string
   body?: string
 }
@@ -75,7 +73,6 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
       status: input.status ?? "raw",
       source: input.source,
       substackUrl: input.substackUrl,
-      substackBody: input.substackBody,
       chatId: input.chatId,
       idempotencyKey: input.idempotencyKey,
     }
@@ -88,14 +85,12 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
       update.title !== undefined ||
       update.status !== undefined ||
       update.substackUrl !== undefined ||
-      update.substackBody !== undefined ||
       update.chatId !== undefined
     ) {
       await client.patchPageProperties(pageId, {
         title: update.title,
         status: update.status,
         substackUrl: update.substackUrl,
-        substackBody: update.substackBody,
         chatId: update.chatId,
       })
     }

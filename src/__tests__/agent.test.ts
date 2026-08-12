@@ -28,22 +28,20 @@ describe("draft agent", () => {
     expect(msgs[1].content).toContain("Some context")
   })
 
-  it("includes substackBody and the format directive in the user message", async () => {
+  it("includes the format directive in the user message", async () => {
     const generate = mockGen("Draft with reference")
     const draft = createDraftAgent(generate, STYLE)
-    await draft({ title: "T", body: "B", substackBody: "Long reference text" })
+    await draft({ title: "T", body: "B" })
     const user = lastMessages(generate)[1].content
-    expect(user).toContain("Long reference text")
     expect(user).toContain("150-300 words")
   })
 
   it("createDraftConversation returns style as system and idea/source as user without calling generate", () => {
-    const msgs = createDraftConversation(STYLE, { title: "T", body: "B", substackBody: "S" })
+    const msgs = createDraftConversation(STYLE, { title: "T", body: "B" })
     expect(msgs[0]).toEqual({ role: "system", content: STYLE })
     expect(msgs[1].role).toBe("user")
     expect(msgs[1].content).toContain("T")
     expect(msgs[1].content).toContain("B")
-    expect(msgs[1].content).toContain("S")
   })
 })
 

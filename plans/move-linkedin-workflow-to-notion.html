@@ -65,7 +65,7 @@
         <tr><td>Q2</td><td>Query endpoint</td><td><code>POST /v1/data_sources/:data_source_id/query</code>; the queryable unit is a <em>data source</em>, not a database</td></tr>
         <tr><td>Q3</td><td>Draft/critique placement</td><td>Not stored in Notion at all — live in Cloudflare Workflow step state</td></tr>
         <tr><td>Q4</td><td>Archive model</td><td>Single data source; <code>finalized</code> is a status value</td></tr>
-        <tr><td>Q5</td><td>Property schema</td><td>Minimal: Title, Kipp ID, Status, Source, Substack URL, Substack Body, Chat ID, Idempotency Key</td></tr>
+        <tr><td>Q5</td><td>Property schema</td><td>Minimal: Title, Kipp ID, Status, Source, Substack URL, Chat ID, Idempotency Key</td></tr>
         <tr><td>Q6</td><td>Style prompt source</td><td>Keep in GitHub (unchanged)</td></tr>
         <tr><td>Q7</td><td>Rate limiting</td><td>350 ms inter-request delay, gated by <code>NOTION_FREE_TIER</code> env var</td></tr>
         <tr><td>Q8</td><td>Kipp ID</td><td>Notion <code>unique_id</code> property — read-only, auto-assigned at creation; surfaced as <code>properties["Kipp ID"].unique_id.number</code></td></tr>
@@ -98,7 +98,6 @@
         <tr><td>Status</td><td><code>status</code></td><td>Filtered by cadence, <code>/generate</code>, workflow</td></tr>
         <tr><td>Source</td><td><code>select</code></td><td>substack | telegram | manual</td></tr>
         <tr><td>Substack URL</td><td><code>url</code></td><td><strong>Queryable — RSS dedup filters on it</strong></td></tr>
-        <tr><td>Substack Body</td><td><code>rich_text</code></td><td><strong>Bounded reference content for drafting</strong> — stripped RSS item body, truncated to 2,000 characters (the Notion <code>rich_text</code> limit); passed to the drafting prompt as <code>substackBody</code>. Optional; present only for RSS-ingested ideas</td></tr>
         <tr><td>Chat ID</td><td><code>rich_text</code></td><td>Workflow Telegram notification routing</td></tr>
         <tr><td>Idempotency Key</td><td><code>rich_text</code></td><td>Caller-supplied stable identity for idempotent create and migration reruns (see §3.5)</td></tr>
       </tbody>
@@ -118,7 +117,6 @@
   source: Source              // substack | telegram | manual
   body: string                // page body (Notion-flavored Markdown); present only after getIdea()
   substackUrl?: string
-  substackBody?: string     // bounded reference text (≤2,000 chars) for drafting; RSS-only
   idempotencyKey?: string     // caller-supplied external key (see §3.5)
   correlation?: { telegramChatId?: string }
 }</code></pre>
@@ -150,7 +148,6 @@
     "Status":          { "status": { "name": "raw" } },
     "Source":          { "select": { "name": "substack" } },
     "Substack URL":    { "url": "https://…" },
-    "Substack Body":   { "rich_text": [{ "type": "text", "text": { "content": "…" } }] }, // optional, RSS-only, ≤2,000 chars
     "Chat ID":         { "rich_text": [{ "type": "text", "text": { "content": "12345" } }] },
     "Idempotency Key": { "rich_text": [{ "type": "text", "text": { "content": "rss:…:0" } }] }
   },
@@ -348,7 +345,7 @@
     <h2>6. Migration and rollback</h2>
     <h3>6.1 One-time migration</h3>
     <ol>
-      <li>Manual setup first (see docs): create internal integration with the capabilities from §3.3, create the Ideas data source with the exact property schema from §3.1, share it with the integration. <strong>This includes the <code>Substack Body</code> rich_text property — create it before deploying this code</strong>, since RSS ingestion writes it on every Substack idea and a missing property is a Notion validation error.</li>
+      <li>Manual setup first (see docs): create internal integration with the capabilities from §3.3, create the Ideas data source with the exact property schema from §3.1, share it with the integration. The schema is minimal and matches what this code writes; a property missing from the data source surfaces as a Notion validation error, so create all §3.1 properties before deploying.</li>
       <li>Run <code>scripts/migrate-to-notion/</code> (self-contained parser + archive + migrate runner). It runs as a local Node script, outside the Worker <code>Env</code>, and reads its own configuration from the process environment: <code>GITHUB_PAT</code>, <code>DATA_REPO_OWNER</code>, <code>DATA_REPO_NAME</code> (selects the source data repo + authenticates the GitHub reads) and <code>NOTION_API_KEY</code>, <code>NOTION_IDEAS_DATA_SOURCE_ID</code> (authenticates and addresses the Notion writes).
         <ul>
           <li>Read <code>ideas.md</code> and <code>archive.md</code> from the GitHub data repo via the existing GitHub client.</li>

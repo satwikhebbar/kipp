@@ -188,14 +188,12 @@ describe("handleRssCron", () => {
     expect(body.key).toBe("rss:guid:first-guid:0")
     expect(body.startWorkflow).toBe(true)
     expect(body.idea.body).toBe("A great hook about testing")
-    expect(body.idea.substackBody).toBe("A plain description")
 
     const sideStub = env.ingestFetches.get("ingest:rss:guid:first-guid:1")!
     expect(sideStub).toBeDefined()
     expect(sideStub).toHaveBeenCalledTimes(1)
     const sideBody = JSON.parse(sideStub.mock.calls[0][1].body)
     expect(sideBody.startWorkflow).toBe(false)
-    expect(sideBody.idea.substackBody).toBe("A plain description")
   })
 
   it("ingests side ideas with sequential rss:{guid}:{i} keys", async () => {
@@ -253,32 +251,6 @@ describe("handleRssCron", () => {
     expect(repeat.started).toBe(false)
     expect(env.ingestFetches.get(firstKey)).toHaveBeenCalledTimes(1)
     expect(env.ingestFetches.get(secondKey)).toHaveBeenCalledTimes(1)
-  })
-
-  it("bounds the persisted Substack Body reference to the 2000-char Notion limit", async () => {
-    const longContent = `<p>${"x".repeat(2500)}</p>`
-    const longRss = `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-<channel>
-  <item>
-    <title>Long Post</title>
-    <link>https://test.substack.com/p/long</link>
-    <guid>long-guid</guid>
-    <pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate>
-    <content:encoded><![CDATA[${longContent}]]></content:encoded>
-  </item>
-</channel>
-</rss>`
-    setupFetch({ rssXml: longRss, knownLinks: [] })
-    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
-
-    const env = mockEnv()
-    await handleRssCron(env as never)
-
-    const mainStub = env.ingestFetches.get("ingest:rss:guid:long-guid:0")!
-    const body = JSON.parse(mainStub.mock.calls[0][1].body)
-    expect(body.idea.substackBody).toHaveLength(2000)
-    expect(body.idea.substackBody).toBe("x".repeat(2000))
   })
 
   it("returns started:false when RSS feed is empty", async () => {

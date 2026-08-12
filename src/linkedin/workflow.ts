@@ -182,7 +182,6 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const initialMessages = createLinkedInConversation(stylePrompt, {
         title: idea.title,
         body: idea.body,
-        substackBody: idea.substackBody,
       })
       const session = await runLinkedInToolSession(provider, initialMessages)
       logRuntime(this.env, {

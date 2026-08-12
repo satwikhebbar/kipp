@@ -3,7 +3,6 @@ import type { GenerateFn, LLMMessage } from "../providers/llm"
 export interface DraftInput {
   title?: string
   body: string
-  substackBody?: string
 }
 
 export type DraftFn = (input: DraftInput) => Promise<string>
@@ -17,7 +16,6 @@ export function createDraftConversation(stylePrompt: string, input: DraftInput):
     input.title ? `Write a LinkedIn post about: ${input.title}` : "Write a LinkedIn post",
     `Context:\n${input.body}`,
   ]
-  if (input.substackBody) parts.push(`Reference material:\n${input.substackBody}`)
   parts.push(FORMAT_DIRECTIVE)
   return [
     { role: "system", content: stylePrompt },

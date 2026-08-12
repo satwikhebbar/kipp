@@ -117,7 +117,7 @@ describe("createNotionClient", () => {
     })
   })
 
-  it("writes the Substack Body rich_text property per the §3.1 schema", async () => {
+  it("writes the Substack URL property per the §3.1 schema", async () => {
     mockFetch.mockResolvedValue(ok(CREATE_RESPONSE))
     const client = createNotionClient(ENV)
     await client.createPage(
@@ -126,22 +126,21 @@ describe("createNotionClient", () => {
         status: "raw",
         source: "substack",
         substackUrl: "https://example.com/post",
-        substackBody: "Reference text",
       },
       "# Idea title\n\nbody…",
     )
     const [_, init] = mockFetch.mock.calls[0]
     expect(JSON.parse((init as RequestInit).body as string).properties).toMatchObject({
-      "Substack Body": { rich_text: [{ type: "text", text: { content: "Reference text" } }] },
+      "Substack URL": { url: "https://example.com/post" },
     })
   })
 
-  it("omits the Substack Body property when substackBody is absent", async () => {
+  it("omits the Substack URL property when substackUrl is absent", async () => {
     mockFetch.mockResolvedValue(ok(CREATE_RESPONSE))
     const client = createNotionClient(ENV)
     await client.createPage({ title: "Idea title", status: "raw", source: "telegram" }, "# Idea title\n\nbody…")
     const [_, init] = mockFetch.mock.calls[0]
-    expect(JSON.parse((init as RequestInit).body as string).properties).not.toHaveProperty("Substack Body")
+    expect(JSON.parse((init as RequestInit).body as string).properties).not.toHaveProperty("Substack URL")
   })
 
   it("queries a data source and returns metadata pages", async () => {

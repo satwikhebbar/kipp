@@ -14,7 +14,6 @@ export interface FakeNotionPage {
   markdown: string
   chatId?: string
   substackUrl?: string
-  substackBody?: string
   idempotencyKey?: string
 }
 
@@ -68,7 +67,6 @@ function notionPageJson(p: FakeNotionPage) {
   }
   if (p.chatId) properties["Chat ID"] = { rich_text: [{ type: "text", text: { content: p.chatId } }] }
   if (p.substackUrl) properties["Substack URL"] = { url: p.substackUrl }
-  if (p.substackBody) properties["Substack Body"] = { rich_text: [{ type: "text", text: { content: p.substackBody } }] }
   if (p.idempotencyKey)
     properties["Idempotency Key"] = { rich_text: [{ type: "text", text: { content: p.idempotencyKey } }] }
   return {
@@ -146,7 +144,6 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
           markdown: body.markdown ?? "",
           chatId: body.properties["Chat ID"]?.rich_text?.[0]?.text?.content,
           substackUrl: body.properties["Substack URL"]?.url,
-          substackBody: body.properties["Substack Body"]?.rich_text?.[0]?.text?.content,
           idempotencyKey: body.properties["Idempotency Key"]?.rich_text?.[0]?.text?.content,
         }
         state.notionPages.set(page.pageId, page)
