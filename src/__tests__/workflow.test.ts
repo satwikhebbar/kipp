@@ -616,6 +616,53 @@ describe("PipelineWorkflow", () => {
     expect(publishMsg).toContain("deepseek-v4-flash")
   })
 
+  it("restores cumulative cost and latest cost line when a completed revision step is replayed", async () => {
+    const responses = [{ text: "First draft", usage: { inputTokens: 100, outputTokens: 50 } }]
+    let callIdx = 0
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "Make it shorter" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    stepDo.mockImplementation(async (name: string, fn: () => unknown) => {
+      if (name === "revise-0") {
+        return {
+          draft: "Revised draft",
+          messages: [],
+          costInputTokens: 300,
+          costOutputTokens: 130,
+          costLine: "\n\n_Est. cost: ~$0.0000 (upper bound; 300 in / 130 out, deepseek-v4-flash)_",
+          model: "deepseek-v4-flash",
+        }
+      }
+      return fn()
+    })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        LINKEDIN_ACCESS_TOKEN: "valid-token",
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        LINKEDIN_CLIENT_ID: "client-id",
+        LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
+      },
+    })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    const publishMsg = telegramTexts.find((t) => t.startsWith("✅"))
+    expect(publishMsg).toBeDefined()
+    expect(publishMsg).toContain("300 in")
+    expect(publishMsg).toContain("130 out")
+  })
+
   it("does not resend a draft when interaction registration is retried", async () => {
     const completedSteps = new Map<string, unknown>()
     const sendStep = vi.fn(async (name: string, fn: () => Promise<unknown>) => {
