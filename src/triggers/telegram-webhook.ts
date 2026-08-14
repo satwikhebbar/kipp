@@ -1,11 +1,12 @@
 import { CALENDAR_HELP } from "../calendar/messages"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
-import { createGitHubClient } from "../integrations/github"
+import { createGitHubClient, GithubError } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
 import { nextId } from "../linkedin/backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../linkedin/backlog/parser"
 import { logRuntime } from "../runtime/logging"
+import { userFacingFailureMessage } from "../runtime/user-failures"
 
 const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32
@@ -136,17 +137,21 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     const cq = update.callback_query
     if (!verifyUser(env, cq.from.id)) return new Response("Forbidden", { status: 403 })
 
-    const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-    await tg.answerCallbackQuery(cq.id)
+    try {
+      const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+      await tg.answerCallbackQuery(cq.id)
 
-    if (cq.data && cq.message)
-      await dispatchRoutedInteraction(env, cq.message.chat.id, cq.from.id, {
-        telegramUpdateId: update.update_id,
-        callbackToken: cq.data,
-      })
+      if (cq.data && cq.message)
+        await dispatchRoutedInteraction(env, cq.message.chat.id, cq.from.id, {
+          telegramUpdateId: update.update_id,
+          callbackToken: cq.data,
+        })
 
-    logRuntime(env, { event: "telegram-callback", outcome: "succeeded" })
-    return new Response("OK")
+      logRuntime(env, { event: "telegram-callback", outcome: "succeeded" })
+      return new Response("OK")
+    } catch (err) {
+      return handleBoundaryError(env, cq.message?.chat.id, err)
+    }
   }
 
   if (update.message) {
@@ -161,103 +166,123 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
   if (!msg.text || !msg.from || msg.from.is_bot) return new Response("OK")
   if (!verifyUser(env, msg.from.id)) return new Response("Forbidden", { status: 403 })
 
-  const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-  const command = telegramCommand(msg)
-  logRuntime(env, {
-    event: "telegram-message-ingress",
-    outcome: "started",
-    details: telegramIngressDetails(msg, command),
-  })
-
-  if (msg.reply_to_message?.from?.is_bot) {
-    await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
-      telegramUpdateId: msg.message_id,
-      replyToMessageId: msg.reply_to_message.message_id,
-      text: msg.text,
+  try {
+    const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+    const command = telegramCommand(msg)
+    logRuntime(env, {
+      event: "telegram-message-ingress",
+      outcome: "started",
+      details: telegramIngressDetails(msg, command),
     })
-    return new Response("OK")
-  }
 
-  if (command?.name === "generate" && !command.argument) {
-    logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
-    const client = createGitHubClient(env)
-    const ideas = parseIdeas((await client.readFile("ideas.md")).content)
-    const rawIdeas = ideas.filter((i) => i.status === "raw")
-    if (rawIdeas.length === 0) {
-      await tg.sendMessage(msg.chat.id, "No raw ideas to generate from.")
-      return new Response("OK")
-    }
-    const raw = rawIdeas.sort((a, b) => Number(a.id) - Number(b.id))[0]
-    await env.PIPELINE_WORKFLOW.create({
-      params: { ideaId: raw.id, ideaTitle: raw.title, ideaBody: raw.body },
-    })
-    const label = raw.title ?? raw.body.slice(0, LABEL_TRUNCATE_LENGTH)
-    await tg.sendMessage(msg.chat.id, `Started workflow for idea #${raw.id}: ${label}`)
-    logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
-    return new Response("OK")
-  }
-
-  if (command?.name === "calendar" && !command.argument) {
-    await tg.sendMessage(msg.chat.id, CALENDAR_HELP)
-    return new Response("OK")
-  }
-
-  if (command?.name === "calendar") {
-    const requestText = command.argument
-    if (!env.CALENDAR_WORKFLOW) {
-      await tg.sendMessage(msg.chat.id, "Calendar scheduling is not configured yet.")
-      return new Response("OK")
-    }
-    await env.CALENDAR_WORKFLOW.create({
-      params: { chatId: String(msg.chat.id), requestText, telegramMessageId: msg.message_id, setupOrigin },
-    })
-    await tg.sendMessage(msg.chat.id, "Scheduling that now.")
-    return new Response("OK")
-  }
-
-  {
-    const client = createGitHubClient(env)
-    const text = msg.text
-
-    if (command?.name === "add") {
-      let savedId = ""
-      await client.mutateFile("ideas.md", (c) => {
-        const items = parseIdeas(c)
-        savedId = String(nextId(items))
-        items.push({
-          id: savedId,
-          status: "raw" as const,
-          created: new Date().toISOString(),
-          source: "telegram" as const,
-          body: command.argument,
-          correlation: { telegramChatId: String(msg.chat.id) },
-        })
-        return serializeIdeas(items)
+    if (msg.reply_to_message?.from?.is_bot) {
+      await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
+        telegramUpdateId: msg.message_id,
+        replyToMessageId: msg.reply_to_message.message_id,
+        text: msg.text,
       })
-      await tg.sendMessage(msg.chat.id, `Saved as idea #${savedId}.`)
       return new Response("OK")
     }
 
-    if (text.startsWith("/")) {
+    if (command?.name === "generate" && !command.argument) {
+      logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
+      const client = createGitHubClient(env)
+      const ideas = parseIdeas((await client.readFile("ideas.md")).content)
+      const rawIdeas = ideas.filter((i) => i.status === "raw")
+      if (rawIdeas.length === 0) {
+        await tg.sendMessage(msg.chat.id, "No raw ideas to generate from.")
+        return new Response("OK")
+      }
+      const raw = rawIdeas.sort((a, b) => Number(a.id) - Number(b.id))[0]
+      await env.PIPELINE_WORKFLOW.create({
+        params: { ideaId: raw.id, ideaTitle: raw.title, ideaBody: raw.body, chatId: String(msg.chat.id) },
+      })
+      const label = raw.title ?? raw.body.slice(0, LABEL_TRUNCATE_LENGTH)
+      await tg.sendMessage(msg.chat.id, `Started workflow for idea #${raw.id}: ${label}`)
+      logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
+      return new Response("OK")
+    }
+
+    if (command?.name === "calendar" && !command.argument) {
+      await tg.sendMessage(msg.chat.id, CALENDAR_HELP)
+      return new Response("OK")
+    }
+
+    if (command?.name === "calendar") {
+      const requestText = command.argument
+      if (!env.CALENDAR_WORKFLOW) {
+        await tg.sendMessage(msg.chat.id, "Calendar scheduling is not configured yet.")
+        return new Response("OK")
+      }
+      await env.CALENDAR_WORKFLOW.create({
+        params: { chatId: String(msg.chat.id), requestText, telegramMessageId: msg.message_id, setupOrigin },
+      })
+      await tg.sendMessage(msg.chat.id, "Scheduling that now.")
+      return new Response("OK")
+    }
+
+    {
+      const client = createGitHubClient(env)
+      const text = msg.text
+
+      if (command?.name === "add") {
+        let savedId = ""
+        await client.mutateFile("ideas.md", (c) => {
+          const items = parseIdeas(c)
+          savedId = String(nextId(items))
+          items.push({
+            id: savedId,
+            status: "raw" as const,
+            created: new Date().toISOString(),
+            source: "telegram" as const,
+            body: command.argument,
+            correlation: { telegramChatId: String(msg.chat.id) },
+          })
+          return serializeIdeas(items)
+        })
+        await tg.sendMessage(msg.chat.id, `Saved as idea #${savedId}.`)
+        return new Response("OK")
+      }
+
+      if (text.startsWith("/")) {
+        await tg.sendMessage(
+          msg.chat.id,
+          "Unknown command. Use /add <text>, /generate, /calendar <request>, or tap inline buttons.",
+        )
+        return new Response("OK")
+      }
+
+      const routed = await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
+        telegramUpdateId: msg.message_id,
+        text,
+      })
+      if (routed) return new Response("OK")
+
       await tg.sendMessage(
         msg.chat.id,
         "Unknown command. Use /add <text>, /generate, /calendar <request>, or tap inline buttons.",
       )
       return new Response("OK")
     }
-
-    const routed = await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
-      telegramUpdateId: msg.message_id,
-      text,
-    })
-    if (routed) return new Response("OK")
-
-    await tg.sendMessage(
-      msg.chat.id,
-      "Unknown command. Use /add <text>, /generate, /calendar <request>, or tap inline buttons.",
-    )
-    return new Response("OK")
+  } catch (err) {
+    return handleBoundaryError(env, msg.chat.id, err)
   }
+}
+
+/** Logs a boundary failure and best-effort notifies the user with safe wording, always acking Telegram. */
+async function handleBoundaryError(env: Env, chatId: number | undefined, err: unknown): Promise<Response> {
+  logRuntime(env, {
+    event: "telegram-update",
+    outcome: "failed",
+    failureCategory: err instanceof GithubError ? "storage-error" : "unhandled",
+  })
+  console.error(new Date().toISOString(), "[telegram-webhook] unhandled error:", err)
+  if (env.TELEGRAM_BOT_TOKEN && chatId !== undefined) {
+    await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+      .sendMessage(chatId, userFacingFailureMessage(err))
+      .catch(() => {})
+  }
+  return new Response("OK")
 }
 
 /** Resolves a routed interaction and sends an event to the workflow instance. */
