@@ -910,4 +910,78 @@ Body`
     expect(telegramSends).toBe(1)
     expect(sendStep).toHaveBeenCalledWith("register-notify-interactions", expect.any(Function))
   })
+
+  it("notifies the operator with safe wording and rethrows when the generate step hits a GitHub 401", async () => {
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
+    let callIdx = 0
+    const telegramBodies: { chat_id?: string | number; text?: string }[] = []
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (url?.includes?.("api.telegram.org")) {
+          const body = JSON.parse(opts?.body as string) as { chat_id?: string | number; text?: string }
+          telegramBodies.push(body)
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        }
+        const path = url.split("/contents/")[1]
+        if (path === "ideas.md")
+          return { ok: false, status: 401, text: () => Promise.resolve('{"message":"Bad credentials"}') }
+        const content = path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await expect(
+      (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep()),
+    ).rejects.toThrow("401")
+    consoleSpy.mockRestore()
+
+    expect(telegramBodies).toHaveLength(1)
+    expect(telegramBodies[0].chat_id).toBe("42")
+    expect(telegramBodies[0].text).toContain("Storage access was denied (HTTP 401)")
+    expect(telegramBodies[0].text).not.toContain("Bad credentials")
+  })
+
+  it("prefers the payload chatId over the operator fallback when notifying", async () => {
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
+    let callIdx = 0
+    let notifiedChatId = ""
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+        if (url?.includes?.("api.telegram.org")) {
+          const body = JSON.parse(opts?.body as string) as { chat_id?: string | number }
+          notifiedChatId = String(body.chat_id)
+          return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+        }
+        const path = url.split("/contents/")[1]
+        if (path === "ideas.md") return { ok: false, status: 401, text: () => Promise.resolve("denied") }
+        const content = path === "style-prompt.md" ? STYLE_PROMPT : ""
+        return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
+      }),
+    )
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    const event = makeEvent() as { payload: { chatId?: string } }
+    event.payload.chatId = "777"
+    await expect(
+      (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(event, makeStep()),
+    ).rejects.toThrow("401")
+    consoleSpy.mockRestore()
+
+    expect(notifiedChatId).toBe("777")
+  })
 })
