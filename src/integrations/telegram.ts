@@ -1,5 +1,8 @@
 const TELEGRAM_API = "https://api.telegram.org"
 
+/** Ceiling for best-effort failure notifications so a hung request can't delay handler completion. */
+export const TELEGRAM_NOTIFY_TIMEOUT_MS = 5_000
+
 /** Creates a Telegram Bot API client. */
 export function createTelegramClient(token: string) {
   async function call<T = unknown>(method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {

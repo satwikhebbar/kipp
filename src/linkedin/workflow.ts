@@ -6,7 +6,7 @@ import { createInteractionRouter, type InteractionRegistration } from "../core/i
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "../core/types"
 import { createGitHubClient } from "../integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integrations/linkedin"
-import { createTelegramClient } from "../integrations/telegram"
+import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createToolProvider, resolveModel } from "../providers"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
@@ -111,7 +111,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const chatId = event.payload.chatId ?? this.env.TELEGRAM_ALLOWED_USER_ID.trim()
       if (chatId && this.env.TELEGRAM_BOT_TOKEN) {
         await createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-          .sendMessage(chatId, userFacingFailureMessage(err))
+          .sendMessage(chatId, userFacingFailureMessage(err), {
+            signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
+          })
           .catch(() => {})
       }
       throw err
