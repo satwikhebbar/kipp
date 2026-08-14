@@ -10,6 +10,7 @@ import { userFacingFailureMessage } from "../runtime/user-failures"
 
 const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32
+const TELEGRAM_NOTIFY_TIMEOUT_MS = 5_000
 
 interface TelegramMessageEntity {
   type: string
@@ -279,7 +280,7 @@ async function handleBoundaryError(env: Env, chatId: number | undefined, err: un
   console.error(new Date().toISOString(), "[telegram-webhook] unhandled error:", err)
   if (env.TELEGRAM_BOT_TOKEN && chatId !== undefined) {
     await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-      .sendMessage(chatId, userFacingFailureMessage(err))
+      .sendMessage(chatId, userFacingFailureMessage(err), { signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS) })
       .catch(() => {})
   }
   return new Response("OK")
