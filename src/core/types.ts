@@ -109,6 +109,8 @@ export interface WorkflowParams {
   ideaTitle?: string
   ideaBody: string
   substackBody?: string
+  /** Originating Telegram chat for failure notification; defaults to the operator chat. */
+  chatId?: string
 }
 
 export interface WorkflowEvent {

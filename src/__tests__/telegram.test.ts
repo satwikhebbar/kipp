@@ -94,6 +94,7 @@ describe("handleTelegramWebhook", () => {
       mockEnv() as never,
     )
     expect(res.status).toBe(400)
+    expect(mockFetch).not.toHaveBeenCalled()
   })
 
   it("rejects null JSON body", async () => {
@@ -516,5 +517,94 @@ Body text`
       replyToBot: false,
     })
     expect(log.mock.calls.flat().join(" ")).not.toContain(requestText)
+  })
+
+  it("notifies the user and acks when GitHub storage auth fails on /generate", async () => {
+    mockFetch.mockImplementation(async (url: string, _opts?: RequestInit) => {
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      return { ok: false, status: 401, text: () => Promise.resolve("Bad credentials SECRETBODY") }
+    })
+
+    const body = JSON.stringify({
+      update_id: 8,
+      message: {
+        message_id: 12,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      mockEnv() as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org") && call.body.includes("Storage access was denied"))
+    expect(sent).toBeDefined()
+    expect(sent?.body).not.toContain("SECRETBODY")
+    expect(sent?.body).not.toContain("pat")
+  })
+
+  it("notifies the user and acks when GitHub storage auth fails on /add", async () => {
+    mockFetch.mockImplementation(async (url: string, _opts?: RequestInit) => {
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      return { ok: false, status: 401, text: () => Promise.resolve("Bad credentials SECRETBODY") }
+    })
+
+    const body = JSON.stringify({
+      update_id: 9,
+      message: {
+        message_id: 13,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/add Quick idea here",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      mockEnv() as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org") && call.body.includes("Storage access was denied"))
+    expect(sent).toBeDefined()
+  })
+
+  it("does not notify when the sender is unauthorized", async () => {
+    mockFetch.mockReset()
+    const env = mockEnv()
+    env.TELEGRAM_ALLOWED_USER_ID = "999"
+    const body = JSON.stringify({
+      update_id: 10,
+      message: {
+        message_id: 14,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+    expect(res.status).toBe(403)
+    expect(mockFetch).not.toHaveBeenCalledWith(expect.stringContaining("api.telegram.org"), expect.any(Object))
   })
 })
