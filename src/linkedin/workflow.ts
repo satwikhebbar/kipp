@@ -9,6 +9,7 @@ import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integr
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, resolveModel } from "../providers"
 import { logRuntime } from "../runtime/logging"
+import { userFacingFailureMessage } from "../runtime/user-failures"
 import { createBacklogManager } from "./backlog/manager"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
 import { resolvePrompt } from "./prompts/resolver"
@@ -107,6 +108,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     } catch (err) {
       logRuntime(this.env, { workflow: event.instanceId, event: "workflow-run", outcome: "failed" })
       console.error(new Date().toISOString(), `[workflow ${event.instanceId}] unhandled error:`, err)
+      const chatId = event.payload.chatId ?? this.env.TELEGRAM_ALLOWED_USER_ID.trim()
+      if (chatId && this.env.TELEGRAM_BOT_TOKEN) {
+        await createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+          .sendMessage(chatId, userFacingFailureMessage(err))
+          .catch(() => {})
+      }
       throw err
     }
   }

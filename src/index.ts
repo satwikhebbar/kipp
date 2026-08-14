@@ -2,7 +2,10 @@ import { Hono } from "hono"
 import { CalendarWorkflow } from "./calendar/workflow"
 import { createTokenVault } from "./core/token-vault-client"
 import type { Env } from "./core/types"
+import { createTelegramClient } from "./integrations/telegram"
 import { HTTP_STATUS } from "./runtime/http"
+import { logRuntime } from "./runtime/logging"
+import { userFacingFailureMessage } from "./runtime/user-failures"
 import { handleCadenceCron } from "./triggers/cadence"
 import { handleGoogleCalendarAuthCallback, handleGoogleCalendarAuthStart } from "./triggers/google-calendar-auth"
 import { handleAuthCallback, handleAuthStart } from "./triggers/linkedin-auth"
@@ -58,16 +61,27 @@ app.post("/webhook/telegram", async (c) => handleTelegramWebhook(c.req.raw, c.en
 export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: Env) {
-    switch (controller.cron) {
-      case "0 9 * * *":
-        await handleRssCron(env)
-        break
-      case "0 8 * * 1":
-        await handleTokenCheckCron(env)
-        break
-      case "0 9 * * 1":
-        await handleCadenceCron(env)
-        break
+    try {
+      switch (controller.cron) {
+        case "0 9 * * *":
+          await handleRssCron(env)
+          break
+        case "0 8 * * 1":
+          await handleTokenCheckCron(env)
+          break
+        case "0 9 * * 1":
+          await handleCadenceCron(env)
+          break
+      }
+    } catch (err) {
+      logRuntime(env, { event: "scheduled-cron", outcome: "failed" })
+      console.error(new Date().toISOString(), "[scheduled] unhandled error:", err)
+      const operatorChatId = env.TELEGRAM_ALLOWED_USER_ID.trim()
+      if (operatorChatId && env.TELEGRAM_BOT_TOKEN) {
+        await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+          .sendMessage(operatorChatId, userFacingFailureMessage(err))
+          .catch(() => {})
+      }
     }
   },
 }

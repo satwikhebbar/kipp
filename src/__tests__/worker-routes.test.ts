@@ -75,6 +75,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 function baseEnv(overrides?: Record<string, unknown>): Record<string, unknown> {
@@ -487,5 +488,61 @@ describe("Worker fetch — production-mode routes", () => {
     const req = new Request("https://example.com/setup/linkedin")
     const res = await worker.fetch(req, env, {} as ExecutionContext)
     expect(res.status).toBe(302)
+  })
+})
+
+describe("scheduled() cron failure notification", () => {
+  function cronEnv(overrides?: Record<string, unknown>): Env {
+    return {
+      SUBSTACK_RSS_URL: "https://test.substack.com/feed",
+      GITHUB_PAT: "pat",
+      DATA_REPO_OWNER: "o",
+      DATA_REPO_NAME: "r",
+      TELEGRAM_ALLOWED_USER_ID: "42",
+      TELEGRAM_BOT_TOKEN: "bot:token",
+      ...overrides,
+    } as unknown as Env
+  }
+
+  function failingRssFetch(telegramBodies: Array<{ chat_id?: string | number; text?: string }>) {
+    return vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (url.includes("api.telegram.org")) {
+        const body = JSON.parse(opts?.body as string) as { chat_id?: string | number; text?: string }
+        telegramBodies.push(body)
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      }
+      return { ok: false, status: 404 }
+    })
+  }
+
+  it("notifies the operator exactly once with safe text when a cron job fails", async () => {
+    const env = cronEnv()
+    const telegramBodies: Array<{ chat_id?: string | number; text?: string }> = []
+    vi.stubGlobal("fetch", failingRssFetch(telegramBodies))
+
+    await worker.scheduled(
+      { cron: "0 9 * * *", scheduledTime: Date.now(), noRetry: false } as unknown as ScheduledController,
+      env,
+    )
+
+    expect(telegramBodies).toHaveLength(1)
+    expect(telegramBodies[0].chat_id).toBe("42")
+    expect(telegramBodies[0].text).toBe("⚠️ Something went wrong. Please try again shortly.")
+  })
+
+  it("does not notify and does not throw when the operator id is empty or whitespace-only", async () => {
+    for (const allowed of ["", "   "]) {
+      const env = cronEnv({ TELEGRAM_ALLOWED_USER_ID: allowed })
+      const telegramBodies: Array<{ chat_id?: string | number; text?: string }> = []
+      vi.stubGlobal("fetch", failingRssFetch(telegramBodies))
+
+      await expect(
+        worker.scheduled(
+          { cron: "0 9 * * *", scheduledTime: Date.now(), noRetry: false } as unknown as ScheduledController,
+          env,
+        ),
+      ).resolves.toBeUndefined()
+      expect(telegramBodies).toHaveLength(0)
+    }
   })
 })
