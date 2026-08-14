@@ -116,9 +116,16 @@
     <h1>Surface User-Facing Failures to Telegram</h1>
     <div class="subtitle">Issue #56 — GitHub token expiration is never reported to the end user on Telegram</div>
     <div class="meta">
-      <span>Status: <strong>Draft — pending plan review</strong></span> &middot;
+      <span>Status: <strong>Revised (round 2) — pending plan review</strong></span> &middot;
       <span>Branch: <code>issue/56-…</code></span> &middot;
       <span>Issue: <a href="https://github.com/satwikhebbar/kipp/issues/56">#56</a></span>
+    </div>
+    <div class="note">
+      <strong>Revision (round 2):</strong> per Codex plan-review verdict — webhook catch moved inside
+      <code>handleMessage</code>/callback branches so it runs only after authorization (§5.2); cron notification
+      explicitly gated on both Telegram config values and can never target chat <code>0</code> (§5.5); test plan
+      extended with <code>scheduled()</code> and unauthorized-update coverage (§7); workflow re-notification on
+      retry explicitly accepted as a deferred dedup improvement (§10).
     </div>
   </header>
 
@@ -223,7 +230,9 @@
     <p>
       Each user-facing entry point gains one try/catch that (a) logs a <code>logRuntime</code> failure record,
       (b) sends the safe message to the known chat (best-effort — send failures are swallowed so they cannot mask the
-      original error or re-trigger Telegram retries), and (c) returns success/acks as before.
+      original error or re-trigger Telegram retries), and (c) returns success/acks as before. The webhook catch is
+      placed <em>after</em> authorization succeeds, so malformed and unauthorized updates are never notified (§5.2);
+      the cron catch is gated on operator configuration (§5.5).
     </p>
     <h3>4.3 Routing chatId into the workflow</h3>
     <p>
@@ -254,11 +263,25 @@ export function userFacingFailureMessage(err: unknown): string {
     </p>
 
     <h3>5.2 <code>src/triggers/telegram-webhook.ts</code> — webhook boundary</h3>
+    <p>
+      The protected catch is placed <strong>after authorization has succeeded</strong> for both update kinds, so the
+      existing HTTP contract is preserved exactly: secret mismatch → 401, malformed body → 400, unverified user → 403.
+      None of those paths enter the protected block, so none can trigger a Telegram notification.
+    </p>
     <ul>
-      <li>Wrap the callback_query branch and the message branch of <code>handleTelegramWebhook</code> (everything after parse + <code>verifyUser</code>) in one try/catch. <code>handleMessage</code> must be <code>await</code>ed inside the <code>try</code> so its rejection is caught.</li>
-      <li>On error: <code>logRuntime(env, { event: "telegram-update", outcome: "failed" })</code>, <code>console.error</code>, derive chatId (<code>update.message.chat.id</code> or <code>update.callback_query.message?.chat.id</code>), then best-effort
-        <code>tg.sendMessage(chatId, userFacingFailureMessage(err)).catch(() =&gt; {})</code>, guarded by <code>env.TELEGRAM_BOT_TOKEN</code>.</li>
-      <li>Return <code>new Response("OK")</code> from the catch so Telegram stops retrying.</li>
+      <li><strong>Messages</strong>: <code>handleMessage</code> keeps its early returns (<code>!msg.text</code> /
+        <code>msg.from.is_bot</code> → OK; <code>verifyUser</code> failure → 403) <em>outside</em> the try. The rest
+        of its body is wrapped in a try/catch that, on error, calls <code>handleBoundaryError</code> and returns
+        <code>new Response("OK")</code>. No duplicate verification is added.</li>
+      <li><strong>Callback queries</strong>: <code>handleTelegramWebhook</code> already runs
+        <code>verifyUser(cq.from.id)</code> before any work; wrap <code>answerCallbackQuery</code> +
+        <code>dispatchRoutedInteraction</code> in a try/catch <em>after</em> that check, calling the same helper.</li>
+      <li><strong>Shared helper</strong> <code>handleBoundaryError(env, chatId, err): Promise&lt;Response&gt;</code> —
+        logs a <code>logRuntime(env, { event: "telegram-update", outcome: "failed" })</code> record,
+        <code>console.error</code>s, best-effort
+        <code>sendMessage(chatId, userFacingFailureMessage(err)).catch(() =&gt; {})</code> guarded by
+        <code>env.TELEGRAM_BOT_TOKEN</code> (skipping notify when chatId is missing), and returns
+        <code>new Response("OK")</code> so Telegram stops retrying.</li>
       <li>Pass <code>chatId: String(msg.chat.id)</code> in the <code>/generate</code> <code>PIPELINE_WORKFLOW.create</code> params (line ~191).</li>
     </ul>
 
@@ -286,8 +309,16 @@ if (chatId &amp;&amp; this.env.TELEGRAM_BOT_TOKEN) {
 
     <h3>5.5 <code>src/index.ts</code> — cron boundary</h3>
     <ul>
-      <li>Wrap the <code>scheduled()</code> switch in try/catch; on error, log and best-effort notify the operator
-        (<code>Number(env.TELEGRAM_ALLOWED_USER_ID)</code>), swallowing send failures.</li>
+      <li>Wrap the <code>scheduled()</code> switch in a try/catch.</li>
+      <li>The catch <strong>only notifies when both</strong> a non-empty <code>TELEGRAM_ALLOWED_USER_ID</code> and a
+        non-empty <code>TELEGRAM_BOT_TOKEN</code> are configured. The operator ID is <code>trim()</code>med and
+        <code>Number()</code>ed only after the guard passes, so an unconfigured operator can never target chat
+        <code>0</code> / <code>Number("")</code>. If the operator chat is absent, log via <code>console.error</code>
+        and return normally.</li>
+      <li>Scope: this catch covers failures <em>before workflow creation</em> (RSS fetch, storage reads/writes inside
+        <code>handleRssCron</code> / <code>handleCadenceCron</code>). Once a workflow is created, its own
+        <code>run()</code> catch (§5.4) owns failure notification — a given workflow failure produces exactly one
+        notification, never one from both boundaries.</li>
     </ul>
   </section>
 
@@ -312,10 +343,19 @@ if (chatId &amp;&amp; this.env.TELEGRAM_BOT_TOKEN) {
         response is 200, Telegram <code>sendMessage</code> was called with the safe storage-auth message, and the
         sent text contains neither the GitHub response body nor the token. Also assert <code>/add</code> 401 path
         notifies.</li>
+      <li><strong><code>src/__tests__/telegram.test.ts</code> — authorization guard</strong>: an unverified user
+        (<code>TELEGRAM_ALLOWED_USER_ID</code> ≠ sender) sending a <code>/generate</code> that would throw still
+        returns 403 and produces <em>no</em> Telegram <code>sendMessage</code> request; the existing malformed-body
+        400 cases likewise never notify.</li>
       <li><strong><code>src/__tests__/user-failures.test.ts</code></strong> (new) — mapper unit tests: 401 → auth wording;
         500 → generic-with-status; plain <code>Error</code> → generic; message content never included in output.</li>
       <li><strong><code>src/__tests__/workflow.test.ts</code></strong> — <code>generate</code> step throws (GitHub 401):
         <code>run()</code> sends a Telegram failure message and rethrows.</li>
+      <li><strong><code>src/__tests__/worker-routes.test.ts</code></strong> — <code>scheduled()</code> boundary tests
+        with <code>fetch</code> stubbed so <code>handleRssCron</code> rejects (non-ok RSS response): (a) with both
+        <code>TELEGRAM_ALLOWED_USER_ID</code> and <code>TELEGRAM_BOT_TOKEN</code> set, exactly one operator
+        <code>sendMessage</code> with safe text is issued; (b) with an empty <code>TELEGRAM_ALLOWED_USER_ID</code>,
+        no Telegram request is made and no exception escapes <code>scheduled()</code>.</li>
     </ul>
   </section>
 
@@ -341,8 +381,11 @@ pnpm test</code></pre>
     <h2>10. Risks &amp; Open Questions</h2>
     <ul>
       <li><strong>Telegram send failure inside catch</strong> — swallowed so the webhook still returns 200 and no retry storm; the failure remains in logs.</li>
-      <li><strong>Workflow rethrow after notify</strong> — a failed workflow may be retried by Cloudflare Workflows; each retry would re-notify. Acceptable for now (mirrors today's behavior plus one message); a per-workflow dedupe key can be added later if noisy.</li>
-      <li><strong>Unauthorized updates</strong> — the catch only runs after <code>verifyUser</code>, so error messages never leak to unverified senders.</li>
+      <li><strong>Workflow re-notification on retry — accepted, deferred</strong>: a failed workflow may be retried by
+        Cloudflare Workflows and each retry re-notifies. Failure visibility takes priority, so a durable per-workflow
+        dedupe design is explicitly deferred as a non-blocking follow-up.</li>
+      <li><strong>Unauthorized updates</strong> — the protected catch only runs after <code>verifyUser</code> passes, so error messages never reach unverified senders (§5.2).</li>
+      <li><strong>Cron double-notification</strong> — excluded by construction: <code>scheduled()</code> catches only failures before workflow creation; workflow failures are owned by <code>run()</code>'s catch (§5.5).</li>
       <li><strong>#53 sequencing</strong> — if Notion lands first, only the <code>GithubError</code> branch of the mapper changes; the boundary catches and <code>chatId</code> plumbing carry over as-is.</li>
     </ul>
   </section>
