@@ -116,9 +116,14 @@
     <h1>Surface User-Facing Failures to Telegram</h1>
     <div class="subtitle">Issue #56 — GitHub token expiration is never reported to the end user on Telegram</div>
     <div class="meta">
-      <span>Status: <strong>Revised (round 3) — pending plan review</strong></span> &middot;
+      <span>Status: <strong>Approved — with CodeRabbit correction</strong></span> &middot;
       <span>Branch: <code>issue/56-…</code></span> &middot;
       <span>Issue: <a href="https://github.com/satwikhebbar/kipp/issues/56">#56</a></span>
+    </div>
+    <div class="note">
+      <strong>Post-approval correction (CodeRabbit):</strong> §5.4 workflow fallback now trims
+      <code>TELEGRAM_ALLOWED_USER_ID</code> so a whitespace-only value is treated as absent, matching the cron
+      no-operator behavior (§5.5). No other plan changes.
     </div>
     <div class="note">
       <strong>Revision (round 3):</strong> per Codex round-2 verdict — cron guard now derives
@@ -299,12 +304,14 @@ export function userFacingFailureMessage(err: unknown): string {
     <h3>5.4 <code>src/linkedin/workflow.ts</code> — workflow failure notification</h3>
     <ul>
       <li>In <code>run()</code> catch (line ~107), after the existing log/console.error: best-effort notify
-        <pre><code>const chatId = event.payload.chatId ?? this.env.TELEGRAM_ALLOWED_USER_ID
+        <pre><code>const chatId = event.payload.chatId ?? this.env.TELEGRAM_ALLOWED_USER_ID.trim()
 if (chatId &amp;&amp; this.env.TELEGRAM_BOT_TOKEN) {
   await createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
     .sendMessage(chatId, userFacingFailureMessage(err))
     .catch(() =&gt; {})
 }</code></pre>
+        The operator fallback is <code>trim()</code>med so a whitespace-only <code>TELEGRAM_ALLOWED_USER_ID</code> is
+        treated as absent, matching the cron no-operator behavior (§5.5).
       </li>
       <li>Keep the existing <code>throw err</code> — Cloudflare Workflows preserves current retry/failure semantics.</li>
     </ul>
