@@ -116,16 +116,18 @@
     <h1>Surface User-Facing Failures to Telegram</h1>
     <div class="subtitle">Issue #56 — GitHub token expiration is never reported to the end user on Telegram</div>
     <div class="meta">
-      <span>Status: <strong>Revised (round 2) — pending plan review</strong></span> &middot;
+      <span>Status: <strong>Revised (round 3) — pending plan review</strong></span> &middot;
       <span>Branch: <code>issue/56-…</code></span> &middot;
       <span>Issue: <a href="https://github.com/satwikhebbar/kipp/issues/56">#56</a></span>
     </div>
     <div class="note">
-      <strong>Revision (round 2):</strong> per Codex plan-review verdict — webhook catch moved inside
-      <code>handleMessage</code>/callback branches so it runs only after authorization (§5.2); cron notification
-      explicitly gated on both Telegram config values and can never target chat <code>0</code> (§5.5); test plan
-      extended with <code>scheduled()</code> and unauthorized-update coverage (§7); workflow re-notification on
-      retry explicitly accepted as a deferred dedup improvement (§10).
+      <strong>Revision (round 3):</strong> per Codex round-2 verdict — cron guard now derives
+      <code>operatorChatId = env.TELEGRAM_ALLOWED_USER_ID.trim()</code> first and passes the trimmed string directly
+      to <code>sendMessage</code> (no <code>Number()</code> conversion, whitespace-only ⇒ no-operator path, chat
+      <code>0</code> impossible); the cron catch emits a structured <code>logRuntime</code> failure event before its
+      guarded notification attempt (§5.5); scheduled test matrix explicitly covers whitespace-only
+      <code>TELEGRAM_ALLOWED_USER_ID</code> (§7). Round-2 changes (§5.2 authorized-only webhook catch, §5.5 gating,
+      §7 tests, §10 deferred dedupe) remain unchanged.
     </div>
   </header>
 
@@ -310,11 +312,21 @@ if (chatId &amp;&amp; this.env.TELEGRAM_BOT_TOKEN) {
     <h3>5.5 <code>src/index.ts</code> — cron boundary</h3>
     <ul>
       <li>Wrap the <code>scheduled()</code> switch in a try/catch.</li>
-      <li>The catch <strong>only notifies when both</strong> a non-empty <code>TELEGRAM_ALLOWED_USER_ID</code> and a
-        non-empty <code>TELEGRAM_BOT_TOKEN</code> are configured. The operator ID is <code>trim()</code>med and
-        <code>Number()</code>ed only after the guard passes, so an unconfigured operator can never target chat
-        <code>0</code> / <code>Number("")</code>. If the operator chat is absent, log via <code>console.error</code>
-        and return normally.</li>
+      <li>On failure the catch first records a structured
+        <code>logRuntime(env, { event: "scheduled-cron", outcome: "failed" })</code> event and
+        <code>console.error</code>s, then attempts the guarded notification.</li>
+      <li>The notification is gated on the <em>trimmed</em> operator ID and a non-empty bot token:
+        <pre><code>const operatorChatId = env.TELEGRAM_ALLOWED_USER_ID.trim()
+if (operatorChatId &amp;&amp; env.TELEGRAM_BOT_TOKEN) {
+  await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+    .sendMessage(operatorChatId, userFacingFailureMessage(err))
+    .catch(() =&gt; {})
+}</code></pre>
+        The trimmed string is passed directly to <code>sendMessage</code> (it accepts <code>string</code>); no
+        <code>Number()</code> conversion occurs. A whitespace-only value trims to <code>""</code> and follows the
+        no-operator path, so chat <code>0</code> / <code>Number(" ")</code> is impossible. If the operator chat is
+        absent, the <code>logRuntime</code> failure record above remains the only output and the handler returns
+        normally.</li>
       <li>Scope: this catch covers failures <em>before workflow creation</em> (RSS fetch, storage reads/writes inside
         <code>handleRssCron</code> / <code>handleCadenceCron</code>). Once a workflow is created, its own
         <code>run()</code> catch (§5.4) owns failure notification — a given workflow failure produces exactly one
@@ -352,10 +364,11 @@ if (chatId &amp;&amp; this.env.TELEGRAM_BOT_TOKEN) {
       <li><strong><code>src/__tests__/workflow.test.ts</code></strong> — <code>generate</code> step throws (GitHub 401):
         <code>run()</code> sends a Telegram failure message and rethrows.</li>
       <li><strong><code>src/__tests__/worker-routes.test.ts</code></strong> — <code>scheduled()</code> boundary tests
-        with <code>fetch</code> stubbed so <code>handleRssCron</code> rejects (non-ok RSS response): (a) with both
-        <code>TELEGRAM_ALLOWED_USER_ID</code> and <code>TELEGRAM_BOT_TOKEN</code> set, exactly one operator
-        <code>sendMessage</code> with safe text is issued; (b) with an empty <code>TELEGRAM_ALLOWED_USER_ID</code>,
-        no Telegram request is made and no exception escapes <code>scheduled()</code>.</li>
+        with <code>fetch</code> stubbed so <code>handleRssCron</code> rejects (non-ok RSS response): (a) with a
+        non-blank <code>TELEGRAM_ALLOWED_USER_ID</code> and <code>TELEGRAM_BOT_TOKEN</code> set, exactly one operator
+        <code>sendMessage</code> with safe text is issued; (b) with an empty <em>or whitespace-only</em>
+        <code>TELEGRAM_ALLOWED_USER_ID</code>, no Telegram request is made and no exception escapes
+        <code>scheduled()</code> (whitespace-only trims to the no-operator path).</li>
     </ul>
   </section>
 
