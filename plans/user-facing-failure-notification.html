@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plan — Surface User-Facing Failures to Telegram</title>
+  <style>
+    :root {
+      --bg: #f8f9fa;
+      --fg: #1a1a2e;
+      --accent: #4361ee;
+      --accent-light: #eef1ff;
+      --border: #dde1e7;
+      --muted: #6b7280;
+      --success: #059669;
+      --warning: #d97706;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    header { margin-bottom: 2.5rem; }
+    header h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.03em; }
+    header .subtitle {
+      color: var(--muted);
+      font-size: 1.05rem;
+      margin-top: 0.5rem;
+      border-left: 3px solid var(--accent);
+      padding-left: 1rem;
+    }
+    header .meta { margin-top: 1rem; font-size: 0.85rem; color: var(--muted); }
+    nav.toc {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem 2rem;
+      margin-bottom: 2rem;
+    }
+    nav.toc h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.75rem; }
+    nav.toc ol { list-style: none; counter-reset: toc-counter; }
+    nav.toc ol li { counter-increment: toc-counter; margin-bottom: 0.3rem; }
+    nav.toc ol li a { text-decoration: none; color: var(--accent); font-weight: 500; }
+    nav.toc ol li::before { content: counter(toc-counter) ". "; color: var(--muted); font-weight: 400; }
+    nav.toc ol li a:hover { text-decoration: underline; }
+    section {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.75rem 2rem;
+      margin-bottom: 1.5rem;
+    }
+    section h2 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid var(--accent-light);
+    }
+    section h3 { font-size: 1.05rem; font-weight: 600; margin-top: 1.25rem; margin-bottom: 0.5rem; }
+    section p, section li { margin-bottom: 0.5rem; }
+    section ul, section ol { padding-left: 1.5rem; }
+    section ul li { list-style: disc; }
+    section ol li { list-style: decimal; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.925rem; }
+    th, td { padding: 0.5rem 0.75rem; border: 1px solid var(--border); text-align: left; }
+    th { background: var(--accent-light); font-weight: 600; }
+    td { background: white; }
+    code {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+      font-size: 0.85em;
+      background: #f1f3f5;
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+    }
+    pre {
+      background: #1a1a2e;
+      color: #e4e4ef;
+      padding: 1rem 1.25rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.875rem;
+      line-height: 1.5;
+      margin: 1rem 0;
+    }
+    pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+    .note {
+      background: #fef9ec;
+      border-left: 3px solid var(--warning);
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      margin: 1rem 0;
+    }
+    .note.success { background: #ecfdf5; border-left-color: var(--success); }
+    .note.info { background: var(--accent-light); border-left-color: var(--accent); }
+    hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-top: 2.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>Surface User-Facing Failures to Telegram</h1>
+    <div class="subtitle">Issue #56 — GitHub token expiration is never reported to the end user on Telegram</div>
+    <div class="meta">
+      <span>Status: <strong>Draft — pending plan review</strong></span> &middot;
+      <span>Branch: <code>issue/56-…</code></span> &middot;
+      <span>Issue: <a href="https://github.com/satwikhebbar/kipp/issues/56">#56</a></span>
+    </div>
+  </header>
+
+  <nav class="toc">
+    <h2>Table of Contents</h2>
+    <ol>
+      <li><a href="#summary">Summary</a></li>
+      <li><a href="#problem">Problem &amp; Reproduction</a></li>
+      <li><a href="#root-cause">Root Cause Analysis</a></li>
+      <li><a href="#design">Design</a></li>
+      <li><a href="#changes">Detailed Changes</a></li>
+      <li><a href="#messages">Failure Message Content</a></li>
+      <li><a href="#tests">Tests</a></li>
+      <li><a href="#verification">Verification</a></li>
+      <li><a href="#out-of-scope">Out of Scope</a></li>
+      <li><a href="#risks">Risks &amp; Open Questions</a></li>
+    </ol>
+  </nav>
+
+  <section id="summary">
+    <h2>1. Summary</h2>
+    <p>
+      When an error occurs at any of Kipp's three user-facing boundaries — the Telegram webhook, the LinkedIn
+      pipeline workflow, or the scheduled cron jobs — it is logged but the end user on Telegram sees nothing.
+      The reported symptom is a GitHub 401 during a <code>/generate</code> read of <code>ideas.md</code>, but the
+      gap is backend-agnostic: any storage (GitHub today, Notion after #53), LLM, or router failure is silently
+      swallowed.
+    </p>
+    <p>
+      This plan adds a <strong>boundary catch at each entry point</strong> that notifies the user (or operator)
+      on Telegram with a safe, fixed message and returns a successful HTTP ack so Telegram stops retrying.
+      A single shared function maps an unknown error to safe, user-facing wording; it never forwards
+      <code>err.message</code>, response bodies, or credentials.
+    </p>
+    <div class="note info">
+      <strong>Backend-agnostic by design.</strong> Issue #53 (<a href="https://github.com/satwikhebbar/kipp/issues/53">Move LinkedIn workflow to Notion</a>)
+      is being worked in parallel and will replace the GitHub storage layer. This fix deliberately contains no
+      GitHub-specific wording; it keyed on error <em>class/status</em> only, so ~90% of the diff survives the
+      Notion migration unchanged. Notion error text lands as a follow-up to #53.
+    </div>
+  </section>
+
+  <section id="problem">
+    <h2>2. Problem &amp; Reproduction</h2>
+    <p>Issue #56 reports:</p>
+    <pre><code>(error) GithubError: GitHub read ideas.md error 401: {
+  "message": "Bad credentials",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "401"
+}</code></pre>
+    <p>Telegram simply shows nothing as a response, leaving the user in the dark. The issue also asks
+    <em>"What other such errors are unhandled?"</em></p>
+    <p><strong>Reproduction:</strong> with an expired/invalid <code>GITHUB_PAT</code>, send <code>/generate</code> to the bot.
+    The webhook logs the error and returns HTTP 500 to Telegram (which retries). No message reaches the user.</p>
+  </section>
+
+  <section id="root-cause">
+    <h2>3. Root Cause Analysis</h2>
+    <p>One pattern, repeated at three boundaries: errors are logged but never translated into a Telegram message.</p>
+    <table>
+      <tr><th>Boundary</th><th>Location</th><th>Today's behavior</th></tr>
+      <tr>
+        <td>Telegram webhook</td>
+        <td><code>src/triggers/telegram-webhook.ts</code></td>
+        <td>
+          <code>/generate</code> reads <code>ideas.md</code> (<code>readFile</code> at line 184) and <code>/add</code>
+          mutates it (line 224); a <code>GithubError</code> propagates uncaught out of <code>handleMessage</code> →
+          webhook 500, Telegram retries, user sees nothing. <code>dispatchRoutedInteraction</code> (router /
+          <code>workflow.get</code> / <code>sendEvent</code> failures) has the same gap.
+        </td>
+      </tr>
+      <tr>
+        <td>Pipeline workflow</td>
+        <td><code>src/linkedin/workflow.ts:107</code></td>
+        <td>
+          <code>run()</code> catch logs and rethrows. GitHub failures in <code>generate</code>/<code>archive</code>
+          steps and LLM failures never notify. (LinkedIn publish failures are already handled via
+          <code>notifyPublishFailure</code>.)
+        </td>
+      </tr>
+      <tr>
+        <td>Cron jobs</td>
+        <td><code>src/index.ts:scheduled</code>, <code>src/triggers/rss.ts</code>, <code>src/triggers/cadence.ts</code></td>
+        <td>GitHub 401 silently aborts the job (weekly cadence / daily RSS).</td>
+      </tr>
+    </table>
+    <div class="note success">
+      Calendar workflow already notifies (<code>CALENDAR_FAILURE</code> in <code>src/calendar/agent-workflow.ts</code>) — no change needed there.
+    </div>
+  </section>
+
+  <section id="design">
+    <h2>4. Design</h2>
+    <h3>4.1 Shared failure-message mapper</h3>
+    <p>
+      New pure module <code>src/runtime/user-failures.ts</code> exporting
+      <code>userFacingFailureMessage(err: unknown): string</code>. It classifies on error class/status only and
+      <strong>never</strong> includes <code>err.message</code>, response bodies, or tokens. This is the single place
+      where failure → wording, reused by the webhook, workflow, and cron.
+    </p>
+    <h3>4.2 Boundary catches</h3>
+    <p>
+      Each user-facing entry point gains one try/catch that (a) logs a <code>logRuntime</code> failure record,
+      (b) sends the safe message to the known chat (best-effort — send failures are swallowed so they cannot mask the
+      original error or re-trigger Telegram retries), and (c) returns success/acks as before.
+    </p>
+    <h3>4.3 Routing chatId into the workflow</h3>
+    <p>
+      The webhook already knows the originating chat. Add an optional <code>chatId</code> to
+      <code>WorkflowParams</code> so a workflow that fails before its <code>generate</code> step resolves a chatId can
+      still notify the requesting user; cron-triggered workflows fall back to <code>TELEGRAM_ALLOWED_USER_ID</code>.
+    </p>
+  </section>
+
+  <section id="changes">
+    <h2>5. Detailed Changes</h2>
+
+    <h3>5.1 New file — <code>src/runtime/user-failures.ts</code></h3>
+    <pre><code>import { GithubError } from "../integrations/github"
+
+export function userFacingFailureMessage(err: unknown): string {
+  if (err instanceof GithubError) {
+    if (err.status === 401 || err.status === 403)
+      return `⚠️ Storage access was denied (HTTP ${err.status}). A credential may be expired or revoked — check the integration token and try again.`
+    return `⚠️ A storage request failed (HTTP ${err.status}). Please try again shortly.`
+  }
+  return "⚠️ Something went wrong. Please try again shortly."
+}</code></pre>
+    <p>
+      Class-agnostic: <code>GithubError</code> is today's storage error; a <code>NotionError</code> class added by #53
+      extends the same switch. No env var names, no message bodies, no Markdown-special characters (safe under
+      Telegram's <code>parse_mode: Markdown</code>).
+    </p>
+
+    <h3>5.2 <code>src/triggers/telegram-webhook.ts</code> — webhook boundary</h3>
+    <ul>
+      <li>Wrap the callback_query branch and the message branch of <code>handleTelegramWebhook</code> (everything after parse + <code>verifyUser</code>) in one try/catch. <code>handleMessage</code> must be <code>await</code>ed inside the <code>try</code> so its rejection is caught.</li>
+      <li>On error: <code>logRuntime(env, { event: "telegram-update", outcome: "failed" })</code>, <code>console.error</code>, derive chatId (<code>update.message.chat.id</code> or <code>update.callback_query.message?.chat.id</code>), then best-effort
+        <code>tg.sendMessage(chatId, userFacingFailureMessage(err)).catch(() =&gt; {})</code>, guarded by <code>env.TELEGRAM_BOT_TOKEN</code>.</li>
+      <li>Return <code>new Response("OK")</code> from the catch so Telegram stops retrying.</li>
+      <li>Pass <code>chatId: String(msg.chat.id)</code> in the <code>/generate</code> <code>PIPELINE_WORKFLOW.create</code> params (line ~191).</li>
+    </ul>
+
+    <h3>5.3 <code>src/core/types.ts</code> — workflow params</h3>
+    <pre><code>export interface WorkflowParams {
+  ideaId: string
+  ideaTitle?: string
+  ideaBody: string
+  substackBody?: string
+  chatId?: string
+}</code></pre>
+
+    <h3>5.4 <code>src/linkedin/workflow.ts</code> — workflow failure notification</h3>
+    <ul>
+      <li>In <code>run()</code> catch (line ~107), after the existing log/console.error: best-effort notify
+        <pre><code>const chatId = event.payload.chatId ?? this.env.TELEGRAM_ALLOWED_USER_ID
+if (chatId &amp;&amp; this.env.TELEGRAM_BOT_TOKEN) {
+  await createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+    .sendMessage(chatId, userFacingFailureMessage(err))
+    .catch(() =&gt; {})
+}</code></pre>
+      </li>
+      <li>Keep the existing <code>throw err</code> — Cloudflare Workflows preserves current retry/failure semantics.</li>
+    </ul>
+
+    <h3>5.5 <code>src/index.ts</code> — cron boundary</h3>
+    <ul>
+      <li>Wrap the <code>scheduled()</code> switch in try/catch; on error, log and best-effort notify the operator
+        (<code>Number(env.TELEGRAM_ALLOWED_USER_ID)</code>), swallowing send failures.</li>
+    </ul>
+  </section>
+
+  <section id="messages">
+    <h2>6. Failure Message Content</h2>
+    <table>
+      <tr><th>Condition</th><th>Message</th></tr>
+      <tr><td><code>GithubError</code> 401 / 403</td><td>⚠️ Storage access was denied (HTTP {status}). A credential may be expired or revoked — check the integration token and try again.</td></tr>
+      <tr><td><code>GithubError</code> other</td><td>⚠️ A storage request failed (HTTP {status}). Please try again shortly.</td></tr>
+      <tr><td>Anything else</td><td>⚠️ Something went wrong. Please try again shortly.</td></tr>
+    </table>
+    <p>
+      Fixed wording only. The original error (including the GitHub response body) stays in operator-visible logs.
+      Telegram receive-only: we never echo user content or error bodies back.
+    </p>
+  </section>
+
+  <section id="tests">
+    <h2>7. Tests</h2>
+    <ul>
+      <li><strong><code>src/__tests__/telegram.test.ts</code></strong> — <code>/generate</code> with a GitHub 401 mock:
+        response is 200, Telegram <code>sendMessage</code> was called with the safe storage-auth message, and the
+        sent text contains neither the GitHub response body nor the token. Also assert <code>/add</code> 401 path
+        notifies.</li>
+      <li><strong><code>src/__tests__/user-failures.test.ts</code></strong> (new) — mapper unit tests: 401 → auth wording;
+        500 → generic-with-status; plain <code>Error</code> → generic; message content never included in output.</li>
+      <li><strong><code>src/__tests__/workflow.test.ts</code></strong> — <code>generate</code> step throws (GitHub 401):
+        <code>run()</code> sends a Telegram failure message and rethrows.</li>
+    </ul>
+  </section>
+
+  <section id="verification">
+    <h2>8. Verification</h2>
+    <pre><code>pnpm lint
+pnpm run docs
+pnpm typecheck
+pnpm test</code></pre>
+    <p>(Equivalent to <code>pnpm check</code>.)</p>
+  </section>
+
+  <section id="out-of-scope">
+    <h2>9. Out of Scope</h2>
+    <ul>
+      <li>Proactive token-health cron for GitHub PATs (on-error notification is the detection; YAGNI).</li>
+      <li>Notion-specific failure wording — deferred to #53; the mapper is structured to accept a new error class.</li>
+      <li>Calendar workflow (already notifies on failure) and LinkedIn publish failures (already handled by <code>notifyPublishFailure</code>).</li>
+    </ul>
+  </section>
+
+  <section id="risks">
+    <h2>10. Risks &amp; Open Questions</h2>
+    <ul>
+      <li><strong>Telegram send failure inside catch</strong> — swallowed so the webhook still returns 200 and no retry storm; the failure remains in logs.</li>
+      <li><strong>Workflow rethrow after notify</strong> — a failed workflow may be retried by Cloudflare Workflows; each retry would re-notify. Acceptable for now (mirrors today's behavior plus one message); a per-workflow dedupe key can be added later if noisy.</li>
+      <li><strong>Unauthorized updates</strong> — the catch only runs after <code>verifyUser</code>, so error messages never leak to unverified senders.</li>
+      <li><strong>#53 sequencing</strong> — if Notion lands first, only the <code>GithubError</code> branch of the mapper changes; the boundary catches and <code>chatId</code> plumbing carry over as-is.</li>
+    </ul>
+  </section>
+
+  <footer>
+    Plan artifact for GitHub issue #56 &middot; backend-agnostic failure notification &middot; prepared by OpenCode (planning)
+  </footer>
+
+</div>
+</body>
+</html>
