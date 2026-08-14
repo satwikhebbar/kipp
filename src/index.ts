@@ -2,7 +2,7 @@ import { Hono } from "hono"
 import { CalendarWorkflow } from "./calendar/workflow"
 import { createTokenVault } from "./core/token-vault-client"
 import type { Env } from "./core/types"
-import { createTelegramClient } from "./integrations/telegram"
+import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "./integrations/telegram"
 import { HTTP_STATUS } from "./runtime/http"
 import { logRuntime } from "./runtime/logging"
 import { userFacingFailureMessage } from "./runtime/user-failures"
@@ -79,7 +79,9 @@ export default {
       const operatorChatId = env.TELEGRAM_ALLOWED_USER_ID.trim()
       if (operatorChatId && env.TELEGRAM_BOT_TOKEN) {
         await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-          .sendMessage(operatorChatId, userFacingFailureMessage(err))
+          .sendMessage(operatorChatId, userFacingFailureMessage(err), {
+            signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
+          })
           .catch(() => {})
       }
     }

@@ -2,7 +2,7 @@ import { CALENDAR_HELP } from "../calendar/messages"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
 import { createGitHubClient, GithubError } from "../integrations/github"
-import { createTelegramClient } from "../integrations/telegram"
+import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { nextId } from "../linkedin/backlog/id-generator"
 import { parseIdeas, serializeIdeas } from "../linkedin/backlog/parser"
 import { logRuntime } from "../runtime/logging"
@@ -10,7 +10,6 @@ import { userFacingFailureMessage } from "../runtime/user-failures"
 
 const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32
-const TELEGRAM_NOTIFY_TIMEOUT_MS = 5_000
 
 interface TelegramMessageEntity {
   type: string
