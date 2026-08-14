@@ -371,7 +371,9 @@ Body text`
       env as never,
     )
     expect(res.status).toBe(200)
-    expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalled()
+    expect(env.PIPELINE_WORKFLOW.create).toHaveBeenCalledWith({
+      params: expect.objectContaining({ ideaId: "1", ideaTitle: "Raw idea", ideaBody: "Body text", chatId: "100" }),
+    })
   })
 
   it("shows Calendar help without invoking an LLM or workflow", async () => {
@@ -606,5 +608,26 @@ Body text`
     )
     expect(res.status).toBe(403)
     expect(mockFetch).not.toHaveBeenCalledWith(expect.stringContaining("api.telegram.org"), expect.any(Object))
+  })
+
+  it("acks and notifies the callback chat when callback handling fails", async () => {
+    const telegramBodies: string[] = []
+    mockFetch.mockImplementation(async (url: string, opts?: RequestInit) => {
+      if (String(url).includes("answerCallbackQuery"))
+        return { ok: false, status: 400, text: () => Promise.resolve("Callback failed SECRET") }
+      if (url?.includes?.("api.telegram.org")) {
+        telegramBodies.push(typeof opts?.body === "string" ? opts.body : "")
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      }
+      return { ok: true, json: () => Promise.resolve({}) }
+    })
+
+    const res = await handleTelegramWebhook(callbackRequest(callbackBody("confirm:wf-x")), mockEnv() as never)
+    expect(res.status).toBe(200)
+    const sent = telegramBodies.find((body) => body.includes("Something went wrong"))
+    expect(sent).toBeDefined()
+    expect(JSON.parse(sent ?? "{}").chat_id).toBe(100)
+    expect(sent).not.toContain("Callback failed SECRET")
+    expect(sent).not.toContain("Telegram API error")
   })
 })
