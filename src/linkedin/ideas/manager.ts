@@ -32,6 +32,8 @@ export interface IdeaManager {
   getLatestFinalizedTimestamp(): Promise<number>
 }
 
+const TITLE_MAX_LENGTH = 80
+
 const KIPP_ID_ASCENDING = [{ property: "Kipp ID", direction: "ascending" }]
 const LAST_EDITED_DESCENDING = [{ timestamp: "last_edited_time", direction: "descending" }]
 
@@ -69,7 +71,7 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
       if (existing) return getIdea(existing.pageId)
     }
     const properties: NotionPagePropertiesInput = {
-      title: input.title,
+      title: input.title ?? input.body.slice(0, TITLE_MAX_LENGTH),
       status: input.status ?? "raw",
       source: input.source,
       substackUrl: input.substackUrl,
