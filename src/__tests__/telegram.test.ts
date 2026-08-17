@@ -550,7 +550,7 @@ Idea 2`
     expect(log.mock.calls.flat().join(" ")).not.toContain(requestText)
   })
 
-  it("notifies the user and acks when GitHub storage auth fails on /generate", async () => {
+  it("notifies the user and acks when Notion storage auth fails on /generate", async () => {
     mockFetch.mockImplementation(async (url: string, _opts?: RequestInit) => {
       if (url?.includes?.("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
@@ -583,12 +583,15 @@ Idea 2`
     expect(sent?.body).not.toContain("pat")
   })
 
-  it("notifies the user and acks when GitHub storage auth fails on /add", async () => {
+  it("notifies the user and acks when idea ingest fails on /add", async () => {
     mockFetch.mockImplementation(async (url: string, _opts?: RequestInit) => {
       if (url?.includes?.("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
       return { ok: false, status: 401, text: () => Promise.resolve("Bad credentials SECRETBODY") }
     })
+
+    const env = mockEnv() as unknown as ReturnType<typeof mockEnv>
+    env.ingestFetches.set("ingest:tg:100:13", vi.fn().mockResolvedValue(new Response("boom", { status: 500 })))
 
     const body = JSON.stringify({
       update_id: 9,
@@ -605,13 +608,16 @@ Idea 2`
         headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
         body,
       }),
-      mockEnv() as never,
+      env as never,
     )
     expect(res.status).toBe(200)
     const sent = mockFetch.mock.calls
       .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
-      .find((call) => String(call.url).includes("api.telegram.org") && call.body.includes("Storage access was denied"))
+      .find((call) => String(call.url).includes("api.telegram.org"))
     expect(sent).toBeDefined()
+    expect(sent?.body).toContain("Something went wrong")
+    expect(sent?.body).not.toContain("SECRETBODY")
+    expect(sent?.body).not.toContain("boom")
   })
 
   it("does not notify when the sender is unauthorized", async () => {

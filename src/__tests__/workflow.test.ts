@@ -706,7 +706,7 @@ describe("PipelineWorkflow", () => {
     expect(sendStep).toHaveBeenCalledWith("register-notify-interactions", expect.any(Function))
   })
 
-  it("notifies the operator with safe wording and rethrows when the generate step hits a GitHub 401", async () => {
+  it("notifies the operator with safe wording and rethrows when the generate step hits a Notion 401", async () => {
     const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
     const telegramBodies: { chat_id?: string | number; text?: string }[] = []
@@ -722,9 +722,9 @@ describe("PipelineWorkflow", () => {
           telegramBodies.push(body)
           return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
         }
-        const path = url.split("/contents/")[1]
-        if (path === "ideas.md")
+        if (url.includes("api.notion.com"))
           return { ok: false, status: 401, text: () => Promise.resolve('{"message":"Bad credentials"}') }
+        const path = url.split("/contents/")[1]
         const content = path === "style-prompt.md" ? STYLE_PROMPT : ""
         return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
       }),
@@ -760,8 +760,8 @@ describe("PipelineWorkflow", () => {
           notifiedChatId = String(body.chat_id)
           return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
         }
+        if (url.includes("api.notion.com")) return { ok: false, status: 401, text: () => Promise.resolve("denied") }
         const path = url.split("/contents/")[1]
-        if (path === "ideas.md") return { ok: false, status: 401, text: () => Promise.resolve("denied") }
         const content = path === "style-prompt.md" ? STYLE_PROMPT : ""
         return { ok: true, json: () => Promise.resolve({ content: b64(content), sha: "s1" }) }
       }),
