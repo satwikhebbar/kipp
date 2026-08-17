@@ -191,6 +191,20 @@ describe("IdeaIngestDO", () => {
     expect(firstBody.workflowInstanceId).toBe(secondBody.workflowInstanceId)
   })
 
+  it("ingests identical body text under distinct keys as two separate pages", async () => {
+    const harness = makeHarness()
+    vi.stubGlobal("fetch", harness.notion.fetchStub)
+    const first = await harness.ingest("tg:5:1", "Identical idea text", true)
+    const second = await harness.ingest("tg:5:2", "Identical idea text", true)
+    const firstBody = (await first.json()) as { pageId: string; ideaId: string; workflowInstanceId: string }
+    const secondBody = (await second.json()) as { pageId: string; ideaId: string; workflowInstanceId: string }
+
+    expect(harness.notion.pages.size).toBe(2)
+    expect(firstBody.pageId).not.toBe(secondBody.pageId)
+    expect(firstBody.ideaId).not.toBe(secondBody.ideaId)
+    expect(firstBody.workflowInstanceId).not.toBe(secondBody.workflowInstanceId)
+  })
+
   it("ingest without startWorkflow does not start a workflow", async () => {
     const harness = makeHarness()
     vi.stubGlobal("fetch", harness.notion.fetchStub)
