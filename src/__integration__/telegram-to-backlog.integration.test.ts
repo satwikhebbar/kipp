@@ -1,41 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { Env } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import {
-  createFakeIdeaIngest,
-  createFakeInteractionRouter,
-  createFakeNetwork,
-  createFakeWorkflowBinding,
-} from "./setup"
+import { createBaseEnv, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
-function baseEnv(overrides?: Partial<Env>): Env {
-  const env = {
-    GITHUB_PAT: "pat",
-    DATA_REPO_OWNER: "o",
-    DATA_REPO_NAME: "r",
-    TELEGRAM_BOT_TOKEN: "bot:token",
-    TELEGRAM_WEBHOOK_SECRET: "my-secret",
-    TELEGRAM_ALLOWED_USER_ID: "",
-    LINKEDIN_CLIENT_ID: "",
-    LINKEDIN_CLIENT_SECRET: "",
-    LINKEDIN_ACCESS_TOKEN: "",
-    LINKEDIN_AUTHOR_URN: "",
-    LLM_API_KEY: "key",
-    LLM_PROVIDER: "deepseek",
-    POSTING_CADENCE_DAYS: "7",
-    SUBSTACK_RSS_URL: "",
-    WAIT_FOR_FEEDBACK_HOURS: "168",
-    NOTION_API_KEY: "secret",
-    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
-    NOTION_FREE_TIER: "false",
-    TOKEN_VAULT: {} as never,
-    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
-    PIPELINE_WORKFLOW: {} as never,
-    ...overrides,
-  } as never as Env
-  env.IDEA_INGEST = createFakeIdeaIngest(env)
-  return env
-}
+const baseEnv = createBaseEnv
 
 function telegramRequest(body: unknown) {
   return new Request("http://localhost", {
@@ -88,7 +55,7 @@ describe("telegram-to-backlog", () => {
     expect(state.telegramMessages[0].text).toContain("Saved as idea")
   })
 
-  it("handles /add with trailing whitespace only", async () => {
+  it("rejects /add with only whitespace as a usage prompt", async () => {
     const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
     const res = await handleTelegramWebhook(
       telegramRequest({
@@ -105,10 +72,9 @@ describe("telegram-to-backlog", () => {
     expect(res.status).toBe(200)
 
     const state = harness.getState()
-    const pages = [...state.notionPages.values()]
-    expect(pages).toHaveLength(1)
-    expect(pages[0].kippId).toBe(1)
-    expect(pages[0].status).toBe("raw")
+    expect([...state.notionPages.values()]).toHaveLength(0)
+    expect(state.telegramMessages).toHaveLength(1)
+    expect(state.telegramMessages[0].text).toBe("Usage: /add <idea text>")
   })
 
   it("handles /generate by creating a workflow for the oldest raw idea", async () => {

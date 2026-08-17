@@ -239,13 +239,15 @@ describe("createIdeaManager", () => {
   })
 
   it("getLatestFinalizedTimestamp returns the most recently edited finalized page time", async () => {
+    const older = { ...page("p1", 1, "finalized", "manual"), last_edited_time: "2026-07-01T12:00:00Z" }
+    const newer = { ...page("p2", 2, "finalized", "manual"), last_edited_time: "2026-07-05T12:00:00Z" }
     const { client } = fakeClient([
-      { page: page("p1", 1, "finalized", "manual"), markdown: "one" },
-      { page: page("p2", 2, "finalized", "manual"), markdown: "two" },
+      { page: older, markdown: "one" },
+      { page: newer, markdown: "two" },
     ])
     const manager = createIdeaManager(client)
     const ts = await manager.getLatestFinalizedTimestamp()
-    expect(ts).toBe(new Date("2026-07-02T12:00:00Z").getTime())
+    expect(ts).toBe(new Date("2026-07-05T12:00:00Z").getTime())
   })
 
   it("getLatestFinalizedTimestamp returns 0 when nothing is finalized", async () => {

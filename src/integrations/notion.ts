@@ -31,6 +31,7 @@ export interface NotionPagePropertiesInput {
   status?: IdeaStatus
   source?: Source
   substackUrl?: string
+  substackBody?: string
   chatId?: string
   idempotencyKey?: string
 }
@@ -58,7 +59,11 @@ export interface NotionClient {
   patchPageProperties(pageId: string, update: NotionPagePropertiesInput): Promise<void>
   getPageMarkdown(pageId: string): Promise<string>
   patchPageMarkdown(pageId: string, newStr: string): Promise<void>
-  queryPages(filter: Record<string, unknown> | null, sorts: Record<string, unknown>[]): Promise<NotionPage[]>
+  queryPages(
+    filter: Record<string, unknown> | null,
+    sorts: Record<string, unknown>[],
+    limit?: number,
+  ): Promise<NotionPage[]>
 }
 
 /** Creates a Notion API client for the Ideas data source. */
@@ -156,11 +161,12 @@ export function createNotionClient(env: {
   async function queryPages(
     filter: Record<string, unknown> | null,
     sorts: Record<string, unknown>[],
+    limit?: number,
   ): Promise<NotionPage[]> {
     const results: NotionPage[] = []
     let cursor: string | null = null
     for (let page = 0; ; page++) {
-      const body: Record<string, unknown> = { page_size: QUERY_PAGE_SIZE, sorts }
+      const body: Record<string, unknown> = { page_size: Math.min(QUERY_PAGE_SIZE, limit ?? QUERY_PAGE_SIZE), sorts }
       if (filter) body.filter = filter
       if (cursor) body.start_cursor = cursor
       const res = await request(`${NOTION_API}/v1/data_sources/${dataSourceId}/query`, {
@@ -172,10 +178,14 @@ export function createNotionClient(env: {
         throw new NotionError(HTTP_OK, "Notion query result limit reached (request_status incomplete)")
       }
       results.push(...list.results)
-      if (!list.has_more || !list.next_cursor || page + 1 >= MAX_QUERY_PAGES) break
+      if (limit !== undefined && results.length >= limit) break
+      if (!list.has_more || !list.next_cursor) break
+      if (page + 1 >= MAX_QUERY_PAGES) {
+        throw new NotionError(HTTP_OK, `Notion query exceeded ${MAX_QUERY_PAGES} pages; result set is incomplete`)
+      }
       cursor = list.next_cursor
     }
-    return results
+    return limit !== undefined ? results.slice(0, limit) : results
   }
 
   return { getPage, createPage, patchPageProperties, getPageMarkdown, patchPageMarkdown, queryPages }
@@ -204,21 +214,24 @@ function buildProperties(input: NotionPagePropertiesInput): Record<string, unkno
   if (input.status) props.Status = { status: { name: input.status } }
   if (input.source) props.Source = { select: { name: input.source } }
   if (input.substackUrl) props["Substack URL"] = { url: input.substackUrl }
+  if (input.substackBody)
+    props["Substack Body"] = { rich_text: [{ type: "text", text: { content: input.substackBody } }] }
   if (input.chatId) props["Chat ID"] = { rich_text: [{ type: "text", text: { content: input.chatId } }] }
   if (input.idempotencyKey)
     props["Idempotency Key"] = { rich_text: [{ type: "text", text: { content: input.idempotencyKey } }] }
   return props
 }
 
-/** Returns a throttle that spaces requests at least NOTION_RATE_LIMIT_DELAY_MS apart when enabled. */
+/** Returns a throttle that reserves spaced request slots when enabled, serializing concurrent callers. */
 function createRateLimiter(enabled: boolean): () => Promise<void> {
-  let lastRequestAt = 0
+  let nextSlotAt = 0
   return async () => {
     if (!enabled) return
     const now = Date.now()
-    const wait = NOTION_RATE_LIMIT_DELAY_MS - (now - lastRequestAt)
+    const slot = Math.max(now, nextSlotAt)
+    nextSlotAt = slot + NOTION_RATE_LIMIT_DELAY_MS
+    const wait = slot - now
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
-    lastRequestAt = now
   }
 }
 
@@ -247,6 +260,11 @@ function readSubstackUrl(props: Record<string, NotionProperty>): string | undefi
   return props["Substack URL"]?.url
 }
 
+/** Reads the Substack reference body rich-text segment. */
+function readSubstackBody(props: Record<string, NotionProperty>): string | undefined {
+  return props["Substack Body"]?.rich_text?.[0]?.text?.content
+}
+
 /** Reads the first Idempotency Key rich-text segment. */
 function readIdempotencyKey(props: Record<string, NotionProperty>): string | undefined {
   return props["Idempotency Key"]?.rich_text?.[0]?.text?.content
@@ -269,6 +287,7 @@ export function pageToSummary(page: NotionPage): IdeaSummary {
     created: page.created_time,
     source: readSource(props) ?? "manual",
     substackUrl: readSubstackUrl(props),
+    substackBody: readSubstackBody(props),
     idempotencyKey: readIdempotencyKey(props),
     correlation: chatId ? { telegramChatId: chatId } : undefined,
   }

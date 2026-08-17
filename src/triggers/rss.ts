@@ -60,6 +60,7 @@ function stripHtml(html: string): string {
 }
 
 const RSS_CONTENT_TRUNCATE_LENGTH = 6000
+const SUBSTACK_BODY_MAX_LENGTH = 2000 // Notion rich_text property limit
 const MAX_SECTION_IDEAS = 4
 const MAX_TITLE_LENGTH = 80
 const DEFAULT_RSS_RETRIES = 3
@@ -72,8 +73,7 @@ export function itemIdentity(item: Pick<RssItem, "guid" | "link">): string {
 }
 
 /** Uses LLM to extract a teaser and sub-ideas from an RSS item's content. */
-async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<ExtractedIdeas> {
-  const text = stripHtml(item.contentHtml).slice(0, RSS_CONTENT_TRUNCATE_LENGTH)
+async function llmExtractIdeas(gen: GenerateFn, item: RssItem, text: string): Promise<ExtractedIdeas> {
   const prompt = `Newsletter: "${item.title}"\nURL: ${item.link}\n\nContent:\n${text}`
   const res = await gen(messages(SYSTEM_PROMPT, prompt))
   const parsed = parseLLMJson<ExtractedIdeas>(res.text)
@@ -84,12 +84,18 @@ async function llmExtractIdeas(gen: GenerateFn, item: RssItem): Promise<Extracte
 }
 
 /** Builds main and side idea inputs from an RSS item and extracted content. */
-function buildIdeaInputs(item: RssItem, extracted: ExtractedIdeas): { main: IdeaInput; side: IdeaInput[] } {
+function buildIdeaInputs(
+  item: RssItem,
+  extracted: ExtractedIdeas,
+  referenceBody: string,
+): { main: IdeaInput; side: IdeaInput[] } {
+  const substackBody = referenceBody.slice(0, SUBSTACK_BODY_MAX_LENGTH)
   const main: IdeaInput = {
     title: item.title,
     status: "raw",
     source: "substack",
     substackUrl: item.link,
+    substackBody,
     body: extracted.teaser,
   }
   const side: IdeaInput[] = []
@@ -99,6 +105,7 @@ function buildIdeaInputs(item: RssItem, extracted: ExtractedIdeas): { main: Idea
       status: "raw",
       source: "substack",
       substackUrl: item.link,
+      substackBody,
       body: sub,
     })
   }
@@ -106,20 +113,21 @@ function buildIdeaInputs(item: RssItem, extracted: ExtractedIdeas): { main: Idea
 }
 
 /** Checks the RSS feed for new items and ingests the first unseen item into Notion. */
-export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaId?: string }> {
+export async function handleRssCron(env: Env): Promise<{
+  started: boolean
+  ideaId?: string
+  workflowInstanceId?: string
+}> {
   const manager = createIdeaManager(createNotionClient(env))
   const ingest = createIdeaIngest(env)
 
   const items = await fetchRssItems(env.SUBSTACK_RSS_URL)
   if (items.length === 0) return { started: false }
 
-  let newItem: RssItem | null = null
-  for (const item of items) {
-    if (!(await manager.findBySubstackUrl(item.link))) {
-      newItem = item
-      break
-    }
-  }
+  const knownLinks = new Set(
+    (await manager.listIdeas()).map((idea) => idea.substackUrl).filter((url): url is string => Boolean(url)),
+  )
+  const newItem = items.find((item) => !knownLinks.has(item.link)) ?? null
   if (!newItem) return { started: false }
 
   const gen = createGenerator(
@@ -128,16 +136,17 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
     env.LLM_MODEL,
     Number(env.LLM_MAX_RETRIES ?? DEFAULT_RSS_RETRIES),
   )
-  const extracted = await llmExtractIdeas(gen, newItem)
+  const referenceBody = stripHtml(newItem.contentHtml).slice(0, RSS_CONTENT_TRUNCATE_LENGTH)
+  const extracted = await llmExtractIdeas(gen, newItem, referenceBody)
 
   const identity = itemIdentity(newItem)
-  const { main, side } = buildIdeaInputs(newItem, extracted)
+  const { main, side } = buildIdeaInputs(newItem, extracted, referenceBody)
   const mainResult = await ingest.ingest({ key: `rss:${identity}:0`, idea: main, startWorkflow: true })
   for (let i = 0; i < side.length; i++) {
     await ingest.ingest({ key: `rss:${identity}:${i + 1}`, idea: side[i], startWorkflow: false })
   }
 
-  return { started: true, ideaId: mainResult.workflowInstanceId ?? mainResult.ideaId }
+  return { started: true, ideaId: mainResult.ideaId, workflowInstanceId: mainResult.workflowInstanceId }
 }
 
 /** Fetches and parses an RSS feed from a URL, retrying transient failures (429/5xx). */

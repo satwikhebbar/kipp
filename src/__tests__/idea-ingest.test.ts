@@ -1,18 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { IdeaIngestDO, WORKFLOW_REPAIR_COOLDOWN_MS } from "../core/idea-ingest"
+import { claimInstanceId, IdeaIngestDO, WORKFLOW_REPAIR_COOLDOWN_MS } from "../core/idea-ingest"
 
 const NOTION_DS = "ds-1"
 
 interface FakeWorkflowInstance {
   status: string
   restartCount: number
-}
-
-function instanceIdFor(pageId: string): Promise<string> {
-  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(pageId)).then((digest) => {
-    const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")
-    return `kipp-${hex.slice(0, 32)}`
-  })
 }
 
 function fakeNotionPages() {
@@ -122,6 +115,7 @@ function makeHarness() {
           doStorage(name).set(key, value)
         },
       },
+      blockConcurrencyWhile: async <T>(fn: () => Promise<T>): Promise<T> => fn(),
     }
     const env = {
       NOTION_API_KEY: "secret",
@@ -224,7 +218,7 @@ describe("IdeaIngestDO", () => {
     vi.stubGlobal("fetch", harness.notion.fetchStub)
     await harness.ingest("tg:4:4", "Idea four", true)
     // simulate a crash before the claim record persisted
-    harness.storage.get(`claim:${"page_1"}`)?.clear()
+    harness.storage.get("claim:page_1")?.clear()
     const res = await harness.start("page_1", "1")
     const body = (await res.json()) as { workflowInstanceId: string; alreadyStarted: boolean }
     expect(body.alreadyStarted).toBe(true)
@@ -235,15 +229,23 @@ describe("IdeaIngestDO", () => {
     const harness = makeHarness()
     vi.stubGlobal("fetch", harness.notion.fetchStub)
     await harness.ingest("tg:5:5", "Idea five", true)
-    const expectedId = await instanceIdFor("page_1")
+    const expectedId = await claimInstanceId("page_1")
     expect(harness.workflows.has(expectedId)).toBe(true)
+    // simulate the crash window: the workflow batch was created but the claim
+    // record never persisted, so a re-issue must adopt the existing instance
+    harness.storage.get("claim:page_1")?.clear()
+    const res = await harness.ingest("tg:5:5", "Idea five retry", true)
+    const body = (await res.json()) as { workflowInstanceId: string; alreadyStarted: boolean }
+    expect(body.workflowInstanceId).toBe(expectedId)
+    expect(body.alreadyStarted).toBe(true)
+    expect(harness.workflows.size).toBe(1)
   })
 
   it("repairs an errored instance on the started fast path, cooldown-bounded", async () => {
     const harness = makeHarness()
     vi.stubGlobal("fetch", harness.notion.fetchStub)
     await harness.ingest("tg:6:6", "Idea six", true)
-    const expectedId = await instanceIdFor("page_1")
+    const expectedId = await claimInstanceId("page_1")
     const instance = harness.workflows.get(expectedId) as FakeWorkflowInstance
     instance.status = "errored"
 
@@ -269,7 +271,7 @@ describe("IdeaIngestDO", () => {
       const harness = makeHarness()
       vi.stubGlobal("fetch", harness.notion.fetchStub)
       await harness.ingest("tg:7:7", "Idea seven", true)
-      const expectedId = await instanceIdFor("page_1")
+      const expectedId = await claimInstanceId("page_1")
       const instance = harness.workflows.get(expectedId) as FakeWorkflowInstance
       instance.status = "errored"
       await harness.start("page_1", "1")
@@ -300,7 +302,7 @@ describe("IdeaIngestDO", () => {
     const harness = makeHarness()
     vi.stubGlobal("fetch", harness.notion.fetchStub)
     await harness.ingest("tg:9:9", "Idea nine", true)
-    const expectedId = await instanceIdFor("page_1")
+    const expectedId = await claimInstanceId("page_1")
     const instance = harness.workflows.get(expectedId) as FakeWorkflowInstance
     instance.status = "complete"
     await harness.start("page_1", "1")

@@ -28,9 +28,15 @@ export async function migrateFile(
   file: "ideas.md" | "archive.md",
 ): Promise<{ created: number; skipped: number; failures: Array<{ key: string; error: string }> }> {
   const prefix = LEGACY_PREFIXES[file]
-  const { content } = await client.readFile(file)
-  const ideas = parseIdeas(content)
   const report = { created: 0, skipped: 0, failures: [] as Array<{ key: string; error: string }> }
+  let ideas: LegacyIdea[]
+  try {
+    const { content } = await client.readFile(file)
+    ideas = parseIdeas(content)
+  } catch (err) {
+    report.failures.push({ key: file, error: err instanceof Error ? err.message : String(err) })
+    return report
+  }
   for (const idea of ideas) {
     const key = `${prefix}${idea.id}`
     try {

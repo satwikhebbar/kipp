@@ -26,6 +26,14 @@ function statusPage(id: string, kippId: number, status: string, lastEdited = "20
   }
 }
 
+function statusOf(page: NotionPage): string {
+  return (page.properties.Status as { status: { name: string } }).status.name
+}
+
+function kippIdOf(page: NotionPage): number {
+  return (page.properties["Kipp ID"] as { unique_id: { number: number } }).unique_id.number
+}
+
 function notionFetch(pages: NotionPage[]) {
   return vi.fn(async (url: RequestInfo | URL, opts?: RequestInit) => {
     const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
@@ -37,16 +45,26 @@ function notionFetch(pages: NotionPage[]) {
       headers: new Map(),
     })
     if (urlStr === `https://api.notion.com/v1/data_sources/${NOTION_DS}/query`) {
-      const body = JSON.parse(opts?.body as string) as { filter?: { property: string; status?: { equals?: string } } }
-      const filterStatus = body.filter?.property === "Status" ? body.filter.status?.equals : undefined
-      let results = filterStatus
-        ? pages.filter((p) => (p.properties.Status as { status: { name: string } }).status.name === filterStatus)
-        : [...pages]
-      results = results.sort(
-        (a, b) =>
-          (a.properties["Kipp ID"] as { unique_id: { number: number } }).unique_id.number -
-          (b.properties["Kipp ID"] as { unique_id: { number: number } }).unique_id.number,
-      )
+      const body = JSON.parse(opts?.body as string) as {
+        filter?: {
+          property?: string
+          status?: { equals?: string }
+          or?: Array<{ property?: string; status?: { equals?: string } }>
+        }
+        sorts?: Array<{ property?: string; timestamp?: string; direction: string }>
+      }
+      const statuses =
+        body.filter?.property === "Status" && body.filter.status?.equals
+          ? [body.filter.status.equals]
+          : (body.filter?.or ?? [])
+              .filter((clause) => clause.property === "Status")
+              .map((clause) => clause.status?.equals)
+              .filter((value): value is string => Boolean(value))
+      let results = statuses.length > 0 ? pages.filter((p) => statuses.includes(statusOf(p))) : [...pages]
+      // Mirror the manager's Kipp ID ascending sort only when the production
+      // sort configuration is present, so a missing sort in cadence fails tests.
+      const sortByKippId = (body.sorts ?? []).some((s) => s.property === "Kipp ID" && s.direction === "ascending")
+      if (sortByKippId) results = results.sort((a, b) => kippIdOf(a) - kippIdOf(b))
       return respond({ object: "list", results, has_more: false, next_cursor: null })
     }
     const markdownMatch = urlStr.match(/\/v1\/pages\/([^/]+)\/markdown$/)
@@ -159,7 +177,8 @@ describe("handleCadenceCron", () => {
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
     expect(result.started).toBe(true)
-    expect(result.ideaId).toBe("wf-1")
+    expect(result.ideaId).toBe("1")
+    expect(result.workflowInstanceId).toBe("wf-1")
     const claimMock = env.startMocks.get("claim:p1")!
     expect(claimMock).toBeDefined()
     const [, init] = claimMock.mock.calls[0]

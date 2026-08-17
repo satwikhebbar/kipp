@@ -104,6 +104,7 @@ function pageJson(page: HarnessPage) {
 
 /** Builds a fetch mock that routes GitHub prompt reads, Notion page/markdown/PATCH, Telegram, and LinkedIn. */
 function buildFetch(pages: HarnessPage[], opts: { linkedinStatus?: number; linkedinBody?: string } = {}) {
+  const state = pages.map((page) => ({ ...page }))
   const patches: { pageId: string; body: Record<string, unknown> }[] = []
   const telegramTexts: string[] = []
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -116,7 +117,7 @@ function buildFetch(pages: HarnessPage[], opts: { linkedinStatus?: number; linke
     if (url.includes("api.notion.com")) {
       const md = url.match(/\/v1\/pages\/([^/]+)\/markdown$/)
       if (md) {
-        const page = pages.find((p) => p.id === md[1])
+        const page = state.find((p) => p.id === md[1])
         if (!page) return ok({ message: "object_not_found" }, 404)
         return ok({
           object: "page_markdown",
@@ -128,7 +129,7 @@ function buildFetch(pages: HarnessPage[], opts: { linkedinStatus?: number; linke
       }
       const pageMatch = url.match(/\/v1\/pages\/([^/]+)$/)
       if (pageMatch) {
-        const page = pages.find((p) => p.id === pageMatch[1])
+        const page = state.find((p) => p.id === pageMatch[1])
         if (!page) return ok({ message: "object_not_found" }, 404)
         if (init?.method === "PATCH") {
           const body = JSON.parse((init.body as string) ?? "{}") as Record<string, unknown>

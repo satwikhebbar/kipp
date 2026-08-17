@@ -1,43 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { Env } from "../core/types"
 import { handleRssCron } from "../triggers/rss"
-import {
-  createFakeIdeaIngest,
-  createFakeInteractionRouter,
-  createFakeNetwork,
-  createFakeWorkflowBinding,
-} from "./setup"
+import { createBaseEnv, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 const RSS_FEED_URL = "https://newsletter.test/feed"
 
-function baseEnv(overrides?: Partial<Env>): Env {
-  const env = {
-    GITHUB_PAT: "pat",
-    DATA_REPO_OWNER: "o",
-    DATA_REPO_NAME: "r",
-    TELEGRAM_BOT_TOKEN: "bot:token",
-    TELEGRAM_WEBHOOK_SECRET: "my-secret",
-    TELEGRAM_ALLOWED_USER_ID: "",
-    LINKEDIN_CLIENT_ID: "",
-    LINKEDIN_CLIENT_SECRET: "",
-    LINKEDIN_ACCESS_TOKEN: "",
-    LINKEDIN_AUTHOR_URN: "",
-    LLM_API_KEY: "key",
-    LLM_PROVIDER: "deepseek",
-    POSTING_CADENCE_DAYS: "7",
-    SUBSTACK_RSS_URL: RSS_FEED_URL,
-    WAIT_FOR_FEEDBACK_HOURS: "168",
-    NOTION_API_KEY: "secret",
-    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
-    NOTION_FREE_TIER: "false",
-    TOKEN_VAULT: {} as never,
-    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
-    PIPELINE_WORKFLOW: {} as never,
-    ...overrides,
-  } as never as Env
-  env.IDEA_INGEST = createFakeIdeaIngest(env)
-  return env
-}
+const baseEnv = (overrides?: Parameters<typeof createBaseEnv>[0]) =>
+  createBaseEnv({ SUBSTACK_RSS_URL: RSS_FEED_URL, ...overrides })
 
 const RSS_ITEM_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">

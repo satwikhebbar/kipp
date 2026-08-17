@@ -6,6 +6,7 @@ vi.stubGlobal("fetch", mockFetch)
 import { INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
+import { createFakeIdeaIngestStub } from "./helpers/idea-ingest-stub"
 
 function b64(s: string): string {
   const bytes = new TextEncoder().encode(s)
@@ -15,7 +16,12 @@ function b64(s: string): string {
 }
 
 function mockEnv() {
-  const ingestFetches = new Map<string, ReturnType<typeof vi.fn>>()
+  const { stub, ingestFetches } = createFakeIdeaIngestStub({
+    pageId: "page_1",
+    ideaId: "1",
+    workflowInstanceId: "wf-1",
+    alreadyStarted: false,
+  })
   return {
     GITHUB_PAT: "pat",
     DATA_REPO_OWNER: "o",
@@ -37,21 +43,7 @@ function mockEnv() {
       idFromName: vi.fn(() => "router-id"),
       get: vi.fn(() => ({ fetch: vi.fn(async () => Response.json({ interaction: null })) })),
     },
-    IDEA_INGEST: {
-      idFromName: (name: string) => ({ name }),
-      get: (id: { name: string }) => {
-        let fetchMock = ingestFetches.get(id.name)
-        if (!fetchMock) {
-          fetchMock = vi
-            .fn()
-            .mockResolvedValue(
-              Response.json({ pageId: "page_1", ideaId: "1", workflowInstanceId: "wf-1", alreadyStarted: false }),
-            )
-          ingestFetches.set(id.name, fetchMock)
-        }
-        return { fetch: fetchMock }
-      },
-    },
+    IDEA_INGEST: stub,
     ingestFetches,
   }
 }

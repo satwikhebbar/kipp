@@ -182,6 +182,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const initialMessages = createLinkedInConversation(stylePrompt, {
         title: idea.title,
         body: idea.body,
+        substackBody: idea.substackBody,
       })
       const session = await runLinkedInToolSession(provider, initialMessages)
       logRuntime(this.env, {
@@ -253,6 +254,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     let currentDraft = state.draft
     let currentMessages = state.messages
+    let runningInputTokens = state.costInputTokens ?? 0
+    let runningOutputTokens = state.costOutputTokens ?? 0
+    let latestCostLine = state.costLine
     for (let i = 0; i < MAX_FEEDBACK_ROUNDS; i++) {
       const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || String(DEFAULT_WAIT_FOR_FEEDBACK_HOURS)
       logRuntime(this.env, {
@@ -370,13 +374,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
         await stepDo("archive", async () => {
           const manager = createIdeaManager(createNotionClient(this.env))
-          const idea = await manager.getIdea(pageId)
-          await manager.moveToArchive(idea)
+          await manager.updateIdea(pageId, { status: "finalized" })
         })
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
           await stepDo("notify-published", async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-            await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${state.costLine}`)
+            await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${latestCostLine}`)
           })
         }
         const completion = await stepDo("workflow-complete", async () =>
@@ -412,12 +415,10 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         if (!session.terminal)
           throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
         const nextDraft = session.terminal.response
-        const prevInput = state.costInputTokens ?? 0
-        const prevOutput = state.costOutputTokens ?? 0
         const stepUsage = session.usage
         const cumulativeUsage: LLMUsage = {
-          inputTokens: prevInput + stepUsage.inputTokens,
-          outputTokens: prevOutput + stepUsage.outputTokens,
+          inputTokens: runningInputTokens + stepUsage.inputTokens,
+          outputTokens: runningOutputTokens + stepUsage.outputTokens,
         }
         const cost = computeCost(cumulativeUsage, model)
         const costLine = formatCostLine(cost)
@@ -429,6 +430,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           costLine,
           model,
         })
+        runningInputTokens = cumulativeUsage.inputTokens
+        runningOutputTokens = cumulativeUsage.outputTokens
+        latestCostLine = costLine
         return nextState
       })
       currentDraft = revised.draft

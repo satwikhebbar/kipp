@@ -7,7 +7,6 @@
     "dev": "wrangler dev --config wrangler.local.toml",
     "webhook:dev": "bash tools/dev-webhook.sh",
     "deploy": "bash tools/pre-deploy-check.sh && wrangler deploy --config wrangler.prod.toml",
-    "migrate:notion": "tsx scripts/migrate-to-notion/migrate.ts",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "lint:ci": "biome ci src/",
@@ -16,6 +15,7 @@
     "test": "vitest run",
     "test:unit": "vitest run src/__tests__/",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:migration": "vitest run --config vitest.migration.config.ts",
     "test:provider-contract": "DEEPSEEK_CONTRACT=1 vitest run src/__contract__/deepseek-calendar.contract.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
@@ -24,7 +24,6 @@
     "@biomejs/biome": "^2.5.3",
     "@cloudflare/workers-types": "^5.20250710.1",
     "lefthook": "^2.1.10",
-    "tsx": "^4.19.2",
     "typescript": "^5.8.0",
     "vitest": "^3.1.0",
     "wrangler": "^4.10.0"
