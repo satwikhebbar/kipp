@@ -2,7 +2,7 @@
 
 ## Telegram ingress and interaction routing
 
-Telegram commands start workflows; replies and callback buttons resume the
+Telegram commands ingest or start work; replies and callback buttons resume the
 specific waiting workflow through short-lived opaque registrations.
 
 ```mermaid
@@ -10,6 +10,7 @@ sequenceDiagram
   participant U as Owner
   participant T as Telegram
   participant W as Worker trigger
+  participant I as IdeaIngestDO
   participant R as InteractionRouterDO
   participant F as Waiting workflow
 
@@ -17,7 +18,12 @@ sequenceDiagram
   T->>W: webhook with secret header
   W->>W: verify allowed user and parse command
   alt new command
-    W->>F: create LinkedIn or Calendar workflow
+    alt LinkedIn idea command
+      W->>I: ingest or claim Notion idea
+      I->>F: create or resume LinkedIn workflow
+    else Calendar command
+      W->>F: create Calendar workflow
+    end
   else reply or callback
     W->>R: claim opaque interaction
     R-->>W: workflow target and interaction kind
@@ -27,8 +33,10 @@ sequenceDiagram
 
 ## LinkedIn idea capture, generation, and review
 
-Telegram `/add` writes a raw idea to the private data repository. `/generate`,
-the daily RSS poll, and the weekly cadence check may start `PipelineWorkflow`.
+Telegram `/add` and RSS create raw pages in the Notion Ideas data source through
+`IdeaIngestDO`. `/generate`, the daily RSS poll, and the weekly cadence check
+may start `PipelineWorkflow`; `IdeaIngestDO` ensures a page has at most one
+active deterministic workflow instance.
 The LinkedIn agent returns a workflow-specific `ready_for_review` terminal
 outcome; it cannot approve, publish, archive, or access credentials.
 
@@ -37,7 +45,9 @@ sequenceDiagram
   participant U as Owner
   participant T as Telegram
   participant W as Worker trigger
-  participant G as GitHub data repo
+  participant I as IdeaIngestDO
+  participant N as Notion Ideas data source
+  participant G as GitHub style prompt
   participant P as PipelineWorkflow
   participant A as Bounded LinkedIn agent
   participant V as TokenVaultDO
@@ -45,12 +55,14 @@ sequenceDiagram
 
   U->>T: /add idea or /generate
   T->>W: verified webhook
-  W->>G: save or select raw idea
-  W->>P: create workflow
-  P->>G: read idea and style instructions
+  W->>I: ingest or select raw idea
+  I->>N: create or claim page
+  I->>P: create workflow for page
+  P->>N: read idea and persist lifecycle updates
+  P->>G: read optional style instructions
   P->>A: bounded native-tool session
   A-->>P: ready_for_review
-  P->>G: persist draft and awaiting-feedback state
+  P->>N: persist draft and awaiting-feedback state
   P->>T: send draft with Approve and Revise controls
   P->>P: durably wait for interaction
   alt revision feedback
@@ -58,14 +70,14 @@ sequenceDiagram
     T->>P: routed interaction
     P->>A: prior transcript plus feedback
     A-->>P: replacement ready_for_review
-    P->>G: replace stored draft
+    P->>N: replace stored draft
     P->>T: send revised review controls
   else explicit approval
     U->>T: Approve
     T->>P: routed interaction
     P->>V: read LinkedIn token
     P->>LI: create lifecycleState DRAFT
-    P->>G: archive finalized idea
+    P->>N: mark idea finalized
     P->>T: confirm LinkedIn draft
   end
 ```

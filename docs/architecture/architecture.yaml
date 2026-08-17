@@ -17,15 +17,16 @@ runtime_components:
       - calendar_workflow
       - token_vault
       - interaction_router
+      - idea_ingest
       - triggers
   pipeline_workflow:
-    implementation: src/workflow.ts
+    implementation: src/linkedin/workflow.ts
     owns:
       - bounded LinkedIn native-tool drafting and revision orchestration
       - approval wait states
       - creating the LinkedIn draft after explicit approval
     depends_on:
-      - backlog
+      - ideas
       - agents
       - providers
       - runtime
@@ -33,7 +34,7 @@ runtime_components:
       - token_vault
       - interaction_router
   calendar_workflow:
-    implementation: src/calendar-workflow.ts and src/calendar-agent-workflow.ts
+    implementation: src/calendar/workflow.ts and src/calendar/agent-workflow.ts
     owns:
       - bounded native-tool interpretation of one-off and recurring Calendar requests
       - safe transcript and versioned opaque plan and option ledger persistence
@@ -47,7 +48,7 @@ runtime_components:
       - token_vault
       - interaction_router
   token_vault:
-    implementation: src/token-vault.ts
+    implementation: src/core/token-vault.ts
     type: Cloudflare Durable Object with SQLite storage
     owns:
       - OAuth state and expiry cleanup
@@ -56,12 +57,21 @@ runtime_components:
     depends_on:
       - crypto
   interaction_router:
-    implementation: src/interaction-router.ts
+    implementation: src/core/interaction-router.ts
     type: Cloudflare Durable Object with SQLite storage
     owns:
       - short-lived opaque Telegram interaction registrations
       - idempotent claim, acknowledgement, expiry, and bounded cleanup
     depends_on: []
+  idea_ingest:
+    implementation: src/core/idea-ingest.ts
+    type: Cloudflare Durable Object with SQLite storage
+    owns:
+      - idempotent Notion idea creation and adoption
+      - deterministic per-page PipelineWorkflow start ownership and bounded repair
+    depends_on:
+      - ideas
+      - pipeline_workflow
 
 modules:
   triggers:
@@ -71,20 +81,20 @@ modules:
       - RSS, cadence, and token-check schedules
       - LinkedIn and Google Calendar OAuth start and callback handling
     depends_on:
-      - backlog
+      - ideas
       - integrations
       - providers
       - pipeline_workflow
       - calendar_workflow
       - token_vault
       - interaction_router
-  backlog:
-    path: src/backlog
+      - idea_ingest
+  ideas:
+    path: src/linkedin/ideas
     owns:
-      - parsing and serializing ideas and archive files
-      - backlog mutation and archive retention
+      - Notion-backed idea creation, retrieval, lifecycle updates, and queries
     depends_on:
-      - integrations.github
+      - integrations.notion
   agents:
     path: src/agent
     owns:
@@ -96,7 +106,7 @@ modules:
       - providers
       - runtime
   calendar_domain:
-    path: src/calendar-validation.ts, src/calendar-evaluation.ts, src/calendar-plan.ts, src/calendar-scheduling.ts, src/calendar-recurrence.ts, and src/calendar-messages.ts
+    path: src/calendar
     owns:
       - strict one-off and recurring proposal schemas
       - aggregate typed semantic validation
@@ -126,35 +136,41 @@ modules:
   integrations:
     path: src/integrations
     owns:
-      - GitHub Contents API access
+      - Notion Ideas data-source access
+      - GitHub Contents API access for style prompts
       - Telegram Bot API access
       - LinkedIn draft creation
       - Google Calendar FreeBusy, event creation, verification, and token refresh
     depends_on:
+      - Notion API
       - GitHub API
       - Telegram Bot API
       - LinkedIn API
       - Google Calendar API
   prompts:
-    path: src/prompts
+    path: src/linkedin/prompts
     owns:
-      - default writing-style prompt and data-repository resolution
+      - default writing-style prompt and optional GitHub resolution
     depends_on:
       - integrations.github
   crypto:
-    path: src/crypto.ts
+    path: src/core/crypto.ts
     owns:
       - AES-256-GCM token envelope encryption and decryption
     depends_on: []
 
 data_stores:
-  github_data_repository:
-    type: Private GitHub repository accessed through the Contents API
+  notion_ideas_data_source:
+    type: Notion data source accessed through the Notion API
     data:
-      - ideas.md
-      - archive.md
+      - LinkedIn idea page bodies and metadata
+      - Kipp ID, status, source, and idempotency key properties
+    owner: ideas
+  github_style_prompt_repository:
+    type: Optional private GitHub repository accessed through the Contents API
+    data:
       - optional style-prompt.md
-    owner: backlog
+    owner: prompts
   token_vault_storage:
     type: Durable Object SQLite storage
     data:
@@ -167,6 +183,12 @@ data_stores:
       - opaque Telegram callback and reply registrations
       - workflow target, interaction kind, version, expiry, and delivery state
     owner: interaction_router
+  idea_ingest_storage:
+    type: Durable Object SQLite storage
+    data:
+      - idempotency key to Notion page ownership records
+      - per-page workflow-start state and repair cooldown
+    owner: idea_ingest
   workflow_state:
     type: Cloudflare Workflows durable execution state
     data:
@@ -178,6 +200,7 @@ data_stores:
 external_systems:
   - Telegram Bot API
   - Substack RSS feed
+  - Notion API
   - GitHub Contents API
   - LinkedIn OAuth and Posts API
   - Google OAuth and Calendar API

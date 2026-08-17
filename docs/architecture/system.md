@@ -18,8 +18,10 @@ flowchart LR
   worker --> calendarFlow["Calendar Workflow"]
   worker <--> router["InteractionRouterDO"]
   worker <--> vault["TokenVaultDO"]
+  worker <--> ingest["IdeaIngestDO"]
 
-  linkedinFlow <--> data["Private GitHub data repository"]
+  linkedinFlow <--> data["Notion Ideas data source"]
+  linkedinFlow --> github["Optional GitHub style prompt"]
   linkedinFlow --> llm["Gemini or DeepSeek API"]
   linkedinFlow --> linkedin["LinkedIn API"]
   calendarFlow --> llm
@@ -52,12 +54,15 @@ flowchart TB
     calendarFlow["CalendarWorkflow\nCalendar conversation and writes"]
     router["InteractionRouterDO\nshort-lived Telegram routing"]
     vault["TokenVaultDO\nencrypted OAuth tokens"]
+    ingest["IdeaIngestDO\nidempotent idea ingestion and workflow ownership"]
   end
 
   triggers --> linkedinFlow
   triggers --> calendarFlow
   triggers --> router
   triggers --> vault
+  triggers --> ingest
+  ingest --> linkedinFlow
   linkedinFlow <--> router
   calendarFlow <--> router
   linkedinFlow <--> vault
