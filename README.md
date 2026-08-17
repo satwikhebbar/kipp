@@ -166,6 +166,7 @@ production secrets in Cloudflare's secret store. Never commit credentials.
 | LinkedIn OAuth | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_AUTHOR_URN`, optional `LINKEDIN_REDIRECT_ORIGIN` |
 | Google OAuth | `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, optional `GOOGLE_CALENDAR_REDIRECT_ORIGIN` |
 | GitHub data | `GITHUB_PAT`, `DATA_REPO_OWNER`, `DATA_REPO_NAME`, `DATA_REPO_BRANCH`, optional `PROMPT_STYLE_PATH` |
+| Notion | `NOTION_API_KEY`, `NOTION_IDEAS_DATA_SOURCE_ID` (bare UUID, see step 7), optional `NOTION_FREE_TIER` (`"false"` disables the 350 ms request throttle) |
 | Token encryption | `TOKEN_ENCRYPTION_KEY_IDS`, plus one `TOKEN_ENCRYPTION_KEY_<key-id>` secret per listed ID |
 | Access | `ACCESS_TEAM`, `ACCESS_AUDIENCE`, `ACCESS_ADMIN_EMAILS` |
 | Workflow behavior | `SUBSTACK_RSS_URL`, `POSTING_CADENCE_DAYS`, `WAIT_FOR_FEEDBACK_HOURS`, `TIMEZONE` |
@@ -221,7 +222,49 @@ The requested Calendar consent supports owned-event operations and availability
 reads on the connected account's primary calendar; it does not request broad
 account access.
 
-### 7. Register the Telegram webhook
+### 7. Create the Notion Ideas data source
+
+Kipp stores LinkedIn ideas as pages in a Notion data source. Notion's model has
+two layers: a **database** (what you create in the UI) and the **data source**
+it contains (what the API addresses). All Kipp requests use the data source ID,
+never the database ID.
+
+1. Create a Notion internal integration (Settings → Connections → Develop or
+   reuse an existing one) and copy its token as `NOTION_API_KEY`. Give it
+   read/write content and property capabilities.
+2. Create an empty database with **exactly** these properties:
+
+   | Property | Type | Options / notes |
+   | --- | --- | --- |
+   | `Title` | Title | Page title |
+   | `Kipp ID` | Unique ID | Auto-assigned, read-only; never written by Kipp |
+   | `Status` | Status | `raw`, `awaiting-feedback`, `awaiting-feedback-expired`, `finalized` |
+   | `Source` | Select | `substack`, `telegram`, `manual` |
+   | `Substack URL` | URL | Optional |
+   | `Chat ID` | Rich text | Optional; Telegram correlation |
+   | `Idempotency Key` | Rich text | Optional; caller-supplied dedup key |
+
+   A missing or mistyped property (e.g. `Kipp ID` as Rich text instead of
+   Unique ID) surfaces as a Notion validation error at runtime, so create the
+   exact schema before deploying.
+3. Share the database with the integration: open the database, click **•••** →
+   **Add connections**, and select the integration. Without this, every request
+   returns `404 object_not_found` and `/search` lists nothing.
+4. Find the data source ID. The "Copy data source ID" button in Notion emits
+   `collection://<uuid>`, but the API only accepts the **bare UUID** — strip
+   the `collection://` prefix. To fetch it via the API instead, take the
+   database ID from the database's URL (the 32-char hex string), then:
+
+   ```bash
+   curl "https://api.notion.com/v1/databases/<database-id>" \
+     -H "Authorization: Bearer $NOTION_API_KEY" \
+     -H "Notion-Version: 2026-03-11"
+   ```
+
+   and read `data_sources[0].id`. Set that bare UUID as
+   `NOTION_IDEAS_DATA_SOURCE_ID`.
+
+### 8. Register the Telegram webhook
 
 ```bash
 curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<worker-host>/webhook/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
@@ -244,9 +287,23 @@ Telegram permits only one webhook per bot, so use a separate development bot.
    ```
 
    Never enable `ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK` in production.
-2. Start Kipp with `pnpm dev` (normally on port 8787).
-3. Expose it with `ngrok http 8787`.
-4. Run `pnpm run webhook:dev` to point the development bot at the active tunnel.
+2. Add the Notion keys from step 7 to `.dev.vars`: `NOTION_API_KEY` and
+   `NOTION_IDEAS_DATA_SOURCE_ID`.
+3. Start Kipp with `pnpm dev` (normally on port 8787).
+4. Expose it with `ngrok http 8787`.
+5. Run `pnpm run webhook:dev` to point the development bot at the active tunnel.
+
+Scheduled jobs (RSS ingest, cadence, token check) do not fire locally on their
+own. Start Wrangler with scheduled-event testing and trigger them by URL:
+
+```bash
+pnpm exec wrangler dev --config wrangler.local.toml --test-scheduled
+curl "http://127.0.0.1:8787/__scheduled?cron=0+9+*+*+*"   # RSS ingest
+curl "http://127.0.0.1:8787/__scheduled?cron=0+9+*+*+1"   # cadence
+```
+
+Local Durable Objects/Workflows are emulated and isolated per worktree, while
+Notion, Telegram, and LLM calls hit the real services.
 
 ## Telegram commands
 
