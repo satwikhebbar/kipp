@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { GithubError } from "../integrations/github"
+import { NotionError } from "../integrations/notion"
 import { userFacingFailureMessage } from "../runtime/user-failures"
 
 describe("userFacingFailureMessage", () => {
@@ -20,6 +21,13 @@ describe("userFacingFailureMessage", () => {
     const message = userFacingFailureMessage(new GithubError(500, "boom"))
     expect(message).toContain("storage request failed")
     expect(message).toContain("500")
+  })
+
+  it("maps NotionError 401 to storage-auth wording without leaking error body", () => {
+    const message = userFacingFailureMessage(new NotionError(401, "Notion request failed (HTTP 401): SECRETBODY"))
+    expect(message).toContain("Storage access was denied")
+    expect(message).toContain("401")
+    expect(message).not.toContain("SECRETBODY")
   })
 
   it("maps unknown errors to generic wording and never leaks message content", () => {
