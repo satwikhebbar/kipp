@@ -7,6 +7,7 @@ export interface IdeaInput {
   source: Source
   body: string
   substackUrl?: string
+  substackBody?: string
   chatId?: string
   idempotencyKey?: string
 }
@@ -15,6 +16,7 @@ export interface IdeaUpdate {
   title?: string
   status?: IdeaStatus
   substackUrl?: string
+  substackBody?: string
   chatId?: string
   body?: string
 }
@@ -23,6 +25,7 @@ export interface IdeaManager {
   listIdeas(): Promise<IdeaSummary[]>
   getIdea(pageId: string): Promise<Idea>
   getIdeasByStatus(status: IdeaStatus): Promise<IdeaSummary[]>
+  getIdeasByStatuses(statuses: IdeaStatus[]): Promise<IdeaSummary[]>
   getNextIdea(): Promise<Idea | null>
   createIdea(input: IdeaInput): Promise<Idea>
   updateIdea(pageId: string, update: IdeaUpdate): Promise<void>
@@ -53,6 +56,15 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
     return pages.map(pageToSummary)
   }
 
+  async function getIdeasByStatuses(statuses: IdeaStatus[]): Promise<IdeaSummary[]> {
+    if (statuses.length === 0) return []
+    const pages = await client.queryPages(
+      { or: statuses.map((status) => ({ property: "Status", status: { equals: status } })) },
+      KIPP_ID_ASCENDING,
+    )
+    return pages.map(pageToSummary)
+  }
+
   async function getNextIdea(): Promise<Idea | null> {
     const pages = await client.queryPages({ property: "Status", status: { equals: "raw" } }, KIPP_ID_ASCENDING)
     if (pages.length === 0) return null
@@ -69,6 +81,7 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
       status: input.status ?? "raw",
       source: input.source,
       substackUrl: input.substackUrl,
+      substackBody: input.substackBody,
       chatId: input.chatId,
       idempotencyKey: input.idempotencyKey,
     }
@@ -81,12 +94,14 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
       update.title !== undefined ||
       update.status !== undefined ||
       update.substackUrl !== undefined ||
+      update.substackBody !== undefined ||
       update.chatId !== undefined
     ) {
       await client.patchPageProperties(pageId, {
         title: update.title,
         status: update.status,
         substackUrl: update.substackUrl,
+        substackBody: update.substackBody,
         chatId: update.chatId,
       })
     }
@@ -98,12 +113,12 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
   }
 
   async function findBySubstackUrl(url: string): Promise<IdeaSummary | null> {
-    const pages = await client.queryPages({ property: "Substack URL", url: { equals: url } }, [])
+    const pages = await client.queryPages({ property: "Substack URL", url: { equals: url } }, [], 1)
     return pages.length > 0 ? pageToSummary(pages[0]) : null
   }
 
   async function findByIdempotencyKey(key: string): Promise<IdeaSummary | null> {
-    const pages = await client.queryPages({ property: "Idempotency Key", rich_text: { equals: key } }, [])
+    const pages = await client.queryPages({ property: "Idempotency Key", rich_text: { equals: key } }, [], 1)
     return pages.length > 0 ? pageToSummary(pages[0]) : null
   }
 
@@ -111,6 +126,7 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
     const pages = await client.queryPages(
       { property: "Status", status: { equals: "finalized" } },
       LAST_EDITED_DESCENDING,
+      1,
     )
     if (pages.length === 0) return 0
     const ts = new Date(pages[0].last_edited_time).getTime()
@@ -121,6 +137,7 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
     listIdeas,
     getIdea,
     getIdeasByStatus,
+    getIdeasByStatuses,
     getNextIdea,
     createIdea,
     updateIdea,

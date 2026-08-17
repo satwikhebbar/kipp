@@ -1,4 +1,5 @@
 import { vi } from "vitest"
+import { claimInstanceId } from "../core/idea-ingest"
 import { CONSUMED_INTERACTION_RETENTION_MS } from "../core/interaction-router"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
 import { createNotionClient } from "../integrations/notion"
@@ -13,6 +14,7 @@ export interface FakeNotionPage {
   markdown: string
   chatId?: string
   substackUrl?: string
+  substackBody?: string
   idempotencyKey?: string
 }
 
@@ -66,6 +68,7 @@ function notionPageJson(p: FakeNotionPage) {
   }
   if (p.chatId) properties["Chat ID"] = { rich_text: [{ type: "text", text: { content: p.chatId } }] }
   if (p.substackUrl) properties["Substack URL"] = { url: p.substackUrl }
+  if (p.substackBody) properties["Substack Body"] = { rich_text: [{ type: "text", text: { content: p.substackBody } }] }
   if (p.idempotencyKey)
     properties["Idempotency Key"] = { rich_text: [{ type: "text", text: { content: p.idempotencyKey } }] }
   return {
@@ -143,6 +146,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
           markdown: body.markdown ?? "",
           chatId: body.properties["Chat ID"]?.rich_text?.[0]?.text?.content,
           substackUrl: body.properties["Substack URL"]?.url,
+          substackBody: body.properties["Substack Body"]?.rich_text?.[0]?.text?.content,
           idempotencyKey: body.properties["Idempotency Key"]?.rich_text?.[0]?.text?.content,
         }
         state.notionPages.set(page.pageId, page)
@@ -258,6 +262,36 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
   return { fetch: fetch as unknown as typeof globalThis.fetch, getState: () => state }
 }
 
+/** Builds a base Env with fake bindings; overrides may supply per-test values. */
+export function createBaseEnv(overrides?: Partial<Env>): Env {
+  const env = {
+    GITHUB_PAT: "pat",
+    DATA_REPO_OWNER: "o",
+    DATA_REPO_NAME: "r",
+    TELEGRAM_BOT_TOKEN: "bot:token",
+    TELEGRAM_WEBHOOK_SECRET: "my-secret",
+    TELEGRAM_ALLOWED_USER_ID: "",
+    LINKEDIN_CLIENT_ID: "",
+    LINKEDIN_CLIENT_SECRET: "",
+    LINKEDIN_ACCESS_TOKEN: "",
+    LINKEDIN_AUTHOR_URN: "",
+    LLM_API_KEY: "key",
+    LLM_PROVIDER: "deepseek",
+    POSTING_CADENCE_DAYS: "7",
+    SUBSTACK_RSS_URL: "",
+    WAIT_FOR_FEEDBACK_HOURS: "168",
+    NOTION_API_KEY: "secret",
+    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
+    NOTION_FREE_TIER: "false",
+    TOKEN_VAULT: {} as never,
+    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
+    PIPELINE_WORKFLOW: {} as never,
+    ...overrides,
+  } as never as Env
+  env.IDEA_INGEST = createFakeIdeaIngest(env)
+  return env
+}
+
 export function createFakeStep() {
   const calledSteps: string[] = []
   const stepDo = vi.fn(async (_name: string, fn: () => unknown) => {
@@ -287,8 +321,16 @@ export function createFakeWorkflowBinding() {
   })
 
   const createBatch = vi.fn(async (items: Array<{ id: string; params: unknown }>) => {
-    created.push(...items)
-    return items
+    const createdNow: Array<{ id: string; params: unknown }> = []
+    for (const item of items) {
+      // Cloudflare Workflows createBatch is idempotent: skip ids already
+      // present (including earlier in this batch) and return only new ones.
+      if (created.some((existing) => existing.id === item.id) || createdNow.some((existing) => existing.id === item.id))
+        continue
+      created.push(item)
+      createdNow.push(item)
+    }
+    return createdNow
   })
 
   const get = vi.fn((instanceId: string) => ({
@@ -312,15 +354,6 @@ export function createFakeWorkflowBinding() {
       get.mockClear()
     },
   }
-}
-
-const INSTANCE_ID_HASH_CHARS = 32
-
-/** Mirrors the deterministic workflow instance id derivation used by IdeaIngestDO. */
-async function claimInstanceId(pageId: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pageId))
-  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
-  return `kipp-${hex.slice(0, INSTANCE_ID_HASH_CHARS)}`
 }
 
 /**

@@ -8,6 +8,7 @@ vi.mock("../providers/index", async () => ({
 }))
 
 import { handleRssCron, itemIdentity, parseRssFeed } from "../triggers/rss"
+import { createFakeIdeaIngestStub } from "./helpers/idea-ingest-stub"
 
 const mockFetch = vi.hoisted(() => vi.fn())
 vi.stubGlobal("fetch", mockFetch)
@@ -94,7 +95,11 @@ function knownSubstackResult(link: string) {
 }
 
 function mockEnv() {
-  const ingestFetches = new Map<string, ReturnType<typeof vi.fn>>()
+  const { stub, ingestFetches } = createFakeIdeaIngestStub({
+    pageId: "page_1",
+    ideaId: "1",
+    workflowInstanceId: "wf-1",
+  })
   return {
     SUBSTACK_RSS_URL: "https://test.substack.com/feed",
     LLM_API_KEY: "key",
@@ -110,22 +115,7 @@ function mockEnv() {
     NOTION_API_KEY: "secret",
     NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
     NOTION_FREE_TIER: "false",
-    IDEA_INGEST: {
-      idFromName: (name: string) => ({ name }),
-      get: (id: { name: string }) => {
-        let fetchMock = ingestFetches.get(id.name)
-        if (!fetchMock) {
-          fetchMock = vi.fn().mockResolvedValue(
-            new Response(JSON.stringify({ pageId: "page_1", ideaId: "1", workflowInstanceId: "wf-1" }), {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            }),
-          )
-          ingestFetches.set(id.name, fetchMock)
-        }
-        return { fetch: fetchMock }
-      },
-    },
+    IDEA_INGEST: stub,
     ingestFetches,
     PIPELINE_WORKFLOW: { create: vi.fn().mockResolvedValue({ id: "wf-1" }) },
   }

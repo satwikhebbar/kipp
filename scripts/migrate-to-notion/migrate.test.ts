@@ -259,6 +259,17 @@ describe("runMigration", () => {
     expect(report.failures).toHaveLength(2)
     expect(report.failures.every((f) => f.key.startsWith("legacy:backlog:"))).toBe(true)
   })
+
+  it("reports a source-read failure as a file-level failure without rejecting the run", async () => {
+    const store: NotionPageStore = { pages: new Map() }
+    const notionFetch = createNotionStub(store)
+    stubNetwork(notionFetch, { "archive.md": ARCHIVE_MD })
+
+    const report = await runMigration(CONFIG)
+    expect(report.failures).toHaveLength(1)
+    expect(report.failures[0].key).toBe("ideas.md")
+    expect(report.created).toBe(1)
+  })
 })
 
 describe("migrate CLI", () => {

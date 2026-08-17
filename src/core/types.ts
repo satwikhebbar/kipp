@@ -50,19 +50,6 @@ export interface WorkflowCost {
   model: string
 }
 
-export interface Idea {
-  pageId: string
-  id: string
-  title?: string
-  status: IdeaStatus
-  created: string
-  source: Source
-  body: string
-  substackUrl?: string
-  idempotencyKey?: string
-  correlation?: { telegramChatId?: string }
-}
-
 /** Metadata-only shape returned by list/query operations; body is absent. */
 export interface IdeaSummary {
   pageId: string
@@ -72,8 +59,14 @@ export interface IdeaSummary {
   created: string
   source: Source
   substackUrl?: string
+  substackBody?: string
   idempotencyKey?: string
   correlation?: { telegramChatId?: string }
+}
+
+/** Hydrated idea: summary metadata plus the page body. */
+export interface Idea extends IdeaSummary {
+  body: string
 }
 
 export interface LLMUsage {

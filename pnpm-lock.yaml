@@ -33,9 +33,6 @@ importers:
       lefthook:
         specifier: ^2.1.10
         version: 2.1.10
-      tsx:
-        specifier: ^4.19.2
-        version: 4.23.12
       typescript:
         specifier: ^5.8.0
         version: 5.9.3
@@ -1676,6 +1673,7 @@ snapshots:
       esbuild: 0.28.1
     optionalDependencies:
       fsevents: 2.3.3
+    optional: true
 
   typescript@5.9.3: {}
 

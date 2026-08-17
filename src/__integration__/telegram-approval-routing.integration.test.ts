@@ -1,41 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { type Env, INTERACTION_KIND } from "../core/types"
+import { INTERACTION_KIND } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
-import {
-  createFakeIdeaIngest,
-  createFakeInteractionRouter,
-  createFakeNetwork,
-  createFakeWorkflowBinding,
-} from "./setup"
+import { createBaseEnv, createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
-function baseEnv(overrides?: Partial<Env>): Env {
-  const env = {
-    GITHUB_PAT: "pat",
-    DATA_REPO_OWNER: "o",
-    DATA_REPO_NAME: "r",
-    TELEGRAM_BOT_TOKEN: "bot:token",
-    TELEGRAM_WEBHOOK_SECRET: "my-secret",
-    TELEGRAM_ALLOWED_USER_ID: "",
-    LINKEDIN_CLIENT_ID: "",
-    LINKEDIN_CLIENT_SECRET: "",
-    LINKEDIN_ACCESS_TOKEN: "",
-    LINKEDIN_AUTHOR_URN: "",
-    LLM_API_KEY: "key",
-    LLM_PROVIDER: "deepseek",
-    POSTING_CADENCE_DAYS: "7",
-    SUBSTACK_RSS_URL: "",
-    WAIT_FOR_FEEDBACK_HOURS: "168",
-    NOTION_API_KEY: "secret",
-    NOTION_IDEAS_DATA_SOURCE_ID: "ds-1",
-    NOTION_FREE_TIER: "false",
-    TOKEN_VAULT: {} as never,
-    INTERACTION_ROUTER: createFakeInteractionRouter().namespace,
-    PIPELINE_WORKFLOW: {} as never,
-    ...overrides,
-  } as never as Env
-  env.IDEA_INGEST = createFakeIdeaIngest(env)
-  return env
-}
+const baseEnv = createBaseEnv
 
 function telegramCallbackRequest(body: Record<string, unknown>) {
   return new Request("http://localhost", {

@@ -75,16 +75,16 @@ export class IdeaIngestDO implements DurableObject {
     if (!key || !idea?.body) return new Response("invalid ingest", { status: 400 })
 
     const manager = createIdeaManager(createNotionClient(this.env))
-    const record = await this.ctx.storage.get<IngestRecord>(RECORD_KEY)
-    let pageId = record?.pageId
-    let ideaId = record?.ideaId
-    if (!pageId) {
+    // Serialize read-create-persist so concurrent ingest:{key} requests cannot
+    // both see an empty record and create duplicate Notion pages. createIdea
+    // awaits outbound Notion calls, which would otherwise open the input gate.
+    const { pageId, ideaId } = await this.ctx.blockConcurrencyWhile(async () => {
+      const record = await this.ctx.storage.get<IngestRecord>(RECORD_KEY)
+      if (record?.pageId && record.ideaId) return { pageId: record.pageId, ideaId: record.ideaId }
       const created = await manager.createIdea({ ...idea, idempotencyKey: key })
-      pageId = created.pageId
-      ideaId = created.id
-      await this.ctx.storage.put<IngestRecord>(RECORD_KEY, { key, pageId, ideaId })
-    }
-    if (!pageId || !ideaId) throw new Error("IdeaIngest could not resolve pageId/ideaId")
+      await this.ctx.storage.put<IngestRecord>(RECORD_KEY, { key, pageId: created.pageId, ideaId: created.id })
+      return { pageId: created.pageId, ideaId: created.id }
+    })
 
     let workflowInstanceId: string | undefined
     let alreadyStarted: boolean | undefined
@@ -142,6 +142,7 @@ export class IdeaIngestDO implements DurableObject {
   private async delegateStart(pageId: string, ideaId: string, source: Source): Promise<StartResult> {
     const id = this.env.IDEA_INGEST.idFromName(`claim:${pageId}`)
     const stub = this.env.IDEA_INGEST.get(id)
+    // The DO stub.fetch URL host is unused; only the pathname routes inside the object.
     const res = await stub.fetch("http://ingest/start", {
       method: "POST",
       body: JSON.stringify({ pageId, ideaId, source }),
@@ -152,7 +153,7 @@ export class IdeaIngestDO implements DurableObject {
 }
 
 /** Derives the deterministic Cloudflare Workflow instance id for a Notion page id. */
-async function claimInstanceId(pageId: string): Promise<string> {
+export async function claimInstanceId(pageId: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pageId))
   const hex = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(HEX_RADIX).padStart(HEX_BYTE_LENGTH, "0"),
@@ -168,6 +169,7 @@ export function createIdeaIngest(env: Env): {
   async function ingest(input: { key: string; idea: IdeaInput; startWorkflow?: boolean }): Promise<IngestResult> {
     const id = env.IDEA_INGEST.idFromName(`ingest:${input.key}`)
     const stub = env.IDEA_INGEST.get(id)
+    // The DO stub.fetch URL host is unused; only the pathname routes inside the object.
     const res = await stub.fetch("http://ingest/ingest", {
       method: "POST",
       body: JSON.stringify(input),

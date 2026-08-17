@@ -149,12 +149,27 @@ describe("createNotionClient", () => {
     mockFetch
       .mockResolvedValueOnce(ok({ ...QUERY_RESPONSE, has_more: true, next_cursor: "c1" }))
       .mockResolvedValueOnce(ok({ ...QUERY_RESPONSE, has_more: false, next_cursor: null }))
-    const client = createNotionClient(ENV)
+    const client = createNotionClient({ ...ENV, NOTION_FREE_TIER: "false" })
     const pages = await client.queryPages(null, [])
     expect(pages).toHaveLength(2)
     expect(mockFetch).toHaveBeenCalledTimes(2)
     const [, init] = mockFetch.mock.calls[1]
     expect(JSON.parse((init as RequestInit).body as string).start_cursor).toBe("c1")
+  })
+
+  it("stops fetching once a result limit is reached", async () => {
+    mockFetch.mockResolvedValueOnce(ok({ ...QUERY_RESPONSE, has_more: true, next_cursor: "c1" }))
+    const client = createNotionClient({ ...ENV, NOTION_FREE_TIER: "false" })
+    const pages = await client.queryPages(null, [], 1)
+    expect(pages).toHaveLength(1)
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("throws when the query page cap is reached while has_more remains true", async () => {
+    mockFetch.mockImplementation(() => ok({ ...QUERY_RESPONSE, has_more: true, next_cursor: "c" }))
+    const client = createNotionClient({ ...ENV, NOTION_FREE_TIER: "false" })
+    await expect(client.queryPages(null, [])).rejects.toThrow(/exceeded 100 pages/)
+    expect(mockFetch).toHaveBeenCalledTimes(100)
   })
 
   it("aborts with NotionError on an incomplete query", async () => {
@@ -248,6 +263,38 @@ describe("createNotionClient", () => {
       await vi.advanceTimersByTimeAsync(600)
       await pending
       expect(mockFetch).toHaveBeenCalledTimes(2)
+    } finally {
+      randomSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it("stops after MAX_RETRIES on repeated 429s and rejects with NotionError", async () => {
+    vi.useFakeTimers()
+    try {
+      mockFetch.mockResolvedValue(status({ message: "rate limited" }, 429, "1"))
+      const client = createNotionClient({ ...ENV, NOTION_FREE_TIER: "false" })
+      const pending = client.queryPages(null, [])
+      const assertion = expect(pending).rejects.toThrow(NotionError)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await assertion
+      expect(mockFetch).toHaveBeenCalledTimes(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("stops after MAX_RETRIES on repeated 5xx and rejects with NotionError", async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0)
+    try {
+      mockFetch.mockResolvedValue(status({ message: "boom" }, 503))
+      const client = createNotionClient({ ...ENV, NOTION_FREE_TIER: "false" })
+      const pending = client.queryPages(null, [])
+      const assertion = expect(pending).rejects.toThrow(NotionError)
+      await vi.advanceTimersByTimeAsync(30_000)
+      await assertion
+      expect(mockFetch).toHaveBeenCalledTimes(4)
     } finally {
       randomSpy.mockRestore()
       vi.useRealTimers()
