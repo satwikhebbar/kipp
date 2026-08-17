@@ -7,3 +7,7 @@ pre-commit:
       run: pnpm lint
     test:
       run: pnpm test
+    test-integration:
+      run: pnpm test:integration
+    test-migration:
+      run: pnpm test:migration
