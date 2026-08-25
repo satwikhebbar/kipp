@@ -259,8 +259,10 @@ describe("meal-planning corpus loader", () => {
     expect(() => parseScenario(badCell)).toThrow(ScenarioValidationError)
   })
 
-  it("returns an empty list when no scenario fixtures exist yet", () => {
-    expect(loadScenarios()).toEqual([])
+  it("loads the full scenario corpus sorted by id", () => {
+    const scenarios = loadScenarios()
+    expect(scenarios.length).toBe(12)
+    expect(scenarios.map((scenario) => scenario.id)).toEqual([...scenarios.map((scenario) => scenario.id)].sort())
   })
 
   it("returns an empty list for a missing scenarios directory but re-throws other readdir errors", () => {
