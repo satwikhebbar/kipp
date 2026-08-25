@@ -146,6 +146,7 @@ export interface MealPlanContext {
   feedbackItems?: FeedbackItem[]
   urgentUseByDay?: string
   requireUrgentUseEarly?: boolean
+  requestedRepeats?: string[]
 }
 
 export interface PolicyOutcome {

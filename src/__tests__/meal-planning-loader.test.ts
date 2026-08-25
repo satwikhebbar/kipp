@@ -237,6 +237,14 @@ describe("meal-planning corpus loader", () => {
     expect(validateScenarioStructure(scenario)[0]?.message).toMatch("revision scenarios must reference a recentPlan")
   })
 
+  it("rejects an urgentUseByDay that is not a configured day", () => {
+    const scenario = validScenario({
+      context: validContext({ requireUrgentUseEarly: true, urgentUseByDay: "Never" }),
+    })
+    expect(validateScenarioStructure(scenario)[0]?.message).toMatch('urgentUseByDay "Never" is not a configured day')
+    expect(() => parseScenario(scenario)).toThrow(ScenarioValidationError)
+  })
+
   it("reports schema violations as ScenarioValidationError issues", () => {
     const badCell = {
       ...validScenario(),
