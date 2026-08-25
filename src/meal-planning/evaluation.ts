@@ -205,7 +205,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     if (count > 1) repeatedDishes.add(dish)
   }
   for (const dish of recentDishes) {
-    if (candidateDishes.has(dish)) repeatedDishes.add(dish)
+    if (request.kind !== "revision" && candidateDishes.has(dish)) repeatedDishes.add(dish)
   }
   const dishRepeats = [...repeatedDishes].filter((dish) => !favourites.has(dish) && !requestedRepeats.has(dish)).sort()
   for (const dish of dishRepeats) {

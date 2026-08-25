@@ -1,0 +1,906 @@
+{
+  "id": "no-prior-night-prep",
+  "name": "No prior-night prep",
+  "summary": "Prior-night prep is not allowed; a single prep cell fails and a three-prep day also exceeds the daily limit.",
+  "context": {
+    "schedule": {
+      "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+      "slots": [
+        {
+          "id": "breakfast",
+          "name": "Breakfast",
+          "packed": false,
+          "dry": false,
+          "maxCookMinutes": null
+        },
+        {
+          "id": "snack1",
+          "name": "Snack 1",
+          "packed": true,
+          "dry": true,
+          "maxCookMinutes": 0
+        },
+        {
+          "id": "snack2",
+          "name": "Snack 2",
+          "packed": true,
+          "dry": true,
+          "maxCookMinutes": 0
+        },
+        {
+          "id": "school-lunch",
+          "name": "School lunch",
+          "packed": true,
+          "dry": false,
+          "maxCookMinutes": null
+        },
+        {
+          "id": "home-lunch",
+          "name": "Home lunch",
+          "packed": false,
+          "dry": false,
+          "maxCookMinutes": null
+        }
+      ]
+    },
+    "profile": {
+      "dietaryExclusions": [
+        {
+          "token": "peanut",
+          "ambiguous": false
+        },
+        {
+          "token": "egg",
+          "ambiguous": false
+        }
+      ],
+      "dishRepertoire": [
+        "paratha",
+        "banana",
+        "roasted chana",
+        "bottle gourd dal",
+        "rice and beans",
+        "poha",
+        "apple",
+        "dates",
+        "rajma",
+        "quinoa bowl",
+        "idli",
+        "orange",
+        "mixed seeds",
+        "khichdi",
+        "sweet potato curry",
+        "upma",
+        "pear",
+        "dry coconut",
+        "chole",
+        "ghee rice",
+        "dosa",
+        "pomegranate",
+        "jaggery cubes",
+        "paneer paratha",
+        "masala oats"
+      ],
+      "foodPreferences": {
+        "favourites": ["paratha"],
+        "avoid": []
+      },
+      "allowNewFoods": false,
+      "sensoryGuidelines": [],
+      "morningCookingBudgetMinutes": 40,
+      "priorNightPrepAllowed": false,
+      "pantryBaseline": ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"],
+      "allowFrequentIngredients": ["oil", "spices", "salt", "rice", "wheat flour", "moong dal"]
+    },
+    "customPolicies": [],
+    "weeklyInventory": {
+      "items": [
+        {
+          "name": "poha",
+          "status": "available"
+        },
+        {
+          "name": "idli rice",
+          "status": "available"
+        },
+        {
+          "name": "upma rava",
+          "status": "available"
+        },
+        {
+          "name": "dosa batter",
+          "status": "available"
+        },
+        {
+          "name": "banana",
+          "status": "available"
+        },
+        {
+          "name": "apple",
+          "status": "available"
+        },
+        {
+          "name": "orange",
+          "status": "available"
+        },
+        {
+          "name": "pear",
+          "status": "available"
+        },
+        {
+          "name": "pomegranate",
+          "status": "available"
+        },
+        {
+          "name": "chana",
+          "status": "available"
+        },
+        {
+          "name": "dates",
+          "status": "available"
+        },
+        {
+          "name": "mixed seeds",
+          "status": "available"
+        },
+        {
+          "name": "dry coconut",
+          "status": "available"
+        },
+        {
+          "name": "jaggery",
+          "status": "available"
+        },
+        {
+          "name": "bottle gourd",
+          "status": "available"
+        },
+        {
+          "name": "kidney beans",
+          "status": "available"
+        },
+        {
+          "name": "chickpeas",
+          "status": "available"
+        },
+        {
+          "name": "paneer",
+          "status": "available"
+        },
+        {
+          "name": "beans",
+          "status": "available"
+        },
+        {
+          "name": "quinoa",
+          "status": "available"
+        },
+        {
+          "name": "sweet potato",
+          "status": "available"
+        },
+        {
+          "name": "oats",
+          "status": "available"
+        }
+      ],
+      "notes": []
+    },
+    "weeklyExceptions": {
+      "items": [
+        {
+          "kind": "school_closed",
+          "appliesTo": {
+            "day": "Sat"
+          },
+          "instruction": "Saturday is a school holiday"
+        }
+      ]
+    },
+    "recentPlan": null,
+    "request": {
+      "kind": "initial_plan",
+      "text": "Plan a week with no overnight cooking."
+    }
+  },
+  "candidates": [
+    {
+      "label": "valid",
+      "plan": {
+        "grid": {
+          "Mon": {
+            "breakfast": {
+              "dish": "paratha",
+              "vegetarian": true,
+              "ingredients": ["wheat flour"],
+              "inventoryItems": ["wheat flour"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "banana",
+              "vegetarian": true,
+              "ingredients": ["banana"],
+              "inventoryItems": ["banana"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "roasted chana",
+              "vegetarian": true,
+              "ingredients": ["chana"],
+              "inventoryItems": ["chana"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "bottle gourd dal",
+              "vegetarian": true,
+              "ingredients": ["bottle gourd", "moong dal"],
+              "inventoryItems": ["bottle gourd", "moong dal"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "rice and beans",
+              "vegetarian": true,
+              "ingredients": ["rice", "beans"],
+              "inventoryItems": ["rice", "beans"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Tue": {
+            "breakfast": {
+              "dish": "poha",
+              "vegetarian": true,
+              "ingredients": ["poha"],
+              "inventoryItems": ["poha"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "apple",
+              "vegetarian": true,
+              "ingredients": ["apple"],
+              "inventoryItems": ["apple"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "dates",
+              "vegetarian": true,
+              "ingredients": ["dates"],
+              "inventoryItems": ["dates"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "rajma",
+              "vegetarian": true,
+              "ingredients": ["kidney beans"],
+              "inventoryItems": ["kidney beans"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "quinoa bowl",
+              "vegetarian": true,
+              "ingredients": ["quinoa"],
+              "inventoryItems": ["quinoa"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Wed": {
+            "breakfast": {
+              "dish": "idli",
+              "vegetarian": true,
+              "ingredients": ["idli rice"],
+              "inventoryItems": ["idli rice"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "orange",
+              "vegetarian": true,
+              "ingredients": ["orange"],
+              "inventoryItems": ["orange"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "mixed seeds",
+              "vegetarian": true,
+              "ingredients": ["mixed seeds"],
+              "inventoryItems": ["mixed seeds"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "khichdi",
+              "vegetarian": true,
+              "ingredients": ["rice", "moong dal"],
+              "inventoryItems": ["rice", "moong dal"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "sweet potato curry",
+              "vegetarian": true,
+              "ingredients": ["sweet potato"],
+              "inventoryItems": ["sweet potato"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Thu": {
+            "breakfast": {
+              "dish": "upma",
+              "vegetarian": true,
+              "ingredients": ["upma rava"],
+              "inventoryItems": ["upma rava"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "pear",
+              "vegetarian": true,
+              "ingredients": ["pear"],
+              "inventoryItems": ["pear"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "dry coconut",
+              "vegetarian": true,
+              "ingredients": ["dry coconut"],
+              "inventoryItems": ["dry coconut"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "chole",
+              "vegetarian": true,
+              "ingredients": ["chickpeas"],
+              "inventoryItems": ["chickpeas"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "ghee rice",
+              "vegetarian": true,
+              "ingredients": ["rice", "ghee"],
+              "inventoryItems": ["rice", "ghee"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Fri": {
+            "breakfast": {
+              "dish": "dosa",
+              "vegetarian": true,
+              "ingredients": ["dosa batter"],
+              "inventoryItems": ["dosa batter"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "pomegranate",
+              "vegetarian": true,
+              "ingredients": ["pomegranate"],
+              "inventoryItems": ["pomegranate"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "jaggery cubes",
+              "vegetarian": true,
+              "ingredients": ["jaggery"],
+              "inventoryItems": ["jaggery"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "paneer paratha",
+              "vegetarian": true,
+              "ingredients": ["wheat flour", "paneer"],
+              "inventoryItems": ["wheat flour", "paneer"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "masala oats",
+              "vegetarian": true,
+              "ingredients": ["oats"],
+              "inventoryItems": ["oats"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          }
+        },
+        "easyBuys": [],
+        "policyOutcomes": {}
+      },
+      "expect": {
+        "pass": true
+      }
+    },
+    {
+      "label": "single-prep",
+      "plan": {
+        "grid": {
+          "Mon": {
+            "breakfast": {
+              "dish": "paratha",
+              "vegetarian": true,
+              "ingredients": ["wheat flour"],
+              "inventoryItems": ["wheat flour"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "banana",
+              "vegetarian": true,
+              "ingredients": ["banana"],
+              "inventoryItems": ["banana"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "roasted chana",
+              "vegetarian": true,
+              "ingredients": ["chana"],
+              "inventoryItems": ["chana"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "bottle gourd dal",
+              "vegetarian": true,
+              "ingredients": ["bottle gourd", "moong dal"],
+              "inventoryItems": ["bottle gourd", "moong dal"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "rice and beans",
+              "vegetarian": true,
+              "ingredients": ["rice", "beans"],
+              "inventoryItems": ["rice", "beans"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Tue": {
+            "breakfast": {
+              "dish": "poha",
+              "vegetarian": true,
+              "ingredients": ["poha"],
+              "inventoryItems": ["poha"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "apple",
+              "vegetarian": true,
+              "ingredients": ["apple"],
+              "inventoryItems": ["apple"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "dates",
+              "vegetarian": true,
+              "ingredients": ["dates"],
+              "inventoryItems": ["dates"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "rajma",
+              "vegetarian": true,
+              "ingredients": ["kidney beans"],
+              "inventoryItems": ["kidney beans"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "quinoa bowl",
+              "vegetarian": true,
+              "ingredients": ["quinoa"],
+              "inventoryItems": ["quinoa"],
+              "cookMinutes": 20,
+              "priorNightPrep": true
+            }
+          },
+          "Wed": {
+            "breakfast": {
+              "dish": "idli",
+              "vegetarian": true,
+              "ingredients": ["idli rice"],
+              "inventoryItems": ["idli rice"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "orange",
+              "vegetarian": true,
+              "ingredients": ["orange"],
+              "inventoryItems": ["orange"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "mixed seeds",
+              "vegetarian": true,
+              "ingredients": ["mixed seeds"],
+              "inventoryItems": ["mixed seeds"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "khichdi",
+              "vegetarian": true,
+              "ingredients": ["rice", "moong dal"],
+              "inventoryItems": ["rice", "moong dal"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "sweet potato curry",
+              "vegetarian": true,
+              "ingredients": ["sweet potato"],
+              "inventoryItems": ["sweet potato"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Thu": {
+            "breakfast": {
+              "dish": "upma",
+              "vegetarian": true,
+              "ingredients": ["upma rava"],
+              "inventoryItems": ["upma rava"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "pear",
+              "vegetarian": true,
+              "ingredients": ["pear"],
+              "inventoryItems": ["pear"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "dry coconut",
+              "vegetarian": true,
+              "ingredients": ["dry coconut"],
+              "inventoryItems": ["dry coconut"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "chole",
+              "vegetarian": true,
+              "ingredients": ["chickpeas"],
+              "inventoryItems": ["chickpeas"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "ghee rice",
+              "vegetarian": true,
+              "ingredients": ["rice", "ghee"],
+              "inventoryItems": ["rice", "ghee"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Fri": {
+            "breakfast": {
+              "dish": "dosa",
+              "vegetarian": true,
+              "ingredients": ["dosa batter"],
+              "inventoryItems": ["dosa batter"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "pomegranate",
+              "vegetarian": true,
+              "ingredients": ["pomegranate"],
+              "inventoryItems": ["pomegranate"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "jaggery cubes",
+              "vegetarian": true,
+              "ingredients": ["jaggery"],
+              "inventoryItems": ["jaggery"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "paneer paratha",
+              "vegetarian": true,
+              "ingredients": ["wheat flour", "paneer"],
+              "inventoryItems": ["wheat flour", "paneer"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "masala oats",
+              "vegetarian": true,
+              "ingredients": ["oats"],
+              "inventoryItems": ["oats"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          }
+        },
+        "easyBuys": [],
+        "policyOutcomes": {}
+      },
+      "expect": {
+        "pass": false,
+        "failures": [
+          {
+            "code": "prior_night_prep_not_allowed",
+            "day": "Tue",
+            "slot": "home-lunch"
+          }
+        ]
+      }
+    },
+    {
+      "label": "three-prep",
+      "plan": {
+        "grid": {
+          "Mon": {
+            "breakfast": {
+              "dish": "paratha",
+              "vegetarian": true,
+              "ingredients": ["wheat flour"],
+              "inventoryItems": ["wheat flour"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "banana",
+              "vegetarian": true,
+              "ingredients": ["banana"],
+              "inventoryItems": ["banana"],
+              "cookMinutes": 0,
+              "priorNightPrep": true
+            },
+            "snack2": {
+              "dish": "roasted chana",
+              "vegetarian": true,
+              "ingredients": ["chana"],
+              "inventoryItems": ["chana"],
+              "cookMinutes": 0,
+              "priorNightPrep": true
+            },
+            "school-lunch": {
+              "dish": "bottle gourd dal",
+              "vegetarian": true,
+              "ingredients": ["bottle gourd", "moong dal"],
+              "inventoryItems": ["bottle gourd", "moong dal"],
+              "cookMinutes": 20,
+              "priorNightPrep": true
+            },
+            "home-lunch": {
+              "dish": "rice and beans",
+              "vegetarian": true,
+              "ingredients": ["rice", "beans"],
+              "inventoryItems": ["rice", "beans"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Tue": {
+            "breakfast": {
+              "dish": "poha",
+              "vegetarian": true,
+              "ingredients": ["poha"],
+              "inventoryItems": ["poha"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "apple",
+              "vegetarian": true,
+              "ingredients": ["apple"],
+              "inventoryItems": ["apple"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "dates",
+              "vegetarian": true,
+              "ingredients": ["dates"],
+              "inventoryItems": ["dates"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "rajma",
+              "vegetarian": true,
+              "ingredients": ["kidney beans"],
+              "inventoryItems": ["kidney beans"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "quinoa bowl",
+              "vegetarian": true,
+              "ingredients": ["quinoa"],
+              "inventoryItems": ["quinoa"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Wed": {
+            "breakfast": {
+              "dish": "idli",
+              "vegetarian": true,
+              "ingredients": ["idli rice"],
+              "inventoryItems": ["idli rice"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "orange",
+              "vegetarian": true,
+              "ingredients": ["orange"],
+              "inventoryItems": ["orange"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "mixed seeds",
+              "vegetarian": true,
+              "ingredients": ["mixed seeds"],
+              "inventoryItems": ["mixed seeds"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "khichdi",
+              "vegetarian": true,
+              "ingredients": ["rice", "moong dal"],
+              "inventoryItems": ["rice", "moong dal"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "sweet potato curry",
+              "vegetarian": true,
+              "ingredients": ["sweet potato"],
+              "inventoryItems": ["sweet potato"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Thu": {
+            "breakfast": {
+              "dish": "upma",
+              "vegetarian": true,
+              "ingredients": ["upma rava"],
+              "inventoryItems": ["upma rava"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "pear",
+              "vegetarian": true,
+              "ingredients": ["pear"],
+              "inventoryItems": ["pear"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "dry coconut",
+              "vegetarian": true,
+              "ingredients": ["dry coconut"],
+              "inventoryItems": ["dry coconut"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "chole",
+              "vegetarian": true,
+              "ingredients": ["chickpeas"],
+              "inventoryItems": ["chickpeas"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "ghee rice",
+              "vegetarian": true,
+              "ingredients": ["rice", "ghee"],
+              "inventoryItems": ["rice", "ghee"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          },
+          "Fri": {
+            "breakfast": {
+              "dish": "dosa",
+              "vegetarian": true,
+              "ingredients": ["dosa batter"],
+              "inventoryItems": ["dosa batter"],
+              "cookMinutes": 15,
+              "priorNightPrep": false
+            },
+            "snack1": {
+              "dish": "pomegranate",
+              "vegetarian": true,
+              "ingredients": ["pomegranate"],
+              "inventoryItems": ["pomegranate"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "snack2": {
+              "dish": "jaggery cubes",
+              "vegetarian": true,
+              "ingredients": ["jaggery"],
+              "inventoryItems": ["jaggery"],
+              "cookMinutes": 0,
+              "priorNightPrep": false
+            },
+            "school-lunch": {
+              "dish": "paneer paratha",
+              "vegetarian": true,
+              "ingredients": ["wheat flour", "paneer"],
+              "inventoryItems": ["wheat flour", "paneer"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            },
+            "home-lunch": {
+              "dish": "masala oats",
+              "vegetarian": true,
+              "ingredients": ["oats"],
+              "inventoryItems": ["oats"],
+              "cookMinutes": 20,
+              "priorNightPrep": false
+            }
+          }
+        },
+        "easyBuys": [],
+        "policyOutcomes": {}
+      },
+      "expect": {
+        "pass": false,
+        "failures": [
+          {
+            "code": "prior_night_prep_limit",
+            "day": "Mon"
+          },
+          {
+            "code": "prior_night_prep_not_allowed",
+            "day": "Mon",
+            "slot": "school-lunch"
+          },
+          {
+            "code": "prior_night_prep_not_allowed",
+            "day": "Mon",
+            "slot": "snack1"
+          },
+          {
+            "code": "prior_night_prep_not_allowed",
+            "day": "Mon",
+            "slot": "snack2"
+          }
+        ]
+      }
+    }
+  ],
+  "behavior": {
+    "expectsClarification": false,
+    "expectedPolicyOutcomes": {}
+  }
+}

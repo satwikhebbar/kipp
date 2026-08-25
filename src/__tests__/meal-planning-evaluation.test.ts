@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { loadScenarios } from "../meal-planning/corpus/load"
 import { evaluateMealPlan } from "../meal-planning/evaluation"
 import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
 
@@ -431,5 +432,45 @@ describe("meal-planning evaluator", () => {
     const evaluation = evaluateMealPlan(candidate, context)
     expect(failureCodes(evaluation)).toEqual(["missing_slot"])
     expect(evaluation.failures[0]).toMatchObject({ code: "missing_slot", day: "Mon", slot: "snack2" })
+  })
+})
+
+describe("corpus scenario runner", () => {
+  const scenarios = loadScenarios()
+
+  it("runs every scenario against every candidate", () => {
+    for (const scenario of scenarios) {
+      for (const candidate of scenario.candidates) {
+        const evaluation = evaluateMealPlan(candidate.plan, scenario.context)
+        if (candidate.expect.failures) {
+          const actual = evaluation.failures.map((failure) => ({
+            code: failure.code,
+            day: failure.day,
+            slot: failure.slot,
+          }))
+          const expected = candidate.expect.failures.map((failure) => ({
+            code: failure.code,
+            day: failure.day,
+            slot: failure.slot,
+          }))
+          expect(actual, `${scenario.id}/${candidate.label}`).toEqual(expected)
+          expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
+        } else if (candidate.expect.noFailuresOf) {
+          const codes = new Set(evaluation.failures.map((failure) => failure.code))
+          for (const code of candidate.expect.noFailuresOf) {
+            expect(codes.has(code), `${scenario.id}/${candidate.label} must not fail with ${code}`).toBe(false)
+          }
+          expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
+        } else {
+          expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
+        }
+        for (const [key, value] of Object.entries(candidate.expect.measurements ?? {})) {
+          expect(
+            evaluation.measurements[key as keyof typeof evaluation.measurements],
+            `${scenario.id}/${candidate.label} measurement ${key}`,
+          ).toEqual(value)
+        }
+      }
+    }
   })
 })
