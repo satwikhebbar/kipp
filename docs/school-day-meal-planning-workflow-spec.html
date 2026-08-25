@@ -34,7 +34,7 @@
   <section id="scope"><h2>2. Scope and user</h2>
     <h3>In scope for v1</h3><ul>
       <li>A configurable Monday–Saturday school-week plan and configurable daily meal slots. The initial household has breakfast, two school snacks, packed school lunch, and home lunch.</li>
-      <li>Profile- and conversation-based planning; spoken or typed weekly input; voice-friendly feedback; and a mobile-friendly weekly grid.</li>
+      <li>Profile- and conversation-based planning; typed weekly input, including device dictation; typed feedback; and a mobile-friendly weekly grid.</li>
       <li>Vegetarian school meals as a workflow constant for the initial India-focused release.</li>
       <li>YouTube-first video discovery for lunch meals and minimally disruptive updates.</li>
     </ul>
@@ -71,13 +71,13 @@
       <tr><td><code>priorNightPrepAllowed</code></td><td>Boolean</td><td>False until confirmed.</td></tr>
       <tr><td><code>healthPlan</code></td><td>Health focus and cheat day</td><td>Health-focused baseline and one enabled cheat day.</td></tr>
       <tr><td><code>pantryBaseline</code></td><td>String array</td><td>Stable grains, pulses, flour, spices, oils, and staples.</td></tr>
-      <tr><td><code>weeklyInventory</code></td><td>Current-week ingredients and notes</td><td>Voice or typed input; captures perishables and urgency.</td></tr>
+      <tr><td><code>weeklyInventory</code></td><td>Current-week ingredients and notes</td><td>Typed input, including device dictation; captures perishables and urgency.</td></tr>
       <tr><td><code>weeklyExceptions</code></td><td>Structured exceptions plus free-text note</td><td>Holidays, capacity changes, occasions, and a weekly focus.</td></tr>
       <tr><td><code>schoolMealPolicy</code></td><td>Optional natural-language string</td><td>School no-go guidance, such as “no chips or biscuits.”</td></tr>
       <tr><td><code>trustedRecipeChannels</code></td><td>Chef/channel array</td><td>Empty. Preferred when a suitable recipe exists.</td></tr>
     </tbody></table></div>
     <h3>Weekly conversational capture</h3>
-    <p>The parent never fills an internal form. A Telegram message or voice note is transcribed, preserved, and summarized for correction. The agent derives a patch to <code>weeklyInventory</code> and/or <code>weeklyExceptions</code>, retaining the source and timestamp. Low-risk, unambiguous facts are applied; consequential ambiguity earns one concise question.</p>
+    <p>The parent never fills an internal form. They send ordinary Telegram text, typed or produced with device dictation, which is preserved and summarized for correction. Kipp does not accept, download, store, or transcribe Telegram voice notes in v1. The agent derives a patch to <code>weeklyInventory</code> and/or <code>weeklyExceptions</code>, retaining the source and timestamp. Low-risk, unambiguous facts are applied; consequential ambiguity earns one concise question.</p>
     <pre>weeklyInventory: items with name, availability, quantity/use note; free-text notes
 weeklyExceptions: kind, optional day/meal slots, free-text instruction</pre>
     <p>These values are week-scoped conversation state. They expire with that plan and never become persistent household context unless the parent explicitly promotes them.</p>
@@ -118,13 +118,15 @@ weeklyExceptions: kind, optional day/meal slots, free-text instruction</pre>
     <div class="wide"><table><thead><tr><th>Meal slot</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th></tr></thead><tbody>
       <tr><th>Breakfast</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Snack 1</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Snack 2</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>School lunch</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Home lunch</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr>
     </tbody></table></div>
-    <p>Each cell supports glanceable viewing, detail on ingredients and prep, typed or voice feedback, a pending-change state, and a pre-fetched lunch-video result where applicable.</p>
+    <p>Each cell supports glanceable viewing, detail on ingredients and prep, typed feedback including device dictation, a pending-change state, and a pre-fetched lunch-video result where applicable.</p>
   </section>
 
   <section id="video"><h2>8. Recipe-video behaviour</h2><ul>
     <li>Attempt discovery ahead of time for school lunch and home lunch only.</li>
-    <li>Prefer configured YouTube chefs and channels; a reputable fallback is acceptable.</li>
-    <li>Suitability includes the meal, dietary rules, vegetarian policy, cuisine preferences, and school context.</li>
+    <li>Search configured YouTube chefs and channels in priority order, then make one bounded public fallback search when they have no eligible match.</li>
+    <li>A result is a recipe-link match based on visible title and metadata evidence for the declared dish and required ingredients. Visible hard-rule conflicts are rejected; missing evidence yields no video rather than a guess.</li>
+    <li>Recipe-link metadata is not dietary, allergy, nutrition, or viewing-suitability verification. For a hard medical or allergy exclusion, do not offer a generic YouTube result unless evidence is sufficient for the chosen policy.</li>
+    <li>Open a matched video through an explicit user-initiated external YouTube link; do not embed a player in v1.</li>
     <li>If no suitable video is found, retain the meal and store an explicit no-video result. Do not substitute a generic popularity ranking.</li>
   </ul></section>
 
@@ -138,6 +140,6 @@ weeklyExceptions: kind, optional day/meal slots, free-text instruction</pre>
 
   <section id="quality"><h2>10. Product quality and remaining decisions</h2>
     <p>The workflow must be configurable, safe with hard exclusions, low-effort, morning-feasible, varied, editable without erasing accepted work, and accessible throughout the week. The initial quality metric is the number of feedback comments attached to each plan that becomes active.</p>
-    <div class="callout warn"><strong>Still open:</strong> the persistent-profile editing experience; a detailed and implementable recipe-source ranking policy; the precise measure and explanation of morning capacity; refrigerator-photo input; and any broader shopping-support design.</div>
+    <div class="callout warn"><strong>Still open:</strong> the persistent-profile editing experience; curated fallback-source governance and detailed parent-facing recipe-link wording; the precise measure and explanation of morning capacity; refrigerator-photo input; and any broader shopping-support design.</div>
   </section>
 </main></body></html>
