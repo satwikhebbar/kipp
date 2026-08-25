@@ -314,6 +314,168 @@ describe("meal-planning evaluator", () => {
     expect(evaluateMealPlan(candidate, overlappingExempt).pass).toBe(true)
   })
 
+  it("keeps unchanged revision cells from repeating recent-plan dishes", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const profile = {
+      ...baseContext().profile,
+      dishRepertoire: ["paratha", "banana", "poha"],
+      foodPreferences: { favourites: [], avoid: [] },
+    }
+    const context = baseContext({
+      schedule,
+      profile,
+      customPolicies: [],
+      recentPlan: {
+        Mon: { breakfast: cellFor("breakfast", "paratha") },
+        Tue: { breakfast: cellFor("breakfast", "banana") },
+      },
+      request: { kind: "revision", text: "Revise Monday's breakfast." },
+      feedbackItems: [{ id: "fb-1", text: "Swap Monday breakfast.", scope: { day: "Mon", slot: "breakfast" } }],
+      weeklyInventory: {
+        items: [
+          { name: "banana", status: "available" },
+          { name: "poha", status: "available" },
+        ],
+        notes: [],
+      },
+    })
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "poha"],
+        ["Tue", "breakfast", "banana"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(evaluation.pass).toBe(true)
+    expect(evaluation.measurements.dishRepeats).toEqual([])
+  })
+
+  it("flags a changed revision cell that newly repeats a recent-plan dish", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const profile = {
+      ...baseContext().profile,
+      dishRepertoire: ["paratha", "banana", "poha"],
+      foodPreferences: { favourites: [], avoid: [] },
+    }
+    const context = baseContext({
+      schedule,
+      profile,
+      customPolicies: [],
+      recentPlan: {
+        Mon: { breakfast: cellFor("breakfast", "paratha") },
+        Tue: { breakfast: cellFor("breakfast", "banana") },
+      },
+      request: { kind: "revision", text: "Revise Monday's breakfast." },
+      feedbackItems: [{ id: "fb-1", text: "Swap Monday breakfast.", scope: { day: "Mon", slot: "breakfast" } }],
+      weeklyInventory: {
+        items: [
+          { name: "banana", status: "available" },
+          { name: "poha", status: "available" },
+        ],
+        notes: [],
+      },
+    })
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "banana"],
+        ["Tue", "breakfast", "banana"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(failureCodes(evaluation)).toEqual(["dish_repeated"])
+    expect(evaluation.measurements.dishRepeats).toEqual(["banana"])
+  })
+
+  it("exempts a changed revision cell that repeats a requested or favourite dish", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const profile = {
+      ...baseContext().profile,
+      dishRepertoire: ["paratha", "banana", "poha"],
+      foodPreferences: { favourites: [], avoid: [] },
+    }
+    const context = baseContext({
+      schedule,
+      profile,
+      customPolicies: [],
+      recentPlan: {
+        Mon: { breakfast: cellFor("breakfast", "paratha") },
+        Tue: { breakfast: cellFor("breakfast", "banana") },
+      },
+      request: { kind: "revision", text: "Revise Monday's breakfast." },
+      feedbackItems: [{ id: "fb-1", text: "Swap Monday breakfast.", scope: { day: "Mon", slot: "breakfast" } }],
+      requestedRepeats: ["banana"],
+      weeklyInventory: {
+        items: [
+          { name: "banana", status: "available" },
+          { name: "poha", status: "available" },
+        ],
+        notes: [],
+      },
+    })
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "banana"],
+        ["Tue", "breakfast", "banana"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    expect(evaluateMealPlan(candidate, context).pass).toBe(true)
+  })
+
+  it("flags an out-of-scope changed revision cell that newly repeats a recent-plan dish", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const profile = {
+      ...baseContext().profile,
+      dishRepertoire: ["paratha", "banana", "poha"],
+      foodPreferences: { favourites: [], avoid: [] },
+    }
+    const context = baseContext({
+      schedule,
+      profile,
+      customPolicies: [],
+      recentPlan: {
+        Mon: { breakfast: cellFor("breakfast", "paratha") },
+        Tue: { breakfast: cellFor("breakfast", "banana") },
+      },
+      request: { kind: "revision", text: "Revise the plan." },
+      feedbackItems: [{ id: "fb-1", text: "Keep Tuesday's breakfast.", scope: { day: "Tue", slot: "breakfast" } }],
+      weeklyInventory: {
+        items: [
+          { name: "banana", status: "available" },
+          { name: "poha", status: "available" },
+        ],
+        notes: [],
+      },
+    })
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "banana"],
+        ["Tue", "breakfast", "banana"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(failureCodes(evaluation)).toEqual(["dish_repeated", "unaddressed_feedback", "unscoped_cell_changed"])
+  })
+
   it("flags a principal ingredient used in more than two cells", () => {
     const context = baseContext({
       schedule: {
