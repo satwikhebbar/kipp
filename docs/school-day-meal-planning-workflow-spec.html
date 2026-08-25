@@ -108,17 +108,18 @@ weeklyExceptions: kind, optional day/meal slots, free-text instruction</pre>
     <li>On Sunday, the parent starts planning through Telegram.</li>
     <li>The agent asks only for missing, week-specific exceptions and inventory, using persistent context rather than re-asking it.</li>
     <li>The agent asks targeted clarification when it materially changes the plan, then proposes a complete weekly grid.</li>
-    <li>The parent reviews the grid and gives natural-language feedback on a meal or whole day. This is guidance to the agent, not direct cell replacement.</li>
-    <li>Feedback remains pending until the parent asks for an updated plan. The current plan stays visible with a pending-changes indicator.</li>
-    <li>The agent processes feedback together and returns a complete revised grid, which immediately becomes active. A separate finalization step is unnecessary.</li>
+    <li>The parent reviews the grid in the Mini App and collects natural-language feedback on one or more meals or a whole day. This is guidance to the agent, not direct cell replacement.</li>
+    <li>The Mini App keeps that feedback as local drafts, visibly marks it ready for review, and submits one batch only when the parent selects <em>Replan</em>. Unsubmitted drafts for the same plan version are restored on the same device; they are not part of the active plan.</li>
+    <li>After accepting the batch, the Mini App confirms that feedback was sent and returns the parent to Telegram. Telegram owns any clarification or progress message; the Mini App must not imply that a new plan already exists.</li>
+    <li>The agent processes the batch and persists a complete revised grid before Telegram offers a new review link. That new version immediately becomes active; a separate finalization step is unnecessary.</li>
   </ol></section>
 
   <section id="review"><h2>7. Active plan and review</h2>
-    <p><strong>Telegram</strong> is the conversational surface: triggering the plan, supplying weekly context, answering clarifications, and asking the agent to process feedback. <strong>The Mini App</strong> is the visual surface: reviewing the weekly grid, opening meal details, and recording feedback. They do not need to duplicate every action in v1.</p>
+    <p><strong>Telegram</strong> is the conversational surface: triggering the plan, supplying weekly context, answering clarifications, and reporting planning progress. <strong>The Mini App</strong> is the visual surface: reviewing the weekly grid, opening meal details, collecting feedback, and handing one batch to the agent. A contextual <em>Review this week’s plan</em> button opens the Mini App; the surfaces do not need to duplicate every action in v1.</p>
     <div class="wide"><table><thead><tr><th>Meal slot</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th></tr></thead><tbody>
       <tr><th>Breakfast</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Snack 1</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Snack 2</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>School lunch</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Home lunch</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr>
     </tbody></table></div>
-    <p>Each cell supports glanceable viewing, detail on ingredients and prep, typed feedback including device dictation, a pending-change state, and a pre-fetched lunch-video result where applicable.</p>
+    <p>On a phone, each cell shows a compact meal label and useful state cues. Details open separately for ingredients, prep, substitutions, and video. A cell supports typed feedback including device dictation, a local-feedback-draft state, and a pre-fetched lunch-video result where applicable. The Mini App restores unsubmitted drafts only for the same plan version on the same device, clearly identifies them as restored, and clears them after submission, discard, or a newer plan.</p>
   </section>
 
   <section id="video"><h2>8. Recipe-video behaviour</h2><ul>
@@ -140,6 +141,6 @@ weeklyExceptions: kind, optional day/meal slots, free-text instruction</pre>
 
   <section id="quality"><h2>10. Product quality and remaining decisions</h2>
     <p>The workflow must be configurable, safe with hard exclusions, low-effort, morning-feasible, varied, editable without erasing accepted work, and accessible throughout the week. The initial quality metric is the number of feedback comments attached to each plan that becomes active.</p>
-    <div class="callout warn"><strong>Still open:</strong> the persistent-profile editing experience; curated fallback-source governance and detailed parent-facing recipe-link wording; the precise measure and explanation of morning capacity; refrigerator-photo input; and any broader shopping-support design.</div>
+    <div class="callout warn"><strong>Still open:</strong> the persistent-profile editing experience; curated fallback-source governance and detailed parent-facing recipe-link wording; the precise measure and explanation of morning capacity; refrigerator-photo input; the privacy and retention policy for device-local Mini App feedback drafts; and any broader shopping-support design.</div>
   </section>
 </main></body></html>
