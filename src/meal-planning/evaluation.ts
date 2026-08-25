@@ -195,12 +195,18 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   }
 
   const weekDishCounts = new Map<string, number>()
-  for (const ref of refs) weekDishCounts.set(ref.cell.dish, (weekDishCounts.get(ref.cell.dish) ?? 0) + 1)
+  const candidateDishes = new Set<string>()
+  for (const ref of refs) {
+    candidateDishes.add(ref.cell.dish)
+    weekDishCounts.set(ref.cell.dish, (weekDishCounts.get(ref.cell.dish) ?? 0) + 1)
+  }
   const repeatedDishes = new Set<string>()
   for (const [dish, count] of weekDishCounts) {
     if (count > 1) repeatedDishes.add(dish)
   }
-  for (const dish of recentDishes) repeatedDishes.add(dish)
+  for (const dish of recentDishes) {
+    if (candidateDishes.has(dish)) repeatedDishes.add(dish)
+  }
   const dishRepeats = [...repeatedDishes].filter((dish) => !favourites.has(dish) && !requestedRepeats.has(dish)).sort()
   for (const dish of dishRepeats) {
     failures.push({
