@@ -175,8 +175,10 @@ export function loadScenarios(
   let files: string[]
   try {
     files = readdirSync(dirPath)
-  } catch {
-    return []
+  } catch (error) {
+    // Only the not-yet-created scenarios directory is a legitimate empty corpus.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
   }
   return files
     .filter((file) => file.endsWith(".json"))

@@ -1,3 +1,5 @@
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import {
   computeCoverageSet,
@@ -251,5 +253,13 @@ describe("meal-planning corpus loader", () => {
 
   it("returns an empty list when no scenario fixtures exist yet", () => {
     expect(loadScenarios()).toEqual([])
+  })
+
+  it("returns an empty list for a missing scenarios directory but re-throws other readdir errors", () => {
+    const missingDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "does-not-exist")
+    expect(loadScenarios(missingDir)).toEqual([])
+
+    const pathToFile = fileURLToPath(import.meta.url)
+    expect(() => loadScenarios(pathToFile)).toThrowError()
   })
 })
