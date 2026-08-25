@@ -262,6 +262,57 @@ describe("meal-planning evaluator", () => {
     expect(evaluateMealPlan(candidate, requested).pass).toBe(true)
   })
 
+  it("does not flag dishes that appear only in the recent plan, only overlaps with the candidate", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const profile = {
+      ...baseContext().profile,
+      dishRepertoire: ["paratha", "banana"],
+      foodPreferences: { favourites: [], avoid: [] },
+    }
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "paratha"],
+        ["Tue", "breakfast", "banana"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+
+    const historyOnly = baseContext({
+      schedule,
+      profile,
+      customPolicies: [],
+      recentPlan: {
+        Mon: { breakfast: cellFor("breakfast", "ghee rice") },
+        Tue: { breakfast: cellFor("breakfast", "paneer paratha") },
+      },
+    })
+    const historyOnlyEval = evaluateMealPlan(candidate, historyOnly)
+    expect(historyOnlyEval.pass).toBe(true)
+    expect(historyOnlyEval.measurements.dishRepeats).toEqual([])
+
+    const overlapping = baseContext({
+      schedule,
+      profile,
+      customPolicies: [],
+      recentPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
+    })
+    const overlappingEval = evaluateMealPlan(candidate, overlapping)
+    expect(failureCodes(overlappingEval)).toEqual(["dish_repeated"])
+    expect(overlappingEval.measurements.dishRepeats).toEqual(["paratha"])
+
+    const overlappingExempt = baseContext({
+      schedule,
+      profile: { ...profile, foodPreferences: { favourites: ["paratha"], avoid: [] } },
+      customPolicies: [],
+      recentPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
+    })
+    expect(evaluateMealPlan(candidate, overlappingExempt).pass).toBe(true)
+  })
+
   it("flags a principal ingredient used in more than two cells", () => {
     const context = baseContext({
       schedule: {
