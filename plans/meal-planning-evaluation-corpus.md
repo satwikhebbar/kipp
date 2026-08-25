@@ -101,7 +101,11 @@ One fixture per scenario. Shape (abbreviated):
       ]
     },
     "profile": {
-      "dietaryExclusions": ["peanut", "egg"],
+      "dietaryExclusions": [
+        { "token": "peanut", "ambiguous": false },
+        { "token": "egg", "ambiguous": false }
+      ],
+      "dishRepertoire": ["paratha", "banana", "roasted moong", "bottle gourd dal", "rice and beans"],
       "foodPreferences": { "favourites": ["paratha"], "avoid": [] },
       "allowNewFoods": false,
       "sensoryGuidelines": [],
@@ -162,9 +166,12 @@ One fixture per scenario. Shape (abbreviated):
 
 Key decisions baked into the schema:
 
-- **Normalized only.** Exclusions, ingredients, dishes, and inventory items
-  are canonical tokens. Each fixture's vocabulary is local to the fixture;
-  no global taxonomy exists.
+- **Normalized only.** Ingredients, dishes, and inventory items are canonical
+  tokens; each dietary exclusion is an object `{ token, ambiguous }`; the
+  household dish repertoire is a `dishRepertoire` token list. The evaluator
+  consumes `token` for membership checks and `ambiguous` only to suppress hard
+  enforcement — it never interprets free text. Each fixture's vocabulary is
+  local to the fixture; no global taxonomy exists.
 - **`request.kind`** is `initial_plan` or `revision`. Revision fixtures
   carry `feedbackItems` (batched) and reference `recentPlan`, which enables
   revision-preservation and unaddressed-feedback checks.
@@ -208,7 +215,7 @@ columns cite the spec (§) / planning-decisions (PD) / issue.
 
 | Code | Rule | Source |
 | --- | --- | --- |
-| `hard_exclusion` | A cell ingredient matches a `dietaryExclusions` token. Tokens flagged `ambiguous: true` are excluded from this check (see dietary-ambiguity). | spec 5.1, PD |
+| `hard_exclusion` | A cell ingredient matches a `dietaryExclusions` entry's `token`. Entries with `ambiguous: true` are excluded from this check: the evaluator never enforces an ambiguous exclusion as hard. | spec 5.1, PD |
 | `non_vegetarian_school_meal` | A configured school-day cell declares `vegetarian: false`. | spec 5.1 (workflow constant) |
 | `missing_slot` | A configured day × slot has no cell. | issue ("slot coverage") |
 | `extra_slot_for_closed_day` | A cell exists on a day marked `school_closed` in `weeklyExceptions`. | spec 5.3 |
@@ -221,6 +228,8 @@ columns cite the spec (§) / planning-decisions (PD) / issue.
 | `use_early_ignored` | A `useNote: "use early"` item's first use day is later than the fixture's `urgentUseByDay` (default Tue). Only enforced when the fixture sets `requireUrgentUseEarly`. | issue ("urgent perishables") |
 | `dish_repeated` | The same named dish appears twice in the week, or repeats a `recentPlan` dish, unless it is a requested repeat or a configured favourite. | spec 5.7, 6 |
 | `principal_ingredient_overused` | An ingredient (outside `allowFrequentIngredients`) appears in more than two cells in the week, unless requested. | spec 6 |
+| `unfamiliar_dish_not_allowed` | `profile.allowNewFoods: false` and a cell's `dish` is not in `profile.dishRepertoire` and not in any `recentPlan` dish. Familiarity is derived, never inferred. | spec 5.1, 6 |
+| `unpaired_new_dish` | `profile.allowNewFoods: true` and a cell whose `dish` is not in the repertoire (nor `recentPlan`) appears on a day with no familiar cell on that day — new food must be paired with familiar food. | spec 5.1, 6 |
 | `missing_policy_outcome` | A persistent-scope custom policy has no recorded `policyOutcomes` entry. Completeness only — truthfulness is agent/human territory. | issue, spec 5.11 |
 | `unscoped_cell_changed` | For `request.kind: revision`, a cell outside the feedback scope differs from `recentPlan`. | spec 10 (smallest change) |
 | `unaddressed_feedback` | A `feedbackItems` entry is referenced by no changed cell and by no `policyOutcomes` rationale. | spec 7 (batched feedback) |
@@ -242,13 +251,13 @@ candidate and at least one rule-violating candidate per scenario.
 | # | Scenario | Intent | Rules exercised |
 | --- | --- | --- | --- |
 | 1 | baseline-week | Happy path: full five-slot week, vegetarian constant only. | zero failures; measurements within bounds |
-| 2 | dietary-ambiguity | One exclusion is `ambiguous: true` and must not be enforced as hard; a clear exclusion is enforced. `behavior.expectsClarification`. | hard_exclusion (boundary), behavior |
+| 2 | dietary-ambiguity | Exclusion objects with `ambiguous: true` must not be enforced as hard. Candidate A violates the clear exclusion (`peanut`) → `hard_exclusion`. Candidate B contains the ambiguous token (`dairy`) but is otherwise valid → passes, `noFailuresOf: ["hard_exclusion"]`. `behavior.expectsClarification: true`, subject: the ambiguous exclusion. | hard_exclusion (boundary), behavior |
 | 3 | packing-constraints | Dry/quick snack slots and a "packing capacity" policy; cooked snack in a dry slot fails; policy outcome completeness. | slot_unsuitable, missing_policy_outcome |
 | 4 | no-prior-night-prep | `priorNightPrepAllowed: false`; a required-prep cell fails; a >2/day prep plan fails. | prior_night_prep_not_allowed, prior_night_prep_limit |
 | 5 | urgent-perishables | "Use early" items must appear by the fixture's `urgentUseByDay`; late use fails. | use_early_ignored |
 | 6 | holiday-half-day | Saturday closed (extra cell fails) and Wednesday half day reconfigures slots. | extra_slot_for_closed_day, missing_slot |
 | 7 | policy-trade-off | A policy in tension with a hard exclusion records `trade-off`; a plan claiming `satisfied` still passes the completeness check, while a plan with no recorded outcome fails. | missing_policy_outcome, hard_exclusion boundary |
-| 8 | new-food-setting | `allowNewFoods: false` rejects an unfamiliar dish; `true` accepts a new dish paired with familiar food. | dish_repeated (familiar pairing) or a dedicated measurement |
+| 8 | new-food-setting | `allowNewFoods: false`: a cell whose dish is not in `dishRepertoire` ∪ `recentPlan` dishes fails with `unfamiliar_dish_not_allowed`. `allowNewFoods: true`: a new dish passes when its day has at least one familiar cell; a new dish on a day with no familiar cell fails with `unpaired_new_dish`. Familiarity is derived from `dishRepertoire` + `recentPlan`, never inferred. | unfamiliar_dish_not_allowed, unpaired_new_dish |
 | 9 | requested-repeat | A requested repeat overrides the anti-repeat rule; an unrequested repeat still fails. | dish_repeated (requested vs not) |
 | 10 | midweek-shortage | "Out of paneer" inventory patch; revision swaps only the affected cell and preserves the rest. | inventory_item_unavailable, unscoped_cell_changed |
 | 11 | whole-day-replan | "This whole day looks untenable" permits a full-day change while other days stay unchanged. | unscoped_cell_changed (scoped relaxation) |
@@ -260,9 +269,10 @@ candidate and at least one rule-violating candidate per scenario.
 
 - Every fixture parses and validates against the zod schema.
 - The 12 required scenario ids are present.
-- Coverage lint: every failure code in §6 is exercised by at least one
-  candidate's expected failures; every scenario has at least one `pass: true`
-  candidate; revision scenarios reference `recentPlan` + `feedbackItems`.
+- Coverage lint: every failure code in §6 — including `unfamiliar_dish_not_allowed`
+  and `unpaired_new_dish` — is exercised by at least one candidate's expected
+  failures; every scenario has at least one `pass: true` candidate; revision
+  scenarios reference `recentPlan` + `feedbackItems`.
 
 ### `src/__tests__/meal-planning-evaluation.test.ts` (scenario runner)
 
