@@ -194,6 +194,25 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     }
   }
 
+  const revisionChangedCells: Array<{ day: string; slotId: string }> = []
+  if (request.kind === "revision" && context.recentPlan) {
+    const recent = context.recentPlan
+    const positions = new Set<string>([
+      ...Object.keys(candidate.grid).flatMap((day) =>
+        Object.keys(candidate.grid[day] ?? {}).map((slotId) => `${day}\u0000${slotId}`),
+      ),
+      ...Object.keys(recent).flatMap((day) => Object.keys(recent[day] ?? {}).map((slotId) => `${day}\u0000${slotId}`)),
+    ])
+    for (const position of positions) {
+      const [day, slotId] = position.split("\u0000") as [string, string]
+      const before = recent[day]?.[slotId]
+      const after = candidate.grid[day]?.[slotId]
+      if (before === undefined || after === undefined || !cellsEqual(before, after)) {
+        revisionChangedCells.push({ day, slotId })
+      }
+    }
+  }
+
   const weekDishCounts = new Map<string, number>()
   const candidateDishes = new Set<string>()
   for (const ref of refs) {
@@ -204,8 +223,17 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   for (const [dish, count] of weekDishCounts) {
     if (count > 1) repeatedDishes.add(dish)
   }
+  const recentRepeatDishes = new Set<string>()
+  if (request.kind === "revision") {
+    for (const { day, slotId } of revisionChangedCells) {
+      const after = candidate.grid[day]?.[slotId]
+      if (after) recentRepeatDishes.add(after.dish)
+    }
+  } else {
+    for (const dish of candidateDishes) recentRepeatDishes.add(dish)
+  }
   for (const dish of recentDishes) {
-    if (request.kind !== "revision" && candidateDishes.has(dish)) repeatedDishes.add(dish)
+    if (recentRepeatDishes.has(dish)) repeatedDishes.add(dish)
   }
   const dishRepeats = [...repeatedDishes].filter((dish) => !favourites.has(dish) && !requestedRepeats.has(dish)).sort()
   for (const dish of dishRepeats) {
@@ -279,21 +307,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
 
   const feedbackItems = context.feedbackItems ?? []
   if (request.kind === "revision" && context.recentPlan) {
-    const recent = context.recentPlan
-    const positions = new Set<string>([
-      ...Object.keys(candidate.grid).flatMap((day) =>
-        Object.keys(candidate.grid[day] ?? {}).map((slotId) => `${day}\u0000${slotId}`),
-      ),
-      ...Object.keys(recent).flatMap((day) => Object.keys(recent[day] ?? {}).map((slotId) => `${day}\u0000${slotId}`)),
-    ])
-    const changedCells: Array<{ day: string; slotId: string }> = []
-    for (const position of positions) {
-      const [day, slotId] = position.split("\u0000") as [string, string]
-      const before = recent[day]?.[slotId]
-      const after = candidate.grid[day]?.[slotId]
-      if (before === undefined || after === undefined || !cellsEqual(before, after)) changedCells.push({ day, slotId })
-    }
-    for (const { day, slotId } of changedCells) {
+    for (const { day, slotId } of revisionChangedCells) {
       const scoped = feedbackItems.some((item) => item.scope && inFeedbackScope(item.scope, day, slotId))
       if (!scoped) {
         failures.push({
@@ -305,7 +319,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       }
     }
     for (const item of feedbackItems) {
-      const addressedByCell = changedCells.some(
+      const addressedByCell = revisionChangedCells.some(
         ({ day, slotId }) => item.scope && inFeedbackScope(item.scope, day, slotId),
       )
       const addressedByRationale = Object.values(candidate.policyOutcomes).some((outcome) =>
