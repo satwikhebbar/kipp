@@ -58,7 +58,7 @@
   </section>
 
   <section id="properties"><h2>4. Configuration and weekly state</h2>
-    <p><strong>Generic properties</strong> are concepts the platform knows in code, with defined semantics and shape. <strong>Custom properties</strong> are user-created natural-language policies or overrides that the planner interprets as planning data only—not executable instructions.</p>
+    <p><strong>Generic properties</strong> are concepts the platform knows in code, with defined semantics and shape. <strong>Custom properties</strong> are user-created natural-language policies or overrides that the planner interprets as planning data only—not executable instructions. For every relevant custom policy, the proposed plan records whether it is satisfied, carries a labelled trade-off, or needs clarification; it must not claim certainty when the policy cannot be interpreted confidently.</p>
     <div class="wide"><table><thead><tr><th>Generic property</th><th>Shape / example</th><th>Default and use</th></tr></thead><tbody>
       <tr><td><code>dietaryExclusions</code></td><td>Natural-language string array, such as <code>["dairy products"]</code></td><td>Empty. Every item is a hard exclusion; ambiguous wording must be clarified.</td></tr>
       <tr><td><code>foodPreferences</code></td><td><code>{ favourites, avoid }</code></td><td>Empty. “Avoid” is soft; it is not a hard ban.</td></tr>
@@ -98,9 +98,10 @@ weeklyExceptions: kind, optional day/meal slots, free-text instruction</pre>
       <li>Treat school lunch and home lunch as fresh cooked. Breakfast is preferably fresh when capacity permits. Assess the combined before-school workload, not each recipe alone.</li>
       <li>Suggest no more than two meals requiring prior-night prep on any day.</li>
       <li>Optimize across the whole week. Avoid repeated named dishes and normally cap a principal ingredient at two meals weekly, while respecting requested repeats.</li>
+      <li>Apply generic properties and measurable operating limits as rules. For a relevant custom policy, record a concise satisfied, trade-off, or needs-clarification outcome; consequential ambiguity or a conflict with a hard constraint earns one concise question.</li>
       <li>Retain structured rationale for every cell. The grid shows compact labels for meaningful trade-offs, such as easy-buy additions or required prep.</li>
     </ul>
-    <div class="callout"><strong>Stored meal data:</strong> each cell retains its name and slot, preparation label, required/optional prep, principal ingredients, inventory use, easy-buy additions, lunch video result, and structured rationale/trade-off labels. The initial UI can reveal only what is useful at a glance.</div>
+    <div class="callout"><strong>Stored plan and meal data:</strong> the plan retains outcomes for relevant custom policies, including affected cells and rationale. Each cell retains its name and slot, preparation label, required/optional prep, principal ingredients, inventory use, easy-buy additions, lunch video result, and structured rationale/trade-off labels. The initial UI can reveal only what is useful at a glance.</div>
   </section>
 
   <section id="flow"><h2>6. Weekly planning flow</h2><ol>

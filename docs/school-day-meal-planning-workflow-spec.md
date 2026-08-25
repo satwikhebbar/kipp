@@ -430,6 +430,10 @@ agent should surface the interpretation or ask a concise question rather than
 silently guess. This separation also gives us a clear input-validation and
 evaluation boundary for the eventual LLM implementation.
 
+For every relevant custom policy, the proposed plan records whether it is
+`satisfied`, carries a labelled `trade-off`, or `needs-clarification`. The plan
+must not claim certainty when the policy cannot be interpreted confidently.
+
 Initial custom properties for this household, based on the discovery so far:
 
 | Custom property | Example value | Scope |
@@ -486,6 +490,10 @@ The agent creates a five-slot plan for every configured school day. It must:
   easy-buy addition, not treated as already available.
 - Apply healthy-eating preferences as best-effort guidance rather than fail the
   plan when they cannot all be met.
+- Apply generic properties and measurable operating limits as rules. For every
+  relevant custom policy, record a concise satisfied, trade-off, or
+  needs-clarification outcome; consequential ambiguity or a conflict with a
+  hard constraint earns one concise question.
 - Treat a configured cheat day as an intentional exception to ordinary health
   preferences.
 - Consider meal-slot suitability: packed school food must suit packing and the
@@ -526,7 +534,8 @@ for the chosen plan to be workable.
 The v1 plan keeps its decision data even if the initial grid exposes only a
 small portion of it. This both makes later rationale UX possible and makes the
 planner's choices inspectable. Each plan stores its period, household location,
-timezone, version, and pending-feedback state. Each meal cell stores:
+timezone, version, pending-feedback state, and outcomes for relevant custom
+policies, including their affected cells and rationale. Each meal cell stores:
 
 - meal name and slot;
 - preparation label and any required or optional prior-night prep;
