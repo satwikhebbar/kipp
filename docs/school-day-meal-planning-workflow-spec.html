@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>School-Day Meal Planning Workflow — v1 Product Specification</title>
+  <style>
+    :root { --ink:#1f2937; --muted:#5b6474; --paper:#fffefa; --line:#dde3e8; --accent:#0f766e; --accent-soft:#e7f5f1; --blue-soft:#eaf2ff; --warn:#8a5a00; --warn-soft:#fff6dc; --code:#f2f5f7; }
+    * { box-sizing:border-box; } body { margin:0; background:#eef2f3; color:var(--ink); font:16px/1.58 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1160px; margin:32px auto; padding:clamp(28px,5vw,72px); background:var(--paper); box-shadow:0 8px 30px #182b3820; }
+    h1,h2,h3 { line-height:1.18; letter-spacing:-.024em; } h1 { margin:10px 0 12px; font-size:clamp(2rem,5vw,3.05rem); } h2 { margin:54px 0 16px; font-size:1.65rem; border-bottom:1px solid var(--line); padding-bottom:9px; } h3 { margin:32px 0 10px; font-size:1.16rem; }
+    p,li { max-width:900px; } .lede { max-width:860px; color:var(--muted); font-size:1.18rem; } .meta { color:var(--muted); font-size:.92rem; } .tag,.pill { display:inline-block; border-radius:999px; padding:3px 9px; background:var(--accent-soft); color:#075b54; font-size:.78rem; font-weight:700; } .pill { white-space:nowrap; background:var(--blue-soft); color:#295ba7; }
+    nav { margin:30px 0 34px; padding:18px 22px; border:1px solid var(--line); background:#f8faf9; } nav ol { columns:2; padding-left:24px; margin:8px 0 0; } nav li { margin:5px 12px 5px 0; } a { color:#0f5eaa; } .callout { max-width:900px; margin:22px 0; padding:16px 20px; border-left:4px solid var(--accent); background:var(--accent-soft); } .callout.warn { border-color:#b57800; background:var(--warn-soft); }
+    table { width:100%; border-collapse:collapse; margin:18px 0 28px; font-size:.9rem; } th,td { border:1px solid var(--line); padding:9px 10px; text-align:left; vertical-align:top; } th { background:#f0f5f4; } .wide { overflow-x:auto; } code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code); } code { padding:1px 4px; border-radius:3px; } pre { max-width:900px; padding:16px; white-space:pre-wrap; overflow:auto; border:1px solid var(--line); } .small { color:var(--muted); font-size:.92rem; } .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(235px,1fr)); gap:14px; max-width:900px; } .card { border:1px solid var(--line); padding:15px 17px; background:#fff; } .card h3 { margin:0 0 6px; } @media print { body { background:#fff; } main { max-width:none; margin:0; box-shadow:none; } } @media(max-width:720px) { main { margin:0; } nav ol { columns:1; } }
+  </style>
+</head>
+<body><main>
+  <header>
+    <span class="tag">Draft for product review · v1</span>
+    <h1>School-Day Meal Planning Workflow</h1>
+    <p class="lede">A product contract for helping a parent turn household context and weekly realities into a practical, easy-to-adjust school-week meal plan.</p>
+    <p class="meta">This HTML edition mirrors the accompanying product specification. It defines behaviour and user outcomes, not the implementation architecture.</p>
+  </header>
+  <nav aria-label="Contents"><strong>Contents</strong><ol>
+    <li><a href="#goal">Goal and outcome</a></li><li><a href="#scope">Scope and user</a></li><li><a href="#context">Planning context</a></li><li><a href="#properties">Configuration model</a></li><li><a href="#policy">Planning policy</a></li><li><a href="#flow">Weekly flow</a></li><li><a href="#review">Review and active plan</a></li><li><a href="#video">Recipe videos</a></li><li><a href="#midweek">Midweek changes</a></li><li><a href="#quality">Quality and open decisions</a></li>
+  </ol></nav>
+
+  <section id="goal"><h2>1. Goal and intended outcome</h2>
+    <p>Help a parent turn the household’s dietary needs, available ingredients, and that week’s exceptions into an active, easy-to-scan school-week meal plan for a child. The plan must be practical to follow and easy to adjust without replanning the whole week.</p>
+    <p>On Sunday, the parent can start a planning conversation, provide exceptions and available vegetables, review a Monday–Saturday plan at a glance, and make a few targeted feedback requests. In the absence of pending feedback, the latest plan is active for that week.</p>
+    <p>During the week, the parent can reopen the plan, find a video for either lunch meal, or guide a minimally disruptive update.</p>
+  </section>
+
+  <section id="scope"><h2>2. Scope and user</h2>
+    <h3>In scope for v1</h3><ul>
+      <li>A configurable Monday–Saturday school-week plan and configurable daily meal slots. The initial household has breakfast, two school snacks, packed school lunch, and home lunch.</li>
+      <li>Profile- and conversation-based planning; spoken or typed weekly input; voice-friendly feedback; and a mobile-friendly weekly grid.</li>
+      <li>Vegetarian school meals as a workflow constant for the initial India-focused release.</li>
+      <li>YouTube-first video discovery for lunch meals and minimally disruptive updates.</li>
+    </ul>
+    <h3>Out of scope for v1</h3><ul>
+      <li>A home-day template, automatic learning from outcomes, grocery ordering, a dedicated native app, and refrigerator-photo inventory recognition.</li>
+    </ul>
+    <p><strong>User:</strong> the parent who plans, prepares, and packs the child’s food. The bot user controls configuration and the active plan. v1 has no roles, sharing model, or separate approval persona.</p>
+  </section>
+
+  <section id="context"><h2>3. Planning context</h2>
+    <p>A useful plan reflects the parent’s real decision environment. Every context item is a hard constraint, soft preference, operating limit, recurring target, or week-specific fact.</p>
+    <div class="grid">
+      <article class="card"><h3>Child eating profile</h3><p>Hard dietary exclusions, favourites and foods to avoid, sensory guidance, new-food tolerance, and school realities such as utensil comfort or food-sharing restrictions.</p></article>
+      <article class="card"><h3>Household repertoire</h3><p>Preferred cuisines and dish families, slot-specific familiar dishes, useful formats, wasteful or disliked formats, substitutions, and repeat tolerance.</p></article>
+      <article class="card"><h3>School-day schedule</h3><p>School days, holidays, half days, break durations, meal-slot purpose, packing requirements, and optional school no-go guidance.</p></article>
+      <article class="card"><h3>Preparation capacity</h3><p>The real before-school workload, meals normally cooked fresh, dry snack defaults, prior-night prep tolerance, equipment gaps, and packing constraints.</p></article>
+      <article class="card"><h3>Nutrition and variety</h3><p>Health defaults, a cheat day, optional household targets, weekly balance, and the desired variety of dishes and ingredients.</p></article>
+      <article class="card"><h3>Ingredients and procurement</h3><p>Stable pantry baseline, weekly perishables and urgency, shortages, a no-shopping default, quick-commerce assumptions, household city and country.</p></article>
+    </div>
+    <h3>History and feedback</h3><p>Recent active plans are first-order workflow records used for cross-week variety. Household repertoire is workflow-managed from active plans and later explicit learning. Meal feedback is transactional: it drives the present revision but does not become permanent context without an explicit promotion step.</p>
+  </section>
+
+  <section id="properties"><h2>4. Configuration and weekly state</h2>
+    <p><strong>Generic properties</strong> are concepts the platform knows in code, with defined semantics and shape. <strong>Custom properties</strong> are user-created natural-language policies or overrides that the planner interprets as planning data only—not executable instructions.</p>
+    <div class="wide"><table><thead><tr><th>Generic property</th><th>Shape / example</th><th>Default and use</th></tr></thead><tbody>
+      <tr><td><code>dietaryExclusions</code></td><td>Natural-language string array, such as <code>["dairy products"]</code></td><td>Empty. Every item is a hard exclusion; ambiguous wording must be clarified.</td></tr>
+      <tr><td><code>foodPreferences</code></td><td><code>{ favourites, avoid }</code></td><td>Empty. “Avoid” is soft; it is not a hard ban.</td></tr>
+      <tr><td><code>allowNewFoods</code></td><td>Boolean</td><td>False. New dishes are only eligible when true.</td></tr>
+      <tr><td><code>sensoryGuidelines</code></td><td>Natural-language string array</td><td>Empty. Covers texture, spice, smell, messiness, and similar guidance.</td></tr>
+      <tr><td><code>schoolSchedule</code></td><td>Days, breaks, half days, and slots</td><td>Starter schema, then parent controlled.</td></tr>
+      <tr><td><code>householdLocation</code></td><td><code>{ country, city }</code></td><td>Required before production planning; country and city are enough for v1.</td></tr>
+      <tr><td><code>planPeriod</code></td><td>Start date, end date, IANA timezone</td><td>Required for every plan and relative-date handling.</td></tr>
+      <tr><td><code>morningCookingBudgetMinutes</code></td><td>Optional number</td><td>Combined before-school work, not isolated recipe durations.</td></tr>
+      <tr><td><code>priorNightPrepAllowed</code></td><td>Boolean</td><td>False until confirmed.</td></tr>
+      <tr><td><code>healthPlan</code></td><td>Health focus and cheat day</td><td>Health-focused baseline and one enabled cheat day.</td></tr>
+      <tr><td><code>pantryBaseline</code></td><td>String array</td><td>Stable grains, pulses, flour, spices, oils, and staples.</td></tr>
+      <tr><td><code>weeklyInventory</code></td><td>Current-week ingredients and notes</td><td>Voice or typed input; captures perishables and urgency.</td></tr>
+      <tr><td><code>weeklyExceptions</code></td><td>Structured exceptions plus free-text note</td><td>Holidays, capacity changes, occasions, and a weekly focus.</td></tr>
+      <tr><td><code>schoolMealPolicy</code></td><td>Optional natural-language string</td><td>School no-go guidance, such as “no chips or biscuits.”</td></tr>
+      <tr><td><code>trustedRecipeChannels</code></td><td>Chef/channel array</td><td>Empty. Preferred when a suitable recipe exists.</td></tr>
+    </tbody></table></div>
+    <h3>Weekly conversational capture</h3>
+    <p>The parent never fills an internal form. A Telegram message or voice note is transcribed, preserved, and summarized for correction. The agent derives a patch to <code>weeklyInventory</code> and/or <code>weeklyExceptions</code>, retaining the source and timestamp. Low-risk, unambiguous facts are applied; consequential ambiguity earns one concise question.</p>
+    <pre>weeklyInventory: items with name, availability, quantity/use note; free-text notes
+weeklyExceptions: kind, optional day/meal slots, free-text instruction</pre>
+    <p>These values are week-scoped conversation state. They expire with that plan and never become persistent household context unless the parent explicitly promotes them.</p>
+    <h3>Initial custom policies</h3><ul>
+      <li><strong>Snack policy:</strong> school snacks are usually dry, quick to pack, and not cooked that morning.</li>
+      <li><strong>Equipment gap:</strong> for example, no microwave.</li>
+      <li><strong>Packing capacity:</strong> for example, two compartments and no leak-prone items.</li>
+      <li><strong>Nutrition targets:</strong> fruit three to four times weekly, plus regular nuts or dry fruits.</li>
+    </ul>
+  </section>
+
+  <section id="policy"><h2>5. Planning policy</h2>
+    <ul>
+      <li>Never violate dietary, allergy, or vegetarian constraints. School policies are guidance: follow them where practical, otherwise label the least-bad feasible trade-off.</li>
+      <li>Favor available, perishable ingredients. Easy-buy additions must be few, clearly labelled, and judged as standard grocery items or seasonally available in the given city and country.</li>
+      <li>Apply health goals as best effort, with one intentional cheat day.</li>
+      <li>Keep packed foods dry by default. Snacks should be pre-prepared or quick, dry items; a substantial cooked snack must be genuinely quick and fit the morning budget.</li>
+      <li>Treat school lunch and home lunch as fresh cooked. Breakfast is preferably fresh when capacity permits. Assess the combined before-school workload, not each recipe alone.</li>
+      <li>Suggest no more than two meals requiring prior-night prep on any day.</li>
+      <li>Optimize across the whole week. Avoid repeated named dishes and normally cap a principal ingredient at two meals weekly, while respecting requested repeats.</li>
+      <li>Retain structured rationale for every cell. The grid shows compact labels for meaningful trade-offs, such as easy-buy additions or required prep.</li>
+    </ul>
+    <div class="callout"><strong>Stored meal data:</strong> each cell retains its name and slot, preparation label, required/optional prep, principal ingredients, inventory use, easy-buy additions, lunch video result, and structured rationale/trade-off labels. The initial UI can reveal only what is useful at a glance.</div>
+  </section>
+
+  <section id="flow"><h2>6. Weekly planning flow</h2><ol>
+    <li>On Sunday, the parent starts planning through Telegram.</li>
+    <li>The agent asks only for missing, week-specific exceptions and inventory, using persistent context rather than re-asking it.</li>
+    <li>The agent asks targeted clarification when it materially changes the plan, then proposes a complete weekly grid.</li>
+    <li>The parent reviews the grid and gives natural-language feedback on a meal or whole day. This is guidance to the agent, not direct cell replacement.</li>
+    <li>Feedback remains pending until the parent asks for an updated plan. The current plan stays visible with a pending-changes indicator.</li>
+    <li>The agent processes feedback together and returns a complete revised grid, which immediately becomes active. A separate finalization step is unnecessary.</li>
+  </ol></section>
+
+  <section id="review"><h2>7. Active plan and review</h2>
+    <p><strong>Telegram</strong> is the conversational surface: triggering the plan, supplying weekly context, answering clarifications, and asking the agent to process feedback. <strong>The Mini App</strong> is the visual surface: reviewing the weekly grid, opening meal details, and recording feedback. They do not need to duplicate every action in v1.</p>
+    <div class="wide"><table><thead><tr><th>Meal slot</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th></tr></thead><tbody>
+      <tr><th>Breakfast</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Snack 1</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Snack 2</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>School lunch</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr><tr><th>Home lunch</th><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td><td>Meal</td></tr>
+    </tbody></table></div>
+    <p>Each cell supports glanceable viewing, detail on ingredients and prep, typed or voice feedback, a pending-change state, and a pre-fetched lunch-video result where applicable.</p>
+  </section>
+
+  <section id="video"><h2>8. Recipe-video behaviour</h2><ul>
+    <li>Attempt discovery ahead of time for school lunch and home lunch only.</li>
+    <li>Prefer configured YouTube chefs and channels; a reputable fallback is acceptable.</li>
+    <li>Suitability includes the meal, dietary rules, vegetarian policy, cuisine preferences, and school context.</li>
+    <li>If no suitable video is found, retain the meal and store an explicit no-video result. Do not substitute a generic popularity ranking.</li>
+  </ul></section>
+
+  <section id="midweek"><h2>9. Midweek changes</h2><ul>
+    <li>Existing accepted cells are implicitly approved. Make the smallest change that addresses the feedback and preserve the remaining week.</li>
+    <li>A comment such as “this whole day is untenable” deliberately widens scope. Broader optimization is allowed only when clearly justified by the user’s comments.</li>
+    <li>Return a full revised grid after batched feedback is processed, and identify consequential additions with plan labels.</li>
+    <li>“Tomorrow is a holiday” updates weekly state but does not itself revise the plan. The parent explicitly asks to recreate remaining days if desired.</li>
+    <li>If a requested change may conflict with a hard constraint, seek clarification in Telegram before revising.</li>
+  </ul></section>
+
+  <section id="quality"><h2>10. Product quality and remaining decisions</h2>
+    <p>The workflow must be configurable, safe with hard exclusions, low-effort, morning-feasible, varied, editable without erasing accepted work, and accessible throughout the week. The initial quality metric is the number of feedback comments attached to each plan that becomes active.</p>
+    <div class="callout warn"><strong>Still open:</strong> the persistent-profile editing experience; a detailed and implementable recipe-source ranking policy; the precise measure and explanation of morning capacity; refrigerator-photo input; and any broader shopping-support design.</div>
+  </section>
+</main></body></html>
