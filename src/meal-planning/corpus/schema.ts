@@ -135,6 +135,7 @@ export const mealPlanContextSchema: z.ZodType<MealPlanContext> = z.object({
   feedbackItems: z.array(feedbackItemSchema).optional(),
   urgentUseByDay: z.string().min(1).optional(),
   requireUrgentUseEarly: z.boolean().optional(),
+  requestedRepeats: z.array(z.string().min(1)).optional(),
 })
 
 export const policyOutcomeSchema: z.ZodType<PolicyOutcome> = z.object({

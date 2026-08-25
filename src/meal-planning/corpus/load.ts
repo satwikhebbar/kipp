@@ -131,6 +131,17 @@ export function validateScenarioStructure(scenario: MealPlanScenario): ScenarioI
     issues.push({ path: "context.recentPlan", message: "revision scenarios must reference a recentPlan" })
   }
 
+  if (
+    scenario.context.requireUrgentUseEarly &&
+    scenario.context.urgentUseByDay &&
+    !days.has(scenario.context.urgentUseByDay)
+  ) {
+    issues.push({
+      path: "context.urgentUseByDay",
+      message: `urgentUseByDay "${scenario.context.urgentUseByDay}" is not a configured day`,
+    })
+  }
+
   const closedDays = new Set(
     weeklyExceptions.items
       .filter((exception) => exception.kind === "school_closed" && exception.appliesTo?.day)
