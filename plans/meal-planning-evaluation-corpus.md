@@ -139,11 +139,11 @@ One fixture per scenario. Shape (abbreviated):
       "plan": {
         "grid": {
           "Mon": {
-            "breakfast":    { "dish": "Paratha", "vegetarian": true,  "ingredients": ["wheat flour"], "inventoryItems": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false },
-            "snack1":       { "dish": "Banana",  "vegetarian": true,  "ingredients": ["banana"],      "inventoryItems": ["banana"],      "cookMinutes": 0,  "priorNightPrep": false },
-            "snack2":       { "dish": "Roasted moong", "vegetarian": true, "ingredients": ["moong dal"], "inventoryItems": ["moong dal"], "cookMinutes": 0, "priorNightPrep": false },
-            "school-lunch": { "dish": "Bottle gourd dal", "vegetarian": true, "ingredients": ["bottle gourd","moong dal"], "inventoryItems": ["bottle gourd","moong dal"], "cookMinutes": 20, "priorNightPrep": false },
-            "home-lunch":   { "dish": "Rice and beans", "vegetarian": true, "ingredients": ["rice","beans"], "inventoryItems": ["rice","beans"], "cookMinutes": 20, "priorNightPrep": false }
+            "breakfast":    { "dish": "paratha", "vegetarian": true,  "ingredients": ["wheat flour"], "inventoryItems": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false },
+            "snack1":       { "dish": "banana",  "vegetarian": true,  "ingredients": ["banana"],      "inventoryItems": ["banana"],      "cookMinutes": 0,  "priorNightPrep": false },
+            "snack2":       { "dish": "roasted moong", "vegetarian": true, "ingredients": ["moong dal"], "inventoryItems": ["moong dal"], "cookMinutes": 0, "priorNightPrep": false },
+            "school-lunch": { "dish": "bottle gourd dal", "vegetarian": true, "ingredients": ["bottle gourd","moong dal"], "inventoryItems": ["bottle gourd","moong dal"], "cookMinutes": 20, "priorNightPrep": false },
+            "home-lunch":   { "dish": "rice and beans", "vegetarian": true, "ingredients": ["rice","beans"], "inventoryItems": ["rice","beans"], "cookMinutes": 20, "priorNightPrep": false }
           }
         },
         "easyBuys": [],
@@ -170,8 +170,16 @@ Key decisions baked into the schema:
   tokens; each dietary exclusion is an object `{ token, ambiguous }`; the
   household dish repertoire is a `dishRepertoire` token list. The evaluator
   consumes `token` for membership checks and `ambiguous` only to suppress hard
-  enforcement — it never interprets free text. Each fixture's vocabulary is
-  local to the fixture; no global taxonomy exists.
+  enforcement — it never interprets free text. All token matching (exclusions,
+  ingredients, dishes, inventory) is **exact string equality**; normalizing
+  free text into canonical tokens is an explicit agent-side precondition, not
+  evaluator behavior. Each fixture's vocabulary is local to the fixture; no
+  global taxonomy exists.
+- **Coverage set.** `missing_slot` is computed over configured days minus days
+  marked `school_closed` (and minus slots dropped by `half_day` exceptions);
+  `extra_slot_for_closed_day` forbids any cell on a closed day. The example's
+  Saturday closure therefore requires Mon–Fri cells only and cannot produce
+  simultaneous missing-slot and extra-slot failures.
 - **`request.kind`** is `initial_plan` or `revision`. Revision fixtures
   carry `feedbackItems` (batched) and reference `recentPlan`, which enables
   revision-preservation and unaddressed-feedback checks.
@@ -217,8 +225,8 @@ columns cite the spec (§) / planning-decisions (PD) / issue.
 | --- | --- | --- |
 | `hard_exclusion` | A cell ingredient matches a `dietaryExclusions` entry's `token`. Entries with `ambiguous: true` are excluded from this check: the evaluator never enforces an ambiguous exclusion as hard. | spec 5.1, PD |
 | `non_vegetarian_school_meal` | A configured school-day cell declares `vegetarian: false`. | spec 5.1 (workflow constant) |
-| `missing_slot` | A configured day × slot has no cell. | issue ("slot coverage") |
-| `extra_slot_for_closed_day` | A cell exists on a day marked `school_closed` in `weeklyExceptions`. | spec 5.3 |
+| `missing_slot` | A configured day × slot has no cell, where the coverage set is configured days minus days marked `school_closed` in `weeklyExceptions` and minus slots dropped by `half_day` exceptions (see §4). | issue ("slot coverage") |
+| `extra_slot_for_closed_day` | A cell exists on a day marked `school_closed` in `weeklyExceptions`. Closed days contribute no required slots and no cells. | spec 5.3 |
 | `morning_capacity_exceeded` | Combined morning cook minutes (breakfast + school lunch + any morning-cooked snack) on a day exceeds `morningCookingBudgetMinutes`. | spec 6 (combined workload), PD |
 | `prior_night_prep_not_allowed` | A cell requires prior-night prep while `priorNightPrepAllowed: false`. | spec 5.4, PD |
 | `prior_night_prep_limit` | A day has more than two `priorNightPrep: true` cells. | spec 6 |
@@ -255,7 +263,7 @@ candidate and at least one rule-violating candidate per scenario.
 | 3 | packing-constraints | Dry/quick snack slots and a "packing capacity" policy; cooked snack in a dry slot fails; policy outcome completeness. | slot_unsuitable, missing_policy_outcome |
 | 4 | no-prior-night-prep | `priorNightPrepAllowed: false`; a required-prep cell fails; a >2/day prep plan fails. | prior_night_prep_not_allowed, prior_night_prep_limit |
 | 5 | urgent-perishables | "Use early" items must appear by the fixture's `urgentUseByDay`; late use fails. | use_early_ignored |
-| 6 | holiday-half-day | Saturday closed (extra cell fails) and Wednesday half day reconfigures slots. | extra_slot_for_closed_day, missing_slot |
+| 6 | holiday-half-day | Saturday `school_closed`: coverage excludes Sat, and a Sat cell fails with `extra_slot_for_closed_day`. Wednesday `half_day` drops the `home-lunch` slot (via `appliesTo.mealSlots`): a plan omitting Wed home-lunch passes, while omitting a still-required Wed slot (e.g. `school-lunch`) fails `missing_slot`. | extra_slot_for_closed_day, missing_slot |
 | 7 | policy-trade-off | A policy in tension with a hard exclusion records `trade-off`; a plan claiming `satisfied` still passes the completeness check, while a plan with no recorded outcome fails. | missing_policy_outcome, hard_exclusion boundary |
 | 8 | new-food-setting | `allowNewFoods: false`: a cell whose dish is not in `dishRepertoire` ∪ `recentPlan` dishes fails with `unfamiliar_dish_not_allowed`. `allowNewFoods: true`: a new dish passes when its day has at least one familiar cell; a new dish on a day with no familiar cell fails with `unpaired_new_dish`. Familiarity is derived from `dishRepertoire` + `recentPlan`, never inferred. | unfamiliar_dish_not_allowed, unpaired_new_dish |
 | 9 | requested-repeat | A requested repeat overrides the anti-repeat rule; an unrequested repeat still fails. | dish_repeated (requested vs not) |
