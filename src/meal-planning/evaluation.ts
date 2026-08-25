@@ -195,6 +195,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   }
 
   const revisionChangedCells: Array<{ day: string; slotId: string }> = []
+  const revisionDishChangedCells: Array<{ day: string; slotId: string }> = []
   if (request.kind === "revision" && context.recentPlan) {
     const recent = context.recentPlan
     const positions = new Set<string>([
@@ -209,6 +210,9 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       const after = candidate.grid[day]?.[slotId]
       if (before === undefined || after === undefined || !cellsEqual(before, after)) {
         revisionChangedCells.push({ day, slotId })
+      }
+      if (after && (before === undefined || before.dish !== after.dish)) {
+        revisionDishChangedCells.push({ day, slotId })
       }
     }
   }
@@ -225,7 +229,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   }
   const recentRepeatDishes = new Set<string>()
   if (request.kind === "revision") {
-    for (const { day, slotId } of revisionChangedCells) {
+    for (const { day, slotId } of revisionDishChangedCells) {
       const after = candidate.grid[day]?.[slotId]
       if (after) recentRepeatDishes.add(after.dish)
     }
