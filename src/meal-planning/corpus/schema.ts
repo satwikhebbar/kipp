@@ -139,6 +139,7 @@ export const feedbackItemSchema: z.ZodType<FeedbackItem> = z
 export const mealCellSchema: z.ZodType<MealCell> = z
   .object({
     dish: z.string().min(1),
+    vegetarian: z.boolean(),
     items: z.array(z.string().min(1)),
     cookMinutes: z.number().int().min(0),
     priorNightPrep: z.boolean(),

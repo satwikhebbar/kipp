@@ -34,10 +34,11 @@ function slotById(schedule: MealPlanContext["schedule"], slotId: string): MealSl
   return schedule.slots.find((slot) => slot.id === slotId)
 }
 
-/** True when two cells are structurally identical (dish, items, cook minutes, prep flag). */
+/** True when two cells are structurally identical (dish, vegetarian flag, items, cook minutes, prep flag). */
 function cellsEqual(a: MealCell, b: MealCell): boolean {
   return (
     a.dish === b.dish &&
+    a.vegetarian === b.vegetarian &&
     a.cookMinutes === b.cookMinutes &&
     a.priorNightPrep === b.priorNightPrep &&
     a.items.length === b.items.length &&
@@ -121,6 +122,14 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       if (clearExclusionTokens.has(token)) {
         failures.push({ code: "hard_exclusion", day, slot: slotId, detail: `ingredient "${token}" is excluded` })
       }
+    }
+    if (dayIndex.has(day) && !closedDays.has(day) && !cell.vegetarian) {
+      failures.push({
+        code: "non_vegetarian_school_meal",
+        day,
+        slot: slotId,
+        detail: "non-vegetarian cell on a school day",
+      })
     }
     const slot = slotById(schedule, slotId)
     if (slot?.maxCookMinutes != null && cell.cookMinutes > slot.maxCookMinutes) {

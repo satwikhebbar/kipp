@@ -94,7 +94,7 @@ describe("meal-planning corpus health", () => {
 
   it("every scenario exercises its declared distinct branch", () => {
     const branchByScenario: Record<string, string[]> = {
-      "baseline-week": ["missing_slot", "unfamiliar_dish_not_allowed"],
+      "baseline-week": ["non_vegetarian_school_meal", "missing_slot", "unfamiliar_dish_not_allowed"],
       "dietary-ambiguity": ["hard_exclusion"],
       "packing-constraints": ["slot_unsuitable", "morning_capacity_exceeded", "missing_policy_outcome"],
       "no-prior-night-prep": ["prior_night_prep_not_allowed", "prior_night_prep_limit"],
