@@ -11,26 +11,24 @@ const SLOT_COOK: Record<string, number> = {
   "home-lunch": 20,
 }
 
-const DISHES: Record<string, { ingredients: string[]; inventory: string[] }> = {
-  paratha: { ingredients: ["wheat flour"], inventory: ["wheat flour"] },
-  banana: { ingredients: ["banana"], inventory: ["banana"] },
-  "roasted moong": { ingredients: ["moong dal"], inventory: ["moong dal"] },
-  "bottle gourd dal": { ingredients: ["bottle gourd", "moong dal"], inventory: ["bottle gourd", "moong dal"] },
-  "rice and beans": { ingredients: ["rice", "beans"], inventory: ["rice", "beans"] },
-  "paneer paratha": { ingredients: ["wheat flour", "paneer"], inventory: ["wheat flour"] },
-  "ghee rice": { ingredients: ["rice", "ghee"], inventory: ["rice"] },
+const DISHES: Record<string, { items: string[] }> = {
+  paratha: { items: ["wheat flour"] },
+  banana: { items: ["banana"] },
+  "roasted moong": { items: ["moong dal"] },
+  "bottle gourd dal": { items: ["bottle gourd", "moong dal"] },
+  "rice and beans": { items: ["rice", "beans"] },
+  "paneer paratha": { items: ["wheat flour", "paneer"] },
+  "ghee rice": { items: ["rice", "ghee"] },
 }
 
 const REPERTOIRE = ["paratha", "banana", "roasted moong", "bottle gourd dal", "rice and beans"]
 const FREQUENT = ["wheat flour", "banana", "moong dal", "bottle gourd", "rice", "beans", "oil", "spices", "salt"]
 
 function cellFor(slot: string, dish: string): MealCell {
-  const info = DISHES[dish] ?? { ingredients: [dish], inventory: [dish] }
+  const info = DISHES[dish] ?? { items: [dish] }
   return {
     dish,
-    vegetarian: true,
-    ingredients: [...info.ingredients],
-    inventoryItems: [...info.inventory],
+    items: [...info.items],
     cookMinutes: SLOT_COOK[slot] ?? 0,
     priorNightPrep: false,
   }
@@ -68,7 +66,7 @@ function baseContext(overrides: Partial<MealPlanContext> = {}): MealPlanContext 
       sensoryGuidelines: [],
       morningCookingBudgetMinutes: 40,
       priorNightPrepAllowed: false,
-      pantryBaseline: ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"],
+      pantryBaseline: ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee", "paneer"],
       allowFrequentIngredients: FREQUENT,
     },
     customPolicies: [
@@ -129,20 +127,15 @@ describe("meal-planning evaluator", () => {
   })
 
   it("enforces clear dietary exclusions but not ambiguous ones", () => {
+    const context = baseContext()
+    context.profile.pantryBaseline = [...context.profile.pantryBaseline, "peanut", "dairy"]
     const candidate = baseCandidate()
-    candidate.grid.Mon.breakfast.ingredients.push("peanut")
-    expect(failureCodes(evaluateMealPlan(candidate, baseContext()))).toEqual(["hard_exclusion"])
+    candidate.grid.Mon.breakfast.items.push("peanut")
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual(["hard_exclusion"])
 
     const ambiguousCandidate = baseCandidate()
-    ambiguousCandidate.grid.Mon.breakfast.ingredients.push("dairy")
-    expect(evaluateMealPlan(ambiguousCandidate, baseContext()).pass).toBe(true)
-  })
-
-  it("flags a non-vegetarian cell on a school day", () => {
-    const candidate = baseCandidate()
-    candidate.grid.Tue["school-lunch"].vegetarian = false
-    const evaluation = evaluateMealPlan(candidate, baseContext())
-    expect(failureCodes(evaluation)).toEqual(["non_vegetarian_school_meal"])
+    ambiguousCandidate.grid.Mon.breakfast.items.push("dairy")
+    expect(evaluateMealPlan(ambiguousCandidate, context).pass).toBe(true)
   })
 
   it("flags a missing required slot", () => {
@@ -195,13 +188,13 @@ describe("meal-planning evaluator", () => {
 
   it("flags inventory items that are unknown and those that are unavailable", () => {
     const unknown = baseCandidate()
-    unknown.grid.Mon.breakfast.inventoryItems.push("paneer")
+    unknown.grid.Mon.breakfast.items.push("cashew")
     expect(failureCodes(evaluateMealPlan(unknown, baseContext()))).toEqual(["inventory_item_unknown"])
 
     const context = baseContext()
-    context.weeklyInventory.items.push({ name: "paneer", status: "unavailable" })
+    context.weeklyInventory.items.push({ name: "cashew", status: "unavailable" })
     const unavailable = baseCandidate()
-    unavailable.grid.Mon.breakfast.inventoryItems.push("paneer")
+    unavailable.grid.Mon.breakfast.items.push("cashew")
     expect(failureCodes(evaluateMealPlan(unavailable, context))).toEqual(["inventory_item_unavailable"])
   })
 
@@ -642,38 +635,38 @@ describe("meal-planning evaluator", () => {
 describe("corpus scenario runner", () => {
   const scenarios = loadScenarios()
 
-  it("runs every scenario against every candidate", () => {
-    for (const scenario of scenarios) {
-      for (const candidate of scenario.candidates) {
-        const evaluation = evaluateMealPlan(candidate.plan, scenario.context)
-        if (candidate.expect.failures) {
-          const actual = evaluation.failures.map((failure) => ({
-            code: failure.code,
-            day: failure.day,
-            slot: failure.slot,
-          }))
-          const expected = candidate.expect.failures.map((failure) => ({
-            code: failure.code,
-            day: failure.day,
-            slot: failure.slot,
-          }))
-          expect(actual, `${scenario.id}/${candidate.label}`).toEqual(expected)
-          expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
-        } else if (candidate.expect.noFailuresOf) {
-          const codes = new Set(evaluation.failures.map((failure) => failure.code))
-          for (const code of candidate.expect.noFailuresOf) {
-            expect(codes.has(code), `${scenario.id}/${candidate.label} must not fail with ${code}`).toBe(false)
-          }
-          expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
-        } else {
-          expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
+  it.each(
+    scenarios.map((scenario) => [scenario.id, scenario] as const),
+  )("evaluates every candidate of %s", (_id, scenario) => {
+    for (const candidate of scenario.candidates) {
+      const evaluation = evaluateMealPlan(candidate.plan, scenario.context)
+      if (candidate.expect.failures) {
+        const actual = evaluation.failures.map((failure) => ({
+          code: failure.code,
+          day: failure.day,
+          slot: failure.slot,
+        }))
+        const expected = candidate.expect.failures.map((failure) => ({
+          code: failure.code,
+          day: failure.day,
+          slot: failure.slot,
+        }))
+        expect(actual, `${scenario.id}/${candidate.label}`).toEqual(expected)
+        expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
+      } else if (candidate.expect.noFailuresOf) {
+        const codes = new Set(evaluation.failures.map((failure) => failure.code))
+        for (const code of candidate.expect.noFailuresOf) {
+          expect(codes.has(code), `${scenario.id}/${candidate.label} must not fail with ${code}`).toBe(false)
         }
-        for (const [key, value] of Object.entries(candidate.expect.measurements ?? {})) {
-          expect(
-            evaluation.measurements[key as keyof typeof evaluation.measurements],
-            `${scenario.id}/${candidate.label} measurement ${key}`,
-          ).toEqual(value)
-        }
+        expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
+      } else {
+        expect(evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(candidate.expect.pass)
+      }
+      for (const [key, value] of Object.entries(candidate.expect.measurements ?? {})) {
+        expect(
+          evaluation.measurements[key as keyof typeof evaluation.measurements],
+          `${scenario.id}/${candidate.label} measurement ${key}`,
+        ).toEqual(value)
       }
     }
   })
