@@ -11,7 +11,6 @@ export const FAILURE_CODES = [
   "inventory_item_unavailable",
   "use_early_ignored",
   "dish_repeated",
-  "principal_ingredient_overused",
   "unfamiliar_dish_not_allowed",
   "unpaired_new_dish",
   "missing_policy_outcome",
@@ -57,18 +56,14 @@ export interface MealSchedule {
   slots: MealSlot[]
 }
 
-export interface DietaryExclusion {
-  token: string
-  ambiguous: boolean
-}
-
 export interface FoodPreferences {
   favourites: string[]
   avoid: string[]
 }
 
 export interface MealProfile {
-  dietaryExclusions: DietaryExclusion[]
+  /** Clear-cut exclusions only. Ambiguous household phrases are resolved by the planner (e.g. by clarifying) before they reach the evaluator. */
+  dietaryExclusions: string[]
   dishRepertoire: string[]
   foodPreferences: FoodPreferences
   allowNewFoods: boolean
@@ -76,7 +71,6 @@ export interface MealProfile {
   morningCookingBudgetMinutes: number
   priorNightPrepAllowed: boolean
   pantryBaseline: string[]
-  allowFrequentIngredients: string[]
 }
 
 export interface CustomPolicy {
@@ -168,8 +162,6 @@ export interface MealPlanMeasurements {
   priorNightPrepMax: number
   dishRepeatCount: number
   dishRepeats: string[]
-  principalIngredientMax: number
-  principalIngredientOverused: string[]
   inventoryUsed: string[]
   urgentUseByDay?: string
   easyBuyCount: number

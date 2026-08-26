@@ -22,7 +22,6 @@ const DISHES: Record<string, { items: string[] }> = {
 }
 
 const REPERTOIRE = ["paratha", "banana", "roasted moong", "bottle gourd dal", "rice and beans"]
-const FREQUENT = ["wheat flour", "banana", "moong dal", "bottle gourd", "rice", "beans", "oil", "spices", "salt"]
 
 function cellFor(slot: string, dish: string): MealCell {
   const info = DISHES[dish] ?? { items: [dish] }
@@ -57,10 +56,7 @@ function baseContext(overrides: Partial<MealPlanContext> = {}): MealPlanContext 
       ],
     },
     profile: {
-      dietaryExclusions: [
-        { token: "peanut", ambiguous: false },
-        { token: "dairy", ambiguous: true },
-      ],
+      dietaryExclusions: ["peanut"],
       dishRepertoire: REPERTOIRE,
       foodPreferences: { favourites: REPERTOIRE, avoid: [] },
       allowNewFoods: false,
@@ -68,7 +64,6 @@ function baseContext(overrides: Partial<MealPlanContext> = {}): MealPlanContext 
       morningCookingBudgetMinutes: 40,
       priorNightPrepAllowed: false,
       pantryBaseline: ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee", "paneer"],
-      allowFrequentIngredients: FREQUENT,
     },
     customPolicies: [
       { id: "snack-policy", label: "Snack policy", scope: "persistent", value: "Snacks dry and quick." },
@@ -122,21 +117,20 @@ describe("meal-planning evaluator", () => {
       morningCookMax: 35,
       priorNightPrepMax: 0,
       dishRepeatCount: 0,
-      principalIngredientMax: 0,
       easyBuyCount: 0,
     })
   })
 
-  it("enforces clear dietary exclusions but not ambiguous ones", () => {
+  it("enforces dietary exclusions", () => {
     const context = baseContext()
     context.profile.pantryBaseline = [...context.profile.pantryBaseline, "peanut", "dairy"]
     const candidate = baseCandidate()
     candidate.grid.Mon.breakfast.items.push("peanut")
     expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual(["hard_exclusion"])
 
-    const ambiguousCandidate = baseCandidate()
-    ambiguousCandidate.grid.Mon.breakfast.items.push("dairy")
-    expect(evaluateMealPlan(ambiguousCandidate, context).pass).toBe(true)
+    const notExcluded = baseCandidate()
+    notExcluded.grid.Mon.breakfast.items.push("dairy")
+    expect(evaluateMealPlan(notExcluded, context).pass).toBe(true)
   })
 
   it("flags a non-vegetarian cell on a school day", () => {
@@ -517,34 +511,6 @@ describe("meal-planning evaluator", () => {
     }
     const evaluation = evaluateMealPlan(candidate, context)
     expect(failureCodes(evaluation)).toEqual(["dish_repeated", "unaddressed_feedback", "unscoped_cell_changed"])
-  })
-
-  it("flags a principal ingredient used in more than two cells", () => {
-    const context = baseContext({
-      schedule: {
-        days: ["Mon", "Tue"],
-        slots: [
-          { id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null },
-          { id: "snack1", name: "Snack 1", packed: true, dry: true, maxCookMinutes: 0 },
-          { id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null },
-        ],
-      },
-      profile: {
-        ...baseContext().profile,
-        dishRepertoire: [...REPERTOIRE, "paneer paratha"],
-        foodPreferences: { favourites: [...REPERTOIRE, "paneer paratha"], avoid: [] },
-      },
-      customPolicies: [],
-    })
-    const rows: Array<[string, string, string]> = []
-    for (const day of ["Mon", "Tue"]) {
-      for (const slot of ["breakfast", "snack1", "school-lunch"]) rows.push([day, slot, "paneer paratha"])
-    }
-    const candidate: MealPlanCandidate = { grid: gridFrom(rows), easyBuys: [], policyOutcomes: {} }
-    const evaluation = evaluateMealPlan(candidate, context)
-    expect(failureCodes(evaluation)).toEqual(["principal_ingredient_overused"])
-    expect(evaluation.measurements.principalIngredientMax).toBe(6)
-    expect(evaluation.measurements.principalIngredientOverused).toEqual(["paneer"])
   })
 
   it("rejects unfamiliar dishes when new foods are disallowed", () => {

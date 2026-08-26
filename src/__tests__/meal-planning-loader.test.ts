@@ -21,7 +21,7 @@ function validContext(overrides: Partial<MealPlanContext> = {}): MealPlanContext
       ],
     },
     profile: {
-      dietaryExclusions: [{ token: "peanut", ambiguous: false }],
+      dietaryExclusions: ["peanut"],
       dishRepertoire: ["paratha", "banana"],
       foodPreferences: { favourites: ["paratha"], avoid: [] },
       allowNewFoods: false,
@@ -29,7 +29,6 @@ function validContext(overrides: Partial<MealPlanContext> = {}): MealPlanContext
       morningCookingBudgetMinutes: 40,
       priorNightPrepAllowed: false,
       pantryBaseline: ["rice", "wheat flour"],
-      allowFrequentIngredients: ["oil", "spices"],
     },
     customPolicies: [
       { id: "snack-policy", label: "Snack policy", scope: "persistent", value: "Snacks dry and quick." },

@@ -102,7 +102,7 @@ describe("meal-planning corpus health", () => {
       "holiday-half-day": ["extra_slot_for_closed_day", "missing_slot"],
       "policy-tradeoff": ["missing_policy_outcome"],
       "new-food-setting": ["unpaired_new_dish"],
-      "requested-repeat": ["dish_repeated", "principal_ingredient_overused"],
+      "requested-repeat": ["dish_repeated"],
       "midweek-shortage": ["inventory_item_unavailable", "unscoped_cell_changed", "inventory_item_unknown"],
       "whole-day-replan": ["unscoped_cell_changed"],
       "batched-feedback": ["unaddressed_feedback"],

@@ -11,7 +11,6 @@ import type {
 } from "./types"
 
 const MAX_PRIOR_NIGHT_PREP_PER_DAY = 2
-const MAX_PRINCIPAL_INGREDIENT_CELLS = 2
 const DEFAULT_URGENT_USE_BY_DAY = "Tue"
 
 interface GridCellRef {
@@ -82,9 +81,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     refsByDay.set(ref.day, list)
   }
 
-  const clearExclusionTokens = new Set(
-    profile.dietaryExclusions.filter((exclusion) => !exclusion.ambiguous).map((exclusion) => exclusion.token),
-  )
+  const clearExclusionTokens = new Set(profile.dietaryExclusions)
   const unavailableItems = new Set(
     weeklyInventory.items.filter((item) => item.status === "unavailable").map((item) => item.name),
   )
@@ -256,27 +253,6 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     })
   }
 
-  const ingredientCellCounts = new Map<string, number>()
-  for (const ref of refs) {
-    for (const ingredient of ref.cell.items) {
-      ingredientCellCounts.set(ingredient, (ingredientCellCounts.get(ingredient) ?? 0) + 1)
-    }
-  }
-  let principalIngredientMax = 0
-  const principalIngredientOverused: string[] = []
-  for (const [ingredient, count] of ingredientCellCounts) {
-    if (profile.allowFrequentIngredients.includes(ingredient)) continue
-    principalIngredientMax = Math.max(principalIngredientMax, count)
-    if (count > MAX_PRINCIPAL_INGREDIENT_CELLS && !requestedRepeats.has(ingredient)) {
-      principalIngredientOverused.push(ingredient)
-      failures.push({
-        code: "principal_ingredient_overused",
-        detail: `ingredient "${ingredient}" appears in ${count} cells`,
-      })
-    }
-  }
-  principalIngredientOverused.sort()
-
   if (profile.allowNewFoods) {
     for (const ref of refs) {
       if (repertoire.has(ref.cell.dish)) continue
@@ -356,8 +332,6 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     priorNightPrepMax: Object.values(priorNightPrepByDay).reduce((max, value) => Math.max(max, value), 0),
     dishRepeatCount: dishRepeats.length,
     dishRepeats,
-    principalIngredientMax,
-    principalIngredientOverused,
     inventoryUsed,
     easyBuyCount: candidate.easyBuys.length,
   }
