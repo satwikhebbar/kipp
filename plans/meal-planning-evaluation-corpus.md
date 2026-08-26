@@ -139,11 +139,11 @@ One fixture per scenario. Shape (abbreviated):
       "plan": {
         "grid": {
           "Mon": {
-            "breakfast":    { "dish": "paratha", "items": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false },
-            "snack1":       { "dish": "banana",  "items": ["banana"], "cookMinutes": 0,  "priorNightPrep": false },
-            "snack2":       { "dish": "roasted moong", "items": ["moong dal"], "cookMinutes": 0, "priorNightPrep": false },
-            "school-lunch": { "dish": "bottle gourd dal", "items": ["bottle gourd","moong dal"], "cookMinutes": 20, "priorNightPrep": false },
-            "home-lunch":   { "dish": "rice and beans", "items": ["rice","beans"], "cookMinutes": 20, "priorNightPrep": false }
+            "breakfast":    { "dish": "paratha", "vegetarian": true, "items": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false },
+            "snack1":       { "dish": "banana",  "vegetarian": true, "items": ["banana"], "cookMinutes": 0,  "priorNightPrep": false },
+            "snack2":       { "dish": "roasted moong", "vegetarian": true, "items": ["moong dal"], "cookMinutes": 0, "priorNightPrep": false },
+            "school-lunch": { "dish": "bottle gourd dal", "vegetarian": true, "items": ["bottle gourd","moong dal"], "cookMinutes": 20, "priorNightPrep": false },
+            "home-lunch":   { "dish": "rice and beans", "vegetarian": true, "items": ["rice","beans"], "cookMinutes": 20, "priorNightPrep": false }
           }
         },
         "easyBuys": [],
@@ -175,12 +175,17 @@ Key decisions baked into the schema:
   free text into canonical tokens is an explicit agent-side precondition, not
   evaluator behavior. Each fixture's vocabulary is local to the fixture; no
   global taxonomy exists.
-- **Cell `items` is the single list.** The workflow is always vegetarian by
-  definition, so there is no per-cell `vegetarian` flag and no
-  `non_vegetarian_school_meal` rule (it could never fire). A cell carries one
-  `items` list — everything the meal draws on — used for exclusion checks,
+- **Cell `items` is the single list.** A cell carries one `items` list —
+  everything the meal draws on — used for exclusion checks,
   principal-ingredient counting, and inventory availability alike; `ingredients`
   and `inventoryItems` were identical in every fixture and are merged here.
+- **Vegetarian status is an evaluable constraint, not dead weight.** School
+  meals are vegetarian by workflow constant, so a per-cell `vegetarian` flag
+  (normally `true`) stays in the schema and `non_vegetarian_school_meal`
+  rejects a cell that a future planner marks otherwise — a constant is exactly
+  a constraint the evaluator must enforce, and removing the field would make a
+  violating candidate unrepresentable and untestable. The corpus includes a
+  violating candidate for it.
 - **`allowFrequentIngredients`** keeps staples (oil, salt, spices, plus rice,
   wheat flour, moong dal in fixtures) out of the `principal_ingredient_overused`
   count (spec 6 variety rule); see §12 note 1.
@@ -233,6 +238,7 @@ columns cite the spec (§) / planning-decisions (PD) / issue.
 | Code | Rule | Source |
 | --- | --- | --- |
 | `hard_exclusion` | A cell `items` entry matches a `dietaryExclusions` entry's `token`. Entries with `ambiguous: true` are excluded from this check: the evaluator never enforces an ambiguous exclusion as hard. | spec 5.1, PD |
+| `non_vegetarian_school_meal` | A configured school-day cell declares `vegetarian: false`. School meals are vegetarian by workflow constant, so this flags a planner violation rather than a normal input. | spec 5.1 (workflow constant) |
 | `missing_slot` | A configured day × slot has no cell, where the coverage set is configured days minus days marked `school_closed` in `weeklyExceptions` and minus slots dropped by `half_day` exceptions (see §4). | issue ("slot coverage") |
 | `extra_slot_for_closed_day` | A cell exists on a day marked `school_closed` in `weeklyExceptions`. Closed days contribute no required slots and no cells. | spec 5.3 |
 | `morning_capacity_exceeded` | Combined morning cook minutes (breakfast + school lunch + any morning-cooked snack) on a day exceeds `morningCookingBudgetMinutes`. | spec 6 (combined workload), PD |

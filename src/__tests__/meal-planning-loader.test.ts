@@ -56,18 +56,21 @@ function validScenario(overrides: Partial<MealPlanScenario> = {}): MealPlanScena
             Mon: {
               breakfast: {
                 dish: "paratha",
+                vegetarian: true,
                 items: ["wheat flour"],
                 cookMinutes: 15,
                 priorNightPrep: false,
               },
               snack1: {
                 dish: "banana",
+                vegetarian: true,
                 items: ["banana"],
                 cookMinutes: 0,
                 priorNightPrep: false,
               },
               "home-lunch": {
                 dish: "paratha",
+                vegetarian: true,
                 items: ["wheat flour"],
                 cookMinutes: 15,
                 priorNightPrep: false,
@@ -141,6 +144,7 @@ describe("meal-planning corpus loader", () => {
               Sun: {
                 breakfast: {
                   dish: "paratha",
+                  vegetarian: true,
                   items: ["wheat flour"],
                   cookMinutes: 15,
                   priorNightPrep: false,
@@ -168,6 +172,7 @@ describe("meal-planning corpus loader", () => {
               Mon: {
                 "lunch-box": {
                   dish: "paratha",
+                  vegetarian: true,
                   items: ["wheat flour"],
                   cookMinutes: 15,
                   priorNightPrep: false,
@@ -241,7 +246,11 @@ describe("meal-planning corpus loader", () => {
       candidates: [
         {
           label: "bad",
-          plan: { grid: { Mon: { snack1: { dish: "", items: [] } } }, easyBuys: [], policyOutcomes: {} },
+          plan: {
+            grid: { Mon: { snack1: { dish: "", vegetarian: true, items: [] } } },
+            easyBuys: [],
+            policyOutcomes: {},
+          },
           expect: { pass: false },
         },
       ],

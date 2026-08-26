@@ -28,6 +28,7 @@ function cellFor(slot: string, dish: string): MealCell {
   const info = DISHES[dish] ?? { items: [dish] }
   return {
     dish,
+    vegetarian: true,
     items: [...info.items],
     cookMinutes: SLOT_COOK[slot] ?? 0,
     priorNightPrep: false,
@@ -136,6 +137,13 @@ describe("meal-planning evaluator", () => {
     const ambiguousCandidate = baseCandidate()
     ambiguousCandidate.grid.Mon.breakfast.items.push("dairy")
     expect(evaluateMealPlan(ambiguousCandidate, context).pass).toBe(true)
+  })
+
+  it("flags a non-vegetarian cell on a school day", () => {
+    const candidate = baseCandidate()
+    candidate.grid.Tue["school-lunch"].vegetarian = false
+    const evaluation = evaluateMealPlan(candidate, baseContext())
+    expect(failureCodes(evaluation)).toEqual(["non_vegetarian_school_meal"])
   })
 
   it("flags a missing required slot", () => {
