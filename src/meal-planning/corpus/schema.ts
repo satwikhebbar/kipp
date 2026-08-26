@@ -1,7 +1,6 @@
 import { z } from "zod"
 import {
   type CustomPolicy,
-  type DietaryExclusion,
   EXCEPTION_KINDS,
   type ExceptionAppliesTo,
   FAILURE_CODES,
@@ -47,13 +46,6 @@ export const mealScheduleSchema: z.ZodType<MealSchedule> = z
   })
   .strict()
 
-export const dietaryExclusionSchema: z.ZodType<DietaryExclusion> = z
-  .object({
-    token: z.string().min(1),
-    ambiguous: z.boolean(),
-  })
-  .strict()
-
 export const foodPreferencesSchema: z.ZodType<FoodPreferences> = z
   .object({
     favourites: z.array(z.string().min(1)),
@@ -63,7 +55,7 @@ export const foodPreferencesSchema: z.ZodType<FoodPreferences> = z
 
 export const mealProfileSchema: z.ZodType<MealProfile> = z
   .object({
-    dietaryExclusions: z.array(dietaryExclusionSchema),
+    dietaryExclusions: z.array(z.string().min(1)),
     dishRepertoire: z.array(z.string().min(1)),
     foodPreferences: foodPreferencesSchema,
     allowNewFoods: z.boolean(),
@@ -71,7 +63,6 @@ export const mealProfileSchema: z.ZodType<MealProfile> = z
     morningCookingBudgetMinutes: z.number().int().min(0),
     priorNightPrepAllowed: z.boolean(),
     pantryBaseline: z.array(z.string().min(1)),
-    allowFrequentIngredients: z.array(z.string().min(1)),
   })
   .strict()
 
@@ -197,8 +188,6 @@ export const mealPlanMeasurementsSchema = z.object({
   priorNightPrepMax: z.number().int().min(0),
   dishRepeatCount: z.number().int().min(0),
   dishRepeats: z.array(z.string()),
-  principalIngredientMax: z.number().int().min(0),
-  principalIngredientOverused: z.array(z.string()),
   inventoryUsed: z.array(z.string()),
   urgentUseByDay: z.string().optional(),
   easyBuyCount: z.number().int().min(0),

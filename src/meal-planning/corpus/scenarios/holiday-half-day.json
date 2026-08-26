@@ -44,16 +44,7 @@
       ]
     },
     "profile": {
-      "dietaryExclusions": [
-        {
-          "token": "peanut",
-          "ambiguous": false
-        },
-        {
-          "token": "egg",
-          "ambiguous": false
-        }
-      ],
+      "dietaryExclusions": ["peanut", "egg"],
       "dishRepertoire": [
         "paratha",
         "banana",
@@ -90,8 +81,7 @@
       "sensoryGuidelines": [],
       "morningCookingBudgetMinutes": 40,
       "priorNightPrepAllowed": false,
-      "pantryBaseline": ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"],
-      "allowFrequentIngredients": ["oil", "spices", "salt", "rice", "wheat flour", "moong dal"]
+      "pantryBaseline": ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"]
     },
     "customPolicies": [],
     "weeklyInventory": {
