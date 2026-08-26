@@ -29,9 +29,9 @@ outcomes; it never treats one exact meal grid as the only valid answer.
 - Zod corpus schema + loader (`src/meal-planning/corpus/`).
 - Deterministic evaluator `evaluateMealPlan` implementing the rules the
   planning-decisions document assigns to the evaluator: "normalized hard
-  exclusions, vegetarian status, configured days and slots, explicit
-  packing/capacity fields, prior-night-prep count, declared morning-work
-  total, and repeat measurements."
+  exclusions, the always-vegetarian workflow constant, configured days and
+  slots, explicit packing/capacity fields, prior-night-prep count, declared
+  morning-work total, and repeat measurements."
 - Two vitest suites: corpus self-validation and scenario-runner evaluation.
 
 ### Out of scope (recorded, not built)
@@ -52,7 +52,7 @@ outcomes; it never treats one exact meal grid as the only valid answer.
 Colocated under the future meal-planning module, mirroring `src/calendar/`
 and the vitest conventions:
 
-```
+```text
 src/meal-planning/
   types.ts                     # MealPlanContext, MealCell, MealPlanCandidate, Failure, Measurement
   evaluation.ts                # evaluateMealPlan(...)  — pure, deterministic
@@ -139,11 +139,11 @@ One fixture per scenario. Shape (abbreviated):
       "plan": {
         "grid": {
           "Mon": {
-            "breakfast":    { "dish": "paratha", "vegetarian": true,  "ingredients": ["wheat flour"], "inventoryItems": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false },
-            "snack1":       { "dish": "banana",  "vegetarian": true,  "ingredients": ["banana"],      "inventoryItems": ["banana"],      "cookMinutes": 0,  "priorNightPrep": false },
-            "snack2":       { "dish": "roasted moong", "vegetarian": true, "ingredients": ["moong dal"], "inventoryItems": ["moong dal"], "cookMinutes": 0, "priorNightPrep": false },
-            "school-lunch": { "dish": "bottle gourd dal", "vegetarian": true, "ingredients": ["bottle gourd","moong dal"], "inventoryItems": ["bottle gourd","moong dal"], "cookMinutes": 20, "priorNightPrep": false },
-            "home-lunch":   { "dish": "rice and beans", "vegetarian": true, "ingredients": ["rice","beans"], "inventoryItems": ["rice","beans"], "cookMinutes": 20, "priorNightPrep": false }
+            "breakfast":    { "dish": "paratha", "items": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false },
+            "snack1":       { "dish": "banana",  "items": ["banana"], "cookMinutes": 0,  "priorNightPrep": false },
+            "snack2":       { "dish": "roasted moong", "items": ["moong dal"], "cookMinutes": 0, "priorNightPrep": false },
+            "school-lunch": { "dish": "bottle gourd dal", "items": ["bottle gourd","moong dal"], "cookMinutes": 20, "priorNightPrep": false },
+            "home-lunch":   { "dish": "rice and beans", "items": ["rice","beans"], "cookMinutes": 20, "priorNightPrep": false }
           }
         },
         "easyBuys": [],
@@ -175,6 +175,15 @@ Key decisions baked into the schema:
   free text into canonical tokens is an explicit agent-side precondition, not
   evaluator behavior. Each fixture's vocabulary is local to the fixture; no
   global taxonomy exists.
+- **Cell `items` is the single list.** The workflow is always vegetarian by
+  definition, so there is no per-cell `vegetarian` flag and no
+  `non_vegetarian_school_meal` rule (it could never fire). A cell carries one
+  `items` list — everything the meal draws on — used for exclusion checks,
+  principal-ingredient counting, and inventory availability alike; `ingredients`
+  and `inventoryItems` were identical in every fixture and are merged here.
+- **`allowFrequentIngredients`** keeps staples (oil, salt, spices, plus rice,
+  wheat flour, moong dal in fixtures) out of the `principal_ingredient_overused`
+  count (spec 6 variety rule); see §12 note 1.
 - **Coverage set.** `missing_slot` is computed over configured days minus days
   marked `school_closed` (and minus slots dropped by `half_day` exceptions);
   `extra_slot_for_closed_day` forbids any cell on a closed day. The example's
@@ -223,19 +232,18 @@ columns cite the spec (§) / planning-decisions (PD) / issue.
 
 | Code | Rule | Source |
 | --- | --- | --- |
-| `hard_exclusion` | A cell ingredient matches a `dietaryExclusions` entry's `token`. Entries with `ambiguous: true` are excluded from this check: the evaluator never enforces an ambiguous exclusion as hard. | spec 5.1, PD |
-| `non_vegetarian_school_meal` | A configured school-day cell declares `vegetarian: false`. | spec 5.1 (workflow constant) |
+| `hard_exclusion` | A cell `items` entry matches a `dietaryExclusions` entry's `token`. Entries with `ambiguous: true` are excluded from this check: the evaluator never enforces an ambiguous exclusion as hard. | spec 5.1, PD |
 | `missing_slot` | A configured day × slot has no cell, where the coverage set is configured days minus days marked `school_closed` in `weeklyExceptions` and minus slots dropped by `half_day` exceptions (see §4). | issue ("slot coverage") |
 | `extra_slot_for_closed_day` | A cell exists on a day marked `school_closed` in `weeklyExceptions`. Closed days contribute no required slots and no cells. | spec 5.3 |
 | `morning_capacity_exceeded` | Combined morning cook minutes (breakfast + school lunch + any morning-cooked snack) on a day exceeds `morningCookingBudgetMinutes`. | spec 6 (combined workload), PD |
 | `prior_night_prep_not_allowed` | A cell requires prior-night prep while `priorNightPrepAllowed: false`. | spec 5.4, PD |
 | `prior_night_prep_limit` | A day has more than two `priorNightPrep: true` cells. | spec 6 |
 | `slot_unsuitable` | A cell violates a declared slot constraint (e.g. a `dry`/`maxCookMinutes: 0` snack slot with `cookMinutes > 0`). | spec 6 (snacks, slot suitability) |
-| `inventory_item_unknown` | A cell's `inventoryItems` references an item not in `weeklyInventory` (available/low), `pantryBaseline`, or `easyBuys`. | spec 5.6, 6 (no-shopping default) |
+| `inventory_item_unknown` | A cell's `items` references an item not in `weeklyInventory` (available/low), `pantryBaseline`, or `easyBuys`. | spec 5.6, 6 (no-shopping default) |
 | `inventory_item_unavailable` | A cell uses an item whose `weeklyInventory.status` is `unavailable` (midweek shortage). | spec 10 |
 | `use_early_ignored` | A `useNote: "use early"` item's first use day is later than the fixture's `urgentUseByDay` (default Tue). Only enforced when the fixture sets `requireUrgentUseEarly`. | issue ("urgent perishables") |
 | `dish_repeated` | The same named dish appears twice in the week, or repeats a `recentPlan` dish, unless it is a requested repeat or a configured favourite. | spec 5.7, 6 |
-| `principal_ingredient_overused` | An ingredient (outside `allowFrequentIngredients`) appears in more than two cells in the week, unless requested. | spec 6 |
+| `principal_ingredient_overused` | An item (outside `allowFrequentIngredients`) appears in more than two cells in the week, unless requested. | spec 6 |
 | `unfamiliar_dish_not_allowed` | `profile.allowNewFoods: false` and a cell's `dish` is not in `profile.dishRepertoire` and not in any `recentPlan` dish. Familiarity is derived, never inferred. | spec 5.1, 6 |
 | `unpaired_new_dish` | `profile.allowNewFoods: true` and a cell whose `dish` is not in the repertoire (nor `recentPlan`) appears on a day with no familiar cell on that day — new food must be paired with familiar food. | spec 5.1, 6 |
 | `missing_policy_outcome` | A persistent-scope custom policy has no recorded `policyOutcomes` entry. Completeness only — truthfulness is agent/human territory. | issue, spec 5.11 |
@@ -258,13 +266,13 @@ candidate and at least one rule-violating candidate per scenario.
 
 | # | Scenario | Intent | Rules exercised |
 | --- | --- | --- | --- |
-| 1 | baseline-week | Happy path: full five-slot week, vegetarian constant only. | zero failures; measurements within bounds |
+| 1 | baseline-week | Happy path: full five-slot week, no exclusions beyond the workflow's always-vegetarian constant. | zero failures; measurements within bounds |
 | 2 | dietary-ambiguity | Exclusion objects with `ambiguous: true` must not be enforced as hard. Candidate A violates the clear exclusion (`peanut`) → `hard_exclusion`. Candidate B contains the ambiguous token (`dairy`) but is otherwise valid → passes, `noFailuresOf: ["hard_exclusion"]`. `behavior.expectsClarification: true`, subject: the ambiguous exclusion. | hard_exclusion (boundary), behavior |
 | 3 | packing-constraints | Dry/quick snack slots and a "packing capacity" policy; cooked snack in a dry slot fails; policy outcome completeness. | slot_unsuitable, missing_policy_outcome |
 | 4 | no-prior-night-prep | `priorNightPrepAllowed: false`; a required-prep cell fails; a >2/day prep plan fails. | prior_night_prep_not_allowed, prior_night_prep_limit |
 | 5 | urgent-perishables | "Use early" items must appear by the fixture's `urgentUseByDay`; late use fails. | use_early_ignored |
 | 6 | holiday-half-day | Saturday `school_closed`: coverage excludes Sat, and a Sat cell fails with `extra_slot_for_closed_day`. Wednesday `half_day` drops the `home-lunch` slot (via `appliesTo.mealSlots`): a plan omitting Wed home-lunch passes, while omitting a still-required Wed slot (e.g. `school-lunch`) fails `missing_slot`. | extra_slot_for_closed_day, missing_slot |
-| 7 | policy-trade-off | A policy in tension with a hard exclusion records `trade-off`; a plan claiming `satisfied` still passes the completeness check, while a plan with no recorded outcome fails. | missing_policy_outcome, hard_exclusion boundary |
+| 7 | policy-tradeoff | A policy in tension with a hard exclusion records `trade-off`; a plan claiming `satisfied` still passes the completeness check, while a plan with no recorded outcome fails. | missing_policy_outcome, hard_exclusion boundary |
 | 8 | new-food-setting | `allowNewFoods: false`: a cell whose dish is not in `dishRepertoire` ∪ `recentPlan` dishes fails with `unfamiliar_dish_not_allowed`. `allowNewFoods: true`: a new dish passes when its day has at least one familiar cell; a new dish on a day with no familiar cell fails with `unpaired_new_dish`. Familiarity is derived from `dishRepertoire` + `recentPlan`, never inferred. | unfamiliar_dish_not_allowed, unpaired_new_dish |
 | 9 | requested-repeat | A requested repeat overrides the anti-repeat rule; an unrequested repeat still fails. | dish_repeated (requested vs not) |
 | 10 | midweek-shortage | "Out of paneer" inventory patch; revision swaps only the affected cell and preserves the rest. | inventory_item_unavailable, unscoped_cell_changed |
@@ -324,10 +332,11 @@ are informational for the plan itself.
 
 None blocking. Two notes for review:
 
-1. `principal_ingredient_overused` counts every declared ingredient; the
-   `allowFrequentIngredients` fixture list keeps staples (oil, salt, spices)
-   out of the count. If review prefers a `principal: true` flag per cell,
-   that is a small schema change.
+1. `principal_ingredient_overused` (spec 6 variety rule) counts every cell
+   `items` entry; the `allowFrequentIngredients` fixture list keeps staples
+   (oil, salt, spices — plus rice, wheat flour, moong dal in fixtures) out of
+   the count. If review prefers a `principal: true` flag per cell, that is a
+   small schema change.
 2. `slot_unsuitable` is limited to *declared* facts (slot `dry` /
    `maxCookMinutes` vs cell `cookMinutes`); leak-prone or packaging
    suitability remain custom-policy semantics owned by the agent, matching

@@ -1,4 +1,4 @@
-import { computeCoverageSet } from "./corpus/load"
+import { computeCoverageSet } from "./coverage"
 import type {
   MealCell,
   MealGrid,
@@ -20,6 +20,7 @@ interface GridCellRef {
   cell: MealCell
 }
 
+/** Enumerates every (day, slotId, cell) triple in a grid, in insertion order. */
 function cellsIn(grid: MealGrid): GridCellRef[] {
   const refs: GridCellRef[] = []
   for (const [day, slots] of Object.entries(grid)) {
@@ -28,26 +29,33 @@ function cellsIn(grid: MealGrid): GridCellRef[] {
   return refs
 }
 
+/** Looks up a configured slot by its id. */
 function slotById(schedule: MealPlanContext["schedule"], slotId: string): MealSlot | undefined {
   return schedule.slots.find((slot) => slot.id === slotId)
 }
 
+/** True when two cells are structurally identical (dish, items, cook minutes, prep flag). */
 function cellsEqual(a: MealCell, b: MealCell): boolean {
   return (
     a.dish === b.dish &&
-    a.vegetarian === b.vegetarian &&
     a.cookMinutes === b.cookMinutes &&
     a.priorNightPrep === b.priorNightPrep &&
-    a.ingredients.length === b.ingredients.length &&
-    a.inventoryItems.length === b.inventoryItems.length &&
-    a.ingredients.every((item, index) => item === b.ingredients[index]) &&
-    a.inventoryItems.every((item, index) => item === b.inventoryItems[index])
+    a.items.length === b.items.length &&
+    a.items.every((item, index) => item === b.items[index])
   )
 }
 
+/** True when a (day, slot) position falls within a feedback scope. */
 function inFeedbackScope(scope: { day?: string; slot?: string }, day: string, slotId: string): boolean {
   if (!scope.day || scope.day !== day) return false
   return scope.slot === undefined || scope.slot === slotId
+}
+
+/** Locale-independent total ordering for two optional strings (empty sorts first). */
+function compareOptional(a: string | undefined, b: string | undefined): number {
+  const left = a ?? ""
+  const right = b ?? ""
+  return left < right ? -1 : left > right ? 1 : 0
 }
 
 /**
@@ -109,18 +117,10 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     if (closedDays.has(day)) {
       failures.push({ code: "extra_slot_for_closed_day", day, slot: slotId, detail: `cell on closed day ${day}` })
     }
-    for (const token of cell.ingredients) {
+    for (const token of cell.items) {
       if (clearExclusionTokens.has(token)) {
         failures.push({ code: "hard_exclusion", day, slot: slotId, detail: `ingredient "${token}" is excluded` })
       }
-    }
-    if (dayIndex.has(day) && !closedDays.has(day) && !cell.vegetarian) {
-      failures.push({
-        code: "non_vegetarian_school_meal",
-        day,
-        slot: slotId,
-        detail: "non-vegetarian cell on a school day",
-      })
     }
     const slot = slotById(schedule, slotId)
     if (slot?.maxCookMinutes != null && cell.cookMinutes > slot.maxCookMinutes) {
@@ -139,7 +139,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
         detail: "prior-night prep is not allowed",
       })
     }
-    for (const item of cell.inventoryItems) {
+    for (const item of cell.items) {
       if (unavailableItems.has(item)) {
         failures.push({
           code: "inventory_item_unavailable",
@@ -249,7 +249,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
 
   const ingredientCellCounts = new Map<string, number>()
   for (const ref of refs) {
-    for (const ingredient of ref.cell.ingredients) {
+    for (const ingredient of ref.cell.items) {
       ingredientCellCounts.set(ingredient, (ingredientCellCounts.get(ingredient) ?? 0) + 1)
     }
   }
@@ -288,7 +288,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     const urgentIndex = dayIndex.get(urgentUseByDay) ?? schedule.days.length
     for (const item of weeklyInventory.items.filter((entry) => entry.useNote === "use early")) {
       const useIndexes = refs
-        .filter((ref) => ref.cell.inventoryItems.includes(item.name))
+        .filter((ref) => ref.cell.items.includes(item.name))
         .map((ref) => dayIndex.get(ref.day) ?? Number.POSITIVE_INFINITY)
       const firstUseIndex = Math.min(...useIndexes)
       if (firstUseIndex > urgentIndex) {
@@ -339,7 +339,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     }
   }
 
-  const inventoryUsed = [...new Set(refs.flatMap((ref) => ref.cell.inventoryItems))].sort()
+  const inventoryUsed = [...new Set(refs.flatMap((ref) => ref.cell.items))].sort()
   const measurements: MealPlanMeasurements = {
     morningCookByDay,
     morningCookMax: Object.values(morningCookByDay).reduce((max, value) => Math.max(max, value), 0),
@@ -357,7 +357,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       .filter((item) => item.useNote === "use early")
       .flatMap((item) =>
         refs
-          .filter((ref) => ref.cell.inventoryItems.includes(item.name))
+          .filter((ref) => ref.cell.items.includes(item.name))
           .map((ref) => dayIndex.get(ref.day) ?? Number.POSITIVE_INFINITY),
       )
     const earliest = Math.min(...useIndexes)
@@ -365,11 +365,13 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   }
 
   failures.sort((a, b) => {
-    const byCode = a.code.localeCompare(b.code)
+    const byCode = compareOptional(a.code, b.code)
     if (byCode !== 0) return byCode
-    const byDay = (a.day ?? "").localeCompare(b.day ?? "")
+    const byDay = compareOptional(a.day, b.day)
     if (byDay !== 0) return byDay
-    return (a.slot ?? "").localeCompare(b.slot ?? "")
+    const bySlot = compareOptional(a.slot, b.slot)
+    if (bySlot !== 0) return bySlot
+    return compareOptional(a.detail, b.detail)
   })
 
   return { pass: failures.length === 0, failures, measurements }

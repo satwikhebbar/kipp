@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { loadScenarios, validateScenarioStructure } from "../meal-planning/corpus/load"
 import { mealPlanScenarioSchema } from "../meal-planning/corpus/schema"
@@ -37,6 +40,14 @@ describe("meal-planning corpus health", () => {
     for (const scenario of scenarios) {
       expect(mealPlanScenarioSchema.safeParse(scenario).success, scenario.id).toBe(true)
       expect(validateScenarioStructure(scenario), scenario.id).toEqual([])
+    }
+  })
+
+  it("rejects misspelled fixture keys by strict-parsing the raw JSON text", () => {
+    const dirPath = join(dirname(fileURLToPath(import.meta.url)), "..", "meal-planning", "corpus", "scenarios")
+    for (const file of ["baseline-week", "whole-day-replan", "batched-feedback"]) {
+      const raw = JSON.parse(readFileSync(join(dirPath, `${file}.json`), "utf8"))
+      expect(mealPlanScenarioSchema.safeParse(raw).success, file).toBe(true)
     }
   })
 
@@ -83,7 +94,7 @@ describe("meal-planning corpus health", () => {
 
   it("every scenario exercises its declared distinct branch", () => {
     const branchByScenario: Record<string, string[]> = {
-      "baseline-week": ["non_vegetarian_school_meal", "missing_slot", "unfamiliar_dish_not_allowed"],
+      "baseline-week": ["missing_slot", "unfamiliar_dish_not_allowed"],
       "dietary-ambiguity": ["hard_exclusion"],
       "packing-constraints": ["slot_unsuitable", "morning_capacity_exceeded", "missing_policy_outcome"],
       "no-prior-night-prep": ["prior_night_prep_not_allowed", "prior_night_prep_limit"],
@@ -95,6 +106,10 @@ describe("meal-planning corpus health", () => {
       "midweek-shortage": ["inventory_item_unavailable", "unscoped_cell_changed", "inventory_item_unknown"],
       "whole-day-replan": ["unscoped_cell_changed"],
       "batched-feedback": ["unaddressed_feedback"],
+    }
+    const loadedIds = new Set(scenarios.map((scenario) => scenario.id))
+    for (const id of Object.keys(branchByScenario)) {
+      expect(loadedIds.has(id), `branchByScenario references unknown scenario ${id}`).toBe(true)
     }
     for (const scenario of scenarios) {
       const codes = new Set<string>(

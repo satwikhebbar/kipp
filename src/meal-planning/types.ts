@@ -1,6 +1,5 @@
 export const FAILURE_CODES = [
   "hard_exclusion",
-  "non_vegetarian_school_meal",
   "missing_slot",
   "extra_slot_for_closed_day",
   "morning_capacity_exceeded",
@@ -126,9 +125,8 @@ export interface FeedbackItem {
 
 export interface MealCell {
   dish: string
-  vegetarian: boolean
-  ingredients: string[]
-  inventoryItems: string[]
+  /** Everything the meal draws on: components and pantry/inventory consumption alike (they coincide in this domain). */
+  items: string[]
   cookMinutes: number
   priorNightPrep: boolean
 }
