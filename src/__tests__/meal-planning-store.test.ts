@@ -292,6 +292,12 @@ describe("createInMemoryMealPlanningStore", () => {
     const store = createInMemoryMealPlanningStore()
     expect(await store.activePlan("chat-nowhere")).toBeNull()
   })
+
+  it("createActivePlan fails when the profile row is missing, never returning a NaN generation", async () => {
+    const store = createInMemoryMealPlanningStore()
+    await expect(store.createActivePlan(createInput())).rejects.toThrow("meal_profile row missing for chat chat-1")
+    expect(await store.activePlan(CHAT)).toBeNull()
+  })
 })
 
 describe("meal-planning store type exports", () => {
