@@ -403,6 +403,13 @@ drives the real path with real text (§13.3).
    immutable submission batch row and links it from the version). Each batch
    makes the plan/version state changes one atomic outcome and bumps the
    chat-scoped plan message generation (returned to the caller for step 5).
+   **No-change revisions skip promotion entirely:** when the submitted
+   candidate's grid + easyBuys are identical to the base version's (compared
+   deterministically — `policyOutcomes` and video enrichment legitimately
+   differ between otherwise-identical candidates), no version row, generation
+   bump, or new plan message is produced: the session sends a
+   `meal-no-changes` notice ("No changes — your feedback is noted") and the
+   loop continues.
     Promotion failure (stale) → `meal-stale-plan` notice, no version written,
     stale event logged via `logRuntime` (§4 recovery).
 5. **Send plan message** (`renderPlanMessage`, Markdown) with inline button
@@ -452,7 +459,7 @@ drives the real path with real text (§13.3).
    | Event kind | Source | Branch (all sends/registers inside `step.do`) |
    | --- | --- | --- |
    | `meal-feedback` | inline-button callback, one-time | Staleness guard first: if `interaction.version < current_version`, send `meal-stale-plan` notice and continue waiting (the tap targeted an outdated plan message). Otherwise `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: <interaction lifetime — 15 min, as clarifications>, interactionGroup: "meal-planning", generation: <planGeneration> }`. Continue waiting. |
-   | `meal-feedback-reply` | force-reply text (replyTo the prompt) | The reply **is a feedback submission**: `coerceSubmission(text, "telegram-reply", messageId)` → one unbound `FeedbackItem`. Run the revision session (step 2) with the item as context; persist via `promotePlanVersion` (feedback-driven → submission batch row written and linked, §4); send the new plan message with a fresh button + register a new action set (step 5). Stale → `meal-stale-plan` notice. Continue waiting. |
+    | `meal-feedback-reply` | force-reply text (replyTo the prompt) | The reply **is a feedback submission**: `coerceSubmission(text, "telegram-reply", messageId)` → one unbound `FeedbackItem`. Run the revision session (step 2) with the item as context; persist via `promotePlanVersion` (feedback-driven → submission batch row written and linked, §4; a grid-identical no-change revision sends `meal-no-changes` instead, step 4); send the new plan message with a fresh button + register a new action set (step 5). Stale → `meal-stale-plan` notice. Continue waiting. |
    | `meal-feedback-submission` | `telegram-reply` event with `interactionKind: "meal-feedback-submission"`: webhook fallthrough (level 3) or iteration-2 mini-app API (future; event seam defined now) | Same as `meal-feedback-reply`: a submission — coerced from raw text by the fallthrough, or already structured (`items: FeedbackItem[]`) by the mini-app. No store, session, or version-chain change is needed to add the mini-app producer. |
    | anything else | a `telegram-reply` whose `interactionKind` is not recognized (e.g., a late `meal-clarification` reply that lost its session wait) | Log + re-wait (ignore). |
    | timeout | `waitForEvent` deadline = `week_end` | End. The active plan stays in D1, approved by default. |
@@ -505,6 +512,19 @@ drives the real path with real text (§13.3).
       the dispatch checks `now >= week_end` first and ends — a late revision
       would persist a version whose button (`expiresAt = weekEnd`) is dead on
       arrival.
+   - **The webhook and workflow clocks are independent:** a message crossing
+      `week_end` exactly can pass the webhook's fallthrough guard
+      (`week_end > ?`, webhook clock) yet land on an already-ended instance
+      (`now >= week_end`, workflow clock) and be swallowed silently — no
+      revision, no "plan ended" notice. Self-recovering: the next attempt
+      reaches the ended-plan notice path. Accepted.
+   - Two **distinct** `/mealplan` commands overlapping in flight (not a webhook
+      retry — different `telegramMessageId`s, both pre-persist within the
+      30-min TTL): whichever persists second wins the store, possibly the
+      first-typed command if its session ran longer — two "previous plan
+      replaced" notices and the plan flips twice. Accepted: serialize-and-
+      supersede keeps store state consistent, and the window is bounded by the
+      session TTL (same category as the command-level-retry acceptance above).
    - Plain text sent while a `/mealplan` planning session is in flight
       (pre-persist) routes to the *previous* active plan's instance (still
       `active` until the new plan persists) — a revision that is superseded
@@ -561,7 +581,12 @@ timezone. `resolvePlanningWeek(invokedAtMs, timezone, requestText)`
   week ("School week of Mon Sep 7 – Sat Sep 12"), so the parent confirms the
   target without an interactive confirmation. The webhook's `/mealplan` ack
   is generic ("Planning that now.", like Calendar) — the webhook can't
-  resolve the week (the profile timezone lives workflow-side).
+   resolve the week (the profile timezone lives workflow-side).
+   Week boundaries and "today" use the profile timezone at **session** time:
+   the plan row's `week_start`/`week_end` are fixed at creation (the loop's
+   deadline stays stable), but a mid-week profile timezone change can shift a
+   revision's elapsed-day marking (accepted — single household, agent-facing
+   day boundary, no data corruption).
 
 **Plain-text routing contract (multi-workflow chat):** three deterministic
 levels, no LLM intent routing (the parent's words must never be handed to a
