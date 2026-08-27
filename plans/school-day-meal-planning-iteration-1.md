@@ -370,7 +370,12 @@ drives the real path with real text (§13.3).
      clarification is pending, so timeout is a defined outcome — initial
      planning → `meal-planning-canceled` notice ("no reply received; run
      /mealplan to retry") and the instance ends; revision → the revision is
-     abandoned and the previous version stands. On reply → next turn.
+     abandoned and the previous version stands. On reply → next turn. The
+     wait filters by `payload.interactionId`: a `telegram-reply` for a
+     different interaction (e.g., a `[Give feedback]` tap on a still-live
+     plan message while the session is mid-flight) is discarded and the wait
+     resumes with the remaining time — a foreign event is never misread as
+     the clarification answer.
    - `propose_plan` → enrich (below) → break.
    - Agent failure/timeout → `meal-agent-unavailable` notice.
 3. **Optional enrichment:** fill `recipeVideo` for school-lunch and home-lunch
@@ -434,7 +439,20 @@ drives the real path with real text (§13.3).
    | `meal-feedback` | inline-button callback, one-time | Staleness guard first: if `interaction.version < current_version`, send `meal-stale-plan` notice and continue waiting (the tap targeted an outdated plan message). Otherwise `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: <interaction lifetime — 15 min, as clarifications>, interactionGroup: "meal-planning", generation: <planGeneration> }`. Continue waiting. |
    | `meal-feedback-reply` | force-reply text (replyTo the prompt) | The reply **is a feedback submission**: `coerceSubmission(text, "telegram-reply", messageId)` → one unbound `FeedbackItem`. Run the revision session (step 2) with the item as context; persist via `promotePlanVersion` (feedback-driven → submission batch row written and linked, §4); send the new plan message with a fresh button + register a new action set (step 5). Stale → `meal-stale-plan` notice. Continue waiting. |
    | `meal-feedback-submission` | `telegram-reply` event with `interactionKind: "meal-feedback-submission"`: webhook fallthrough (level 3) or iteration-2 mini-app API (future; event seam defined now) | Same as `meal-feedback-reply`: a submission — coerced from raw text by the fallthrough, or already structured (`items: FeedbackItem[]`) by the mini-app. No store, session, or version-chain change is needed to add the mini-app producer. |
+   | anything else | a `telegram-reply` whose `interactionKind` is not recognized (e.g., a late `meal-clarification` reply that lost its session wait) | Log + re-wait (ignore). |
    | timeout | `waitForEvent` deadline = `week_end` | End. The active plan stays in D1, approved by default. |
+
+   **Parked receive-wait, not a session wait:** no agent session or LLM runs
+   while the loop waits — the instance parks because Workflows delivers
+   events only to a live `waitForEvent`, and the week-long contracts (the
+   `[Give feedback]` button, the level-3 fallthrough, the iteration-2 API)
+   must all be able to reach it until `week_end` (idle instances cost
+   nothing). The 15-min waits (clarification, feedback prompt) are the
+   session-side "agent sought input" waits; this week-end wait is liveness
+   for event receipt. Implementation must verify the runtime's
+   `waitForEvent` timeout cap (the repo only uses 15-min waits); if capped,
+   re-wait in chunks (e.g., 24 h), re-checking `week_end` each cycle — same
+   semantics.
 
    **Duplicate and stale handling** (deterministic, no LLM):
    - The router claims each interaction once by `consumed_update_id` /
@@ -453,6 +471,12 @@ drives the real path with real text (§13.3).
       target: the `meal-feedback` branch sends `meal-stale-plan` instead of
       opening the prompt, so feedback is never silently applied to the wrong
       plan version.
+   - A `[Give feedback]` tap that lands while a session (initial or revision)
+      is mid-flight is consumed by the router's single-claim and delivered to
+      the instance, where the session's interactionId-filtered wait discards
+      it (step 2) — the tap is silently dropped; the parent re-taps after the
+      new plan message lands. The window is bounded by the 15-min
+      clarification / 30-min session TTL.
    - Action interactions expire at `week_end`; the router drops expired rows
       and `waitForEvent` times out at the same deadline, so the instance ends
       cleanly and no interaction survives the week. A superseded instance
@@ -499,9 +523,11 @@ timezone. `resolvePlanningWeek(invokedAtMs, timezone, requestText)`
 - The plan always covers the full Mon–Sat school week: `week_start` is the
   target week's Monday even when invoked mid-week (no partial plans,
   iteration 1 — the session's message can note "planning the rest of the
-  week"). The `/mealplan` ack and every plan message state the week
-  ("School week of Mon Sep 7 – Sat Sep 12"), so the parent confirms the
-  target without an interactive confirmation.
+  week"). The workflow's opening message and every plan message state the
+  week ("School week of Mon Sep 7 – Sat Sep 12"), so the parent confirms the
+  target without an interactive confirmation. The webhook's `/mealplan` ack
+  is generic ("Planning that now.", like Calendar) — the webhook can't
+  resolve the week (the profile timezone lives workflow-side).
 
 **Plain-text routing contract (multi-workflow chat):** three deterministic
 levels, no LLM intent routing (the parent's words must never be handed to a
@@ -695,10 +721,11 @@ Modified:
   `YOUTUBE_API_KEY?`), `INTERACTION_KIND` meal kinds,
   `MealPlanningWorkflowParams.invokedAtMs`.
 - `src/triggers/telegram-webhook.ts` — `/mealplan` command (captures
-  `invokedAtMs`; ack states the week); `meal-*` dispatch (third workflow
-  branch); level-3 fallthrough (`meal_plan.instance_id` lookup →
-  `telegram-reply` event with `interactionKind: "meal-feedback-submission"`)
-  before the "Unknown command" reply.
+  `invokedAtMs`; generic ack — the week is stated workflow-side); `meal-*`
+  dispatch (third workflow branch); level-3 fallthrough
+  (`meal_plan.instance_id` lookup → `telegram-reply` event with
+  `interactionKind: "meal-feedback-submission"`) before the "Unknown
+  command" reply.
 - `src/index.ts` — export `MealPlanningWorkflow`.
 - `src/core/interaction-router.ts` — optional chat-scoped generation on group
   registrations: new nullable `generation` column (same ALTER pattern as
