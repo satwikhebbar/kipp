@@ -70,6 +70,15 @@ function deepseekResponse(toolCalls: Array<{ name: string; input: unknown }>) {
   }
 }
 
+function clarifyResponse(message: string) {
+  return deepseekResponse([
+    {
+      name: "needs_clarification",
+      input: { message, reasonCodes: ["slot_unsuitable"], interaction: { kind: "reply" } },
+    },
+  ])
+}
+
 function proseResponse() {
   return {
     choices: [{ message: { content: "I will plan the week." } }],
@@ -88,6 +97,14 @@ function jsonResponse(body: unknown) {
 
 function stubNetwork(deepseekResponses: unknown[]) {
   const telegramMessages: Array<{ chatId: string; text: string; replyMarkup?: unknown }> = []
+  const deepseekBodies: Array<{
+    messages: Array<{
+      role: string
+      content?: string
+      tool_call_id?: string
+      tool_calls?: Array<{ id?: string; function?: { name?: string } }>
+    }>
+  }> = []
   let messageId = 1000
   let llmIndex = 0
   const fallback = proseResponse()
@@ -103,6 +120,15 @@ function stubNetwork(deepseekResponses: unknown[]) {
       return jsonResponse({ ok: true, result: { message_id: messageId++ } })
     }
     if (urlStr.includes("api.deepseek.com")) {
+      const body = JSON.parse((init?.body as string) ?? "{}") as {
+        messages: Array<{
+          role: string
+          content?: string
+          tool_call_id?: string
+          tool_calls?: Array<{ id?: string; function?: { name?: string } }>
+        }>
+      }
+      deepseekBodies.push(body)
       const next = deepseekResponses[llmIndex] ?? fallback
       llmIndex += 1
       return jsonResponse(next)
@@ -110,7 +136,13 @@ function stubNetwork(deepseekResponses: unknown[]) {
     throw new Error(`unexpected fetch ${urlStr}`)
   })
   vi.stubGlobal("fetch", fetchMock)
-  return { telegramMessages }
+  return { telegramMessages, deepseekBodies }
+}
+
+/** Deterministic `crypto.randomUUID` sequence so prompts can reference the generated interaction ids. */
+function stubUuidSequence() {
+  let nextId = 0
+  vi.stubGlobal("crypto", { randomUUID: () => `uuid-${++nextId}` })
 }
 
 function fakeRouter() {
@@ -274,5 +306,46 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const store = createMealPlanningStore(d1)
     expect(await store.activePlan(CHAT)).toBeNull()
     expect(telegramMessages.some((message) => message.text.includes("couldn't reach"))).toBe(true)
+  })
+
+  it("carries the clarification transcript into the next provider request", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    stubUuidSequence()
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    // The first randomUUID is the clarification interactionId, so the force-reply
+    // event must carry `uuid-1` to be accepted as the matching reply.
+    const step = createFakeStep(
+      [{ interactionId: "uuid-1", source: "telegram-reply", text: "yes" }],
+      Date.parse(week.weekEnd),
+    )
+    const base = seedCandidate()
+    const { deepseekBodies } = stubNetwork([
+      clarifyResponse("How many people should the week serve?"),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const store = createMealPlanningStore(d1)
+    expect(await store.activePlan(CHAT)).not.toBeNull()
+    const secondRequest = deepseekBodies[1]
+    expect(secondRequest).toBeTruthy()
+    const transcript = secondRequest.messages
+    const assistantClarify = transcript.find(
+      (message) => message.role === "assistant" && message.tool_calls?.[0]?.function?.name === "needs_clarification",
+    )
+    expect(assistantClarify).toBeTruthy()
+    expect(
+      transcript.some((message) => message.role === "tool" && message.tool_call_id === "needs_clarification"),
+    ).toBe(true)
+    expect(transcript.some((message) => message.role === "user" && message.content === "yes")).toBe(true)
+    expect(deepseekBodies[0]?.messages.some((message) => message.role === "user" && message.content === "yes")).toBe(
+      false,
+    )
   })
 })

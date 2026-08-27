@@ -156,6 +156,7 @@ async function runPlanningSession(
       )
       return runMealPlanningAgentSession(provider, options.messages, { context: options.context })
     })
+    options.messages = session.messages
     logAgentSession(env, event.instanceId, session)
     if (!session.completed || !session.terminal) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE)
