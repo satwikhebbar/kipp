@@ -30,14 +30,13 @@ issue.
   tool and the agent-owned free-form policy self-validation loop (`satisfied` /
   `trade-off` / `needs-clarification` outcomes). No reviewer agent.
 - Telegram-first surface: `/mealplan` to start or continue planning,
-  targeted clarification via force-reply, and plan review with inline actions
-  (Give feedback / Update plan). No `/plan` command: mid-week retrieval
+  targeted clarification via force-reply, and plan review with one inline
+  action (Give feedback). No `/plan` command: mid-week retrieval
   of the active plan is the iteration-2 mini-app's home view, and iteration-1
   tests read the store directly (see §13.3).
 - Default-approval plan lifecycle: a created plan is approved as-is; a
   feedback submission (Telegram force-reply today, mini-app in iteration 2)
-  or an Update-plan request triggers a revision that creates a new plan
-  version.
+  triggers a revision that creates a new plan version.
 - Plan versioning: active plan is versioned; a feedback submission is
   recorded as an immutable batch linked to the version it drove; stale
   revisions are rejected; retried deliveries are idempotent (router
@@ -101,7 +100,7 @@ stateDiagram-v2
   clarifying --> interpreting: parent reply
   interpreting --> versioned: propose_plan passes evaluateMealPlan
   versioned --> active: version 1 persisted (D1)
-  active --> revising: feedback submission or [Update plan]
+  active --> revising: feedback submission (button, prompt, or plain text)
   revising --> versioned: version N+1 persisted (CAS on current_version)
   active --> [*]: week end or superseded by /mealplan
 ```
@@ -109,7 +108,8 @@ stateDiagram-v2
 One workflow instance lives per chat-week: it is created by `/mealplan`,
 stays alive until the plan's `week_end` (or until a fresh `/mealplan`
 supersedes it), and handles initial planning plus every feedback submission
-and update request for that week's plan. A created plan is approved by
+for that week's plan (a submission arrives via the `[Give feedback]` button,
+its force-reply prompt, or plain text in the chat). A created plan is approved by
 default; conversation continuity across revisions comes from the instance's
 durable step state (the Calendar pattern), never from D1 transcripts (privacy
 rule). The active plan and version history remain readable from D1 (the
@@ -159,7 +159,7 @@ CREATE TABLE meal_plan_version (
   evaluation_json TEXT NOT NULL,         -- failures + measurements
   request_kind TEXT NOT NULL,            -- initial_plan | revision
   base_version INTEGER,                  -- NULL for initial
-  feedback_batch_id TEXT,          -- batch that drove this version (NULL for initial / free-form)
+  feedback_batch_id TEXT,          -- batch that drove this version (NULL only for the initial plan)
   video_json TEXT NOT NULL DEFAULT '{}', -- per-cell video results (lunch slots)
   created_at TEXT NOT NULL,
   PRIMARY KEY (plan_id, version)
@@ -168,8 +168,7 @@ CREATE TABLE meal_plan_version (
 -- Feedback submission record: one immutable batch per feedback-driven
 -- revision, created atomically with the version it drove (promotePlanVersion).
 -- No lifecycle (no status transitions), no accumulation — a submission is
--- consumed by the revision it triggers. Initial plans and free-form
--- [Update plan] revisions have no batch.
+-- consumed by the revision it triggers. The initial plan has no batch.
 CREATE TABLE feedback_batch (
   batch_id TEXT PRIMARY KEY,             -- plan_id || ':v' || newVersion
   plan_id TEXT NOT NULL,
@@ -226,15 +225,16 @@ Invariants enforced at the store layer (deterministic, unit-tested):
   any button on its stale message routes to a replaced plan (revision returns
   `stale`, §6).
 - **Atomic revision promotion (`plan_id`-scoped):** one `db.batch` of, in
-  order (`oldVersion` = the CAS base the caller believes is current,
-  `newVersion` = `oldVersion + 1`; `batchId` =
-  `plan_id || ':v' || newVersion`, or NULL for a free-form `[Update plan]`
-  revision — a NULL `batchId` makes statement 5 a no-op):
+   order (`oldVersion` = the CAS base the caller believes is current,
+   `newVersion` = `oldVersion + 1`; `batchId` =
+   `plan_id || ':v' || newVersion` — NULL only defensively: every revision in
+   this design is submission-driven, so a NULL `batchId` (statement 5 no-op)
+   is retained as cheap insurance, not a designed path):
   1. `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind, base_version, feedback_batch_id, video_json, created_at) SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'`
   2. `UPDATE meal_profile SET interaction_generation = interaction_generation + 1 WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active')` — the generation bump, guarded on the CAS base like everything else
   3. `SELECT interaction_generation FROM meal_profile WHERE chat_id = ?` — returns this plan message's generation (used only when the caller sees success)
   4. `UPDATE meal_plan SET current_version = newVersion, updated_at = ? WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'`
-  5. `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at) SELECT ?, plan_id, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = newVersion AND status = 'active' AND ? IS NOT NULL` — records the submission that drove this revision; a NULL `batchId` matches 0 rows (free-form revisions leave no batch)
+   5. `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at) SELECT ?, plan_id, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = newVersion AND status = 'active' AND ? IS NOT NULL` — records the submission that drove this revision; a NULL `batchId` matches 0 rows (retained defensively — every revision is submission-driven)
   **Every statement is conditional on a successful promotion.** Statements 1–2
   and 4 no-op via the CAS base guard (`current_version = oldVersion` — the
   bump's `EXISTS` reads the plan row before statement 4 advances it, so a
@@ -312,6 +312,12 @@ the agent owns free-text interpretation and normalization into the canonical
 tokens the evaluator checks (exact string membership only); it must clarify
 ambiguous exclusions before they become hard constraints.
 
+For revisions, the context carries the submitted `FeedbackItem[]`: an item
+with a cell `id` is scoped to that cell (the revision must address it there —
+the coverage validation on `propose_plan` requires every item be represented);
+an unbound item (iteration-1 Telegram text) is interpreted against the plan as
+a whole.
+
 Unlike Calendar, no opaque plan ledger is needed: the write target is our own
 D1 store and the evaluator is pure/replayable, so `propose_plan` carries the
 candidate and the handler re-verifies it deterministically.
@@ -320,6 +326,20 @@ candidate and the handler re-verifies it deterministically.
 
 `MealPlanningWorkflowParams`:
 `{ chatId, telegramMessageId, requestText }`.
+
+**Submission payload (canonical, identical in iteration 1 and 2):** feedback
+arrives as one JSON object `{ items: FeedbackItem[] }` with
+`FeedbackItem = { id, text }`. The mini-app (iteration 2) sends this over HTTP
+via `feedback-submit` with cell-bound ids; Telegram text is coerced into the
+same shape at the boundary by `coerceSubmission(text, source, messageId)`
+(`submissions.ts`, pure function, unit-tested): the whole message becomes one
+unbound item `{ id: "tg-<messageId>", text }`. Everything downstream — session
+context, `propose_plan` validation, the `feedback_batch` row, the version
+chain — consumes only this payload shape, so iteration 2 swaps the Telegram
+producer for the mini-app producer with no pipeline change. Multi-item
+cell-mapped batches cannot enter through Telegram (text transport), so they
+are exercised by constructing the payload directly in tests (§9); manual QA
+drives the real path with real text (§13.3).
 
 `runAgentCenteredMealPlanningWorkflow(env, event, step)`:
 
@@ -342,31 +362,35 @@ candidate and the handler re-verifies it deterministically.
      planning → `meal-planning-canceled` notice ("no reply received; run
      /mealplan to retry") and the instance ends; revision → the revision is
      abandoned and the previous version stands. On reply → next turn.
-   - `propose_plan` → persist (below) → break.
+   - `propose_plan` → enrich (below) → break.
    - Agent failure/timeout → `meal-agent-unavailable` notice.
-3. **Persist:** initial → `createActivePlan` (atomic batch, §4); revision →
+3. **Optional enrichment:** fill `recipeVideo` for school-lunch and home-lunch
+   cells via `video.ts` **before** persisting the version (deterministic gate,
+   never blocking; see §8) — the version row is insert-only, so enrichment
+   must precede the persist batch.
+4. **Persist:** initial → `createActivePlan` (atomic batch, §4); revision →
    `promotePlanVersion` (`plan_id`-scoped atomic batch, §4; when the revision
    was triggered by a feedback submission, the batch also writes the
    immutable submission batch row and links it from the version). Each batch
    makes the plan/version state changes one atomic outcome and bumps the
    chat-scoped plan message generation (returned to the caller for step 5).
-   Promotion failure (stale) → `meal-stale-plan` notice, no version written,
-   stale event logged via `logRuntime` (§4 recovery).
-4. **Optional enrichment:** fill `recipeVideo` for school-lunch and home-lunch
-   cells via `video.ts` **before** persisting the version (deterministic gate,
-   never blocking; see §8).
-5. **Send plan message** (`renderPlanMessage`, Markdown) with inline buttons
-   `[Give feedback] [Update plan]`; in one durable `step.do` register two
-   callback interactions (group `"meal-planning"`, `expiresAt = weekEnd` —
+    Promotion failure (stale) → `meal-stale-plan` notice, no version written,
+    stale event logged via `logRuntime` (§4 recovery).
+5. **Send plan message** (`renderPlanMessage`, Markdown) with inline button
+   `[Give feedback]`; in one durable `step.do` register one callback
+   interaction (group `"meal-planning"`, `expiresAt = weekEnd` —
    the plan row's `week_end`, not a feedback window: a plan is approved by
-   default and its buttons stay live until the week ends or the plan is
+   default and its button stays live until the week ends or the plan is
    superseded, `generation: <planGeneration>`):
    - `{ interactionId, version: <planVersion>, workflowId: instanceId, kind:
      meal-feedback, callbackToken, botMessageId: planMessageId }`
-   - same for `meal-update` (distinct token).
-   `version` binds the buttons to the plan version the parent is looking at and
-   is the base version used by the revision branch. `planGeneration` is the
-   value returned by the persistence batch (§4 — createActivePlan statements
+   `version` binds the buttons to the plan version the parent is looking at;
+   the branch uses it only as a staleness guard — if `interaction.version` is
+   below the store's current version at event processing, the tap targeted an
+   outdated plan message and the branch sends `meal-stale-plan` instead of
+   opening the prompt (the revision itself always bases on the store's current
+   version, never on the button's). `planGeneration` is the value returned by
+   the persistence batch (§4 — createActivePlan statements
    4–5, promotePlanVersion statements 2–3): a chat-scoped monotonic counter
    that every persisted plan message (initial or revision) increments exactly
    once, atomically with its own version rows.
@@ -394,9 +418,8 @@ candidate and the handler re-verifies it deterministically.
 
    | Event kind | Source | Branch (all sends/registers inside `step.do`) |
    | --- | --- | --- |
-   | `meal-feedback` | inline-button callback, one-time | `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: weekEnd, interactionGroup: "meal-planning", generation: <planGeneration> }`. Continue waiting. |
-   | `meal-feedback-reply` | force-reply text (replyTo the prompt) | The reply **is a feedback submission** (one `FeedbackItem { id, text }`). Run the revision session (step 2) with the item as context; persist via `promotePlanVersion` (feedback-driven → submission batch row written and linked, §4); send the new plan message with fresh buttons + register a new action set (step 5). Stale → `meal-stale-plan` notice. Continue waiting. |
-   | `meal-update` | inline-button callback, one-time | Run the revision session (step 2) with `basePlanVersion = interaction.version` (free-form — no submission batch). Success → send the new plan message with fresh buttons + register a new action set (step 5). Stale (`promotePlanVersion` returns `stale`) → `meal-stale-plan` notice. Continue waiting. |
+   | `meal-feedback` | inline-button callback, one-time | Staleness guard first: if `interaction.version < current_version`, send `meal-stale-plan` notice and continue waiting (the tap targeted an outdated plan message). Otherwise `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: <interaction lifetime — 15 min, as clarifications>, interactionGroup: "meal-planning", generation: <planGeneration> }`. Continue waiting. |
+   | `meal-feedback-reply` | force-reply text (replyTo the prompt) | The reply **is a feedback submission**: `coerceSubmission(text, "telegram-reply", messageId)` → one unbound `FeedbackItem`. Run the revision session (step 2) with the item as context; persist via `promotePlanVersion` (feedback-driven → submission batch row written and linked, §4); send the new plan message with a fresh button + register a new action set (step 5). Stale → `meal-stale-plan` notice. Continue waiting. |
    | `feedback-submit` | iteration-2 mini-app API (future; event seam defined now) | Same as `meal-feedback-reply` with an arbitrary `items: FeedbackItem[]` submission. No store, session, or version-chain change is needed to add this producer. |
    | timeout | `waitForEvent` deadline = `week_end` | End. The active plan stays in D1, approved by default. |
 
@@ -410,18 +433,58 @@ candidate and the handler re-verifies it deterministically.
      and the first reply already triggered its revision), so a stray second
      reply is ignored.
    - The `meal-feedback` button branch is one-shot by construction: the tap
-     consumed its callback interaction, and the follow-up text arrives on the
-     new `meal-feedback-reply` interaction.
+      consumed its callback interaction, and the follow-up text arrives on the
+      new `meal-feedback-reply` interaction.
+   - A tap resolved against an outdated message (its `interaction.version` is
+      below the store's current version) is not a duplicate — it is a stale
+      target: the `meal-feedback` branch sends `meal-stale-plan` instead of
+      opening the prompt, so feedback is never silently applied to the wrong
+      plan version.
    - Action interactions expire at `week_end`; the router drops expired rows
-     and `waitForEvent` times out at the same deadline, so the instance ends
-     cleanly and no interaction survives the week. A superseded instance
-     idles to `week_end` — its rows already resolve null via generation, and
-     idle Workflow instances cost nothing.
+      and `waitForEvent` times out at the same deadline, so the instance ends
+      cleanly and no interaction survives the week. A superseded instance
+      idles to `week_end` — its rows already resolve null via generation, and
+      idle Workflow instances cost nothing.
+   - **Command-level retries are not deduped** (deliberate, iteration 1): the
+      router's single-claim covers interactions only; a retried `/mealplan`
+      webhook delivery (Telegram retries only after the worker fails to
+      answer) creates a second instance and a second plan message —
+      serialize-and-supersede resolves the store state and the parent sees a
+      "previous plan replaced" notice. Accepted as user-visible-but-harmless;
+      a deterministic instance id (`mealplan-<chatId>-<telegramMessageId>`)
+      is the future fix if it ever proves annoying.
 
 Routing (`telegram-webhook.ts`): kinds `meal-*` dispatch to
 `MEAL_PLANNING_WORKFLOW`; planning-conversation interactions carry the live
 instance id (sendEvent, like Calendar). `/mealplan` with no argument shows
 help. There is no `/plan` command (see §13.3).
+
+**Plain-text routing contract (multi-workflow chat):** three deterministic
+levels, no LLM intent routing (the parent's words must never be handed to a
+workflow that acts on them via a guess; routing stays mechanical, matching the
+codebase's existing router). Telegram has no real threading, and Kipp hosts
+several workflows in one chat — parallel pending prompts are normal.
+(1) Reply-to a specific bot message resolves exactly by `botMessageId` — the
+disambiguator when several prompts pend. (2) Plain text resolves the newest
+pending plain-text-eligible interaction in the chat (`rowid DESC`, the
+existing router semantics; the router's per-chat interactions table is the
+stack of open interactions, and `meal-clarification` +
+`meal-feedback-reply` join `PLAIN_TEXT_INTERACTION_KINDS`), regardless of
+which workflow owns it: while another workflow's prompt is pending, plain text
+belongs to it. The inline button is the explicit intent switch back: tapping
+`[Give feedback]` registers the `meal-feedback-reply` prompt as the newest
+pending interaction, so the next plain-text message maps to the meal plan
+immediately — the parent never waits for another workflow's prompt to expire.
+(3) Plain text with no pending match falls through to the live meal-planning
+instance (when the active plan's `week_end` has not passed) — the
+single-workflow convenience ("type against the plan"), active only when the
+stack is empty, so it never competes with a real pending prompt. Prompt
+lifetimes bound the switch: meal prompts (clarification, feedback reply) are
+short-lived at the interaction lifetime (15 min) so they claim plain text only
+while the parent is actively using them; the `[Give feedback]` button stays
+live until `week_end` (long button, short prompt). The iteration-2 mini-app
+skips text routing entirely: `feedback-submit` delivers structured per-cell
+submissions (spec §8.1 — pending edit, see §13 note 4).
 
 ## 7. Telegram surface and rendering
 
@@ -434,14 +497,22 @@ help. There is no `/plan` command (see §13.3).
   from `policyOutcomes` (labels only, no essay). Video links shown only when a
   `found` result exists. (No pending-feedback indicator: feedback is consumed
   by the revision it triggers, so a plan message never has pending changes.)
-- Buttons on a plan message: `[Give feedback] [Update plan]` (no `[Done]` —
-  approval is the default state). Both expire at the plan's `week_end`.
+- Button on a plan message: `[Give feedback]` only (no `[Done]` — approval
+  is the default state; no `[Update plan]` — every revision is
+  submission-driven, so a no-input button would have nothing to act on and
+  would churn dishes for no reason). It expires at the plan's `week_end`.
   `[Give feedback]` opens the interim Telegram force-reply surface for
-  feedback submissions; the product feedback surface is the iteration-2
-  mini-app (`feedback-submit` event), and the Telegram prompt exists only to
-  exercise the same pipeline until it lands.
+  feedback submissions, and its prompt's example doubles as the update
+  affordance — any typed text reaches the same submission pipeline; the
+  product feedback surface is the iteration-2 mini-app (`feedback-submit`
+  event), and the Telegram prompt exists only to exercise the same pipeline
+  until it lands. The button is also the explicit meal-intent switch in a
+  multi-workflow chat: tapping it registers the feedback prompt as the newest
+  pending interaction, so the next plain-text message maps to the meal plan
+  immediately — no wait for another workflow's prompt to expire (routing
+  contract, §6).
 - Interaction kinds added to `INTERACTION_KIND`: `meal-clarification`,
-  `meal-feedback`, `meal-feedback-reply`, `meal-update` (all `meal-*`
+  `meal-feedback`, `meal-feedback-reply` (all `meal-*`
   prefixed for routing). No new plain-text routing kinds: feedback and
   clarifications arrive as force-reply replies (replyTo resolution), matching
   the Calendar pattern.
@@ -473,6 +544,10 @@ help. There is no `/plan` command (see §13.3).
   `behavior.expectsClarification` scenarios → asserts `needs_clarification`
   with the expected policy outcomes. This makes the corpus the documented gate
   for the planning loop (issue acceptance criterion 5).
+- New `meal-planning-submissions.test.ts`: `coerceSubmission` wraps raw
+  Telegram text into the canonical one-item submission payload; multi-item,
+  cell-mapped submissions are constructed directly and drive the store/session
+  pipeline unchanged — the exact shape iteration-2 `feedback-submit` will send.
 - New `meal-planning-store.test.ts`: one-active-per-chat constraint,
   `createActivePlan` atomicity — a second create supersedes the first
   (serialize-and-supersede), any statement failure rolls back the whole batch
@@ -482,9 +557,8 @@ help. There is no `/plan` command (see §13.3).
   generation unmoved, `current_version` unmoved, no feedback batch row) —
   including the same-target race where a concurrent revision already committed
   the same `newVersion` (plus: success bumps the generation in the same
-  transaction and, for a feedback-driven revision, writes the immutable
-  submission batch row linked from the new version — and a free-form revision
-  writes no batch row), insert-only versions, restart survival (fresh store
+  transaction and writes the immutable submission batch row linked from the
+  new version), insert-only versions, restart survival (fresh store
   instance reads the active plan).
 - Extended `interaction-router.test.ts` (existing): a registration carrying a
   `generation` removes the group's lower-generation unconsumed rows and is
@@ -496,11 +570,15 @@ help. There is no `/plan` command (see §13.3).
 - New Telegram e2e (`meal-planning-telegram-workflow.integration.test.ts`):
   webhook → workflow → in-memory store → fake Telegram, covering: full happy
   path (context → plan v1 → [Give feedback] button → force-reply prompt →
-  feedback text → feedback-triggered revision → plan v2 message with fresh
-  buttons, and separately [Update plan] → free-form revision → plan v2), the
-  feedback-driven revision's submission batch row linked from v2, stale
-  revision rejection (base version < current), retried callback and retried
-  feedback delivery (router single-claim), **mid-week replacement: a fresh
+  feedback text → feedback-triggered revision → plan v2 message with a fresh
+  button), the feedback-driven revision's submission batch row linked from
+  v2, stale revision rejection (base version < current), stale-message tap
+  (interaction.version < current → `meal-stale-plan` notice, no prompt opened),
+  retried callback and retried feedback delivery (router single-claim),
+  plain-text routing (a pending foreign prompt captures plain text — newest
+  wins; tapping `[Give feedback]` re-claims the next message even while another
+  workflow's prompt pends; with nothing pending, plain text falls through to
+  the live instance), **mid-week replacement: a fresh
   `/mealplan` supersedes plan v1 while the instance is live — the old plan's
   action buttons and its pending force-reply prompt resolve nothing
   (generation invalidation) while the new plan's buttons work**, the
@@ -527,11 +605,13 @@ New:
 - `src/meal-planning/workflow.ts` — `MealPlanningWorkflow` entrypoint.
 - `src/meal-planning/agent-workflow.ts` — runner (session loop, persistence, live week loop, revision).
 - `src/meal-planning/messages.ts` — help, `renderPlanMessage`, fixed notices.
+- `src/meal-planning/submissions.ts` — canonical submission payload:
+  `Submission`/`FeedbackItem` types, `coerceSubmission` (pure, unit-tested).
 - `src/meal-planning/video.ts` — optional enrichment.
 - `src/agent/meal-planning.ts` — tool definitions + zod schemas.
 - `src/agent/meal-planning-session.ts` — bounded session.
 - `src/__tests__/meal-planning-store.test.ts`, `meal-planning-messages.test.ts`,
-  `meal-planning-agent.test.ts`.
+  `meal-planning-submissions.test.ts`, `meal-planning-agent.test.ts`.
 - `src/__integration__/meal-planning-telegram-workflow.integration.test.ts`.
 
 Modified:
@@ -598,15 +678,60 @@ None blocking. Notes for review:
 1. One workflow instance lives per chat-week (until `week_end` or supersede);
    idle instances are free on Cloudflare Workflows. A superseded instance is
    not signaled to end — it idles to `week_end` with its rows already
-   generation-invalidated. Clarification replies expire after 15 min
-   (`MEAL_CLARIFICATION_TTL_MS`); feedback prompts and action buttons expire
-   at `week_end`.
+   generation-invalidated. Clarification replies and feedback-reply prompts
+   expire after 15 min (the interaction lifetime, `MEAL_CLARIFICATION_TTL_MS`);
+   action buttons expire at `week_end` (long button, short prompt).
 2. Weekly inventory/exceptions live on the `meal_plan` row (week-scoped
    state, per spec §5.11); they expire when a new plan replaces the row.
 3. **No `/plan` command** (deliberate cut): this workflow is never shipped to
    users without the mini-app, so mid-week retrieval of the active plan is the
    iteration-2 mini-app's home view (`activePlan` store read, unchanged).
    Iteration-1 automated tests never needed the command — unit/integration
-   suites assert the store and fake-Telegram messages directly, and manual QA
-   can read D1 with `wrangler d1 execute`. Re-adding a text fallback later is a
-   few lines in `telegram-webhook.ts` if a phone-scan use case ever appears.
+   suites assert the store and fake-Telegram messages directly. Manual QA with
+   the real LLM runs through the real webhook: `wrangler dev` with the real bot
+   token, then drive `/mealplan` and feedback either via `curl` (Telegram-shaped
+   update bodies, `X-Telegram-Bot-Api-Secret-Token` header) or via a tunnel +
+   the real Telegram app; the bot's messages land in the real chat either way,
+   so the human watches the agent plan and revise (curl only replaces the
+   webhook input, never the bot's outbound sends). Re-adding a text fallback
+   later is a few lines in `telegram-webhook.ts` if a phone-scan use case ever
+   appears.
+4. **Spec update pending (apply during implementation; blocked in the planning
+   session, which may only write `plans/`):** add §8.1 "Conversational routing
+   in a multi-workflow chat" to
+   `docs/school-day-meal-planning-workflow-spec.md`, between §8 and §9, with
+   this verbatim body:
+   > Telegram has no real threading, and Kipp hosts several workflows (idea
+   > pipeline, calendar, meal planning) in one chat, so parallel pending
+   > prompts are normal. Plain-text routing must therefore be deterministic:
+   > never route unaddressed text by LLM intent classification at the ingress,
+   > and never assume the parent works through one workflow at a time.
+   >
+   > The contract:
+   >
+   > - Reply-to a specific bot message resolves exactly (`botMessageId`); it
+   >   is the disambiguator when several prompts pend.
+   > - Unaddressed plain text resolves the newest pending prompt in the chat,
+   >   regardless of which workflow owns it (the router's per-chat
+   >   interactions table is the stack of open interactions; newest wins).
+   >   While another workflow's prompt is pending, plain text belongs to it.
+   > - Each workflow keeps a readily-reachable explicit intent switch — an
+   >   inline button that, when tapped, registers that workflow's prompt as
+   >   the newest pending interaction, so the next plain-text message maps to
+   >   it immediately. The parent never waits for another workflow's prompt to
+   >   expire.
+   > - Conversational prompts are short-lived (interaction lifetime, 15
+   >   minutes); the switch affordance stays available for the whole relevant
+   >   period (long button, short prompt). Plain text with no pending match
+   >   may fall through to the meal-planning workflow's live session when one
+   >   exists — the single-workflow convenience — and never competes with a
+   >   real pending prompt.
+   >
+   > Iteration 1 realizes the switch as the `[Give feedback]` button on the
+   > plan message, with prompt lifetimes of 15 minutes; full routing
+   > semantics live in the iteration-1 plan (§6 plain-text routing contract).
+   > For iteration 2, the Mini App must preserve the same contract: keep the
+   > explicit switch reachable (e.g., from the home view), and deliver
+   > per-cell feedback as structured submissions (`feedback-submit`) that
+   > bypass text routing entirely — the parent's feedback never competes with
+   > another workflow's pending prompt.
