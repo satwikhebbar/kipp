@@ -1,0 +1,696 @@
+import type {
+  CustomPolicy,
+  FeedbackItem,
+  MealPlanCandidate,
+  MealPlanEvaluation,
+  MealProfile,
+  MealSchedule,
+  RequestKind,
+  WeeklyExceptions,
+  WeeklyInventory,
+} from "./types"
+
+/** `{ country, city }` location snapshot stored on the household profile row. */
+export interface StoredLocation {
+  country: string
+  city: string
+}
+
+/** A hydrated `meal_profile` row. */
+export interface StoredMealProfile {
+  chatId: string
+  profile: MealProfile
+  customPolicies: CustomPolicy[]
+  schedule: MealSchedule
+  location: StoredLocation | null
+  /** Chat-scoped plan-message generation (§6): bumped exactly once per persisted plan message. */
+  interactionGeneration: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type MealPlanStatus = "active" | "replaced"
+
+/** A hydrated `meal_plan` header row (plan identity, week bounds, live instance, week-scoped state). */
+export interface MealPlanRecord {
+  planId: string
+  chatId: string
+  weekStart: string
+  weekEnd: string
+  timezone: string
+  instanceId: string
+  status: MealPlanStatus
+  currentVersion: number
+  weeklyInventory: WeeklyInventory
+  weeklyExceptions: WeeklyExceptions
+  createdAt: string
+  updatedAt: string
+}
+
+/** A hydrated, immutable `meal_plan_version` row. */
+export interface MealPlanVersionRecord {
+  planId: string
+  version: number
+  candidate: MealPlanCandidate
+  evaluation: MealPlanEvaluation
+  requestKind: RequestKind
+  baseVersion: number | null
+  feedbackBatchId: string | null
+  /** Per-cell video results (lunch slots), as stored; iteration 1 keeps this opaque. */
+  video: unknown
+  createdAt: string
+}
+
+/** The active plan plus its current version — the read shape for the live loop and the iteration-2 mini-app. */
+export interface ActivePlanRecord {
+  plan: MealPlanRecord
+  version: MealPlanVersionRecord
+}
+
+/** A hydrated `feedback_batch` row. */
+export interface FeedbackBatchRecord {
+  batchId: string
+  planId: string
+  baseVersion: number
+  items: FeedbackItem[]
+  createdAt: string
+}
+
+/** Input to `createActivePlan`: everything the atomic initial-plan batch needs. */
+export interface CreateActivePlanInput {
+  planId: string
+  chatId: string
+  weekStart: string
+  weekEnd: string
+  timezone: string
+  /** The live Workflow instance id — the webhook's fallthrough pointer (§6). */
+  instanceId: string
+  candidate: MealPlanCandidate
+  evaluation: MealPlanEvaluation
+  weeklyInventory: WeeklyInventory
+  weeklyExceptions: WeeklyExceptions
+  video?: unknown
+}
+
+/** Result of a committed initial-plan batch. */
+export interface CreateActivePlanResult {
+  plan: MealPlanRecord
+  version: MealPlanVersionRecord
+  generation: number
+  /** True when a previous active plan was superseded by this create (the parent gets a "previous plan replaced" notice). */
+  previousReplaced: boolean
+}
+
+/** One immutable submission batch written atomically with the revision it drives. */
+export interface FeedbackBatchInput {
+  batchId: string
+  items: FeedbackItem[]
+}
+
+/** Input to `promotePlanVersion`: `baseVersion` is the CAS base; the new version is always `baseVersion + 1`. */
+export interface PromotePlanVersionInput {
+  planId: string
+  chatId: string
+  baseVersion: number
+  candidate: MealPlanCandidate
+  evaluation: MealPlanEvaluation
+  video?: unknown
+  /** Week-scoped state captured by the revision session; omit (or null) to skip the refresh. */
+  inventory?: { weeklyInventory: WeeklyInventory; weeklyExceptions: WeeklyExceptions } | null
+  /** The submission that drove this revision; omit (or null) only defensively — every revision is submission-driven. */
+  feedbackBatch?: FeedbackBatchInput | null
+}
+
+/** A stale call changes nothing; the only defined failure reason is `stale`. */
+export type PromotePlanVersionResult =
+  | { ok: true; version: MealPlanVersionRecord; generation: number }
+  | { ok: false; reason: "stale" }
+
+/** The typed meal-planning store surface. The D1 and in-memory implementations share the same invariants. */
+export interface MealPlanningStore {
+  loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
+  createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
+  promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
+  activePlan(chatId: string): Promise<ActivePlanRecord | null>
+}
+
+/**
+ * Backing state shared across in-memory store instances. Passing the same
+ * backing to a fresh `createInMemoryMealPlanningStore` call simulates process
+ * restart survival (a new store reads the same committed state).
+ */
+export interface InMemoryMealPlanningBacking {
+  profiles: Map<string, StoredMealProfile>
+  plans: Map<string, MealPlanRecord>
+  versions: Map<string, MealPlanVersionRecord>
+  batches: Map<string, FeedbackBatchRecord>
+}
+
+/** Options for the in-memory store; `failNextOn` is a single-shot test hook that simulates a mid-batch statement failure. */
+export interface InMemoryMealPlanningStoreOptions {
+  backing?: InMemoryMealPlanningBacking
+  failNextOn?: "createActivePlan" | "promotePlanVersion"
+}
+
+const SEED_SCHEDULE: MealSchedule = {
+  days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+  slots: [
+    { id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null },
+    { id: "snack1", name: "Snack 1", packed: true, dry: true, maxCookMinutes: 0 },
+    { id: "snack2", name: "Snack 2", packed: true, dry: true, maxCookMinutes: 0 },
+    { id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null },
+    { id: "home-lunch", name: "Home lunch", packed: false, dry: false, maxCookMinutes: null },
+  ],
+}
+
+const SEED_PROFILE: MealProfile = {
+  dietaryExclusions: ["peanut", "egg"],
+  dishRepertoire: [
+    "paratha",
+    "banana",
+    "roasted chana",
+    "bottle gourd dal",
+    "rice and beans",
+    "poha",
+    "apple",
+    "dates",
+    "rajma",
+    "quinoa bowl",
+    "idli",
+    "orange",
+    "mixed seeds",
+    "khichdi",
+    "sweet potato curry",
+    "upma",
+    "pear",
+    "dry coconut",
+    "chole",
+    "ghee rice",
+    "dosa",
+    "pomegranate",
+    "jaggery cubes",
+    "paneer paratha",
+    "masala oats",
+  ],
+  foodPreferences: { favourites: ["paratha"], avoid: [] },
+  allowNewFoods: false,
+  sensoryGuidelines: [],
+  morningCookingBudgetMinutes: 40,
+  priorNightPrepAllowed: false,
+  pantryBaseline: ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"],
+}
+
+/** The initial household configuration per spec §5.11 (Snack policy, Equipment gap, Packing capacity, two Nutrition targets). */
+const SEED_CUSTOM_POLICIES: CustomPolicy[] = [
+  {
+    id: "snack-policy",
+    label: "Snack policy",
+    scope: "persistent",
+    value: "School snacks should usually be dry, quick to pack, and not cooked that morning.",
+  },
+  { id: "equipment-gap", label: "Equipment gap", scope: "persistent", value: '["microwave oven"]' },
+  {
+    id: "packing-capacity",
+    label: "Packing capacity",
+    scope: "persistent",
+    value: "Use at most two lunchbox compartments; avoid leak-prone items.",
+  },
+  {
+    id: "nutrition-target-fruit",
+    label: "Nutrition target",
+    scope: "persistent",
+    value: "Pack fruit in a snack at least three to four times each week.",
+  },
+  {
+    id: "nutrition-target-nuts",
+    label: "Nutrition target",
+    scope: "persistent",
+    value: "Include nuts or dry fruits regularly.",
+  },
+]
+
+/** ISO-8601 UTC at fixed millisecond precision — the only timestamp format D1 rows may carry. */
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+/** Parses a stored JSON column; malformed or missing JSON falls back to `fallback`. */
+function parseJson<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
+/** Stable map key for a (plan, version) pair. */
+function versionKey(planId: string, version: number): string {
+  return `${planId}:${version}`
+}
+
+/** Constructs the hydrated `MealPlanRecord` a create batch just wrote (always the fresh active plan at version 1). */
+function makePlanRecord(input: CreateActivePlanInput, now: string): MealPlanRecord {
+  return {
+    planId: input.planId,
+    chatId: input.chatId,
+    weekStart: input.weekStart,
+    weekEnd: input.weekEnd,
+    timezone: input.timezone,
+    instanceId: input.instanceId,
+    status: "active",
+    currentVersion: 1,
+    weeklyInventory: input.weeklyInventory,
+    weeklyExceptions: input.weeklyExceptions,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+/** Constructs the hydrated `MealPlanVersionRecord` a batch just wrote. */
+function makeVersionRecord(
+  planId: string,
+  version: number,
+  candidate: MealPlanCandidate,
+  evaluation: MealPlanEvaluation,
+  requestKind: RequestKind,
+  baseVersion: number | null,
+  feedbackBatchId: string | null,
+  video: unknown,
+  now: string,
+): MealPlanVersionRecord {
+  return { planId, version, candidate, evaluation, requestKind, baseVersion, feedbackBatchId, video, createdAt: now }
+}
+
+/**
+ * Production store over a Cloudflare D1 binding. Every operation is one atomic
+ * `db.batch`; the partial unique index `idx_meal_plan_one_active` and the CAS
+ * guards in the promotion SQL enforce the invariants described in the
+ * iteration-1 plan §4.
+ */
+export function createMealPlanningStore(db: D1Database): MealPlanningStore {
+  return {
+    async loadOrCreateProfile(chatId) {
+      const row = await db
+        .prepare(
+          `SELECT chat_id, profile_json, custom_policies_json, schedule_json, location_json,
+                  interaction_generation, created_at, updated_at
+           FROM meal_profile WHERE chat_id = ?`,
+        )
+        .bind(chatId)
+        .first()
+      if (row) {
+        return {
+          chatId: String(row.chat_id),
+          profile: parseJson<MealProfile>(String(row.profile_json), SEED_PROFILE),
+          customPolicies: parseJson<CustomPolicy[]>(String(row.custom_policies_json), []),
+          schedule: parseJson<MealSchedule>(String(row.schedule_json), SEED_SCHEDULE),
+          location: parseJson<StoredLocation | null>(String(row.location_json), null),
+          interactionGeneration: Number(row.interaction_generation),
+          createdAt: String(row.created_at),
+          updatedAt: String(row.updated_at),
+        }
+      }
+      const now = nowIso()
+      await db
+        .prepare(
+          `INSERT INTO meal_profile (chat_id, profile_json, custom_policies_json, schedule_json,
+                                     location_json, interaction_generation, version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, NULL, 0, 1, ?, ?)`,
+        )
+        .bind(
+          chatId,
+          JSON.stringify(SEED_PROFILE),
+          JSON.stringify(SEED_CUSTOM_POLICIES),
+          JSON.stringify(SEED_SCHEDULE),
+          now,
+          now,
+        )
+        .run()
+      return {
+        chatId,
+        profile: SEED_PROFILE,
+        customPolicies: SEED_CUSTOM_POLICIES,
+        schedule: SEED_SCHEDULE,
+        location: null,
+        interactionGeneration: 0,
+        createdAt: now,
+        updatedAt: now,
+      }
+    },
+
+    async createActivePlan(input) {
+      const now = nowIso()
+      const results = await db.batch([
+        db
+          .prepare("UPDATE meal_plan SET status = 'replaced', updated_at = ? WHERE chat_id = ? AND status = 'active'")
+          .bind(now, input.chatId),
+        db
+          .prepare(
+            `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status,
+                                    current_version, weekly_inventory_json, weekly_exceptions_json,
+                                    created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?)`,
+          )
+          .bind(
+            input.planId,
+            input.chatId,
+            input.weekStart,
+            input.weekEnd,
+            input.timezone,
+            input.instanceId,
+            JSON.stringify(input.weeklyInventory),
+            JSON.stringify(input.weeklyExceptions),
+            now,
+            now,
+          ),
+        db
+          .prepare(
+            `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
+                                            base_version, feedback_batch_id, video_json, created_at)
+             VALUES (?, 1, ?, ?, 'initial', NULL, NULL, ?, ?)`,
+          )
+          .bind(
+            input.planId,
+            JSON.stringify(input.candidate),
+            JSON.stringify(input.evaluation),
+            JSON.stringify(input.video ?? {}),
+            now,
+          ),
+        db
+          .prepare(
+            "UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ? WHERE chat_id = ?",
+          )
+          .bind(now, input.chatId),
+        db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
+      ])
+      const previousReplaced = Number((results[0] as { meta: { changes?: number } }).meta.changes) >= 1
+      const generation = Number(
+        (results[4] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
+      )
+      return {
+        plan: makePlanRecord(input, now),
+        version: makeVersionRecord(
+          input.planId,
+          1,
+          input.candidate,
+          input.evaluation,
+          "initial_plan",
+          null,
+          null,
+          input.video ?? {},
+          now,
+        ),
+        generation,
+        previousReplaced,
+      }
+    },
+
+    async promotePlanVersion(input) {
+      const now = nowIso()
+      const newVersion = input.baseVersion + 1
+      const batchId = input.feedbackBatch?.batchId ?? null
+      const statements = [
+        db
+          .prepare(
+            `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
+                                            base_version, feedback_batch_id, video_json, created_at)
+             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan
+             WHERE plan_id = ? AND current_version = ? AND status = 'active'`,
+          )
+          .bind(
+            input.planId,
+            newVersion,
+            JSON.stringify(input.candidate),
+            JSON.stringify(input.evaluation),
+            input.baseVersion,
+            batchId,
+            JSON.stringify(input.video ?? {}),
+            now,
+            input.planId,
+            input.baseVersion,
+          ),
+        db
+          .prepare(
+            `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ?
+             WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan
+                                           WHERE plan_id = ? AND current_version = ? AND status = 'active')`,
+          )
+          .bind(now, input.chatId, input.planId, input.baseVersion),
+        db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
+      ]
+      if (input.inventory) {
+        statements.push(
+          db
+            .prepare(
+              `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
+               WHERE plan_id = ? AND current_version = ? AND status = 'active'`,
+            )
+            .bind(
+              JSON.stringify(input.inventory.weeklyInventory),
+              JSON.stringify(input.inventory.weeklyExceptions),
+              now,
+              input.planId,
+              input.baseVersion,
+            ),
+        )
+      }
+      statements.push(
+        db
+          .prepare(
+            `UPDATE meal_plan SET current_version = ?, updated_at = ?
+             WHERE plan_id = ? AND current_version = ? AND status = 'active'`,
+          )
+          .bind(newVersion, now, input.planId, input.baseVersion),
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at)
+             SELECT ?, plan_id, ?, ?, ? FROM meal_plan
+             WHERE plan_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL`,
+          )
+          .bind(
+            batchId,
+            input.baseVersion,
+            JSON.stringify(input.feedbackBatch?.items ?? []),
+            now,
+            input.planId,
+            newVersion,
+            batchId,
+          ),
+      )
+      const results = await db.batch(statements)
+      const promoted = Number((results[0] as { meta: { changes?: number } }).meta.changes) === 1
+      if (!promoted) return { ok: false as const, reason: "stale" as const }
+      const generation = Number(
+        (results[2] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
+      )
+      return {
+        ok: true as const,
+        version: makeVersionRecord(
+          input.planId,
+          newVersion,
+          input.candidate,
+          input.evaluation,
+          "revision",
+          input.baseVersion,
+          batchId,
+          input.video ?? {},
+          now,
+        ),
+        generation,
+      }
+    },
+
+    async activePlan(chatId) {
+      const row = await db
+        .prepare(
+          `SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
+                  p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
+                  v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
+                  v.feedback_batch_id, v.video_json, v.created_at AS version_created_at
+           FROM meal_plan p
+           JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
+           WHERE p.chat_id = ? AND p.status = 'active'`,
+        )
+        .bind(chatId)
+        .first()
+      if (!row) return null
+      return {
+        plan: {
+          planId: String(row.plan_id),
+          chatId: String(row.chat_id),
+          weekStart: String(row.week_start),
+          weekEnd: String(row.week_end),
+          timezone: String(row.timezone),
+          instanceId: String(row.instance_id),
+          status: String(row.status) as MealPlanStatus,
+          currentVersion: Number(row.current_version),
+          weeklyInventory: parseJson<WeeklyInventory>(String(row.weekly_inventory_json), { items: [], notes: [] }),
+          weeklyExceptions: parseJson<WeeklyExceptions>(String(row.weekly_exceptions_json), { items: [] }),
+          createdAt: String(row.created_at),
+          updatedAt: String(row.updated_at),
+        },
+        version: {
+          planId: String(row.plan_id),
+          version: Number(row.version),
+          candidate: parseJson<MealPlanCandidate>(String(row.candidate_json), {
+            grid: {},
+            easyBuys: [],
+            policyOutcomes: {},
+          }),
+          evaluation: parseJson<MealPlanEvaluation>(String(row.evaluation_json), {
+            pass: false,
+            failures: [],
+            measurements: {
+              morningCookByDay: {},
+              morningCookMax: 0,
+              priorNightPrepByDay: {},
+              priorNightPrepMax: 0,
+              dishRepeatCount: 0,
+              dishRepeats: [],
+              inventoryUsed: [],
+              easyBuyCount: 0,
+            },
+          }),
+          requestKind: String(row.request_kind) as RequestKind,
+          baseVersion: row.base_version === null ? null : Number(row.base_version),
+          feedbackBatchId: row.feedback_batch_id === null ? null : String(row.feedback_batch_id),
+          video: parseJson<unknown>(String(row.video_json), {}),
+          createdAt: String(row.version_created_at),
+        },
+      }
+    },
+  }
+}
+
+/**
+ * In-memory store for unit/integration tests. Enforces the same invariants as
+ * the D1 implementation (one active plan per chat, insert-only versions,
+ * CAS-guarded promotion that changes nothing on stale, immutable submission
+ * batches linked to versions) without SQL. `backing` is shared across
+ * instances; `failNextOn` injects a single-shot mid-batch failure.
+ */
+export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningStoreOptions = {}): MealPlanningStore {
+  const backing: InMemoryMealPlanningBacking = options.backing ?? {
+    profiles: new Map(),
+    plans: new Map(),
+    versions: new Map(),
+    batches: new Map(),
+  }
+
+  function throwIfFailing(operation: "createActivePlan" | "promotePlanVersion"): void {
+    if (options.failNextOn === operation) {
+      options.failNextOn = undefined
+      throw new Error(`injected batch failure: ${operation}`)
+    }
+  }
+
+  function activePlanForChat(chatId: string): MealPlanRecord | undefined {
+    for (const plan of backing.plans.values()) {
+      if (plan.chatId === chatId && plan.status === "active") return plan
+    }
+    return undefined
+  }
+
+  return {
+    async loadOrCreateProfile(chatId) {
+      const existing = backing.profiles.get(chatId)
+      if (existing) return existing
+      const now = nowIso()
+      const profile: StoredMealProfile = {
+        chatId,
+        profile: SEED_PROFILE,
+        customPolicies: SEED_CUSTOM_POLICIES,
+        schedule: SEED_SCHEDULE,
+        location: null,
+        interactionGeneration: 0,
+        createdAt: now,
+        updatedAt: now,
+      }
+      backing.profiles.set(chatId, profile)
+      return profile
+    },
+
+    async createActivePlan(input) {
+      throwIfFailing("createActivePlan")
+      const now = nowIso()
+      const previous = activePlanForChat(input.chatId)
+      if (previous) {
+        previous.status = "replaced"
+        previous.updatedAt = now
+      }
+      const plan = makePlanRecord(input, now)
+      backing.plans.set(input.planId, plan)
+      const version = makeVersionRecord(
+        input.planId,
+        1,
+        input.candidate,
+        input.evaluation,
+        "initial_plan",
+        null,
+        null,
+        input.video ?? {},
+        now,
+      )
+      backing.versions.set(versionKey(input.planId, 1), version)
+      const profile = backing.profiles.get(input.chatId)
+      if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      profile.interactionGeneration += 1
+      profile.updatedAt = now
+      return { plan, version, generation: profile.interactionGeneration, previousReplaced: previous !== undefined }
+    },
+
+    async promotePlanVersion(input) {
+      throwIfFailing("promotePlanVersion")
+      const plan = backing.plans.get(input.planId)
+      const stale = plan?.status !== "active" || plan.currentVersion !== input.baseVersion
+      if (stale) return { ok: false as const, reason: "stale" as const }
+      const now = nowIso()
+      const newVersion = input.baseVersion + 1
+      const version = makeVersionRecord(
+        input.planId,
+        newVersion,
+        input.candidate,
+        input.evaluation,
+        "revision",
+        input.baseVersion,
+        input.feedbackBatch?.batchId ?? null,
+        input.video ?? {},
+        now,
+      )
+      backing.versions.set(versionKey(input.planId, newVersion), version)
+      if (input.inventory) {
+        plan.weeklyInventory = input.inventory.weeklyInventory
+        plan.weeklyExceptions = input.inventory.weeklyExceptions
+        plan.updatedAt = now
+      }
+      plan.currentVersion = newVersion
+      plan.updatedAt = now
+      if (input.feedbackBatch) {
+        const batchId = input.feedbackBatch.batchId
+        if (!backing.batches.has(batchId)) {
+          backing.batches.set(batchId, {
+            batchId,
+            planId: input.planId,
+            baseVersion: input.baseVersion,
+            items: input.feedbackBatch.items,
+            createdAt: now,
+          })
+        }
+      }
+      const profile = backing.profiles.get(input.chatId)
+      if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      profile.interactionGeneration += 1
+      profile.updatedAt = now
+      return { ok: true as const, version, generation: profile.interactionGeneration }
+    },
+
+    async activePlan(chatId) {
+      const plan = activePlanForChat(chatId)
+      if (!plan) return null
+      const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
+      if (!version) return null
+      return { plan, version }
+    },
+  }
+}
