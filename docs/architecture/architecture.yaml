@@ -15,6 +15,7 @@ runtime_components:
     depends_on:
       - pipeline_workflow
       - calendar_workflow
+      - meal_planning_workflow
       - token_vault
       - interaction_router
       - idea_ingest
@@ -46,6 +47,19 @@ runtime_components:
       - runtime
       - integrations.google-calendar
       - token_vault
+      - interaction_router
+  meal_planning_workflow:
+    implementation: src/meal-planning/workflow.ts and src/meal-planning/agent-workflow.ts
+    owns:
+      - bounded meal-planning agent session and evaluator-gated persistence
+      - atomic active-plan creation and versioned revision promotion in D1
+      - Telegram plan rendering, Give-feedback and force-reply prompts, and the week-long live loop
+      - optional non-blocking recipe-video enrichment for lunch cells
+    depends_on:
+      - meal_planning_domain
+      - providers
+      - runtime
+      - integrations.youtube-data-api
       - interaction_router
   token_vault:
     implementation: src/core/token-vault.ts
@@ -86,6 +100,7 @@ modules:
       - providers
       - pipeline_workflow
       - calendar_workflow
+      - meal_planning_workflow
       - token_vault
       - interaction_router
       - idea_ingest
@@ -102,9 +117,21 @@ modules:
       - LinkedIn ready_for_review handoff and revision transcript
       - Calendar ready_to_create and needs_user_input handoffs
       - safe Calendar transcript persistence and event-list compaction
+      - Meal-planning propose_plan and needs_clarification handoffs
     depends_on:
       - providers
       - runtime
+  meal_planning_domain:
+    path: src/meal-planning
+    owns:
+      - household profile, weekly inventory/exceptions, and plan-candidate types
+      - deterministic evaluateMealPlan evaluation and coverage sets
+      - D1 store: atomic active-plan creation, CAS revision promotion, immutable version and feedback-batch rows
+      - week resolution, plan rendering, and canonical submission coercion
+      - optional recipe-video enrichment with KV cache
+    depends_on:
+      - meal-planning-d1
+      - recipe-video-cache
   calendar_domain:
     path: src/calendar
     owns:
@@ -189,13 +216,26 @@ data_stores:
       - idempotency key to Notion page ownership records
       - per-page workflow-start state and repair cooldown
     owner: idea_ingest
+  meal_planning_d1:
+    type: Cloudflare D1 database
+    data:
+      - household profile (seed only in iteration 1)
+      - active plan header, immutable plan versions, and immutable feedback batches
+      - chat-scoped plan-message generation counter
+    owner: meal_planning_domain
+  recipe_video_cache:
+    type: Cloudflare KV namespace
+    data:
+      - per-dish/slot recipe-video search results with 24-hour per-key expiry
+    owner: meal_planning_domain
   workflow_state:
     type: Cloudflare Workflows durable execution state
     data:
       - workflow steps
       - LinkedIn draft transcript and approval or revision events
       - Calendar safe transcript, typed proposals, exact plans, opaque plan and option ledger, created-event baseline, and wait events
-    owner: pipeline_workflow and calendar_workflow
+      - Meal-planning session outcomes and live-loop wait events
+    owner: pipeline_workflow and calendar_workflow and meal_planning_workflow
 
 external_systems:
   - Telegram Bot API
@@ -206,6 +246,7 @@ external_systems:
   - Google OAuth and Calendar API
   - Gemini API
   - DeepSeek API
+  - YouTube Data API (optional recipe-video enrichment)
   - Cloudflare Access
 
 security_boundaries:
@@ -220,3 +261,6 @@ security_boundaries:
   - Calendar descriptions, locations, people, links, credentials, and raw provider responses never enter model context or content logs
   - Calendar plan and option IDs are opaque, version-scoped, expiring, and single-use
   - Calendar writes require fresh deterministic revalidation and remain idempotent outside the model tool session
+  - Meal-planning D1 stores canonical plans and versions, never transcripts or raw provider text
+  - Meal-planning interaction registrations are opaque, expiring, generation-invalidated, and single-claim
+  - Meal-planning plan persistence is evaluator-gated and CAS-guarded (a stale revision changes nothing)

@@ -54,6 +54,12 @@ class_name = "MealPlanningWorkflow"
 # database_name = "meal-planning"
 # database_id = "<provisioned-database-id>"
 
+# KV cache for optional recipe-video enrichment (24 h per-key expiry; set in
+# the deployed/environment config where the namespace is provisioned).
+# [[kv_namespaces]]
+# binding = "RECIPE_VIDEO_CACHE"
+# id = "<provisioned-namespace-id>"
+
 # Substack RSS poll — daily at 9:00 UTC
 # Token check — Monday 8:00 UTC
 # Cadence check — Monday 9:00 UTC
@@ -75,6 +81,7 @@ LLM_MAX_RETRIES = "3"
 DEPLOYMENT_ENV = "production"
 ACCESS_TEAM = "my-team"
 TOKEN_ENCRYPTION_KEY_IDS = "k20260720a"
+# YOUTUBE_API_KEY = "<read-only-youtube-data-api-key>"   # enables optional recipe-video enrichment
 # Set to your deployed worker URL, e.g. https://linkedin-pipeline.your-name.workers.dev
 # LINKEDIN_REDIRECT_ORIGIN = "https://linkedin-pipeline.your-name.workers.dev"
 # GOOGLE_CALENDAR_REDIRECT_ORIGIN = "https://linkedin-pipeline.your-name.workers.dev"

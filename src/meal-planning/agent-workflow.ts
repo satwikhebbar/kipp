@@ -28,6 +28,7 @@ import {
 } from "./store"
 import { coerceSubmission, type Submission } from "./submissions"
 import type { MealPlanCandidate, MealPlanContext } from "./types"
+import { enrichLunchVideos } from "./video"
 import { resolvePlanningWeek } from "./week"
 import type { MealPlanningWorkflowParams } from "./workflow"
 
@@ -98,6 +99,11 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: false })
   if (outcome?.kind !== "proposed") return
 
+  // Optional enrichment must precede the persist batch: version rows are insert-only (§8).
+  const enriched = await stepDo(step, "meal-planning-video-enrich", () =>
+    enrichLunchVideos(env, outcome.propose.candidate),
+  )
+
   const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
   const persisted = await stepDo(step, "meal-planning-create-plan", () =>
     store.createActivePlan({
@@ -107,7 +113,8 @@ export async function runAgentCenteredMealPlanningWorkflow(
       weekEnd: week.weekEnd,
       timezone,
       instanceId: event.instanceId,
-      candidate: outcome.propose.candidate,
+      candidate: enriched.candidate,
+      video: enriched.video,
       evaluation: outcome.propose.evaluation,
       weeklyInventory: outcome.propose.weeklyInventory,
       weeklyExceptions: outcome.propose.weeklyExceptions,
@@ -375,12 +382,16 @@ async function runRevision(
     await notify(env, step, event.payload.chatId, MEAL_NO_CHANGES)
     return null
   }
+  const enriched = await stepDo(step, `meal-planning-video-enrich-${active.plan.planId}`, () =>
+    enrichLunchVideos(env, propose.candidate),
+  )
   const result = await stepDo(step, `meal-planning-promote-${active.plan.planId}`, () =>
     store.promotePlanVersion({
       planId: active.plan.planId,
       chatId: event.payload.chatId,
       baseVersion: active.plan.currentVersion,
-      candidate: propose.candidate,
+      candidate: enriched.candidate,
+      video: enriched.video,
       evaluation: propose.evaluation,
       inventory: {
         weeklyInventory: propose.weeklyInventory,

@@ -608,6 +608,43 @@ may start the workflow and interpret natural-language feedback, but it does
 not by itself satisfy the plan-review requirement unless it provides an
 equally usable per-cell review experience.
 
+### 8.1 Conversational routing in a multi-workflow chat
+
+> Telegram has no real threading, and Kipp hosts several workflows (idea
+> pipeline, calendar, meal planning) in one chat, so parallel pending
+> prompts are normal. Plain-text routing must therefore be deterministic:
+> never route unaddressed text by LLM intent classification at the ingress,
+> and never assume the parent works through one workflow at a time.
+>
+> The contract:
+>
+> - Reply-to a specific bot message resolves exactly (`botMessageId`); it
+>   is the disambiguator when several prompts pend.
+> - Unaddressed plain text resolves the newest pending prompt in the chat,
+>   regardless of which workflow owns it (the router's per-chat
+>   interactions table is the stack of open interactions; newest wins).
+>   While another workflow's prompt is pending, plain text belongs to it.
+> - Each workflow keeps a readily-reachable explicit intent switch — an
+>   inline button that, when tapped, registers that workflow's prompt as
+>   the newest pending interaction, so the next plain-text message maps to
+>   it immediately. The parent never waits for another workflow's prompt to
+>   expire.
+> - Conversational prompts are short-lived (interaction lifetime, 15
+>   minutes); the switch affordance stays available for the whole relevant
+>   period (long button, short prompt). Plain text with no pending match
+>   may fall through to the meal-planning workflow's live session when one
+>   exists — the single-workflow convenience — and never competes with a
+>   real pending prompt.
+>
+> Iteration 1 realizes the switch as the `[Give feedback]` button on the
+> plan message, with prompt lifetimes of 15 minutes; full routing
+> semantics live in the iteration-1 plan (§6 plain-text routing contract).
+> For iteration 2, the Mini App must preserve the same contract: keep the
+> explicit switch reachable (e.g., from the home view), and deliver
+> per-cell feedback as structured submissions (`feedback-submit`) that
+> bypass text routing entirely — the parent's feedback never competes with
+> another workflow's pending prompt.
+
 ## 9. Recipe-video behavior
 
 Recipe discovery is attempted ahead of time for school lunch and home lunch in

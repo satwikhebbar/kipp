@@ -51,6 +51,8 @@ export function renderPlanMessage(
       const cell = version.candidate.grid[day]?.[slot.id]
       if (!cell) continue
       lines.push(`  ${slot.name}: ${cell.dish}${cellMarkers(version, cell.dish, cell.priorNightPrep)}`)
+      if (cell.recipeVideo?.status === "found" && cell.recipeVideo.url)
+        lines.push(`    ${cell.recipeVideo.title ?? "Recipe video"}: ${cell.recipeVideo.url}`)
     }
     lines.push("")
   }

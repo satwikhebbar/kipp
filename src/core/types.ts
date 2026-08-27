@@ -3,6 +3,8 @@ export interface Env {
   CALENDAR_WORKFLOW?: Workflow
   MEAL_PLANNING_WORKFLOW?: Workflow
   MEAL_PLANNING_DB?: D1Database
+  RECIPE_VIDEO_CACHE?: KVNamespace
+  YOUTUBE_API_KEY?: string
   TOKEN_VAULT: DurableObjectNamespace
   INTERACTION_ROUTER: DurableObjectNamespace
   IDEA_INGEST: DurableObjectNamespace

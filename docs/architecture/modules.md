@@ -1,15 +1,17 @@
 # Modules
 
 The dependency direction is from orchestration and entry points toward domain
-modules and integrations. LinkedIn and Calendar share provider, runtime,
-interaction-routing, and token-vault infrastructure while retaining separate
-workflow policy.
+modules and integrations. LinkedIn, Calendar, and Meal planning share provider,
+runtime, and interaction-routing infrastructure while retaining separate
+workflow policy. Meal planning adds the D1 and KV stores and the YouTube Data
+API integration as its own domain surface.
 
 ```mermaid
 flowchart LR
   entry["index.ts\nWorker entry point"] --> triggers["triggers"]
   entry --> linkedin_workflow["PipelineWorkflow"]
   entry --> calendar_workflow["CalendarWorkflow"]
+  entry --> meal_workflow["MealPlanningWorkflow"]
   entry --> vault["token-vault"]
   entry --> router["interaction-router"]
   entry --> ingest["idea-ingest"]
@@ -20,6 +22,7 @@ flowchart LR
   triggers --> providers["providers"]
   triggers --> linkedin_workflow
   triggers --> calendar_workflow
+  triggers --> meal_workflow
   triggers --> vault
   triggers --> router
 
@@ -41,6 +44,13 @@ flowchart LR
   calendar_workflow --> vault
   calendar_workflow --> router
 
+  meal_workflow --> meal_agent["agent/meal-planning-session"]
+  meal_workflow --> meal_domain["meal-planning evaluation, coverage, store, messages, submissions, week, video"]
+  meal_workflow --> providers
+  meal_workflow --> runtime
+  meal_workflow --> integrations
+  meal_workflow --> router
+
   ideas --> notion["integrations/notion"]
   prompts --> github
   linkedin_agent --> providers
@@ -48,6 +58,9 @@ flowchart LR
   calendar_agent --> calendar_domain
   calendar_agent --> providers
   calendar_agent --> runtime
+  meal_agent --> meal_domain
+  meal_agent --> providers
+  meal_agent --> runtime
   runtime --> providers
   vault --> crypto["crypto"]
 ```
@@ -59,9 +72,14 @@ flowchart LR
 | `calendar/workflow.ts` + `calendar/agent-workflow.ts` | Runs the bounded Calendar agent session, persists its safe transcript and opaque plan ledger, maps fixed actions, revalidates fresh state, and performs idempotent writes and recovery. | Calendar agent, Calendar domain, Google Calendar integration, interaction router, providers, runtime, token vault |
 | `calendar/validation.ts` + `calendar/evaluation.ts` + `calendar/plan.ts` | Defines strict one-off/recurring proposal validation, aggregates typed semantic issues, evaluates safe candidates, and authorizes versioned single-use plan and option IDs. | Scheduling and recurrence domains, Google Calendar integration |
 | `calendar/scheduling.ts` + `calendar/recurrence.ts` + `calendar/messages.ts` | Implements time-zone conversion, availability policy, recurrence expansion, candidate selection, Calendar event projection, and deterministic operational or post-write messages. | Shared types, Google Calendar types, `rrule` |
+| `meal-planning/workflow.ts` + `meal-planning/agent-workflow.ts` | Runs the bounded meal-planning agent session, enriches lunch cells with optional recipe videos, persists the plan atomically (active-plan create and CAS-guarded version promotion), renders and sends the plan with a live `[Give feedback]` button, and parks in a week-long live loop that turns feedback submissions into revisions. | Meal-planning domain, meal-planning agent, providers, runtime, integration router, D1 store, KV video cache |
+| `meal-planning/store.ts` | D1 client (plus in-memory fake) for the household profile, active plan, immutable plan versions, immutable feedback batches, and the chat-scoped plan-message generation; enforces one-active-plan and stale-rejection invariants atomically. | D1 binding |
+| `meal-planning/evaluation.ts` + `meal-planning/coverage.ts` + `meal-planning/corpus/` | Deterministic `evaluateMealPlan` over typed candidates, the coverage-set resolver, and the validated #64 scenario corpus. | Shared types |
+| `meal-planning/messages.ts` + `meal-planning/submissions.ts` + `meal-planning/week.ts` | Deterministic plan rendering, the canonical `Submission`/`FeedbackItem` payload coercion, and Mon–Sat week resolution. | Shared types |
+| `meal-planning/video.ts` | Optional, never-blocking YouTube recipe-video discovery for school-lunch and home-lunch cells with a 24 h KV cache and a per-plan call ceiling. | YouTube Data API, KV namespace |
 | `linkedin/ideas/` | Manages Notion-backed idea creation, retrieval, lifecycle updates, and metadata queries. | Notion integration |
 | `core/idea-ingest.ts` | Serializes idempotent Notion ingestion and owns deterministic workflow starts per idea page. | Ideas, Notion integration, PipelineWorkflow, Durable Object SQLite |
-| `agent/` | Defines workflow-specific bounded sessions, prompts, tool contracts, safe transcript handling, and terminal outcomes: Calendar `ready_to_create`/`needs_user_input` and LinkedIn `ready_for_review`. | Providers, runtime, Calendar evaluation and plans |
+| `agent/` | Defines workflow-specific bounded sessions, prompts, tool contracts, safe transcript handling, and terminal outcomes: Calendar `ready_to_create`/`needs_user_input`, LinkedIn `ready_for_review`, and Meal-planning `propose_plan`/`needs_clarification`. | Providers, runtime, Calendar evaluation and plans, Meal-planning evaluation |
 | `providers/` | Selects Gemini or DeepSeek and normalizes text generation plus native tool declarations, calls, and results. | Provider SDK/API |
 | `runtime/` | Supplies the typed tool registry and guard, three-turn/four-call bounded runner, batching and handoff policy, shared agent-session result, metadata-only logging, and HTTP constants. | Providers, Zod |
 | `core/interaction-router.ts` + `core/interaction-router-client.ts` | Stores and resolves short-lived opaque Telegram interactions with idempotent claim/acknowledgement and expiry. | Durable Object SQLite |
