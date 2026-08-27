@@ -20,7 +20,12 @@ export interface FakeNotionPage {
 export interface FakeState {
   githubFiles: Map<string, string>
   notionPages: Map<string, FakeNotionPage>
-  telegramMessages: Array<{ chatId: number | string; text: string; replyMarkup?: Record<string, unknown> }>
+  telegramMessages: Array<{
+    chatId: number | string
+    text: string
+    replyMarkup?: Record<string, unknown>
+    messageId: number
+  }>
   answeredCallbacks: string[]
   linkedinDrafts: Array<{ authorUrn: string; text: string }>
   linkedinUrls: string[]
@@ -220,6 +225,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
         chatId: (parsed.chat_id ?? parsed.chatId) as number | string,
         text: parsed.text as string,
         replyMarkup: parsed.reply_markup as Record<string, unknown> | undefined,
+        messageId: state.nextMessageId,
       }
       state.telegramMessages.push(msg)
       const mid = state.nextMessageId++
@@ -428,6 +434,8 @@ const PLAIN_TEXT_INTERACTION_KINDS = new Set<string>([
   INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
   INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
   INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+  INTERACTION_KIND.MEAL_CLARIFICATION,
+  INTERACTION_KIND.MEAL_FEEDBACK_REPLY,
 ])
 
 export interface FakeInteractionRegistration {
@@ -439,6 +447,7 @@ export interface FakeInteractionRegistration {
   botMessageId?: number
   expiresAt?: number
   interactionGroup?: string
+  generation?: number
 }
 
 export interface FakeInteractionRouter {
@@ -456,26 +465,32 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
     botMessageId?: number
     expiresAt: number
     interactionGroup?: string
+    generation?: number
     consumed?: number
     consumedAt?: number
   }
   const records = new Map<string, RouterRecord[]>()
+  const invalidate = (
+    list: RouterRecord[],
+    registration: { interactionGroup?: string; generation?: number; version: number },
+  ) => {
+    if (!registration.interactionGroup) return
+    for (const item of list) {
+      if (item.interactionGroup !== registration.interactionGroup || item.consumed) continue
+      if (registration.generation !== undefined) {
+        if (item.generation !== undefined && item.generation < registration.generation) item.consumed = -1
+      } else if (item.version < registration.version) {
+        item.consumed = -1
+      }
+    }
+  }
   const register = (chatId: number | string, registration: FakeInteractionRegistration) => {
     const chat = `telegram-chat:${chatId}`
     const list = records.get(chat) ?? []
     if (registration.kind === REVISION_FEEDBACK_KIND) {
       for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
     }
-    if (registration.interactionGroup) {
-      for (const item of list) {
-        if (
-          item.interactionGroup === registration.interactionGroup &&
-          item.version < registration.version &&
-          !item.consumed
-        )
-          item.consumed = -1
-      }
-    }
+    invalidate(list, registration)
     list.push({ ...registration, expiresAt: registration.expiresAt ?? Date.now() + 60_000 })
     records.set(chat, list)
   }
@@ -497,16 +512,7 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
           if (registration.kind === REVISION_FEEDBACK_KIND) {
             for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
           }
-          if (registration.interactionGroup) {
-            for (const item of list) {
-              if (
-                item.interactionGroup === registration.interactionGroup &&
-                item.version < registration.version &&
-                !item.consumed
-              )
-                item.consumed = -1
-            }
-          }
+          invalidate(list, registration)
           list.push(registration)
           return Response.json({ ok: true })
         }
@@ -517,6 +523,15 @@ export function createFakeInteractionRouter(): FakeInteractionRouter {
             : [...list].reverse().find((item) => PLAIN_TEXT_INTERACTION_KINDS.has(item.kind) && !item.consumed)
         if (!found) return Response.json({ interaction: null })
         if (found.expiresAt <= Date.now() || found.consumed) return Response.json({ interaction: null })
+        if (found.interactionGroup && found.generation !== undefined) {
+          const max = Math.max(
+            0,
+            ...list
+              .filter((item) => item.interactionGroup === found.interactionGroup && item.generation !== undefined)
+              .map((item) => item.generation as number),
+          )
+          if (found.generation < max) return Response.json({ interaction: null })
+        }
         found.consumed = body.telegramUpdateId as number
         found.consumedAt = now
         return Response.json({

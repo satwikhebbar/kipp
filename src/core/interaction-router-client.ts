@@ -9,6 +9,8 @@ export interface InteractionRegistration {
   botMessageId?: number
   expiresAt: number
   interactionGroup?: string
+  /** Chat-scoped plan-message generation (§6); carries group invalidation when present. */
+  generation?: number
 }
 
 export interface RoutedInteraction extends WorkflowInteraction {
