@@ -79,7 +79,7 @@ meal-planning/store.ts               D1 client: profile, plan, plan_version,
                                      feedback_batch, agent_job, meal_audit (+ seed profile)
 meal-planning/messages.ts            MEAL_HELP, renderPlanMessage, fixed notices
 meal-planning/video.ts               optional YouTube enrichment, never blocking
-core/interaction-router.ts           per-chat opaque routing [exists, reused]
+core/interaction-router.ts           per-chat opaque routing [exists, extended: chat-scoped generation]
 ```
 
 Dependency direction matches `docs/architecture/modules.md`: triggers → workflow
@@ -121,6 +121,7 @@ CREATE TABLE meal_profile (
   custom_policies_json TEXT NOT NULL,    -- CustomPolicy[]
   schedule_json TEXT NOT NULL,           -- MealSchedule
   location_json TEXT,                    -- { country, city } | NULL
+  interaction_generation INTEGER NOT NULL DEFAULT 0, -- chat-scoped plan-message generation (§6)
   version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -233,10 +234,13 @@ Invariants enforced at the store layer (deterministic, unit-tested):
   2. `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, status, current_version, ...) VALUES (?, ?, ..., 'active', 1, ...)`
   3. `INSERT INTO meal_plan_version (plan_id, version, ...) VALUES (?, 1, ...)`
   4. `INSERT INTO feedback_batch (batch_id, chat_id, plan_id, base_version, items_json, status, created_at) VALUES (?, ?, ?, 1, '[]', 'open', ?)` (batch_id = `plan_id || ':v1'`)
+  5. `UPDATE meal_profile SET interaction_generation = interaction_generation + 1 WHERE chat_id = ?`
+  6. `SELECT interaction_generation FROM meal_profile WHERE chat_id = ?` — returns this plan message's generation (used for the action registrations in step 5 of §6)
   D1 batch is a single transaction: **either the whole new plan exists (active
-  row + version 1 + its empty open feedback batch) and any previous active row
-  is atomically replaced, or nothing changes** — any statement failure rolls
-  back the entire batch (no orphan version row, no half-replaced state).
+  row + version 1 + its empty open feedback batch + the bumped generation) and
+  any previous active row is atomically replaced, or nothing changes** — any
+  statement failure rolls back the entire batch (no orphan version row, no
+  half-replaced state, no orphan generation bump).
   **Concurrency semantic is deliberately serialize-and-supersede**, matching
   spec §2: a second `/mealplan` batch that commits after the first likewise
   replaces the first batch's fresh active row (its supersede-UPDATE matches it
@@ -249,21 +253,42 @@ Invariants enforced at the store layer (deterministic, unit-tested):
   last-commit-wins; the superseded plan stays readable in version history and
   any button on its stale message routes to a replaced plan (revision returns
   `stale`, §6).
-- **Atomic revision promotion (`plan_id`-scoped):** one `db.batch` of
-  1. `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind, base_version, feedback_batch_id, video_json, created_at) SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = ? AND status = 'active'`
-  2. `UPDATE meal_plan SET current_version = ?, updated_at = ? WHERE plan_id = ? AND current_version = ? AND status = 'active'`
-  3. `UPDATE feedback_batch SET status = 'applied', applied_to_version = ?, applied_at = ? WHERE plan_id = ? AND base_version = ? AND status = 'open'`
-  4. `INSERT INTO feedback_batch (batch_id, chat_id, plan_id, base_version, items_json, status, created_at) SELECT ?, chat_id, plan_id, ?, '[]', 'open', ? FROM meal_plan WHERE plan_id = ? AND current_version = ? AND status = 'active'` (batch_id = `plan_id || ':v' || newVersion`)
+- **Atomic revision promotion (`plan_id`-scoped):** one `db.batch` of, in
+  order (`oldVersion` = the CAS base the caller believes is current,
+  `newVersion` = `oldVersion + 1`):
+  1. `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind, base_version, feedback_batch_id, video_json, created_at) SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'`
+  2. `UPDATE meal_profile SET interaction_generation = interaction_generation + 1 WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active')` — the generation bump, guarded on the CAS base like everything else
+  3. `SELECT interaction_generation FROM meal_profile WHERE chat_id = ?` — returns this plan message's generation (used only when the caller sees success)
+  4. `UPDATE meal_plan SET current_version = newVersion, updated_at = ? WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'`
+  5. `UPDATE feedback_batch SET status = 'applied', applied_to_version = newVersion, applied_at = ? WHERE plan_id = ? AND base_version = oldVersion AND status = 'open' AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = feedback_batch.plan_id AND current_version = newVersion AND status = 'active')`
+  6. `INSERT OR IGNORE INTO feedback_batch (batch_id, chat_id, plan_id, base_version, items_json, status, created_at) SELECT ?, chat_id, plan_id, newVersion, '[]', 'open', ? FROM meal_plan WHERE plan_id = ? AND current_version = newVersion AND status = 'active'` (batch_id = `plan_id || ':v' || newVersion`)
+  **Every statement is conditional on a successful promotion.** Statements 1–2
+  and 4 no-op via the CAS base guard (`current_version = oldVersion` — the
+  bump's `EXISTS` reads the plan row before statement 4 advances it, so a
+  stale call never bumps the generation), and the `current_version =
+  newVersion` guards on 5–6 can only match *after* statement 4 has advanced
+  the row. Order therefore matters, and a stale call changes nothing:
+  1–2 no-op on the CAS base; 4 no-ops on the CAS base; 5 no-ops because the
+  batch is either already applied or `current_version ≠ newVersion` / the plan
+  is no longer `active`; 6 inserts nothing because its SELECT matches 0 rows.
+  Statement 3 is a read the caller ignores on stale. The one deliberate
+  exception is the same-target race: two concurrent revisions from the same
+  base both compute the same `newVersion`; when the loser runs after the
+  winner, statements 1–2 and 4 match 0 rows (the winner already advanced past
+  `oldVersion`), 5's guard passes but the batch is already `applied` (0 rows),
+  and 6's SELECT matches the winner's advanced row — `INSERT OR IGNORE` then
+  absorbs the already-existing open batch for that version (unique
+  `idx_feedback_open_batch`) as a clean no-op instead of a constraint error.
+  `meal-planning-store.test.ts` asserts **all five writes are unchanged on a
+  stale call** (no version row, generation unmoved, `current_version` unmoved,
+  source batch still `open`, no new batch row).
   **One defined atomic outcome:** the new version row, the `current_version`
-  advance, the source feedback-batch transition to `applied`, and the fresh
-  empty open batch for the new version all commit or all roll back together.
-  Every statement is guarded so a stale run changes nothing: the version row
-  is inserted only when the plan row still holds the expected `current_version`
-  (the `INSERT … SELECT` yields 0 rows otherwise), and statements 2–4 share
-  that guard or match only `open` batches, so they no-op on stale. `plan_id`
-  is the PK and `status = 'active'` is guarded, so the batch can never promote
-  more than one row or a replaced plan. Concurrent same-base revisions
-  serialize on the transaction; the loser's SELECT matches 0 rows.
+  advance, the source feedback-batch transition to `applied`, the fresh
+  empty open batch for the new version, and the generation bump all commit or
+  all roll back together. `plan_id` is the PK and `status = 'active'` is
+  guarded, so the batch can never promote more than one row or a replaced
+  plan. Concurrent same-base revisions serialize on the transaction; the
+  loser's SELECT matches 0 rows.
   **Post-batch diagnostics (recovery defined):** the caller gates on statement
   1's `meta.changes` — `1` → success; `0` → `{ ok: false, reason: "stale" }`.
   On stale, no compensation is needed (nothing changed) and the caller writes
@@ -275,12 +300,12 @@ Invariants enforced at the store layer (deterministic, unit-tested):
   a duplicated row is harmless.
 - **One open feedback batch per plan version:** every persisted version has
   exactly one empty `open` batch row, created atomically with the version
-  (statement 4 of each persistence batch above). `appendFeedback(planId,
+  (createActivePlan statement 4 / promotePlanVersion statement 6 above). `appendFeedback(planId,
   baseVersion, item)` finds the open batch for `(plan_id, base_version)` and
   appends; if no `open` batch exists for that base version (it was already
   applied or the version was superseded) the append is a defined no-op —
   `{ ok: false, reason: "no_open_batch" }` — and the branch drops the reply.
-  The router's version-scoped cleanup (§6) makes this unreachable in normal
+  The router's generation-scoped cleanup (§6) makes this unreachable in normal
   flow; the store contract is still total.
 - **Feedback idempotency (per item):** each reply-derived `FeedbackItem`
   carries `updateId` = the Telegram update id of the force-reply. The router's
@@ -343,40 +368,61 @@ candidate and the handler re-verifies it deterministically.
      feedback items).
    - Run `runMealPlanningAgentSession` in a `step.do`.
    - `needs_clarification` → `promptForReply` (force-reply, kind
-     `meal-clarification`) → append reply → next turn.
+     `meal-clarification`, registered **without** a generation — it precedes
+     any plan message, so no plan-message generation exists to attach; its
+     invalidation is the normal single-claim + expiry, and the session cannot
+     persist while a clarification is pending) → append reply → next turn.
    - `propose_plan` → persist (below) → break.
    - Agent failure/timeout → `meal-agent-unavailable` notice; record job.
 3. **Persist:** initial → `createActivePlan` (atomic batch, §4); revision →
    `promotePlanVersion` (`plan_id`-scoped atomic batch, §4). Each batch makes
-   the plan/version/feedback-batch state changes one atomic outcome and opens
-   the next version's empty feedback batch; audit + agent-job rows are written
-   after commit as idempotent, best-effort diagnostics (§4 recovery).
-   Promotion failure (stale) → `meal-stale-plan` notice, no version written,
-   `rejected/stale` audit + job rows.
+   the plan/version/feedback-batch state changes one atomic outcome, opens
+   the next version's empty feedback batch, and bumps the chat-scoped plan
+   message generation (returned to the caller for step 5); audit + agent-job
+   rows are written after commit as idempotent, best-effort diagnostics (§4
+   recovery). Promotion failure (stale) → `meal-stale-plan` notice, no version
+   written, `rejected/stale` audit + job rows.
 4. **Optional enrichment:** fill `recipeVideo` for school-lunch and home-lunch
    cells via `video.ts` **before** persisting the version (deterministic gate,
    never blocking; see §8).
 5. **Send plan message** (`renderPlanMessage`, Markdown) with inline buttons
    `[Give feedback] [Update plan] [Done]`; in one durable `step.do` register
    three callback interactions (group `"meal-planning"`, `expiresAt =
-   feedbackDeadline`):
+   feedbackDeadline`, `generation: <planGeneration>`):
    - `{ interactionId, version: <planVersion>, workflowId: instanceId, kind:
      meal-feedback, callbackToken, botMessageId: planMessageId }`
    - same for `meal-update` and `meal-done` (distinct tokens).
    `version` binds the buttons to the plan version the parent is looking at and
-   is the base version used by the revision branch. Registering the new action
-   set also removes the previous version's unconsumed interactions in the same
-   group (router `DELETE … WHERE interaction_group = ? AND version < ? AND
-   consumed_update_id IS NULL`), so buttons on a superseded plan message
-   resolve nothing after its successor is sent — for revisions and for a newer
-   `/mealplan` alike.
+   is the base version used by the revision branch. `planGeneration` is the
+   value returned by the persistence batch (§4 — createActivePlan statements
+   5–6, promotePlanVersion statements 2–3): a chat-scoped monotonic counter
+   that every persisted plan message (initial or revision) increments exactly
+   once, atomically with its own version rows.
+   **Chat-scoped generation invalidation:** every post-persist meal-planning
+   registration (action sets here, the `meal-feedback-reply` force-reply
+   prompt in step 6) carries the generation of the plan message it belongs
+   to. The router tags each row with it, deletes every unconsumed row in the
+   group with a *lower* generation at registration time, and on resolve
+   returns `{ interaction: null }` for any row below the group's highest
+   present generation. Because the counter is per chat and increments per
+   plan message (not per plan or version), a fresh `/mealplan` that replaces
+   a distinct plan bumps past the old plan's registrations even when both
+   plans are at version 1 — the old plan's action buttons and any pending
+   `meal-feedback-reply` prompt resolve nothing after the successor
+   registers, for revisions and for a newer `/mealplan` alike. A superseded
+   instance's registration that lands late still carries its own (lower)
+   plan message generation, so it can never invalidate the successor's
+   buttons and its own rows resolve null. Pre-persist clarification prompts
+   carry no generation (they precede any plan message) and are invalidated
+   by single-claim + expiry alone. Calendar registrations carry no generation
+   and keep the existing version-based cleanup.
 6. **Feedback window loop** until absolute deadline (`MEAL_FEEDBACK_WINDOW_MS`,
    default 48 h, env-overridable). `step.waitForEvent("telegram-reply",
    timeout = remaining)`, then dispatch on `interactionKind`:
 
    | Event kind | Source | Branch (all sends/registers inside `step.do`) |
    | --- | --- | --- |
-   | `meal-feedback` | inline-button callback, one-time | `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: feedbackDeadline, interactionGroup: "meal-planning" }`. Continue waiting. |
+   | `meal-feedback` | inline-button callback, one-time | `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: feedbackDeadline, interactionGroup: "meal-planning", generation: <planGeneration> }`. Continue waiting. |
    | `meal-feedback-reply` | force-reply text (replyTo the prompt) | Append `FeedbackItem { id, text, updateId: <reply update id> }` to the open batch for `(plan_id, interaction.version)` via `appendFeedback` — idempotent per item (router single-claim + store guard on `updateId`, §4); send `meal-feedback-noted` notice. Continue waiting. |
    | `meal-update` | inline-button callback, one-time | Run the revision session (step 2) with `basePlanVersion = interaction.version`. Success → send the new plan message with fresh buttons + register a new action set (step 5); the promotion batch (§4) applied the source batch and opened the new version's empty batch. Stale (`promotePlanVersion` returns `stale`) → `meal-stale-plan` notice. Continue waiting. |
    | `meal-done` | inline-button callback, one-time | Send `meal-finalized` notice; end. The active plan stays in D1. |
@@ -450,19 +496,34 @@ help; `/plan` shows the active plan (or help).
   for the planning loop (issue acceptance criterion 5).
 - New `meal-planning-store.test.ts`: one-active-per-chat constraint,
   `createActivePlan` atomicity — a second create supersedes the first
-  (serialize-and-supersede) and any statement failure rolls back the whole
-  batch (no orphan version row, previous active stays), `promotePlanVersion`
-  stale rejection with no orphan version row and no feedback-batch state
-  change (plus: success applies the open source batch and opens the next
-  version's batch in the same transaction), insert-only versions, one open batch per
-  plan version, `appendFeedback` idempotency by item `updateId`, restart
+  (serialize-and-supersede), any statement failure rolls back the whole
+  batch (no orphan version row, previous active stays), and the generation is
+  bumped exactly once per created plan message, `promotePlanVersion`
+  stale rejection asserting **all five batch writes are unchanged** (no
+  version row, generation unmoved, `current_version` unmoved, source feedback
+  batch still `open`, no new batch row) — including the same-target race where
+  a concurrent revision already committed the same `newVersion` (plus: success
+  applies the open source batch, opens the next version's batch, and bumps the
+  generation in the same transaction), insert-only versions, one open batch
+  per plan version, `appendFeedback` idempotency by item `updateId`, restart
   survival (fresh store instance reads the active plan).
+- Extended `interaction-router.test.ts` (existing): a registration carrying a
+  `generation` removes the group's lower-generation unconsumed rows and is
+  tagged with it; a row below the group's highest present generation resolves
+  to `{ interaction: null }` (including rows that registered after the
+  successor's cleanup ran — the late-registration case); registrations without
+  a generation keep the legacy version-based cleanup and never resolve null on
+  generation grounds.
 - New Telegram e2e (`meal-planning-telegram-workflow.integration.test.ts`):
   webhook → workflow → in-memory store → fake Telegram, covering: full happy
   path (context → plan v1 → [Give feedback] button → force-reply prompt →
   feedback text → [Update plan] → plan v2), stale revision rejection (base
   version < current), retried callback and retried feedback delivery (router
-  single-claim + per-item `updateId` guard), and restart survival.
+  single-claim + per-item `updateId` guard), **mid-window replacement: a
+  fresh `/mealplan` supersedes plan v1 while its feedback window is alive —
+  the old plan's action buttons and its pending force-reply prompt resolve
+  nothing (generation invalidation) while the new plan's buttons work**, and
+  restart survival.
 
 ## 10. File changes
 
@@ -498,6 +559,22 @@ Modified:
   `MEAL_PLANNING_WORKFLOW: Workflow`, `YOUTUBE_API_KEY?`), `INTERACTION_KIND` meal kinds.
 - `src/triggers/telegram-webhook.ts` — `/mealplan`, `/plan` commands; `meal-*` dispatch.
 - `src/index.ts` — export `MealPlanningWorkflow`.
+- `src/core/interaction-router.ts` — optional chat-scoped generation on group
+  registrations: new nullable `generation` column (same ALTER pattern as
+  `interaction_group`). A registration that carries `generation` (a number)
+  tags its row with it and deletes the group's lower-generation unconsumed
+  rows (replacing the version-based cleanup for that registration); `resolve`
+  returns `{ interaction: null }` for a row whose generation is below the
+  group's highest present generation (a `SELECT MAX(generation)` over the
+  group's rows — no separate counter storage). Registrations without a
+  generation are unchanged (Calendar keeps the version-based cleanup). The
+  value itself is assigned by the meal-planning persistence batches in D1
+  (§4), not by the router.
+- `src/core/interaction-router-client.ts` — `InteractionRegistration.generation?:
+  number` (explicit plan-message generation; absent for Calendar).
+- `src/__integration__/setup.ts` — fake router mirrors the generation tagging,
+  the lower-generation cleanup, and the resolve-null check.
+- `src/__tests__/interaction-router.test.ts` — generation behavior (see §9).
 - `src/meal-planning/types.ts` — `MealCell.recipeVideo` (optional),
   `FeedbackItem.updateId` (optional; reply-derived items only).
 - `src/meal-planning/corpus/schema.ts` — `feedbackItemSchema` accepts the
