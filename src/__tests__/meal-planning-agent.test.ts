@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { runMealPlanningAgentSession } from "../agent/meal-planning-session"
+import { loadScenarios } from "../meal-planning/corpus/load"
+import { evaluateMealPlan } from "../meal-planning/evaluation"
 import type { MealCell, MealGrid, MealPlanContext } from "../meal-planning/types"
 import type { ToolProviderClient } from "../providers"
 
@@ -88,11 +90,15 @@ function clarifyResponse(input: unknown) {
   return { toolCalls: [call("clarify", "needs_clarification", input)], usage: { inputTokens: 0, outputTokens: 0 } }
 }
 
-function proposeInput(candidate: unknown, feedbackItems?: unknown) {
+function proposeInput(
+  candidate: unknown,
+  feedbackItems?: unknown,
+  overrides?: { weeklyInventory?: unknown; weeklyExceptions?: unknown },
+) {
   return {
     candidate,
-    weeklyInventory: { items: [], notes: [] },
-    weeklyExceptions: { items: [] },
+    weeklyInventory: overrides?.weeklyInventory ?? { items: [], notes: [] },
+    weeklyExceptions: overrides?.weeklyExceptions ?? { items: [] },
     ...(feedbackItems ? { feedbackItems } : {}),
   }
 }
@@ -204,5 +210,66 @@ describe("bounded meal-planning agent session", () => {
       expect.objectContaining({ tool: "needs_clarification", outcome: "failed", failureCategory: "invalid-state" }),
     )
     expect(result.terminal).toMatchObject({ kind: "needs_clarification" })
+  })
+})
+
+describe("corpus-driven planning loop", () => {
+  const scenarios = loadScenarios()
+
+  it.each(
+    scenarios.map((scenario) => [scenario.id, scenario] as const),
+  )("accepts every passing candidate of %s", async (_id, scenario) => {
+    for (const candidate of scenario.candidates.filter((entry) => entry.expect.pass)) {
+      const provider = providerWith(
+        evaluateResponse(candidate.plan),
+        proposeResponse(
+          proposeInput(candidate.plan, scenario.context.feedbackItems, {
+            weeklyInventory: scenario.context.weeklyInventory,
+            weeklyExceptions: scenario.context.weeklyExceptions,
+          }),
+        ),
+      )
+      const result = await runMealPlanningAgentSession(
+        provider,
+        [{ role: "user", text: scenario.context.request.text }],
+        { context: scenario.context },
+      )
+      expect(result.completed, `${scenario.id}/${candidate.label}`).toBe(true)
+      expect(result.terminal?.kind, `${scenario.id}/${candidate.label}`).toBe("propose_plan")
+      if (result.terminal?.kind === "propose_plan")
+        expect(result.terminal.evaluation.pass, `${scenario.id}/${candidate.label}`).toBe(true)
+    }
+  })
+
+  it.each(
+    scenarios
+      .filter((scenario) => scenario.behavior?.expectsClarification)
+      .map((scenario) => [scenario.id, scenario] as const),
+  )("ends a clarification scenario in needs_clarification with the expected policy outcomes", async (_id, scenario) => {
+    const driving = scenario.candidates.find((candidate) => !candidate.expect.pass) ?? scenario.candidates[0]
+    if (!driving) throw new Error(`${scenario.id} has no candidate to drive a clarification`)
+    const evaluation = evaluateMealPlan(driving.plan, scenario.context)
+    const reasonCodes = [...new Set(evaluation.failures.map((failure) => failure.code))]
+    if (reasonCodes.length === 0)
+      throw new Error(`${scenario.id} needs a failing candidate to drive needs_clarification`)
+    const provider = providerWith(
+      evaluateResponse(driving.plan),
+      clarifyResponse({
+        message: "Please clarify before I finalize the plan.",
+        reasonCodes,
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(
+      provider,
+      [{ role: "user", text: scenario.context.request.text }],
+      { context: scenario.context },
+    )
+    expect(result.terminal?.kind, scenario.id).toBe("needs_clarification")
+    if (result.terminal?.kind === "needs_clarification")
+      expect(result.terminal.reasonCodes, scenario.id).toEqual(reasonCodes)
+    for (const [key, value] of Object.entries(scenario.behavior?.expectedPolicyOutcomes ?? {})) {
+      expect(driving.plan.policyOutcomes[key]?.outcome, `${scenario.id} policy ${key}`).toBe(value)
+    }
   })
 })

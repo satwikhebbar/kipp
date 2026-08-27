@@ -118,6 +118,14 @@ export interface FeedbackItem {
   scope?: { day?: string; slot?: string }
 }
 
+/** Optional per-cell recipe-video result (lunch slots only). A missing video never gates or alters a plan. */
+export interface RecipeVideo {
+  status: "found" | "no_suitable_video" | "not_attempted"
+  url?: string
+  title?: string
+  channel?: string
+}
+
 export interface MealCell {
   dish: string
   /** School meals are vegetarian by workflow constant; the evaluator rejects a non-vegetarian cell. */
@@ -126,6 +134,7 @@ export interface MealCell {
   items: string[]
   cookMinutes: number
   priorNightPrep: boolean
+  recipeVideo?: RecipeVideo
 }
 
 export type MealGrid = Record<string, Record<string, MealCell>>

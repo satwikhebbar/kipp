@@ -2,8 +2,9 @@
 
 Kipp is a personal workflow assistant on Cloudflare Workers. Telegram is its
 primary user interface. Separate durable workflows currently handle LinkedIn
-drafting and personal Google Calendar scheduling while sharing a bounded agent
-runtime, interaction routing, OAuth storage, and external integrations.
+drafting, personal Google Calendar scheduling, and school-week meal planning
+while sharing a bounded agent runtime, interaction routing, OAuth storage, and
+external integrations.
 
 ## System context
 
@@ -16,6 +17,7 @@ flowchart LR
 
   worker --> linkedinFlow["LinkedIn Workflow"]
   worker --> calendarFlow["Calendar Workflow"]
+  worker --> mealFlow["Meal-planning Workflow"]
   worker <--> router["InteractionRouterDO"]
   worker <--> vault["TokenVaultDO"]
   worker <--> ingest["IdeaIngestDO"]
@@ -26,10 +28,16 @@ flowchart LR
   linkedinFlow --> linkedin["LinkedIn API"]
   calendarFlow --> llm
   calendarFlow <--> calendar["Google Calendar API"]
+  mealFlow --> llm
+  mealFlow <--> mealDb["MEAL_PLANNING_DB D1"]
+  mealFlow --> mealVideo["RECIPE_VIDEO_CACHE KV"]
+  mealFlow <--> youtube["YouTube Data API"]
   linkedinFlow <--> telegram
   calendarFlow <--> telegram
+  mealFlow <--> telegram
   linkedinFlow <--> router
   calendarFlow <--> router
+  mealFlow <--> router
   linkedinFlow <--> vault
   calendarFlow <--> vault
 ```
@@ -52,6 +60,7 @@ flowchart TB
   subgraph durable["Cloudflare durable components"]
     linkedinFlow["PipelineWorkflow\nLinkedIn generation and review"]
     calendarFlow["CalendarWorkflow\nCalendar conversation and writes"]
+    mealFlow["MealPlanningWorkflow\nMeal-planning conversation, persistence, and revisions"]
     router["InteractionRouterDO\nshort-lived Telegram routing"]
     vault["TokenVaultDO\nencrypted OAuth tokens"]
     ingest["IdeaIngestDO\nidempotent idea ingestion and workflow ownership"]
@@ -59,16 +68,19 @@ flowchart TB
 
   triggers --> linkedinFlow
   triggers --> calendarFlow
+  triggers --> mealFlow
   triggers --> router
   triggers --> vault
   triggers --> ingest
   ingest --> linkedinFlow
   linkedinFlow <--> router
   calendarFlow <--> router
+  mealFlow <--> router
   linkedinFlow <--> vault
   calendarFlow <--> vault
   linkedinFlow --> external["External APIs"]
   calendarFlow --> external
+  mealFlow --> external
   triggers --> external
 ```
 

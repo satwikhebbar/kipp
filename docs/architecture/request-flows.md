@@ -137,6 +137,64 @@ availability checks; neither model-facing tool mutates Calendar. Opaque plan
 and option IDs are version-scoped, expiring, and single-use. A successful write
 is never repeated merely because Telegram confirmation failed.
 
+## Meal-planning conversation, persistence, and revision
+
+Meal planning uses a bounded agent to interpret the parent's request and
+week-relevant context. The deterministic evaluator owns plan validation;
+only the workflow can persist. A plan is approved by default, and every
+feedback submission triggers a CAS-guarded revision that persists a new
+version plus an immutable submission batch.
+
+```mermaid
+sequenceDiagram
+  participant U as Owner
+  participant T as Telegram
+  participant M as MealPlanningWorkflow
+  participant A as Bounded meal-planning agent
+  participant E as evaluateMealPlan tool
+  participant D as MEAL_PLANNING_DB D1
+  participant Y as YouTube Data API
+  participant R as InteractionRouterDO
+
+  U->>T: /mealplan this week
+  T->>M: create workflow
+  M->>A: request plus bounded transcript
+  opt needs clarification
+    A-->>M: needs_clarification
+    M->>R: register force-reply prompt
+    M->>T: clarification question
+    U->>T: reply
+    T->>R: claim interaction
+    R-->>M: normalized event
+    M->>A: resume with reply
+  end
+  A->>E: evaluate_meal_plan candidate
+  E-->>A: pass or typed failures
+  A-->>M: propose_plan
+  opt video enrichment configured
+    M->>Y: search school-lunch and home-lunch dishes
+    Y-->>M: recipe-video results
+    M->>M: cache results for 24 h (KV)
+  end
+  M->>D: atomic createActivePlan (supersede + version 1 + generation)
+  M->>T: rendered plan with [Give feedback]
+  M->>M: park until week_end
+  opt feedback submission
+    U->>T: tap [Give feedback] then reply with feedback
+    T->>R: claim interaction
+    R-->>M: normalized event
+    M->>A: revision session with submission context
+    A->>E: evaluate_meal_plan revised candidate
+    A-->>M: propose_plan
+    M->>D: promotePlanVersion (CAS + version N+1 + feedback batch)
+    M->>T: rendered revised plan with fresh [Give feedback]
+  end
+```
+
+No transcripts or raw provider text are stored in D1. The active plan is the
+canonical store contract the iteration-2 Mini App reads; video enrichment is
+optional and never gates a plan.
+
 ## OAuth setup
 
 LinkedIn and Google Calendar use the same protected setup pattern and separate
