@@ -68,7 +68,7 @@ the Workflow coordinates one planning conversation and revision turns.
 
 ```text
 triggers/telegram-webhook.ts
-  ├─ /mealplan <text> ──▶ MealPlanningWorkflow.create({ chatId, requestText })
+  ├─ /mealplan <text> ──▶ MealPlanningWorkflow.create({ chatId, requestText, invokedAtMs })
   └─ routed interactions (kind meal-*) ──▶ MealPlanningWorkflow instance events
 
 meal-planning/workflow.ts            WorkflowEntrypoint → agent-workflow runner
@@ -140,6 +140,7 @@ CREATE TABLE meal_plan (
   plan_id TEXT PRIMARY KEY,
   chat_id TEXT NOT NULL,
   week_start TEXT NOT NULL, week_end TEXT NOT NULL, timezone TEXT NOT NULL,
+  instance_id TEXT NOT NULL,              -- live Workflow instance id (the webhook's fallthrough pointer, §6)
   status TEXT NOT NULL DEFAULT 'active',            -- active | replaced
   current_version INTEGER NOT NULL DEFAULT 0,
   weekly_inventory_json TEXT NOT NULL DEFAULT '{}', -- week-scoped state
@@ -194,16 +195,22 @@ Invariants enforced at the store layer (deterministic, unit-tested):
   not first supersede its predecessor (it is the database-level invariant; the
   in-memory fake enforces the same rule). Week semantics: an explicit
   `/mealplan` always creates a new active plan and atomically supersedes the
-  previous active row in the same batch (spec §2: "the latest plan is the
-  active plan for that week"). The superseded plan stays readable in
+  previous active row in the same batch, **even when the target week differs**
+  (a Thursday `/mealplan` targets next week and replaces this week's plan —
+  one active plan per chat, per the product ruling; there are never two live
+  plans). The superseded plan stays readable in
   `meal_plan_version` history (feedback about a superseded plan is discarded
   with it — its message's buttons are generation-invalidated, §6); the parent
-  is told the previous plan was replaced.
+  is told the previous plan was replaced. **Documented shortcoming
+  (iteration 1):** planning a later week before the current week ends removes
+  the current week's plan from the active surface — the parent loses in-chat
+  access to the superseded week's plan; D1 keeps the history, and the
+  iteration-2 mini-app home view can surface past weeks.
 - **Immutable versions:** insert-only `meal_plan_version`; a version row is
   never updated or deleted.
 - **Atomic create-active-plan (initial):** one `db.batch` of
   1. `UPDATE meal_plan SET status = 'replaced', updated_at = ? WHERE chat_id = ? AND status = 'active'`
-  2. `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, status, current_version, ...) VALUES (?, ?, ?, ?, ?, 'active', 1, ...)`
+  2. `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status, current_version, ...) VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ...)` — `instance_id` = `event.instanceId` (the webhook's fallthrough pointer, §6)
   3. `INSERT INTO meal_plan_version (plan_id, version, ...) VALUES (?, 1, ...)`
   4. `UPDATE meal_profile SET interaction_generation = interaction_generation + 1 WHERE chat_id = ?`
   5. `SELECT interaction_generation FROM meal_profile WHERE chat_id = ?` — returns this plan message's generation (used for the action registrations in step 5 of §6)
@@ -343,8 +350,10 @@ drives the real path with real text (§13.3).
 
 `runAgentCenteredMealPlanningWorkflow(env, event, step)`:
 
-1. **Load state:** `loadOrCreateProfile(chatId)`; active plan for chat
-   (becomes `recentPlan` for variety); the active plan's latest version
+1. **Load state:** `loadOrCreateProfile(chatId)`; resolve the target week —
+   `resolvePlanningWeek(invokedAtMs, profile.timezone, requestText)`
+   ("Planning-week selection" below); active plan for chat (becomes
+   `recentPlan` for variety); the active plan's latest version
    (candidate/evaluation feed the revision context).
 2. **Session turn loop** (bounded by `MEAL_PLANNING_TTL_MS`, default 30 min per
    interaction):
@@ -413,14 +422,16 @@ drives the real path with real text (§13.3).
    by single-claim + expiry alone. Calendar registrations carry no generation
    and keep the existing version-based cleanup.
 6. **Live week loop** until `week_end` (the plan row's `week_end`) or until a
-   fresh `/mealplan` supersedes the plan. `step.waitForEvent("telegram-reply",
-   timeout = remaining)`, then dispatch on `interactionKind`:
+   fresh `/mealplan` supersedes the plan. Wait on both event types (Workflows
+   multi-event `waitForEvent`, timeout = remaining): `telegram-reply` (routed
+   interactions) and `meal-feedback-submission` (submissions with no
+   interaction row), then dispatch on the event kind:
 
    | Event kind | Source | Branch (all sends/registers inside `step.do`) |
    | --- | --- | --- |
    | `meal-feedback` | inline-button callback, one-time | Staleness guard first: if `interaction.version < current_version`, send `meal-stale-plan` notice and continue waiting (the tap targeted an outdated plan message). Otherwise `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: <interaction lifetime — 15 min, as clarifications>, interactionGroup: "meal-planning", generation: <planGeneration> }`. Continue waiting. |
    | `meal-feedback-reply` | force-reply text (replyTo the prompt) | The reply **is a feedback submission**: `coerceSubmission(text, "telegram-reply", messageId)` → one unbound `FeedbackItem`. Run the revision session (step 2) with the item as context; persist via `promotePlanVersion` (feedback-driven → submission batch row written and linked, §4); send the new plan message with a fresh button + register a new action set (step 5). Stale → `meal-stale-plan` notice. Continue waiting. |
-   | `feedback-submit` | iteration-2 mini-app API (future; event seam defined now) | Same as `meal-feedback-reply` with an arbitrary `items: FeedbackItem[]` submission. No store, session, or version-chain change is needed to add this producer. |
+   | `meal-feedback-submission` | webhook fallthrough (level 3) or iteration-2 mini-app API (future; event seam defined now) | Same as `meal-feedback-reply`: a submission — coerced from raw text by the fallthrough, or already structured (`items: FeedbackItem[]`) by the mini-app. No store, session, or version-chain change is needed to add the mini-app producer. |
    | timeout | `waitForEvent` deadline = `week_end` | End. The active plan stays in D1, approved by default. |
 
    **Duplicate and stale handling** (deterministic, no LLM):
@@ -459,6 +470,26 @@ Routing (`telegram-webhook.ts`): kinds `meal-*` dispatch to
 instance id (sendEvent, like Calendar). `/mealplan` with no argument shows
 help. There is no `/plan` command (see §13.3).
 
+**Planning-week selection:** the school week is pinned — `week_start` =
+Monday 00:00, `week_end` = Saturday 23:59:59, in the chat's profile
+timezone. `resolvePlanningWeek(invokedAtMs, timezone, requestText)`
+(`meal-planning/week.ts`, pure + unit-tested) picks the target week:
+- Default: invoked Mon/Tue/Wed → the current week; Thu/Fri/Sat/Sun → the
+  next week (Sunday → next week: the school week ended Saturday).
+- Override in the command text: `/mealplan this week`, `/mealplan next
+  week`, or a date (`/mealplan 2026-09-14`) → the week containing it.
+  Unparsed text → the default. This is the "confirmation" mechanism —
+  deterministic, zero conversation state, no new interaction kind.
+- `invokedAtMs` is captured by the webhook at `/mealplan` and passed in the
+  workflow params; week resolution never calls `Date.now()` inside the
+  workflow (replays must be deterministic).
+- The plan always covers the full Mon–Sat school week: `week_start` is the
+  target week's Monday even when invoked mid-week (no partial plans,
+  iteration 1 — the session's message can note "planning the rest of the
+  week"). The `/mealplan` ack and every plan message state the week
+  ("School week of Mon Sep 7 – Sat Sep 12"), so the parent confirms the
+  target without an interactive confirmation.
+
 **Plain-text routing contract (multi-workflow chat):** three deterministic
 levels, no LLM intent routing (the parent's words must never be handed to a
 workflow that acts on them via a guess; routing stays mechanical, matching the
@@ -478,7 +509,16 @@ immediately — the parent never waits for another workflow's prompt to expire.
 (3) Plain text with no pending match falls through to the live meal-planning
 instance (when the active plan's `week_end` has not passed) — the
 single-workflow convenience ("type against the plan"), active only when the
-stack is empty, so it never competes with a real pending prompt. Prompt
+stack is empty, so it never competes with a real pending prompt. Wiring:
+`createActivePlan` stores the instance id on the plan row
+(`meal_plan.instance_id` = `event.instanceId`, §4), and the webhook, on a
+plain-text input that resolved nothing, reads
+`SELECT instance_id FROM meal_plan WHERE chat_id = ? AND status = 'active' AND week_end > ?`
+and sends `{ type: "meal-feedback-submission", payload: { source:
+"telegram-text", text, messageId } }` to that instance (coercion stays in the
+workflow). This slots in before the "Unknown command" reply — slash-prefixed
+text still short-circuits to command handling, so a bare typo becomes
+feedback only when an active plan exists (intended). Prompt
 lifetimes bound the switch: meal prompts (clarification, feedback reply) are
 short-lived at the interaction lifetime (15 min) so they claim plain text only
 while the parent is actively using them; the `[Give feedback]` button stays
@@ -492,7 +532,9 @@ submissions (spec §8.1 — pending edit, see §13 note 4).
   week-relevant facts (inventory/exceptions) and confirms them in plain
   language before proposing (spec §5.11).
 - Plan message: compact fridge-board-equivalent, phone-friendly, deterministic
-  (`messages.ts`, pure function, snapshot-tested). Per day, five slot lines;
+  (`messages.ts`, pure function, snapshot-tested). The header states the
+  school week ("School week of Mon Sep 7 – Sat Sep 12"). Per day, five slot
+  lines;
   dish + optional prep label + easy-buy marker; material trade-offs summarized
   from `policyOutcomes` (labels only, no essay). Video links shown only when a
   `found` result exists. (No pending-feedback indicator: feedback is consumed
@@ -512,10 +554,11 @@ submissions (spec §8.1 — pending edit, see §13 note 4).
   immediately — no wait for another workflow's prompt to expire (routing
   contract, §6).
 - Interaction kinds added to `INTERACTION_KIND`: `meal-clarification`,
-  `meal-feedback`, `meal-feedback-reply` (all `meal-*`
-  prefixed for routing). No new plain-text routing kinds: feedback and
-  clarifications arrive as force-reply replies (replyTo resolution), matching
-  the Calendar pattern.
+  `meal-feedback`, `meal-feedback-reply` (all `meal-*` prefixed for routing).
+  `meal-clarification` and `meal-feedback-reply` join
+  `PLAIN_TEXT_INTERACTION_KINDS` (the routing contract's level 2, §6);
+  reply-to a bot message still resolves exactly by `botMessageId` first,
+  matching the Calendar pattern.
 
 ## 8. Optional recipe-video enrichment (`meal-planning/video.ts`)
 
@@ -548,6 +591,10 @@ submissions (spec §8.1 — pending edit, see §13 note 4).
   Telegram text into the canonical one-item submission payload; multi-item,
   cell-mapped submissions are constructed directly and drive the store/session
   pipeline unchanged — the exact shape iteration-2 `feedback-submit` will send.
+- New `meal-planning-week.test.ts`: `resolvePlanningWeek` — Mon/Tue/Wed →
+  current week, Thu/Fri/Sat/Sun → next week, Sunday → next week; "this
+  week"/"next week"/date overrides; timezone boundary (the week flips at
+  Monday 00:00 / Saturday 23:59:59 in the profile timezone, not UTC).
 - New `meal-planning-store.test.ts`: one-active-per-chat constraint,
   `createActivePlan` atomicity — a second create supersedes the first
   (serialize-and-supersede), any statement failure rolls back the whole batch
@@ -581,7 +628,11 @@ submissions (spec §8.1 — pending edit, see §13 note 4).
   the live instance), **mid-week replacement: a fresh
   `/mealplan` supersedes plan v1 while the instance is live — the old plan's
   action buttons and its pending force-reply prompt resolve nothing
-  (generation invalidation) while the new plan's buttons work**, the
+  (generation invalidation) while the new plan's buttons work**, **cross-week
+  supersede: a Thursday `/mealplan` targets next week, replaces the
+  current-week plan (one active plan per chat), the old plan's buttons
+  resolve nothing, its instance idles to its own `week_end`, and the
+  fallthrough now targets the new plan**, the
   **15-min clarification timeout** (no reply → initial planning ends with a
   canceled notice and no plan; revision clarification timeout → previous
   version stands), **week-end expiry** (instance ends at `week_end`, buttons
@@ -599,7 +650,8 @@ New:
   `meal_plan_record` history table (same store interface, same invariants).
 - `src/meal-planning/store.ts` — store interface + D1 impl + in-memory fake +
   seed profile; operations `loadOrCreateProfile`, `createActivePlan` (atomic
-  supersede), `promotePlanVersion` (atomic version + generation bump; a
+  supersede; writes `meal_plan.instance_id` = `event.instanceId`),
+  `promotePlanVersion` (atomic version + generation bump; a
   feedback-driven revision also writes the immutable submission batch row
   linked from the version), `activePlan`.
 - `src/meal-planning/workflow.ts` — `MealPlanningWorkflow` entrypoint.
@@ -607,11 +659,13 @@ New:
 - `src/meal-planning/messages.ts` — help, `renderPlanMessage`, fixed notices.
 - `src/meal-planning/submissions.ts` — canonical submission payload:
   `Submission`/`FeedbackItem` types, `coerceSubmission` (pure, unit-tested).
+- `src/meal-planning/week.ts` — `resolvePlanningWeek` (pure, unit-tested).
 - `src/meal-planning/video.ts` — optional enrichment.
 - `src/agent/meal-planning.ts` — tool definitions + zod schemas.
 - `src/agent/meal-planning-session.ts` — bounded session.
 - `src/__tests__/meal-planning-store.test.ts`, `meal-planning-messages.test.ts`,
-  `meal-planning-submissions.test.ts`, `meal-planning-agent.test.ts`.
+  `meal-planning-submissions.test.ts`, `meal-planning-week.test.ts`,
+  `meal-planning-agent.test.ts`.
 - `src/__integration__/meal-planning-telegram-workflow.integration.test.ts`.
 
 Modified:
@@ -621,8 +675,12 @@ Modified:
   `[[workflows]]` binding `MEAL_PLANNING_WORKFLOW`, optional `YOUTUBE_API_KEY` var.
 - `src/core/types.ts` — `Env` additions (`MEAL_PLANNING_DB: D1Database`,
   `RECIPE_VIDEO_CACHE: KVNamespace`, `MEAL_PLANNING_WORKFLOW: Workflow`,
-  `YOUTUBE_API_KEY?`), `INTERACTION_KIND` meal kinds.
-- `src/triggers/telegram-webhook.ts` — `/mealplan` command; `meal-*` dispatch.
+  `YOUTUBE_API_KEY?`), `INTERACTION_KIND` meal kinds,
+  `MealPlanningWorkflowParams.invokedAtMs`.
+- `src/triggers/telegram-webhook.ts` — `/mealplan` command (captures
+  `invokedAtMs`; ack states the week); `meal-*` dispatch (third workflow
+  branch); level-3 fallthrough (`meal_plan.instance_id` lookup →
+  `meal-feedback-submission` event) before the "Unknown command" reply.
 - `src/index.ts` — export `MealPlanningWorkflow`.
 - `src/core/interaction-router.ts` — optional chat-scoped generation on group
   registrations: new nullable `generation` column (same ALTER pattern as
@@ -632,9 +690,11 @@ Modified:
   returns `{ interaction: null }` for a row whose generation is below the
   group's highest present generation (a `SELECT MAX(generation)` over the
   group's rows — no separate counter storage). Registrations without a
-  generation are unchanged (Calendar keeps the version-based cleanup). The
-  value itself is assigned by the meal-planning persistence batches in D1
-  (§4), not by the router.
+   generation are unchanged (Calendar keeps the version-based cleanup). The
+   value itself is assigned by the meal-planning persistence batches in D1
+   (§4), not by the router. Plus: `meal-clarification` and
+   `meal-feedback-reply` join `PLAIN_TEXT_INTERACTION_KINDS` (the routing
+   contract's level 2, §6).
 - `src/core/interaction-router-client.ts` — `InteractionRegistration.generation?:
   number` (explicit plan-message generation; absent for Calendar).
 - `src/__integration__/setup.ts` — fake router mirrors the generation tagging,
