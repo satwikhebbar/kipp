@@ -243,28 +243,30 @@ Invariants enforced at the store layer (deterministic, unit-tested):
   1. `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind, base_version, feedback_batch_id, video_json, created_at) SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'`
   2. `UPDATE meal_profile SET interaction_generation = interaction_generation + 1 WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active')` — the generation bump, guarded on the CAS base like everything else
   3. `SELECT interaction_generation FROM meal_profile WHERE chat_id = ?` — returns this plan message's generation (used only when the caller sees success)
-  4. `UPDATE meal_plan SET current_version = newVersion, updated_at = ? WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'`
-   5. `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at) SELECT ?, plan_id, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = newVersion AND status = 'active' AND ? IS NOT NULL` — records the submission that drove this revision; a NULL `batchId` matches 0 rows (retained defensively — every revision is submission-driven)
-  **Every statement is conditional on a successful promotion.** Statements 1–2
-  and 4 no-op via the CAS base guard (`current_version = oldVersion` — the
-  bump's `EXISTS` reads the plan row before statement 4 advances it, so a
-  stale call never bumps the generation), and statement 5's
-  `current_version = newVersion` guard can only match *after* statement 4 has
-  advanced the row. Order therefore matters, and a stale call changes nothing:
-  1–2 no-op on the CAS base; 4 no-ops on the CAS base; 5 no-ops because
-  `current_version ≠ newVersion` (or the plan is no longer `active`).
-  Statement 3 is a read the caller ignores on stale. The one deliberate
-  exception is the same-target race: two concurrent revisions from the same
-  base both compute the same `newVersion`; when the loser runs after the
-  winner, statements 1–2 and 4 match 0 rows (the winner already advanced past
-  `oldVersion`), and 5's SELECT matches the winner's advanced row with the
-  same `batchId` — `INSERT OR IGNORE` absorbs the winner's batch row as a
-  clean no-op instead of a PK-constraint error.
-  `meal-planning-store.test.ts` asserts **all four writes are unchanged on a
-  stale call** (no version row, generation unmoved, `current_version` unmoved,
-  no feedback batch row).
-  **One defined atomic outcome:** the new version row, the `current_version`
-  advance, the generation bump, and (for feedback-driven revisions) the
+   4. `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ? WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'` — the week-scoped inventory/exceptions refresh (the revision session's captured values, §6 step 2); skipped when the session submitted no changes; CAS-guarded on the base like statements 1–2 (a stale call changes nothing)
+   5. `UPDATE meal_plan SET current_version = newVersion, updated_at = ? WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'`
+   6. `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at) SELECT ?, plan_id, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = newVersion AND status = 'active' AND ? IS NOT NULL` — records the submission that drove this revision; a NULL `batchId` matches 0 rows (retained defensively — every revision is submission-driven)
+   **Every statement is conditional on a successful promotion.** Statements 1–2
+   and 4–5 no-op via the CAS base guard (`current_version = oldVersion` — the
+   bump's `EXISTS` reads the plan row before statement 5 advances it, so a
+   stale call never bumps the generation), and statement 6's
+   `current_version = newVersion` guard can only match *after* statement 5 has
+   advanced the row. Order therefore matters, and a stale call changes nothing:
+   1–2 and 4 no-op on the CAS base; 5 no-ops on the CAS base; 6 no-ops because
+   `current_version ≠ newVersion` (or the plan is no longer `active`).
+   Statement 3 is a read the caller ignores on stale. The one deliberate
+   exception is the same-target race: two concurrent revisions from the same
+   base both compute the same `newVersion`; when the loser runs after the
+   winner, statements 1–2 and 4 match 0 rows (the winner already advanced past
+   `oldVersion`), and 6's SELECT matches the winner's advanced row with the
+   same `batchId` — `INSERT OR IGNORE` absorbs the winner's batch row as a
+   clean no-op instead of a PK-constraint error.
+   `meal-planning-store.test.ts` asserts **all writes are unchanged on a
+   stale call** (no version row, generation unmoved, `current_version` unmoved,
+   inventory/exceptions unmoved, no feedback batch row).
+   **One defined atomic outcome:** the new version row, the `current_version`
+   advance, the generation bump, the week-scoped inventory/exceptions refresh,
+   and (for feedback-driven revisions) the
   feedback batch row all commit or all roll back together. `plan_id` is the PK
   and `status = 'active'` is guarded, so the batch can never promote more than
   one row or a replaced plan. Concurrent same-base revisions serialize on the
@@ -380,7 +382,10 @@ drives the real path with real text (§13.3).
      clarification is pending, so timeout is a defined outcome — initial
      planning → `meal-planning-canceled` notice ("no reply received; run
      /mealplan to retry") and the instance ends; revision → the revision is
-     abandoned and the previous version stands. On reply → next turn. The
+     abandoned, the previous version stands, and the parent gets a
+     `meal-feedback-not-applied` notice ("no reply received — your feedback
+     was not applied; tap [Give feedback] to try again"). On reply → next
+     turn. The
      wait filters by `payload.interactionId`: a `telegram-reply` for a
      different interaction (e.g., a `[Give feedback]` tap on a still-live
      plan message while the session is mid-flight) is discarded and the wait
@@ -496,6 +501,16 @@ drives the real path with real text (§13.3).
       null silently: the webhook answers the callback (spinner clears) and
       nothing else happens — no notice. The actionable surface is the newest
       plan message or a fresh `/mealplan`.
+   - An event that arrives at or after `week_end` does not trigger a revision:
+      the dispatch checks `now >= week_end` first and ends — a late revision
+      would persist a version whose button (`expiresAt = weekEnd`) is dead on
+      arrival.
+   - Plain text sent while a `/mealplan` planning session is in flight
+      (pre-persist) routes to the *previous* active plan's instance (still
+      `active` until the new plan persists) — a revision that is superseded
+      moments later; the parent may briefly see an old-plan revision message
+      mid-planning. Accepted: the window is the session length (bounded by the
+      30-min TTL).
    - Action interactions expire at `week_end`; the router drops expired rows
       and `waitForEvent` times out at the same deadline, so the instance ends
       cleanly and no interaction survives the week. A superseded instance
@@ -673,9 +688,10 @@ submissions (spec §8.1 — pending edit, see §13 note 4).
   `createActivePlan` atomicity — a second create supersedes the first
   (serialize-and-supersede), any statement failure rolls back the whole batch
   (no orphan version row, previous active stays), and the generation is
-  bumped exactly once per created plan message, `promotePlanVersion` stale
-  rejection asserting **all four batch writes are unchanged** (no version row,
-  generation unmoved, `current_version` unmoved, no feedback batch row) —
+  bumped exactly once per created plan message,   `promotePlanVersion` stale
+  rejection asserting **all batch writes are unchanged** (no version row,
+  generation unmoved, `current_version` unmoved, inventory/exceptions unmoved,
+  no feedback batch row) —
   including the same-target race where a concurrent revision already committed
   the same `newVersion` (plus: success bumps the generation in the same
   transaction and writes the immutable submission batch row linked from the
