@@ -47,8 +47,9 @@ export interface EnrichedPlan {
  * videos.list for duration), cache each result for 24 h keyed
  * `video:<dish>:<slotId>`, and honor a hard per-plan call ceiling. Without a
  * key or cache, every lunch cell records `not_attempted`. A missing video
- * never removes or blocks a plan; any step failure degrades to
- * `no_suitable_video`.
+ * never removes or blocks a plan; any step failure — a cache read or write
+ * error included — degrades the affected cells to `no_suitable_video` and the
+ * plan persists unchanged.
  */
 export async function enrichLunchVideos(
   env: Env,
@@ -69,7 +70,14 @@ export async function enrichLunchVideos(
   const byDishSlot = new Map<string, { dish: string; slot: string; keys: string[] }>()
   for (const { key, slot, cell } of cells) {
     const cKey = cacheKey(cell.dish, slot)
-    const cached = await cache.get(cKey)
+    let cached: string | null = null
+    try {
+      cached = await cache.get(cKey)
+    } catch {
+      // A failing KV read is an enrichment-step failure: degrade this cell and move on.
+      results.set(key, { status: "no_suitable_video" })
+      continue
+    }
     if (cached) {
       results.set(key, parseCached(cached))
       continue
@@ -130,9 +138,13 @@ export async function enrichLunchVideos(
     const dish = dishByKey.get(key)
     const slot = key.slice(key.indexOf(":") + 1)
     if (dish && slot)
-      await cache.put(cacheKey(dish, slot), JSON.stringify(video), {
-        expirationTtl: VIDEO_CACHE_TTL_SECONDS,
-      })
+      try {
+        await cache.put(cacheKey(dish, slot), JSON.stringify(video), {
+          expirationTtl: VIDEO_CACHE_TTL_SECONDS,
+        })
+      } catch {
+        // A cache write is best-effort; a transient KV failure never blocks plan persistence.
+      }
   }
 
   return { candidate: withVideos(candidate, results), video: Object.fromEntries(results) }

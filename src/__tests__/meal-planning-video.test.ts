@@ -76,6 +76,26 @@ function fakeCache(initial: Array<[string, string]> = []): RecipeVideoCache & { 
   }
 }
 
+function throwingReadCache(): RecipeVideoCache {
+  return {
+    get: vi.fn(async () => {
+      throw new Error("kv read failed")
+    }),
+    put: vi.fn(async () => {}),
+  }
+}
+
+function throwingWriteCache(): RecipeVideoCache & { store: Map<string, string> } {
+  const store = new Map<string, string>()
+  return {
+    store,
+    get: vi.fn(async (key: string) => store.get(key) ?? null),
+    put: vi.fn(async () => {
+      throw new Error("kv write failed")
+    }),
+  }
+}
+
 function videoEnv(cache?: RecipeVideoCache): Env {
   return { YOUTUBE_API_KEY: "yt-key", RECIPE_VIDEO_CACHE: cache } as unknown as Env
 }
@@ -195,6 +215,47 @@ describe("optional recipe-video enrichment", () => {
       status: "found",
       url: "https://www.youtube.com/watch?v=trusted-1",
     })
+  })
+
+  it("degrades lunch cells and skips the network when a cache read fails", async () => {
+    const fetch = vi.fn(async () => {
+      throw new Error("network must not be touched after a failed cache read")
+    })
+    const { candidate: enriched, video } = await enrichLunchVideos(
+      videoEnv(throwingReadCache()),
+      candidate(),
+      undefined,
+      {
+        fetch,
+      },
+    )
+    expect(video["Mon:school-lunch"]).toEqual({ status: "no_suitable_video" })
+    expect(video["Mon:home-lunch"]).toEqual({ status: "no_suitable_video" })
+    expect(enriched.grid["Mon"]["school-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it("still applies a found video when a cache write fails", async () => {
+    const fetch = youTubeFetch([
+      {
+        q: "idli recipe",
+        videoId: "idli-1",
+        channelId: "c-idli",
+        channelTitle: "Idli Chef",
+        title: "Perfect Idli",
+        duration: "PT6M5S",
+      },
+    ])
+    const { candidate: enriched, video } = await enrichLunchVideos(
+      videoEnv(throwingWriteCache()),
+      candidate(),
+      undefined,
+      {
+        fetch,
+      },
+    )
+    expect(video["Mon:school-lunch"]).toMatchObject({ status: "found", url: "https://www.youtube.com/watch?v=idli-1" })
+    expect(enriched.grid["Mon"]["school-lunch"].recipeVideo).toMatchObject({ status: "found" })
   })
 
   it("respects the hard per-plan call ceiling", async () => {
