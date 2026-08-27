@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>School-Day Meal Planning — Iteration 1: Telegram-first Workflow</title>
+    <style>
+      :root { --bg:#0f172a; --panel:#172554; --ink:#e2e8f0; --muted:#94a3b8; --line:#334155; --blue:#60a5fa; --green:#34d399; --amber:#fbbf24; --red:#f87171; --code:#020617; } * { box-sizing:border-box; } body { max-width:1080px; margin:0 auto; padding:40px 24px 72px; color:var(--ink); background:var(--bg); font:16px/1.6 Inter,ui-sans-serif,system-ui,sans-serif; } h1,h2,h3 { line-height:1.25; color:#f8fafc; } h1 { margin:0 0 10px; font-size:2.25rem; border-bottom:2px solid var(--line); padding-bottom:20px; } h2 { margin-top:46px; color:var(--blue); border-bottom:1px solid var(--line); padding-bottom:8px; } h3 { margin-top:28px; color:#7dd3fc; } p,li { max-width:94ch; } .lede { color:var(--muted); font-size:1.1rem; } .callout { margin:24px 0; padding:18px 20px; background:var(--panel); border-left:4px solid var(--green); border-radius:0 8px 8px 0; } .note { border-left-color:var(--amber); } .risk { border-left-color:var(--red); } .tag { display:inline-block; margin:0 5px 5px 0; padding:2px 8px; border-radius:999px; color:#bfdbfe; background:#1e3a8a; font-size:.8rem; font-weight:700; } code { padding:2px 5px; border-radius:4px; color:#bfdbfe; background:var(--code); font:.9em ui-monospace,SFMono-Regular,Menlo,monospace; } pre { margin:20px 0; padding:16px 18px; background:var(--code); border:1px solid var(--line); border-radius:8px; overflow-x:auto; color:#cbd5e1; font:.9em/1.55 ui-monospace,SFMono-Regular,Menlo,monospace; } pre code { padding:0; background:none; color:inherit; } table { width:100%; border-collapse:collapse; margin:20px 0; } th,td { padding:11px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; } th { color:#cbd5e1; background:#1e293b; } ol>li,ul>li { margin:10px 0; } .foot { margin-top:56px; color:var(--muted); font-size:.85rem; border-top:1px solid var(--line); padding-top:14px; } @media (max-width:640px) { body { padding:24px 16px 48px; } h1 { font-size:1.8rem; } table { font-size:.9rem; } }
+    </style>
+  </head>
+  <body>
+    <h1>School-Day Meal Planning — Iteration 1: Telegram-first Workflow</h1>
+    <p class="lede">Design of the first deliverable slice of the School-Day Meal Planning workflow: durable D1 contracts, the bounded planning-agent loop wired to the deterministic <code>evaluateMealPlan</code> evaluator, a Telegram-first conversation surface, versioned plan persistence with stale-revision rejection, and the #64 corpus as the documented quality gate.</p>
+    <div class="callout"><strong>Status:</strong> Plan for GitHub issue #65 (parent: #59; prerequisite: #64 corpus/evaluator, merged).<br /><span class="tag">D1 contracts</span><span class="tag">Telegram-first</span><span class="tag">Versioned plans</span><span class="tag">Bounded agent loop</span><span class="tag">Generation invalidation</span><span class="tag">#64 corpus gate</span></div>
+
+    <h2>1. Goal</h2>
+    <p>Deliver a usable Telegram-first school-week meal-planning workflow. A parent can start a planning conversation in Telegram text, receive a Monday–Saturday plan rendered as Telegram text, reply with targeted meal feedback, and receive a new persisted active-plan version. The active plan and its revision history survive process restarts as versioned canonical records in Cloudflare D1.</p>
+    <p>This iteration reuses the already-merged deterministic evaluator and corpus (#64). It introduces no separate review agent, no Mini App, no voice transcription, and no multi-bot support — all recorded as out of scope in the issue.</p>
+
+    <h2>2. Scope and boundary</h2>
+    <table><thead><tr><th>In scope</th><th>Out of scope (recorded, not built)</th></tr></thead><tbody>
+      <tr><td>
+        <ul>
+          <li>D1 database binding, migration schema, and a thin typed store for: household profile, plan, immutable plan version, and feedback batch records.</li>
+          <li>One bounded planning-agent loop with the deterministic <code>evaluate_meal_plan</code> tool and the agent-owned free-form policy self-validation loop (<code>satisfied</code> / <code>trade-off</code> / <code>needs-clarification</code> outcomes). No reviewer agent.</li>
+          <li>Telegram-first surface: <code>/mealplan</code> to start or continue planning, targeted clarification via force-reply, and plan review with inline actions (Give feedback / Update plan). No <code>/plan</code> command: mid-week retrieval of the active plan is the iteration-2 mini-app's home view, and iteration-1 tests read the store directly (see §13.3).</li>
+          <li>Default-approval plan lifecycle: a created plan is approved as-is; a feedback submission (Telegram force-reply today, mini-app in iteration 2) or an Update-plan request triggers a revision that creates a new plan version.</li>
+          <li>Plan versioning: active plan is versioned; a feedback submission is recorded as an immutable batch linked to the version it drove; stale revisions are rejected; retried deliveries are idempotent (router single-claim).</li>
+          <li>Deterministic plan rendering as Telegram text (fridge-board equivalent).</li>
+          <li>Recipe-video discovery as <strong>optional, non-blocking enrichment</strong> for school lunch and home lunch cells; a missing video never removes or blocks a plan.</li>
+          <li>The #64 corpus as a documented quality gate, including new agent-level tests that drive the loop from corpus scenarios.</li>
+        </ul>
+      </td><td>
+        <ul>
+          <li>Telegram Mini App review, visual weekly grid, local feedback drafts.</li>
+          <li>Multi-bot support (#63), voice-note transcription (#61).</li>
+          <li>A separate reviewer agent (explicitly excluded by the planning-decisions document).</li>
+          <li>Persistent-profile editing UX (an open product decision in the spec); the initial household profile is seeded, not editable in this iteration.</li>
+          <li>Grocery ordering, inventory tracking, shopping support.</li>
+          <li>D1 backup/export automation, dashboards, or usage metrics beyond <code>logRuntime</code> (durable per-workflow usage metrics for all workflows are tracked separately — backlog <code>agent-harness-fuc</code>).</li>
+        </ul>
+      </td></tr>
+    </tbody></table>
+
+    <h2>3. Architecture</h2>
+    <p>Mirror the proven Calendar shape (bounded agent session, deterministic evaluator, durable workflow, interaction router). D1 is the long-term store; the Workflow coordinates one planning conversation and revision turns.</p>
+<pre><code>triggers/telegram-webhook.ts
+  ├─ /mealplan &lt;text&gt; ──▶ MealPlanningWorkflow.create({ chatId, requestText })
+  └─ routed interactions (kind meal-*) ──▶ MealPlanningWorkflow instance events
+
+meal-planning/workflow.ts            WorkflowEntrypoint → agent-workflow runner
+meal-planning/agent-workflow.ts      bounded turn loop: session, clarifications,
+                                     persistence, plan send, live week loop, revision
+agent/meal-planning-session.ts       bounded tool session (mirrors calendar-session)
+agent/meal-planning.ts               static zod tool definitions:
+                                       evaluate_meal_plan, propose_plan, needs_clarification
+meal-planning/evaluation.ts          evaluateMealPlan(candidate, context)  [exists, reused]
+meal-planning/types.ts               MealPlanContext, MealPlanCandidate, ...  [exists]
+meal-planning/coverage.ts            coverage set  [exists]
+meal-planning/store.ts               D1 client: profile, plan, plan_version,
+                                     feedback_batch (+ seed profile)
+meal-planning/messages.ts            MEAL_HELP, renderPlanMessage, fixed notices
+meal-planning/video.ts               optional YouTube enrichment, never blocking
+core/interaction-router.ts           per-chat opaque routing [exists, extended: chat-scoped generation]</code></pre>
+    <p>Dependency direction matches <code>docs/architecture/modules.md</code>: triggers → workflow → agent → (meal-planning domain, providers, runtime, integrations, router, D1 store). The store is the only module that touches the D1 binding.</p>
+    <h3>State lifecycle</h3>
+<pre><code>stateDiagram-v2
+  [*] --&gt; interpreting: /mealplan text
+  interpreting --&gt; clarifying: needs_clarification (force-reply, 15 min)
+  clarifying --&gt; interpreting: parent reply
+  interpreting --&gt; versioned: propose_plan passes evaluateMealPlan
+  versioned --&gt; active: version 1 persisted (D1)
+  active --&gt; revising: feedback submission or [Update plan]
+  revising --&gt; versioned: version N+1 persisted (CAS on current_version)
+  active --&gt; [*]: week end or superseded by /mealplan</code></pre>
+    <p>One workflow instance lives per chat-week: it is created by <code>/mealplan</code>, stays alive until the plan's <code>week_end</code> (or until a fresh <code>/mealplan</code> supersedes it), and handles initial planning plus every feedback submission and update request for that week's plan. A created plan is approved by default; conversation continuity across revisions comes from the instance's durable step state (the Calendar pattern), never from D1 transcripts (privacy rule). The active plan and version history remain readable from D1 (the iteration-2 mini-app reads the same <code>activePlan</code> store contract).</p>
+
+    <h2>4. Durable contracts (D1)</h2>
+    <p>One database <code>MEAL_PLANNING_DB</code> (<code>d1_databases</code> binding), migration <code>migrations/0001_init.sql</code>. All JSON columns hold normalized structured data per <code>src/meal-planning/types.ts</code>; no transcripts or raw provider text are stored (privacy rule inherited from Calendar).</p>
+<pre><code>-- Household profile (single-bot: one row per Telegram chat)
+CREATE TABLE meal_profile (
+  chat_id TEXT PRIMARY KEY,
+  profile_json TEXT NOT NULL,            -- MealProfile
+  custom_policies_json TEXT NOT NULL,    -- CustomPolicy[]
+  schedule_json TEXT NOT NULL,           -- MealSchedule
+  location_json TEXT,                    -- { country, city } | NULL
+  interaction_generation INTEGER NOT NULL DEFAULT 0, -- chat-scoped plan-message generation (§6)
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+
+-- Plan header: one active plan per chat (previous active → 'replaced')
+CREATE TABLE meal_plan (
+  plan_id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  week_start TEXT NOT NULL, week_end TEXT NOT NULL, timezone TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',            -- active | replaced
+  current_version INTEGER NOT NULL DEFAULT 0,
+  weekly_inventory_json TEXT NOT NULL DEFAULT '{}', -- week-scoped state
+  weekly_exceptions_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_meal_plan_chat ON meal_plan(chat_id, status);
+
+-- Exactly one active plan per chat, enforced by the database. A concurrent
+-- second active INSERT fails atomically (whole batch rolls back).
+CREATE UNIQUE INDEX idx_meal_plan_one_active ON meal_plan(chat_id) WHERE status = 'active';
+
+-- Immutable plan versions. No UPDATE statements ever target this table.
+CREATE TABLE meal_plan_version (
+  plan_id TEXT NOT NULL, version INTEGER NOT NULL,
+  candidate_json TEXT NOT NULL,          -- grid + easyBuys + policyOutcomes
+  evaluation_json TEXT NOT NULL,         -- failures + measurements
+  request_kind TEXT NOT NULL,            -- initial_plan | revision
+  base_version INTEGER,                  -- NULL for initial
+  feedback_batch_id TEXT,          -- batch that drove this version (NULL for initial / free-form)
+  video_json TEXT NOT NULL DEFAULT '{}', -- per-cell video results (lunch slots)
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (plan_id, version)
+);
+
+-- Feedback submission record: one immutable batch per feedback-driven
+-- revision, created atomically with the version it drove (promotePlanVersion).
+-- No lifecycle (no status transitions), no accumulation — a submission is
+-- consumed by the revision it triggers. Initial plans and free-form
+-- [Update plan] revisions have no batch.
+CREATE TABLE feedback_batch (
+  batch_id TEXT PRIMARY KEY,             -- plan_id || ':v' || newVersion
+  plan_id TEXT NOT NULL,
+  base_version INTEGER NOT NULL,         -- the version the feedback targeted
+  items_json TEXT NOT NULL,              -- FeedbackItem[] as submitted
+  created_at TEXT NOT NULL
+);</code></pre>
+
+    <h3>Store module (<code>meal-planning/store.ts</code>)</h3>
+    <p><code>MealPlanningStore</code> interface with two implementations:</p>
+    <ul>
+      <li><code>createMealPlanningStore(db: D1Database)</code> — production binding, SQL via <code>prepare/bind/run/first/all</code>.</li>
+      <li><code>createInMemoryMealPlanningStore()</code> — Map-backed fake for unit/integration tests (same invariant logic, no SQL).</li>
+    </ul>
+    <p>Invariants enforced at the store layer (deterministic, unit-tested):</p>
+
+    <h3>One active plan per chat, by construction</h3>
+    <p>The partial unique index <code>idx_meal_plan_one_active</code> rejects any insert of a second active row that did not first supersede its predecessor (it is the database-level invariant; the in-memory fake enforces the same rule). Week semantics: an explicit <code>/mealplan</code> always creates a new active plan and atomically supersedes the previous active row in the same batch (spec §2: &ldquo;the latest plan is the active plan for that week&rdquo;). The superseded plan stays readable in <code>meal_plan_version</code> history (feedback about a superseded plan is discarded with it — its message's buttons are generation-invalidated, §6); the parent is told the previous plan was replaced.</p>
+
+    <h3>Immutable versions</h3>
+    <p>Insert-only <code>meal_plan_version</code>; a version row is never updated or deleted.</p>
+
+    <h3>Atomic create-active-plan (initial)</h3>
+    <p>One <code>db.batch</code> of</p>
+    <ol>
+      <li><code>UPDATE meal_plan SET status = 'replaced', updated_at = ? WHERE chat_id = ? AND status = 'active'</code></li>
+      <li><code>INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, status, current_version, ...) VALUES (?, ?, ..., 'active', 1, ...)</code></li>
+      <li><code>INSERT INTO meal_plan_version (plan_id, version, ...) VALUES (?, 1, ...)</code></li>
+      <li><code>UPDATE meal_profile SET interaction_generation = interaction_generation + 1 WHERE chat_id = ?</code></li>
+      <li><code>SELECT interaction_generation FROM meal_profile WHERE chat_id = ?</code> — returns this plan message's generation (used for the action registrations in step 5 of §6)</li>
+    </ol>
+    <p>D1 batch is a single transaction: <strong>either the whole new plan exists (active row + version 1 + the bumped generation) and the previous active row is atomically replaced — or nothing changes</strong> — any statement failure rolls back the entire batch (no orphan version row, no half-replaced state, no orphan generation bump).</p>
+    <div class="callout note"><strong>Concurrency semantic is deliberately serialize-and-supersede</strong>, matching spec §2: a second <code>/mealplan</code> batch that commits after the first likewise replaces the first batch's fresh active row (its supersede-UPDATE matches it because it is still <code>active</code>), so its INSERT never violates the partial index. The <code>plan-already-active</code> rejection cannot arise from this SQL and is not part of the design; there is no atomic compare/insert guard. The caller reads statement 1's <code>meta.changes</code> — <code>0</code> → first plan for the chat (no notice); <code>&gt;= 1</code> → a previous active plan was replaced and the parent gets a &ldquo;previous plan replaced&rdquo; notice. Two concurrent starts simply resolve last-commit-wins; the superseded plan stays readable in version history and any button on its stale message routes to a replaced plan (revision returns <code>stale</code>, §6).</div>
+
+    <h3>Atomic revision promotion (<code>plan_id</code>-scoped)</h3>
+    <p>One <code>db.batch</code> of, in order (<code>oldVersion</code> = the CAS base the caller believes is current, <code>newVersion</code> = <code>oldVersion + 1</code>; <code>batchId</code> = <code>plan_id || ':v' || newVersion</code>, or NULL for a free-form <code>[Update plan]</code> revision — a NULL <code>batchId</code> makes statement 5 a no-op):</p>
+    <ol>
+      <li><code>INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind, base_version, feedback_batch_id, video_json, created_at) SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'</code></li>
+      <li><code>UPDATE meal_profile SET interaction_generation = interaction_generation + 1 WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = ? AND current_version = oldVersion AND status = 'active')</code> — the generation bump, guarded on the CAS base like everything else</li>
+      <li><code>SELECT interaction_generation FROM meal_profile WHERE chat_id = ?</code> — returns this plan message's generation (used only when the caller sees success)</li>
+      <li><code>UPDATE meal_plan SET current_version = newVersion, updated_at = ? WHERE plan_id = ? AND current_version = oldVersion AND status = 'active'</code></li>
+      <li><code>INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at) SELECT ?, plan_id, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = newVersion AND status = 'active' AND ? IS NOT NULL</code> — records the submission that drove this revision; a NULL <code>batchId</code> matches 0 rows (free-form revisions leave no batch)</li>
+    </ol>
+    <p><strong>Every statement is conditional on a successful promotion.</strong> Statements 1–2 and 4 no-op via the CAS base guard (<code>current_version = oldVersion</code> — the bump's <code>EXISTS</code> reads the plan row before statement 4 advances it, so a stale call never bumps the generation), and statement 5's <code>current_version = newVersion</code> guard can only match <em>after</em> statement 4 has advanced the row. Order therefore matters, and a stale call changes nothing: 1–2 no-op on the CAS base; 4 no-ops on the CAS base; 5 no-ops because <code>current_version ≠ newVersion</code> (or the plan is no longer <code>active</code>). Statement 3 is a read the caller ignores on stale. The one deliberate exception is the same-target race: two concurrent revisions from the same base both compute the same <code>newVersion</code>; when the loser runs after the winner, statements 1–2 and 4 match 0 rows (the winner already advanced past <code>oldVersion</code>), and 5's SELECT matches the winner's advanced row with the same <code>batchId</code> — <code>INSERT OR IGNORE</code> absorbs the winner's batch row as a clean no-op instead of a PK-constraint error. <code>meal-planning-store.test.ts</code> asserts <strong>all four writes are unchanged on a stale call</strong> (no version row, generation unmoved, <code>current_version</code> unmoved, no feedback batch row).</p>
+    <div class="callout"><strong>One defined atomic outcome:</strong> the new version row, the <code>current_version</code> advance, the generation bump, and (for feedback-driven revisions) the feedback batch row all commit or all roll back together. <code>plan_id</code> is the PK and <code>status = 'active'</code> is guarded, so the batch can never promote more than one row or a replaced plan. Concurrent same-base revisions serialize on the transaction; the loser's SELECT matches 0 rows.</div>
+    <p><strong>Post-batch diagnostics (recovery defined):</strong> the caller gates on statement 1's <code>meta.changes</code> — <code>1</code> → success; <code>0</code> → <code>{ ok: false, reason: "stale" }</code>. On stale, no compensation is needed (nothing changes — this is the point of the CAS guard) and the caller sends <code>meal-stale-plan</code> and logs the event via <code>logRuntime</code> (<code>event: "meal-plan-promotion", outcome: "stale"</code>), the ephemeral structured-log pattern the other workflows use for every event. No separate audit table exists: this is a single-household consumer workflow, so committed transitions are recorded by the domain tables themselves (<code>meal_plan_version.created_at</code>, <code>feedback_batch.created_at</code>), non-events like a stale attempt go to runtime logs, and durable per-workflow metrics are the separate backlog item <code>agent-harness-fuc</code>.</p>
+
+    <h3>Feedback submission records</h3>
+    <p>A feedback submission is one immutable <code>feedback_batch</code> row (the items as submitted), created atomically with the revision version it drove and linked from it via <code>meal_plan_version.feedback_batch_id</code>. There is no append path, no open/applied/rejected lifecycle, and no accumulation — a submission is consumed by exactly one revision. Delivery idempotency is the router's durable single-claim on <code>consumed_update_id</code> / <code>callbackToken</code> (§6): a retried delivery of the same update resolves to <code>{ interaction: null }</code> and never reaches the store.</p>
+
+    <h3>Seed profile</h3>
+    <p><code>loadOrCreateProfile(chatId)</code> inserts the initial household configuration (spec §5.11 initial set: Snack policy, Equipment gap, Packing capacity, two Nutrition targets) on first use, stored as generic properties + custom policies + the five-slot Mon–Sat schedule.</p>
+    <p>The in-memory fake mirrors the same operations and result semantics (<code>ok</code>/<code>reason: "stale"</code>, one-active constraint, insert-only versions, immutable submission batches linked to versions) so the unit and integration suites exercise identical invariants without SQL.</p>
+
+    <h2>5. Planning-agent loop and tools</h2>
+    <p><code>agent/meal-planning-session.ts</code> runs <code>runTools</code> (bounded: 3 provider turns / 4 tool calls, <code>requireHandoff: true</code>) with a static registry (<code>agent/meal-planning.ts</code>), mirroring the Calendar session. Tools:</p>
+    <table><thead><tr><th>Tool</th><th>Input (zod, strict)</th><th>Output</th><th>Behavior</th></tr></thead><tbody>
+      <tr><td><code>evaluate_meal_plan</code></td><td><code>MealPlanCandidate</code> (grid, easyBuys, policyOutcomes)</td><td><code>MealPlanEvaluation</code> (pass, failures, measurements)</td><td>Pure wrapper over <code>evaluateMealPlan</code>; tracked as <code>latestEvaluation</code> in the session closure</td></tr>
+      <tr><td><code>propose_plan</code> (terminal)</td><td><code>{ candidate, weeklyInventory, weeklyExceptions, feedbackItems? }</code></td><td><code>{ accepted: true }</code></td><td>Handler re-runs <code>evaluateMealPlan</code> on the submitted candidate with the session context; requires <code>pass</code>, else <code>ToolHandlerError("proposed plan did not pass evaluation")</code>. For revisions, validates every provided raw feedback text is represented by a scoped <code>feedbackItems</code> entry or an outcome rationale (matches <code>unaddressed_feedback</code>)</td></tr>
+      <tr><td><code>needs_clarification</code> (terminal)</td><td><code>{ message, reasonCodes: FailureCode[], interaction: { kind: "reply" } }</code></td><td><code>{ accepted: true }</code></td><td>Enforces every failure from <code>latestEvaluation</code> is included; message cannot expose opaque ids</td></tr>
+    </tbody></table>
+    <p>Agent self-validation loop (spec §7 / planning-decisions): the agent proposes a candidate, calls <code>evaluate_meal_plan</code>, revises objective failures, self-checks free-form policy (recording <code>satisfied</code> / <code>trade-off</code> / <code>needs-clarification</code> with concise rationale — completeness enforced by the evaluator's <code>missing_policy_outcome</code>), then either calls <code>propose_plan</code> or asks one targeted clarification. The system prompt states the rules and the boundary: the agent owns free-text interpretation and normalization into the canonical tokens the evaluator checks (exact string membership only); it must clarify ambiguous exclusions before they become hard constraints.</p>
+    <p>Unlike Calendar, no opaque plan ledger is needed: the write target is our own D1 store and the evaluator is pure/replayable, so <code>propose_plan</code> carries the candidate and the handler re-verifies it deterministically.</p>
+
+    <h2>6. Workflow sequence (<code>meal-planning/workflow.ts</code> + <code>agent-workflow.ts</code>)</h2>
+    <p><code>MealPlanningWorkflowParams</code>: <code>{ chatId, telegramMessageId, requestText }</code>.</p>
+    <p><code>runAgentCenteredMealPlanningWorkflow(env, event, step)</code>:</p>
+    <ol>
+      <li><strong>Load state:</strong> <code>loadOrCreateProfile(chatId)</code>; active plan for chat (becomes <code>recentPlan</code> for variety); the active plan's latest version (candidate/evaluation feed the revision context).</li>
+      <li><strong>Session turn loop</strong> (bounded by <code>MEAL_PLANNING_TTL_MS</code>, default 30 min per interaction):
+        <ul>
+          <li>Build <code>MealPlanContext</code> (profile, custom policies, weekly inventory/exceptions from plan row or conversation, recent plan, session kind, submitted feedback items when a revision is feedback-driven).</li>
+          <li>Run <code>runMealPlanningAgentSession</code> in a <code>step.do</code>.</li>
+          <li><code>needs_clarification</code> → <code>promptForReply</code> (force-reply, kind <code>meal-clarification</code>, registered <strong>without</strong> a generation — it precedes any plan message, so no plan-message generation exists to attach; its invalidation is the normal single-claim + expiry). The reply interaction expires after <strong>15 min</strong> (<code>MEAL_CLARIFICATION_TTL_MS</code>, matching the other workflows' interaction lifetime): the session is blocked while a clarification is pending, so timeout is a defined outcome — initial planning → <code>meal-planning-canceled</code> notice ("no reply received; run /mealplan to retry") and the instance ends; revision → the revision is abandoned and the previous version stands. On reply → next turn.</li>
+          <li><code>propose_plan</code> → persist (below) → break.</li>
+          <li>Agent failure/timeout → <code>meal-agent-unavailable</code> notice.</li>
+        </ul>
+      </li>
+      <li><strong>Persist:</strong> initial → <code>createActivePlan</code> (atomic batch, §4); revision → <code>promotePlanVersion</code> (<code>plan_id</code>-scoped atomic batch, §4; when the revision was triggered by a feedback submission, the batch also writes the immutable submission batch row and links it from the version). Each batch makes the plan/version state changes one atomic outcome and bumps the chat-scoped plan message generation (returned to the caller for step 5). Promotion failure (stale) → <code>meal-stale-plan</code> notice, no version written, stale event logged via <code>logRuntime</code> (§4 recovery).</li>
+      <li><strong>Optional enrichment:</strong> fill <code>recipeVideo</code> for school-lunch and home-lunch cells via <code>video.ts</code> <strong>before</strong> persisting the version (deterministic gate, never blocking; see §8).</li>
+      <li><strong>Send plan message</strong> (<code>renderPlanMessage</code>, Markdown) with inline buttons <code>[Give feedback] [Update plan]</code>; in one durable <code>step.do</code> register two callback interactions (group <code>"meal-planning"</code>, <code>expiresAt = weekEnd</code> — the plan row's <code>week_end</code>, not a feedback window: a plan is approved by default and its buttons stay live until the week ends or the plan is superseded, <code>generation: &lt;planGeneration&gt;</code>):
+        <ul>
+          <li><code>{ interactionId, version: &lt;planVersion&gt;, workflowId: instanceId, kind: meal-feedback, callbackToken, botMessageId: planMessageId }</code></li>
+          <li>same for <code>meal-update</code> (distinct token).</li>
+        </ul>
+        <p><code>version</code> binds the buttons to the plan version the parent is looking at and is the base version used by the revision branch. <code>planGeneration</code> is the value returned by the persistence batch (§4 — createActivePlan statements 4–5, promotePlanVersion statements 2–3): a chat-scoped monotonic counter that every persisted plan message (initial or revision) increments exactly once, atomically with its own version rows.</p>
+        <div class="callout"><strong>Chat-scoped generation invalidation:</strong> every post-persist meal-planning registration (action sets here, the <code>meal-feedback-reply</code> force-reply prompt in step 6) carries the generation of the plan message it belongs to. The router tags each row with it, deletes every unconsumed row in the group with a <em>lower</em> generation at registration time, and on resolve returns <code>{ interaction: null }</code> for any row below the group's highest present generation. Because the counter is per chat and increments per plan message (not per plan or version), a fresh <code>/mealplan</code> that replaces a distinct plan bumps past the old plan's registrations even when both plans are at version 1 — the old plan's action buttons and any pending <code>meal-feedback-reply</code> prompt resolve nothing after the successor registers, for revisions and for a newer <code>/mealplan</code> alike. A superseded instance's registration that lands late still carries its own (lower) plan message generation, so it can never invalidate the successor's buttons and its own rows resolve null. Pre-persist clarification prompts carry no generation (they precede any plan message) and are invalidated by single-claim + expiry alone. Calendar registrations carry no generation and keep the existing version-based cleanup.</div>
+      </li>
+      <li><strong>Live week loop</strong> until <code>week_end</code> (the plan row's <code>week_end</code>) or until a fresh <code>/mealplan</code> supersedes the plan. <code>step.waitForEvent("telegram-reply", timeout = remaining)</code>, then dispatch on <code>interactionKind</code>:
+        <table><thead><tr><th>Event kind</th><th>Source</th><th>Branch (all sends/registers inside <code>step.do</code>)</th></tr></thead><tbody>
+          <tr><td><code>meal-feedback</code></td><td>inline-button callback, one-time</td><td><code>promptForFeedbackReply</code>: send force-reply prompt <code>"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."</code> via <code>step.do</code>; register one reply interaction <code>{ interactionId, version: &lt;planVersion&gt;, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: weekEnd, interactionGroup: "meal-planning", generation: &lt;planGeneration&gt; }</code>. Continue waiting.</td></tr>
+          <tr><td><code>meal-feedback-reply</code></td><td>force-reply text (replyTo the prompt)</td><td>The reply <strong>is a feedback submission</strong> (one <code>FeedbackItem { id, text }</code>). Run the revision session (step 2) with the item as context; persist via <code>promotePlanVersion</code> (feedback-driven → submission batch row written and linked, §4); send the new plan message with fresh buttons + register a new action set (step 5). Stale → <code>meal-stale-plan</code> notice. Continue waiting.</td></tr>
+          <tr><td><code>meal-update</code></td><td>inline-button callback, one-time</td><td>Run the revision session (step 2) with <code>basePlanVersion = interaction.version</code> (free-form — no submission batch). Success → send the new plan message with fresh buttons + register a new action set (step 5). Stale (<code>promotePlanVersion</code> returns <code>stale</code>) → <code>meal-stale-plan</code> notice. Continue waiting.</td></tr>
+          <tr><td><code>feedback-submit</code></td><td>iteration-2 mini-app API (future; event seam defined now)</td><td>Same as <code>meal-feedback-reply</code> with an arbitrary <code>items: FeedbackItem[]</code> submission. No store, session, or version-chain change is needed to add this producer.</td></tr>
+          <tr><td>timeout</td><td><code>waitForEvent</code> deadline = <code>week_end</code></td><td>End. The active plan stays in D1, approved by default.</td></tr>
+        </tbody></table>
+        <p><strong>Duplicate and stale handling</strong> (deterministic, no LLM):</p>
+        <ul>
+          <li>The router claims each interaction once by <code>consumed_update_id</code> / <code>callbackToken</code>; a Telegram retry of the same update id resolves to <code>{ interaction: null }</code> and is logged <code>ignored</code> at the webhook — a duplicate button tap or duplicate reply can never re-enter the loop.</li>
+          <li>A second, different reply to the same force-reply prompt resolves nothing (the only interaction bound to that <code>botMessageId</code> is already consumed, and the first reply already triggered its revision), so a stray second reply is ignored.</li>
+          <li>The <code>meal-feedback</code> button branch is one-shot by construction: the tap consumed its callback interaction, and the follow-up text arrives on the new <code>meal-feedback-reply</code> interaction.</li>
+          <li>Action interactions expire at <code>week_end</code>; the router drops expired rows and <code>waitForEvent</code> times out at the same deadline, so the instance ends cleanly and no interaction survives the week. A superseded instance idles to <code>week_end</code> — its rows already resolve null via generation, and idle Workflow instances cost nothing.</li>
+        </ul>
+      </li>
+    </ol>
+    <p>Routing (<code>telegram-webhook.ts</code>): kinds <code>meal-*</code> dispatch to <code>MEAL_PLANNING_WORKFLOW</code>; planning-conversation interactions carry the live instance id (sendEvent, like Calendar). <code>/mealplan</code> with no argument shows help. There is no <code>/plan</code> command (see §13.3).</p>
+
+    <h2>7. Telegram surface and rendering</h2>
+    <ul>
+      <li><code>/mealplan &lt;context&gt;</code> — start planning; the agent asks only for week-relevant facts (inventory/exceptions) and confirms them in plain language before proposing (spec §5.11).</li>
+      <li>Plan message: compact fridge-board-equivalent, phone-friendly, deterministic (<code>messages.ts</code>, pure function, snapshot-tested). Per day, five slot lines; dish + optional prep label + easy-buy marker; material trade-offs summarized from <code>policyOutcomes</code> (labels only, no essay). Video links shown only when a <code>found</code> result exists. (No pending-feedback indicator: feedback is consumed by the revision it triggers, so a plan message never has pending changes.)</li>
+      <li>Buttons on a plan message: <code>[Give feedback] [Update plan]</code> (no <code>[Done]</code> — approval is the default state). Both expire at the plan's <code>week_end</code>. <code>[Give feedback]</code> opens the interim Telegram force-reply surface for feedback submissions; the product feedback surface is the iteration-2 mini-app (<code>feedback-submit</code> event), and the Telegram prompt exists only to exercise the same pipeline until it lands.</li>
+      <li>Interaction kinds added to <code>INTERACTION_KIND</code>: <code>meal-clarification</code>, <code>meal-feedback</code>, <code>meal-feedback-reply</code>, <code>meal-update</code> (all <code>meal-*</code> prefixed for routing). No new plain-text routing kinds: feedback and clarifications arrive as force-reply replies (replyTo resolution), matching the Calendar pattern.</li>
+    </ul>
+
+    <h2>8. Optional recipe-video enrichment (<code>meal-planning/video.ts</code>)</h2>
+    <ul>
+      <li>Schema: <code>MealCell.recipeVideo?: { status: "found" | "no_suitable_video" | "not_attempted"; url?; title?; channel? }</code> (types.ts addition).</li>
+      <li>Behavior: for school-lunch and home-lunch cells only. When <code>YOUTUBE_API_KEY</code> is configured, query the YouTube Data API per the #60 spike design (search.list + videos.list, trusted-channel preference, <code>no_suitable_video</code> on miss), cache 24 h in Workers KV (<code>RECIPE_VIDEO_CACHE</code> namespace, keys <code>video:&lt;dish&gt;:&lt;slotId&gt;</code>) via per-key <code>expirationTtl</code> (86400 s) — expiry is built in, so there is no <code>expires_at</code> bookkeeping or cleanup sweep, and the free tier covers this workload. When the key is absent or any step fails, the cell records <code>no_suitable_video</code> (or <code>not_attempted</code>) and the plan proceeds unchanged. Hard ceiling on calls per plan; results never gate or alter the plan.</li>
+      <li>Iteration 1 keeps the adapter thin and flag-gated; the full #60 remaining work (server-side secret binding, rate limiting) is a follow-up.</li>
+    </ul>
+
+    <h2>9. Quality gate (#64 corpus)</h2>
+    <ul>
+      <li>Existing suites stay: <code>meal-planning-corpus.test.ts</code> (corpus health), <code>meal-planning-evaluation.test.ts</code> (candidate runner) — <code>pnpm test</code>.</li>
+      <li>New <code>meal-planning-agent.test.ts</code>: drives <code>runMealPlanningAgentSession</code> with a mocked provider over each corpus scenario's <code>pass: true</code> candidates → asserts <code>propose_plan</code> is accepted and the evaluation passes; for <code>behavior.expectsClarification</code> scenarios → asserts <code>needs_clarification</code> with the expected policy outcomes. This makes the corpus the documented gate for the planning loop (issue acceptance criterion 5).</li>
+      <li>New <code>meal-planning-store.test.ts</code>: one-active-per-chat constraint, <code>createActivePlan</code> atomicity — a second create supersedes the first (serialize-and-supersede), any statement failure rolls back the whole batch (no orphan version row, previous active stays), and the generation is bumped exactly once per created plan message, <code>promotePlanVersion</code> stale rejection asserting <strong>all four batch writes are unchanged</strong> (no version row, generation unmoved, <code>current_version</code> unmoved, no feedback batch row) — including the same-target race where a concurrent revision already committed the same <code>newVersion</code> (plus: success bumps the generation in the same transaction and, for a feedback-driven revision, writes the immutable submission batch row linked from the new version — and a free-form revision writes no batch row), insert-only versions, restart survival (fresh store instance reads the active plan).</li>
+      <li>Extended <code>interaction-router.test.ts</code> (existing): a registration carrying a <code>generation</code> removes the group's lower-generation unconsumed rows and is tagged with it; a row below the group's highest present generation resolves to <code>{ interaction: null }</code> (including rows that registered after the successor's cleanup ran — the late-registration case); registrations without a generation keep the legacy version-based cleanup and never resolve null on generation grounds.</li>
+      <li>New Telegram e2e (<code>meal-planning-telegram-workflow.integration.test.ts</code>): webhook → workflow → in-memory store → fake Telegram, covering: full happy path (context → plan v1 → [Give feedback] button → force-reply prompt → feedback text → feedback-triggered revision → plan v2 message with fresh buttons, and separately [Update plan] → free-form revision → plan v2), the feedback-driven revision's submission batch row linked from v2, stale revision rejection (base version &lt; current), retried callback and retried feedback delivery (router single-claim), <strong>mid-week replacement: a fresh <code>/mealplan</code> supersedes plan v1 while the instance is live — the old plan's action buttons and its pending force-reply prompt resolve nothing (generation invalidation) while the new plan's buttons work</strong>, the <strong>15-min clarification timeout</strong> (no reply → initial planning ends with a canceled notice and no plan; revision clarification timeout → previous version stands), <strong>week-end expiry</strong> (instance ends at <code>week_end</code>, buttons resolve nothing after), and restart survival (workflow state + D1 survive).</li>
+    </ul>
+
+    <h2>10. File changes</h2>
+    <h3>New</h3>
+    <ul>
+      <li><code>migrations/0001_init.sql</code> — D1 schema above, including the partial unique index <code>idx_meal_plan_one_active</code>. During <code>wrangler d1 migrations apply</code>, confirm the partial index is accepted; fallback if rejected: single active row per chat enforced by making <code>chat_id</code> the <code>meal_plan</code> PK and moving superseded plans to a <code>meal_plan_record</code> history table (same store interface, same invariants).</li>
+      <li><code>src/meal-planning/store.ts</code> — store interface + D1 impl + in-memory fake + seed profile; operations <code>loadOrCreateProfile</code>, <code>createActivePlan</code> (atomic supersede), <code>promotePlanVersion</code> (atomic version + generation bump; a feedback-driven revision also writes the immutable submission batch row linked from the version), <code>activePlan</code>.</li>
+      <li><code>src/meal-planning/workflow.ts</code> — <code>MealPlanningWorkflow</code> entrypoint.</li>
+      <li><code>src/meal-planning/agent-workflow.ts</code> — runner (session loop, persistence, live week loop, revision).</li>
+      <li><code>src/meal-planning/messages.ts</code> — help, <code>renderPlanMessage</code>, fixed notices.</li>
+      <li><code>src/meal-planning/video.ts</code> — optional enrichment.</li>
+      <li><code>src/agent/meal-planning.ts</code> — tool definitions + zod schemas.</li>
+      <li><code>src/agent/meal-planning-session.ts</code> — bounded session.</li>
+      <li><code>src/__tests__/meal-planning-store.test.ts</code>, <code>meal-planning-messages.test.ts</code>, <code>meal-planning-agent.test.ts</code>.</li>
+      <li><code>src/__integration__/meal-planning-telegram-workflow.integration.test.ts</code>.</li>
+    </ul>
+    <h3>Modified</h3>
+    <ul>
+      <li><code>wrangler.toml</code> — <code>[[d1_databases]]</code> binding <code>MEAL_PLANNING_DB</code>, <code>[[kv_namespaces]]</code> binding <code>RECIPE_VIDEO_CACHE</code>, <code>[[workflows]]</code> binding <code>MEAL_PLANNING_WORKFLOW</code>, optional <code>YOUTUBE_API_KEY</code> var.</li>
+      <li><code>src/core/types.ts</code> — <code>Env</code> additions (<code>MEAL_PLANNING_DB: D1Database</code>, <code>RECIPE_VIDEO_CACHE: KVNamespace</code>, <code>MEAL_PLANNING_WORKFLOW: Workflow</code>, <code>YOUTUBE_API_KEY?</code>), <code>INTERACTION_KIND</code> meal kinds.</li>
+      <li><code>src/triggers/telegram-webhook.ts</code> — <code>/mealplan</code> command; <code>meal-*</code> dispatch.</li>
+      <li><code>src/index.ts</code> — export <code>MealPlanningWorkflow</code>.</li>
+      <li><code>src/core/interaction-router.ts</code> — optional chat-scoped generation on group registrations: new nullable <code>generation</code> column (same ALTER pattern as <code>interaction_group</code>). A registration that carries <code>generation</code> (a number) tags its row with it and deletes the group's lower-generation unconsumed rows (replacing the version-based cleanup for that registration); <code>resolve</code> returns <code>{ interaction: null }</code> for a row whose generation is below the group's highest present generation (a <code>SELECT MAX(generation)</code> over the group's rows — no separate counter storage). Registrations without a generation are unchanged (Calendar keeps the version-based cleanup). The value itself is assigned by the meal-planning persistence batches in D1 (§4), not by the router.</li>
+      <li><code>src/core/interaction-router-client.ts</code> — <code>InteractionRegistration.generation?: number</code> (explicit plan-message generation; absent for Calendar).</li>
+      <li><code>src/__integration__/setup.ts</code> — fake router mirrors the generation tagging, the lower-generation cleanup, and the resolve-null check.</li>
+      <li><code>src/__tests__/interaction-router.test.ts</code> — generation behavior (see §9).</li>
+      <li><code>src/meal-planning/types.ts</code> — <code>MealCell.recipeVideo</code> (optional).</li>
+      <li><code>docs/architecture/architecture.yaml</code>, <code>data-and-state.md</code>, <code>modules.md</code>, <code>request-flows.md</code> — per ADR-001 (D1 store, meal-planning workflow module, Telegram commands).</li>
+    </ul>
+
+    <h2>11. Validation</h2>
+<pre><code>pnpm typecheck
+pnpm lint            # biome check src/
+pnpm run docs        # tools/require-jsdoc.mjs (JSDoc on all new exported functions)
+pnpm test            # unit: store, messages, agent, evaluator + corpus suites
+pnpm test:integration</code></pre>
+    <p><code>lefthook</code> pre-commit runs typecheck, lint, and both test suites. The plan commit itself is documentation-only and does not touch <code>src/</code>.</p>
+
+    <h2>12. Follow-ups (separate issues)</h2>
+    <ul>
+      <li>Mini-app feedback surface (iteration 2): <code>feedback-submit</code> API endpoint that sends the submission to the live instance; the immutable submission-batch contract, session, and version chain need no changes.</li>
+      <li>Profile-editing conversation (open product decision).</li>
+      <li>#60 remaining production work: YouTube secret binding, rate limiting, refresh policy (KV handles cache expiry itself).</li>
+      <li>D1 backup/export automation and read/write metrics (feasibility guardrails).</li>
+      <li>Durable usage metrics for all workflows (per-run outcome, failure reason, turn/tool-call counts; designed once, not per workflow) — backlog <code>agent-harness-fuc</code>.</li>
+    </ul>
+
+    <h2>13. Open questions</h2>
+    <p>None blocking. Notes for review:</p>
+    <ol>
+      <li>One workflow instance lives per chat-week (until <code>week_end</code> or supersede); idle instances are free on Cloudflare Workflows. A superseded instance is not signaled to end — it idles to <code>week_end</code> with its rows already generation-invalidated. Clarification replies expire after 15 min (<code>MEAL_CLARIFICATION_TTL_MS</code>); feedback prompts and action buttons expire at <code>week_end</code>.</li>
+      <li>Weekly inventory/exceptions live on the <code>meal_plan</code> row (week-scoped state, per spec §5.11); they expire when a new plan replaces the row.</li>
+      <li><strong>No <code>/plan</code> command</strong> (deliberate cut): this workflow is never shipped to users without the mini-app, so mid-week retrieval of the active plan is the iteration-2 mini-app's home view (<code>activePlan</code> store read, unchanged). Iteration-1 automated tests never needed the command — unit/integration suites assert the store and fake-Telegram messages directly, and manual QA can read D1 with <code>wrangler d1 execute</code>. Re-adding a text fallback later is a few lines in <code>telegram-webhook.ts</code> if a phone-scan use case ever appears.</li>
+    </ol>
+
+    <p class="foot">Source: <code>plans/school-day-meal-planning-iteration-1.md</code>. Based on <code>4e9cfcb</code> (approved in <code>issue-65-plan-review-verdict-4</code>); revised by the pre-implementation grilling session — default-approval plan lifecycle, one live instance per chat-week, feedback-submission → one revision with an immutable linked batch, 15-min clarification window, Workers KV video cache. Markdown remains the review/revision target; HTML is a faithful rendering.</p>
+  </body>
+</html>
