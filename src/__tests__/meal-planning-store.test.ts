@@ -220,6 +220,22 @@ describe("createInMemoryMealPlanningStore", () => {
     expect(profile.interactionGeneration).toBe(2)
   })
 
+  it("a cross-chat promotion (plan A id + chat B) is stale and changes neither plan nor either generation", async () => {
+    const store = createInMemoryMealPlanningStore()
+    await store.loadOrCreateProfile(CHAT)
+    await store.loadOrCreateProfile("chat-2")
+    await store.createActivePlan(createInput())
+
+    const cross = await store.promotePlanVersion(promoteInput({ chatId: "chat-2" }))
+    expect(cross).toEqual({ ok: false, reason: "stale" })
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(1)
+    expect(active?.version.version).toBe(1)
+    expect((await store.loadOrCreateProfile(CHAT)).interactionGeneration).toBe(1)
+    expect((await store.loadOrCreateProfile("chat-2")).interactionGeneration).toBe(0)
+  })
+
   it("an injected batch failure rolls back the whole create: no new plan, previous active stays, generation unmoved", async () => {
     const backing: InMemoryMealPlanningBacking = {
       profiles: new Map(),
@@ -386,6 +402,11 @@ function d1Count(db: DatabaseSync, sql: string, ...params: Array<string | number
   return Number((db.prepare(sql).get(...params) as { count: number }).count)
 }
 
+function d1Scalar(db: DatabaseSync, sql: string, ...params: Array<string | number | null>): unknown {
+  const row = db.prepare(sql).get(...params) as Record<string, unknown> | undefined
+  return row ? Object.values(row)[0] : null
+}
+
 describe("createMealPlanningStore (D1, real SQL)", () => {
   it("runs the migration and the happy path: seed → create v1 → promote v2 with batch → activePlan", async () => {
     const { store, db } = createD1Store()
@@ -481,6 +502,23 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+  })
+
+  it("a cross-chat promotion (plan A id + chat B) is stale and changes neither plan nor either generation", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    await store.loadOrCreateProfile("chat-2")
+    await store.createActivePlan(createInput())
+    expect(d1Scalar(db, "SELECT interaction_generation FROM meal_profile WHERE chat_id = ?", "chat-2")).toBe(0)
+
+    const cross = await store.promotePlanVersion(promoteInput({ chatId: "chat-2" }))
+    expect(cross).toEqual({ ok: false, reason: "stale" })
+
+    expect(await store.activePlan(CHAT)).toMatchObject({ plan: { currentVersion: 1 }, version: { version: 1 } })
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(0)
+    expect(d1Scalar(db, "SELECT interaction_generation FROM meal_profile WHERE chat_id = ?", CHAT)).toBe(1)
+    expect(d1Scalar(db, "SELECT interaction_generation FROM meal_profile WHERE chat_id = ?", "chat-2")).toBe(0)
   })
 
   it("serialize-and-supersede at the D1 level: a second create replaces the first, generation 1 then 2", async () => {
