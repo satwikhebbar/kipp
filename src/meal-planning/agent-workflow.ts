@@ -95,7 +95,12 @@ export async function runAgentCenteredMealPlanningWorkflow(
       text: `Current instant: ${new Date().toISOString()}\nTime zone: ${timezone}\nRequest: ${event.payload.requestText || "/mealplan"}`,
     },
   ]
-  const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: false })
+  const outcome = await runPlanningSession(env, step, event, {
+    context,
+    messages,
+    isRevision: false,
+    generation: profile.interactionGeneration,
+  })
   if (outcome?.kind !== "proposed") return
 
   const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
@@ -139,7 +144,13 @@ async function runPlanningSession(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
-  options: { context: MealPlanContext; messages: ToolConversationMessage[]; isRevision: boolean },
+  options: {
+    context: MealPlanContext
+    messages: ToolConversationMessage[]
+    isRevision: boolean
+    /** Chat-scoped plan-message generation this session's prompts belong to; a superseding plan invalidates them (§6). */
+    generation: number
+  },
 ): Promise<PlanningOutcome | null> {
   const sessionDeadline = Date.now() + MEAL_PLANNING_TTL_MS
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
@@ -164,7 +175,7 @@ async function runPlanningSession(
     }
     const terminal = session.terminal
     if (terminal.kind === "needs_clarification") {
-      const reply = await promptForClarification(env, step, event, turn, terminal.message)
+      const reply = await promptForClarification(env, step, event, turn, terminal.message, options.generation)
       if (!reply) {
         await notify(
           env,
@@ -190,6 +201,7 @@ async function promptForClarification(
   event: WorkflowEvent<MealPlanningWorkflowParams>,
   turn: number,
   message: string,
+  generation: number,
 ): Promise<string | null> {
   const chatId = event.payload.chatId
   const interactionId = crypto.randomUUID()
@@ -208,6 +220,7 @@ async function promptForClarification(
       botMessageId: sent.messageId,
       expiresAt: Date.now() + MEAL_CLARIFICATION_TTL_MS,
       interactionGroup: MEAL_PLANNING_GROUP,
+      generation,
     } satisfies InteractionRegistration)
   })
   const deadline = Date.now() + MEAL_CLARIFICATION_TTL_MS
@@ -319,7 +332,7 @@ async function liveWeekLoop(
       if (!submission) continue
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) continue
-      const promotedGeneration = await runRevision(env, step, event, store, profile, active, submission)
+      const promotedGeneration = await runRevision(env, step, event, store, profile, active, submission, generation)
       if (promotedGeneration !== null) generation = promotedGeneration
       continue
     }
@@ -351,6 +364,7 @@ async function runRevision(
   profile: StoredMealProfile,
   active: ActivePlanRecord,
   submission: Submission,
+  generation: number,
 ): Promise<number | null> {
   const context: MealPlanContext = {
     schedule: profile.schedule,
@@ -368,7 +382,7 @@ async function runRevision(
       text: `Current instant: ${new Date().toISOString()}\nTime zone: ${active.plan.timezone}\nRevision feedback: ${submission.items.map((item) => item.text).join(" ")}`,
     },
   ]
-  const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true })
+  const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true, generation })
   if (outcome?.kind !== "proposed") return null
   const propose = outcome.propose
   if (isNoChangeCandidate(propose.candidate, active.version.candidate)) {
