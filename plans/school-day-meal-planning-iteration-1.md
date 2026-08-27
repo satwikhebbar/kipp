@@ -120,7 +120,10 @@ iteration-2 mini-app reads the same `activePlan` store contract).
 One database `MEAL_PLANNING_DB` (`d1_databases` binding), migration
 `migrations/0001_init.sql`. All JSON columns hold normalized structured data
 per `src/meal-planning/types.ts`; no transcripts or raw provider text are
-stored (privacy rule inherited from Calendar).
+stored (privacy rule inherited from Calendar). All timestamps are ISO-8601
+UTC at fixed precision (`created_at`, `updated_at`, `week_start`,
+`week_end`); `week_end > ?` comparisons are lexical, so writers must emit the
+identical format.
 
 ```sql
 -- Household profile (single-bot: one row per Telegram chat)
@@ -323,7 +326,10 @@ For revisions, the context carries the submitted `FeedbackItem[]`: an item
 with a cell `id` is scoped to that cell (the revision must address it there —
 the coverage validation on `propose_plan` requires every item be represented);
 an unbound item (iteration-1 Telegram text) is interpreted against the plan as
-a whole.
+a whole. Feedback is **plan-scoped** in iteration 1: a revision never updates
+the profile or custom policies ("we don't eat paneer anymore" fixes the week
+only). Profile/policy learning waits for Kipp's learning/memory work (the
+existing "profile-editing conversation" follow-up).
 
 Unlike Calendar, no opaque plan ledger is needed: the write target is our own
 D1 store and the evaluator is pure/replayable, so `propose_plan` carries the
@@ -359,7 +365,11 @@ drives the real path with real text (§13.3).
    interaction):
    - Build `MealPlanContext` (profile, custom policies, weekly inventory/
      exceptions from plan row or conversation, recent plan, session kind,
-     submitted feedback items when a revision is feedback-driven).
+     submitted feedback items when a revision is feedback-driven). For
+     revisions, the context marks elapsed days (before today) as consumed:
+     the agent keeps their dishes unchanged unless the submitted feedback
+     explicitly targets them, and applies changes from today onward
+     (prompt-level instruction, exercised in the corpus).
    - Run `runMealPlanningAgentSession` in a `step.do`.
    - `needs_clarification` → `promptForReply` (force-reply, kind
      `meal-clarification`, registered **without** a generation — it precedes
@@ -476,7 +486,16 @@ drives the real path with real text (§13.3).
       the instance, where the session's interactionId-filtered wait discards
       it (step 2) — the tap is silently dropped; the parent re-taps after the
       new plan message lands. The window is bounded by the 15-min
-      clarification / 30-min session TTL.
+      clarification / 30-min session TTL. The same applies to a **reply** to a
+      pending feedback prompt that lands mid-session: it is consumed and
+      discarded, and the parent cannot re-reply (the router bound one
+      interaction to that prompt's `botMessageId`, already consumed — a second
+      reply resolves null); they re-tap `[Give feedback]` for a fresh prompt
+      and re-type.
+   - Expired (`week_end` passed) or generation-invalidated buttons resolve
+      null silently: the webhook answers the callback (spinner clears) and
+      nothing else happens — no notice. The actionable surface is the newest
+      plan message or a fresh `/mealplan`.
    - Action interactions expire at `week_end`; the router drops expired rows
       and `waitForEvent` times out at the same deadline, so the instance ends
       cleanly and no interaction survives the week. A superseded instance
@@ -559,7 +578,16 @@ messageId } }` to that instance (coercion stays in the workflow; the event
 type is a transport channel, the payload discriminates — step 6). This slots
 in before the "Unknown command" reply — slash-prefixed
 text still short-circuits to command handling, so a bare typo becomes
-feedback only when an active plan exists (intended). Prompt
+feedback only when an active plan exists (intended). When the active-plan
+lookup returns nothing, a second lookup without the `week_end > now` guard
+distinguishes "no plan at all" from "the plan ended": if an active row exists
+whose `week_end` has passed, the webhook replies "This week's plan has ended —
+run /mealplan for the next week" instead of "Unknown command" (the stray text
+is not captured — the parent restates it in the next `/mealplan` context).
+Feedback that names days of a superseded/previous week is accepted as-is and
+delivered to the active plan's instance; the session context includes the
+active plan's days, so the agent can clarify if the text clearly concerns the
+old week (accepted ambiguity, per the one-active-plan ruling). Prompt
 lifetimes bound the switch: meal prompts (clarification, feedback reply) are
 short-lived at the interaction lifetime (15 min) so they claim plain text only
 while the parent is actively using them; the `[Give feedback]` button stays
@@ -572,6 +600,9 @@ submissions (spec §8.1 — pending edit, see §13 note 4).
 - `/mealplan <context>` — start planning; the agent asks only for
   week-relevant facts (inventory/exceptions) and confirms them in plain
   language before proposing (spec §5.11).
+- Help (`/mealplan` with no argument): states the week default (Mon–Wed →
+  current week; Thu–Sun → next week) and the three overrides (`this week`,
+  `next week`, a date).
 - Plan message: compact fridge-board-equivalent, phone-friendly, deterministic
   (`messages.ts`, pure function, snapshot-tested). The header states the
   school week ("School week of Mon Sep 7 – Sat Sep 12"). Per day, five slot
@@ -775,6 +806,9 @@ commit itself is documentation-only and does not touch `src/`.
 - #60 remaining production work: YouTube secret binding, rate limiting,
   refresh policy (KV handles cache expiry itself).
 - D1 backup/export automation and read/write metrics (feasibility guardrails).
+- Plan-vs-actual recording: the weekly grid is a plan, not an actuals ledger —
+  out of scope for iterations 1–2 (revisit only if the mini-app's grid is
+  later read as actuals tracking).
 - Durable usage metrics for all workflows (per-run outcome, failure reason,
   turn/tool-call counts; designed once, not per workflow) — backlog
   `agent-harness-fuc`.
