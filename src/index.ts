@@ -3,6 +3,7 @@ import { CalendarWorkflow } from "./calendar/workflow"
 import { createTokenVault } from "./core/token-vault-client"
 import type { Env } from "./core/types"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "./integrations/telegram"
+import { MealPlanningWorkflow } from "./meal-planning/workflow"
 import { HTTP_STATUS } from "./runtime/http"
 import { logRuntime } from "./runtime/logging"
 import { userFacingFailureMessage } from "./runtime/user-failures"
@@ -18,7 +19,7 @@ export { IdeaIngestDO } from "./core/idea-ingest"
 export { InteractionRouterDO } from "./core/interaction-router"
 export { TokenVaultDO } from "./core/token-vault"
 export { PipelineWorkflow } from "./linkedin/workflow"
-export { CalendarWorkflow }
+export { CalendarWorkflow, MealPlanningWorkflow }
 
 const app = new Hono<{ Bindings: Env }>()
 

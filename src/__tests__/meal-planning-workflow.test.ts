@@ -1,0 +1,278 @@
+import type { WorkflowEvent } from "cloudflare:workers"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import type { Env } from "../core/types"
+import { type MealPlanningLiveEvent, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
+import { createMealPlanningStore } from "../meal-planning/store"
+import type { MealCell, MealGrid } from "../meal-planning/types"
+import { resolvePlanningWeek } from "../meal-planning/week"
+import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
+import { createD1TestDb, d1Count } from "./d1-test-db"
+
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+const SLOT_COOK: Record<string, number> = { breakfast: 15, snack1: 0, snack2: 0, "school-lunch": 20, "home-lunch": 20 }
+const POLICY_IDS = [
+  "snack-policy",
+  "equipment-gap",
+  "packing-capacity",
+  "nutrition-target-fruit",
+  "nutrition-target-nuts",
+]
+const CHAT = "chat-1"
+const TZ = "Asia/Kolkata"
+
+function cell(dish: string, items: string[], slot: string): MealCell {
+  return { dish, vegetarian: true, items, cookMinutes: SLOT_COOK[slot], priorNightPrep: false }
+}
+
+function seedCandidate(override?: { day: string; slot: string; cell: MealCell }): {
+  grid: MealGrid
+  easyBuys: string[]
+  policyOutcomes: Record<string, { outcome: string; rationale: string }>
+} {
+  const grid: MealGrid = {}
+  for (const day of DAYS) {
+    grid[day] = {}
+    for (const slot of Object.keys(SLOT_COOK)) {
+      grid[day][slot] = cell(
+        "paratha",
+        slot === "school-lunch" || slot === "home-lunch" ? ["rice"] : ["wheat flour"],
+        slot,
+      )
+    }
+  }
+  if (override) grid[override.day][override.slot] = override.cell
+  return {
+    grid,
+    easyBuys: [],
+    policyOutcomes: Object.fromEntries(POLICY_IDS.map((id) => [id, { outcome: "satisfied", rationale: "ok" }])),
+  }
+}
+
+function proposeInput(candidate: unknown, feedbackItems?: unknown) {
+  return {
+    candidate,
+    weeklyInventory: { items: [], notes: [] },
+    weeklyExceptions: { items: [] },
+    ...(feedbackItems ? { feedbackItems } : {}),
+  }
+}
+
+function deepseekToolCall(name: string, input: unknown) {
+  return { id: name, type: "function", function: { name, arguments: JSON.stringify(input) } }
+}
+
+function deepseekResponse(toolCalls: Array<{ name: string; input: unknown }>) {
+  return {
+    choices: [
+      { message: { content: "", tool_calls: toolCalls.map((call) => deepseekToolCall(call.name, call.input)) } },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  }
+}
+
+function proseResponse() {
+  return {
+    choices: [{ message: { content: "I will plan the week." } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  }
+}
+
+function jsonResponse(body: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as unknown as Response
+}
+
+function stubNetwork(deepseekResponses: unknown[]) {
+  const telegramMessages: Array<{ chatId: string; text: string; replyMarkup?: unknown }> = []
+  let messageId = 1000
+  let llmIndex = 0
+  const fallback = proseResponse()
+  const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = String(url)
+    if (urlStr.includes("api.telegram.org")) {
+      const body = JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>
+      telegramMessages.push({
+        chatId: String(body.chat_id),
+        text: String(body.text),
+        replyMarkup: body.reply_markup,
+      })
+      return jsonResponse({ ok: true, result: { message_id: messageId++ } })
+    }
+    if (urlStr.includes("api.deepseek.com")) {
+      const next = deepseekResponses[llmIndex] ?? fallback
+      llmIndex += 1
+      return jsonResponse(next)
+    }
+    throw new Error(`unexpected fetch ${urlStr}`)
+  })
+  vi.stubGlobal("fetch", fetchMock)
+  return { telegramMessages }
+}
+
+function fakeRouter() {
+  const registrations: Array<Record<string, unknown>> = []
+  const namespace = {
+    idFromName: (name: string) => name as never,
+    get: (_id: unknown) => ({
+      fetch: async (url: string | Request, init?: RequestInit) => {
+        const path = new URL(typeof url === "string" ? url : url.url).pathname
+        const body = JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>
+        if (path === "/register") registrations.push(body)
+        return jsonResponse({ ok: true })
+      },
+    }),
+  } as unknown as DurableObjectNamespace
+  return { namespace, registrations }
+}
+
+function createFakeStep(events: MealPlanningLiveEvent[], endTime: number) {
+  const queue = [...events]
+  return {
+    do: vi.fn(async (_name: string, fn: () => unknown) => fn()),
+    waitForEvent: vi.fn(async () => {
+      const next = queue.shift()
+      if (next) return { type: "event" as const, payload: next }
+      // Advance the mocked clock to week end so the live loop's `week_end`
+      // check terminates on the next iteration.
+      vi.setSystemTime(endTime)
+      return { type: "timeout" as const }
+    }),
+    sleep: vi.fn(),
+    sleepUntil: vi.fn(),
+  }
+}
+
+function mealEvent(invokedAtMs: number): WorkflowEvent<MealPlanningWorkflowParams> {
+  return {
+    instanceId: "wf-meal-1",
+    payload: { chatId: CHAT, telegramMessageId: 10, requestText: "", invokedAtMs },
+  } as unknown as WorkflowEvent<MealPlanningWorkflowParams>
+}
+
+function makeEnv(namespace: DurableObjectNamespace, d1: D1Database): Env {
+  return {
+    TELEGRAM_BOT_TOKEN: "bot:token",
+    LLM_API_KEY: "key",
+    LLM_PROVIDER: "deepseek",
+    LLM_MODEL: "deepseek-chat",
+    LLM_MAX_RETRIES: "3",
+    INTERACTION_ROUTER: namespace,
+    MEAL_PLANNING_DB: d1,
+    TIMEZONE: TZ,
+    LOG_LEVEL: "info",
+  } as unknown as Env
+}
+
+describe("runAgentCenteredMealPlanningWorkflow", () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it("persists plan v1, sends the plan message with a feedback button, and parks until week end", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace, registrations } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const store = createMealPlanningStore(d1)
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.weekStart).toBe(week.weekStart)
+    expect(active?.plan.weekEnd).toBe(week.weekEnd)
+    expect(active?.plan.instanceId).toBe("wf-meal-1")
+    expect(active?.version.version).toBe(1)
+    expect(active?.version.requestKind).toBe("initial_plan")
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+
+    const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))
+    expect(planMessage).toBeTruthy()
+    expect(planMessage?.replyMarkup).toBeTruthy()
+    expect(registrations).toContainEqual(
+      expect.objectContaining({
+        kind: "meal-feedback",
+        version: 1,
+        workflowId: "wf-meal-1",
+        interactionGroup: "meal-planning",
+      }),
+    )
+  })
+
+  it("turns a feedback reply into a version-2 revision with an immutable submission batch", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace, registrations } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("idli", ["rice"], "snack1") })
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "Mon snack: prefer idli",
+          messageId: 200,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([
+        {
+          name: "propose_plan",
+          input: proposeInput(revised, [
+            { id: "tg-200", text: "Mon snack: prefer idli", scope: { day: "Mon", slot: "snack1" } },
+          ]),
+        },
+      ]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const store = createMealPlanningStore(d1)
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.version).toBe(2)
+    expect(active?.version.requestKind).toBe("revision")
+    expect(active?.version.feedbackBatchId).toBe(`${active?.plan.planId}:v2`)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(telegramMessages.filter((message) => message.text.includes("School week of")).length).toBe(2)
+    expect(registrations.filter((registration) => registration.kind === "meal-feedback").length).toBe(2)
+  })
+
+  it("sends meal-agent-unavailable and persists nothing when the agent fails", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const { telegramMessages } = stubNetwork([proseResponse(), proseResponse(), proseResponse()])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const store = createMealPlanningStore(d1)
+    expect(await store.activePlan(CHAT)).toBeNull()
+    expect(telegramMessages.some((message) => message.text.includes("couldn't reach"))).toBe(true)
+  })
+})

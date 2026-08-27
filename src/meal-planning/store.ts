@@ -371,7 +371,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, created_at)
-             SELECT ?, 1, ?, ?, 'initial', NULL, NULL, ?, ?
+             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?
              WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(

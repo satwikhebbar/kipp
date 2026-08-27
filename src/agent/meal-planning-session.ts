@@ -1,0 +1,180 @@
+import { evaluateMealPlan } from "../meal-planning/evaluation"
+import type {
+  FailureCode,
+  FeedbackItem,
+  MealPlanCandidate,
+  MealPlanContext,
+  MealPlanEvaluation,
+  WeeklyExceptions,
+  WeeklyInventory,
+} from "../meal-planning/types"
+import type { ToolConversationMessage, ToolProviderClient } from "../providers"
+import { type AgentSessionResult, persistableAgentMessages } from "../runtime/agent-session"
+import { runTools } from "../runtime/tool-runner"
+import { ToolHandlerError, type ToolRegistry } from "../runtime/tools"
+import {
+  acceptedOutputSchema,
+  createEvaluateMealPlanTool,
+  MEAL_PLANNING_TOOL,
+  needsClarificationInputSchema,
+  proposePlanInputSchema,
+} from "./meal-planning"
+
+const MEAL_PLANNING_AGENT_PROMPT = `You are Kipp's bounded meal-planning agent. Interpret the parent's request and use only the provided actions.
+
+Build one complete Monday–Saturday school-week plan. School meals are vegetarian by constant; packed snacks are dry and not cooked that morning. Respect hard dietary exclusions, unavailable inventory, and the household's operating limits. For every relevant persistent custom policy, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale; never claim certainty when a policy cannot be interpreted confidently.
+
+When the request is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole.
+
+Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.`
+
+export interface MealPlanningAgentSessionOptions {
+  context: MealPlanContext
+}
+
+export type MealPlanningTerminalOutcome =
+  | {
+      kind: "propose_plan"
+      candidate: MealPlanCandidate
+      weeklyInventory: WeeklyInventory
+      weeklyExceptions: WeeklyExceptions
+      feedbackItems?: FeedbackItem[]
+      evaluation: MealPlanEvaluation
+    }
+  | { kind: "needs_clarification"; message: string; reasonCodes: FailureCode[] }
+
+export type MealPlanningAgentSessionResult = AgentSessionResult<MealPlanningTerminalOutcome>
+
+/** Runs one capped meal-planning agent session with deterministic evaluator-gated persistence handoffs. */
+export async function runMealPlanningAgentSession(
+  provider: ToolProviderClient,
+  initialMessages: ToolConversationMessage[],
+  options: MealPlanningAgentSessionOptions,
+): Promise<MealPlanningAgentSessionResult> {
+  let terminal: MealPlanningTerminalOutcome | null = null
+  let latestEvaluation: MealPlanEvaluation | null = null
+  const evaluationTool = createEvaluateMealPlanTool(options.context)
+  const registry: ToolRegistry = {
+    [MEAL_PLANNING_TOOL.EVALUATE]: {
+      ...evaluationTool,
+      handler: async (candidate) => {
+        const result = (await evaluationTool.handler(candidate)) as MealPlanEvaluation
+        latestEvaluation = result
+        return result
+      },
+    },
+    [MEAL_PLANNING_TOOL.PROPOSE]: {
+      name: MEAL_PLANNING_TOOL.PROPOSE,
+      description: "Hand the evaluated candidate to the workflow for deterministic re-validation and persistence.",
+      input: proposePlanInputSchema,
+      output: acceptedOutputSchema,
+      privacy: "private",
+      batching: "isolated",
+      handler: async (input) => {
+        const context = {
+          ...options.context,
+          weeklyInventory: input.weeklyInventory,
+          weeklyExceptions: input.weeklyExceptions,
+        }
+        // A revision's evaluation uses the agent's scoped interpretation of the
+        // feedback (the submitted items, when present) so `unscoped_cell_changed`
+        // can be satisfied for the cells the feedback targets.
+        const evaluationContext = input.feedbackItems?.length
+          ? { ...context, feedbackItems: input.feedbackItems }
+          : context
+        const evaluation = evaluateMealPlan(input.candidate, evaluationContext)
+        if (!evaluation.pass) throw new ToolHandlerError("proposed plan did not pass evaluation", "invalid-state")
+        enforceFeedbackCoverage(options.context.feedbackItems ?? [], input.feedbackItems ?? [], input.candidate)
+        terminal = {
+          kind: "propose_plan",
+          candidate: input.candidate,
+          weeklyInventory: input.weeklyInventory,
+          weeklyExceptions: input.weeklyExceptions,
+          ...(input.feedbackItems?.length ? { feedbackItems: input.feedbackItems } : {}),
+          evaluation,
+        }
+        return { accepted: true as const }
+      },
+    },
+    [MEAL_PLANNING_TOOL.CLARIFY]: {
+      name: MEAL_PLANNING_TOOL.CLARIFY,
+      description: "Return one concise human-facing question when more information is needed to plan confidently.",
+      input: needsClarificationInputSchema,
+      output: acceptedOutputSchema,
+      privacy: "private",
+      batching: "isolated",
+      handler: async ({ message, reasonCodes }) => {
+        enforceCompleteClarification(latestEvaluation, reasonCodes, message, options.context.feedbackItems ?? [])
+        terminal = { kind: "needs_clarification", message, reasonCodes }
+        return { accepted: true as const }
+      },
+    },
+  }
+  const initialAllowedTools = [MEAL_PLANNING_TOOL.EVALUATE, MEAL_PLANNING_TOOL.CLARIFY]
+  const terminalTools = [MEAL_PLANNING_TOOL.PROPOSE, MEAL_PLANNING_TOOL.CLARIFY]
+  const result = await runTools(
+    provider,
+    registry,
+    {
+      allowedTools: initialAllowedTools,
+      handoffTools: terminalTools,
+      requireHandoff: true,
+      toolChoice: "required",
+      reasoning: "disabled",
+      nextAllowedTools: (executedTools) =>
+        executedTools.includes(MEAL_PLANNING_TOOL.EVALUATE) ? terminalTools : initialAllowedTools,
+    },
+    initialMessages[0]?.role === "system"
+      ? initialMessages
+      : [{ role: "system", text: MEAL_PLANNING_AGENT_PROMPT }, ...initialMessages],
+  )
+  return {
+    terminal: result.completed ? terminal : null,
+    messages: persistableAgentMessages(result.messages),
+    completed: result.completed,
+    ...(result.failureReason ? { failureReason: result.failureReason } : {}),
+    providerTurns: result.providerTurns,
+    toolCallCount: result.toolCallCount,
+    toolNames: result.toolNames,
+    toolExecutions: result.toolExecutions,
+    usage: result.usage,
+  }
+}
+
+/**
+ * Enforces that every raw feedback item driving a revision is represented in
+ * the submitted payload or an outcome rationale — the session-side mirror of
+ * the evaluator's `unaddressed_feedback`.
+ */
+function enforceFeedbackCoverage(
+  rawFeedback: FeedbackItem[],
+  submittedFeedback: FeedbackItem[],
+  candidate: MealPlanCandidate,
+): void {
+  const submittedIds = new Set(submittedFeedback.map((item) => item.id))
+  for (const raw of rawFeedback) {
+    const inSubmitted = submittedIds.has(raw.id)
+    const inRationale = Object.values(candidate.policyOutcomes).some(
+      (outcome) => outcome.rationale.includes(raw.id) || outcome.rationale.includes(raw.text),
+    )
+    if (!inSubmitted && !inRationale)
+      throw new ToolHandlerError("proposed plan did not address all submitted feedback", "invalid-state")
+  }
+}
+
+/** Ensures the clarification surfaces every evaluator failure and never exposes opaque feedback ids. */
+function enforceCompleteClarification(
+  evaluation: MealPlanEvaluation | null,
+  reasonCodes: FailureCode[],
+  message: string,
+  feedbackItems: FeedbackItem[],
+): void {
+  if (evaluation) {
+    const submitted = new Set(reasonCodes)
+    if (evaluation.failures.some((failure) => !submitted.has(failure.code)))
+      throw new ToolHandlerError("planning failures were omitted from the clarification", "invalid-state")
+  }
+  const opaqueIds = feedbackItems.map((item) => item.id)
+  if (opaqueIds.some((id) => message.includes(id)))
+    throw new ToolHandlerError("opaque feedback id was exposed in user-facing text", "invalid-state")
+}

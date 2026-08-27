@@ -40,6 +40,20 @@ binding = "CALENDAR_WORKFLOW"
 name = "kipp-calendar"
 class_name = "CalendarWorkflow"
 
+[[workflows]]
+binding = "MEAL_PLANNING_WORKFLOW"
+name = "kipp-meal-planning"
+class_name = "MealPlanningWorkflow"
+
+# D1 database for the meal-planning workflow. Apply the schema with:
+#   wrangler d1 migrations apply <DATABASE> --config wrangler.toml
+# (database_id/database_name are set in the deployed/environment config where
+# the database is provisioned; local dev uses wrangler's default local DB.)
+# [[d1_databases]]
+# binding = "MEAL_PLANNING_DB"
+# database_name = "meal-planning"
+# database_id = "<provisioned-database-id>"
+
 # Substack RSS poll — daily at 9:00 UTC
 # Token check — Monday 8:00 UTC
 # Cadence check — Monday 9:00 UTC

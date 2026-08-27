@@ -1,6 +1,8 @@
 export interface Env {
   PIPELINE_WORKFLOW: Workflow
   CALENDAR_WORKFLOW?: Workflow
+  MEAL_PLANNING_WORKFLOW?: Workflow
+  MEAL_PLANNING_DB?: D1Database
   TOKEN_VAULT: DurableObjectNamespace
   INTERACTION_ROUTER: DurableObjectNamespace
   IDEA_INGEST: DurableObjectNamespace
@@ -121,6 +123,10 @@ export const INTERACTION_KIND = {
   CALENDAR_EDIT_FEEDBACK: "calendar-edit-feedback",
   CALENDAR_RETRY: "calendar-retry",
   CALENDAR_CANCEL: "calendar-cancel",
+  MEAL_CLARIFICATION: "meal-clarification",
+  MEAL_FEEDBACK: "meal-feedback",
+  MEAL_FEEDBACK_REPLY: "meal-feedback-reply",
+  MEAL_FEEDBACK_SUBMISSION: "meal-feedback-submission",
 } as const
 
 export type WorkflowInteractionKind = (typeof INTERACTION_KIND)[keyof typeof INTERACTION_KIND]
