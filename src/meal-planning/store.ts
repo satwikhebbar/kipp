@@ -435,7 +435,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, created_at)
              SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan
-             WHERE plan_id = ? AND current_version = ? AND status = 'active'
+             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
@@ -448,6 +448,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             JSON.stringify(input.video ?? {}),
             now,
             input.planId,
+            input.chatId,
             input.baseVersion,
             input.chatId,
           ),
@@ -455,9 +456,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ?
              WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan
-                                           WHERE plan_id = ? AND current_version = ? AND status = 'active')`,
+                                           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active')`,
           )
-          .bind(now, input.chatId, input.planId, input.baseVersion),
+          .bind(now, input.chatId, input.planId, input.chatId, input.baseVersion),
         db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
       ]
       if (input.inventory) {
@@ -465,7 +466,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           db
             .prepare(
               `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
-               WHERE plan_id = ? AND current_version = ? AND status = 'active'
+               WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
                  AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
             )
             .bind(
@@ -473,6 +474,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
               JSON.stringify(input.inventory.weeklyExceptions),
               now,
               input.planId,
+              input.chatId,
               input.baseVersion,
               input.chatId,
             ),
@@ -482,15 +484,15 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         db
           .prepare(
             `UPDATE meal_plan SET current_version = ?, updated_at = ?
-             WHERE plan_id = ? AND current_version = ? AND status = 'active'
+             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
-          .bind(newVersion, now, input.planId, input.baseVersion, input.chatId),
+          .bind(newVersion, now, input.planId, input.chatId, input.baseVersion, input.chatId),
         db
           .prepare(
             `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at)
              SELECT ?, plan_id, ?, ?, ? FROM meal_plan
-             WHERE plan_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL
+             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
@@ -499,6 +501,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             JSON.stringify(input.feedbackBatch?.items ?? []),
             now,
             input.planId,
+            input.chatId,
             newVersion,
             batchId,
             input.chatId,
@@ -669,7 +672,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     async promotePlanVersion(input) {
       throwIfFailing("promotePlanVersion")
       const plan = backing.plans.get(input.planId)
-      const stale = plan?.status !== "active" || plan.currentVersion !== input.baseVersion
+      const stale =
+        plan?.status !== "active" || plan.chatId !== input.chatId || plan.currentVersion !== input.baseVersion
       if (stale) return { ok: false as const, reason: "stale" as const }
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
