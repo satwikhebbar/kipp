@@ -291,31 +291,14 @@ function makeVersionRecord(
 export function createMealPlanningStore(db: D1Database): MealPlanningStore {
   return {
     async loadOrCreateProfile(chatId) {
-      const row = await db
-        .prepare(
-          `SELECT chat_id, profile_json, custom_policies_json, schedule_json, location_json,
-                  interaction_generation, created_at, updated_at
-           FROM meal_profile WHERE chat_id = ?`,
-        )
-        .bind(chatId)
-        .first()
-      if (row) {
-        return {
-          chatId: String(row.chat_id),
-          profile: parseJson<MealProfile>(String(row.profile_json), SEED_PROFILE),
-          customPolicies: parseJson<CustomPolicy[]>(String(row.custom_policies_json), []),
-          schedule: parseJson<MealSchedule>(String(row.schedule_json), SEED_SCHEDULE),
-          location: parseJson<StoredLocation | null>(String(row.location_json), null),
-          interactionGeneration: Number(row.interaction_generation),
-          createdAt: String(row.created_at),
-          updatedAt: String(row.updated_at),
-        }
-      }
       const now = nowIso()
+      // Atomic insert-if-absent: `INSERT OR IGNORE` is one statement, so two
+      // concurrent first requests for the same chat cannot both INSERT (one
+      // no-ops); the row is always created exactly once, then read back.
       await db
         .prepare(
-          `INSERT INTO meal_profile (chat_id, profile_json, custom_policies_json, schedule_json,
-                                     location_json, interaction_generation, version, created_at, updated_at)
+          `INSERT OR IGNORE INTO meal_profile (chat_id, profile_json, custom_policies_json, schedule_json,
+                                               location_json, interaction_generation, version, created_at, updated_at)
            VALUES (?, ?, ?, ?, NULL, 0, 1, ?, ?)`,
         )
         .bind(
@@ -327,20 +310,33 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           now,
         )
         .run()
+      const row = await db
+        .prepare(
+          `SELECT chat_id, profile_json, custom_policies_json, schedule_json, location_json,
+                  interaction_generation, created_at, updated_at
+           FROM meal_profile WHERE chat_id = ?`,
+        )
+        .bind(chatId)
+        .first()
       return {
-        chatId,
-        profile: SEED_PROFILE,
-        customPolicies: SEED_CUSTOM_POLICIES,
-        schedule: SEED_SCHEDULE,
-        location: null,
-        interactionGeneration: 0,
-        createdAt: now,
-        updatedAt: now,
+        chatId: String(row?.chat_id),
+        profile: parseJson<MealProfile>(String(row?.profile_json), SEED_PROFILE),
+        customPolicies: parseJson<CustomPolicy[]>(String(row?.custom_policies_json), []),
+        schedule: parseJson<MealSchedule>(String(row?.schedule_json), SEED_SCHEDULE),
+        location: parseJson<StoredLocation | null>(String(row?.location_json), null),
+        interactionGeneration: Number(row?.interaction_generation),
+        createdAt: String(row?.created_at),
+        updatedAt: String(row?.updated_at),
       }
     },
 
     async createActivePlan(input) {
       const now = nowIso()
+      // The plan/version inserts are guarded on the profile row existing, so a
+      // missing profile (a programming error — the workflow always calls
+      // loadOrCreateProfile first) makes the whole batch write nothing; the
+      // zero-row generation bump below turns that into an atomic failure
+      // instead of a committed plan with `generation: NaN`.
       const results = await db.batch([
         db
           .prepare("UPDATE meal_plan SET status = 'replaced', updated_at = ? WHERE chat_id = ? AND status = 'active'")
@@ -350,7 +346,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status,
                                     current_version, weekly_inventory_json, weekly_exceptions_json,
                                     created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?)`,
+             SELECT ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?
+             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
             input.planId,
@@ -363,12 +360,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             JSON.stringify(input.weeklyExceptions),
             now,
             now,
+            input.chatId,
           ),
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, created_at)
-             VALUES (?, 1, ?, ?, 'initial', NULL, NULL, ?, ?)`,
+             SELECT ?, 1, ?, ?, 'initial', NULL, NULL, ?, ?
+             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
             input.planId,
@@ -376,6 +375,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             JSON.stringify(input.evaluation),
             JSON.stringify(input.video ?? {}),
             now,
+            input.chatId,
           ),
         db
           .prepare(
@@ -384,6 +384,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .bind(now, input.chatId),
         db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
       ])
+      const generationChanged = Number((results[3] as { meta: { changes?: number } }).meta.changes) === 1
+      if (!generationChanged) {
+        throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      }
       const previousReplaced = Number((results[0] as { meta: { changes?: number } }).meta.changes) >= 1
       const generation = Number(
         (results[4] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
@@ -481,6 +485,13 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const results = await db.batch(statements)
       const promoted = Number((results[0] as { meta: { changes?: number } }).meta.changes) === 1
       if (!promoted) return { ok: false as const, reason: "stale" as const }
+      // The version insert succeeded (the plan matched the CAS), so a zero-row
+      // generation bump means the profile row is missing — fail instead of
+      // returning `generation: NaN` (matches the in-memory store's behavior).
+      const generationChanged = Number((results[1] as { meta: { changes?: number } }).meta.changes) === 1
+      if (!generationChanged) {
+        throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      }
       const generation = Number(
         (results[2] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
       )
@@ -613,6 +624,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
 
     async createActivePlan(input) {
       throwIfFailing("createActivePlan")
+      const profile = backing.profiles.get(input.chatId)
+      if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       const now = nowIso()
       const previous = activePlanForChat(input.chatId)
       if (previous) {
@@ -633,8 +646,6 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         now,
       )
       backing.versions.set(versionKey(input.planId, 1), version)
-      const profile = backing.profiles.get(input.chatId)
-      if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       profile.interactionGeneration += 1
       profile.updatedAt = now
       return { plan, version, generation: profile.interactionGeneration, previousReplaced: previous !== undefined }
@@ -645,6 +656,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const plan = backing.plans.get(input.planId)
       const stale = plan?.status !== "active" || plan.currentVersion !== input.baseVersion
       if (stale) return { ok: false as const, reason: "stale" as const }
+      const profile = backing.profiles.get(input.chatId)
+      if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       const now = nowIso()
       const newVersion = input.baseVersion + 1
       const version = makeVersionRecord(
@@ -678,8 +691,6 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
           })
         }
       }
-      const profile = backing.profiles.get(input.chatId)
-      if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       profile.interactionGeneration += 1
       profile.updatedAt = now
       return { ok: true as const, version, generation: profile.interactionGeneration }
