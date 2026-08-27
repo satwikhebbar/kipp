@@ -1,7 +1,12 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { DatabaseSync } from "node:sqlite"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import {
   type CreateActivePlanInput,
   createInMemoryMealPlanningStore,
+  createMealPlanningStore,
   type InMemoryMealPlanningBacking,
   type MealPlanningStore,
   type PromotePlanVersionInput,
@@ -306,5 +311,186 @@ describe("meal-planning store type exports", () => {
     expect(typeof store.createActivePlan).toBe("function")
     expect(typeof store.promotePlanVersion).toBe("function")
     expect(typeof store.activePlan).toBe("function")
+  })
+})
+
+// Production-D1-level tests: run the store's real SQL against an in-memory
+// SQLite database (node:sqlite) with the migration applied, via a minimal
+// D1Database-shaped adapter. This exercises the exact statements the D1
+// implementation binds, including the atomic missing-profile paths.
+
+interface D1ResultLike {
+  meta: { changes?: number }
+  results?: Array<Record<string, unknown>>
+}
+
+/** A bound D1 statement carrying its SQL and parameters for batch execution. */
+class D1BoundStatement {
+  constructor(
+    private readonly db: DatabaseSync,
+    readonly sql: string,
+    readonly params: Array<string | number | null>,
+  ) {}
+
+  run(): D1ResultLike {
+    return executeD1(this.db, this.sql, this.params)
+  }
+
+  first(): Record<string, unknown> | null {
+    const row = this.db.prepare(this.sql).get(...this.params) as Record<string, unknown> | undefined
+    return row ?? null
+  }
+}
+
+function executeD1(db: DatabaseSync, sql: string, params: Array<string | number | null>): D1ResultLike {
+  if (/^\s*SELECT/i.test(sql)) {
+    const results = db.prepare(sql).all(...params) as Array<Record<string, unknown>>
+    return { meta: { changes: 0 }, results }
+  }
+  const info = db.prepare(sql).run(...params)
+  return { meta: { changes: Number(info.changes) } }
+}
+
+/** Minimal D1Database adapter over `node:sqlite`; `batch` runs in one transaction. */
+function createD1Adapter(db: DatabaseSync): D1Database {
+  return {
+    prepare(sql: string) {
+      return {
+        bind(...params: Array<string | number | null>) {
+          return new D1BoundStatement(db, sql, params)
+        },
+      }
+    },
+    batch(statements: D1BoundStatement[]) {
+      db.exec("BEGIN")
+      try {
+        const results = statements.map((statement) => executeD1(db, statement.sql, statement.params))
+        db.exec("COMMIT")
+        return results
+      } catch (error) {
+        db.exec("ROLLBACK")
+        throw error
+      }
+    },
+  } as unknown as D1Database
+}
+
+function createD1Store(): { store: MealPlanningStore; db: DatabaseSync } {
+  const db = new DatabaseSync(":memory:")
+  const migration = join(dirname(fileURLToPath(import.meta.url)), "../../migrations/0001_init.sql")
+  db.exec(readFileSync(migration, "utf8"))
+  return { store: createMealPlanningStore(createD1Adapter(db)), db }
+}
+
+function d1Count(db: DatabaseSync, sql: string, ...params: Array<string | number | null>): number {
+  return Number((db.prepare(sql).get(...params) as { count: number }).count)
+}
+
+describe("createMealPlanningStore (D1, real SQL)", () => {
+  it("runs the migration and the happy path: seed → create v1 → promote v2 with batch → activePlan", async () => {
+    const { store, db } = createD1Store()
+    const profile = await store.loadOrCreateProfile(CHAT)
+    expect(profile.interactionGeneration).toBe(0)
+    expect(profile.customPolicies).toHaveLength(5)
+
+    const created = await store.createActivePlan(createInput())
+    expect(created.generation).toBe(1)
+    expect(created.previousReplaced).toBe(false)
+
+    const promoted = await store.promotePlanVersion(
+      promoteInput({ feedbackBatch: { batchId: "plan-1:v2", items: [{ id: "tg-42", text: "Tue lunch: less oily" }] } }),
+    )
+    expect(promoted).toMatchObject({ ok: true, generation: 2 })
+    if (!promoted.ok) return
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.version).toBe(2)
+    expect(active?.version.feedbackBatchId).toBe("plan-1:v2")
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+  })
+
+  it("createActivePlan with a missing profile throws atomically: no plan, no version, no profile row", async () => {
+    const { store, db } = createD1Store()
+    await expect(store.createActivePlan(createInput())).rejects.toThrow("meal_profile row missing for chat chat-1")
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan")).toBe(0)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(0)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_profile")).toBe(0)
+  })
+
+  it("createActivePlan with a missing profile does not replace a prior active plan (supersede guarded)", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    await store.createActivePlan(createInput())
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan WHERE status = 'active'")).toBe(1)
+
+    // Simulate the programming-error precondition (profile row deleted).
+    db.prepare("DELETE FROM meal_profile WHERE chat_id = ?").run(CHAT)
+    await expect(store.createActivePlan(createInput({ planId: "plan-2" }))).rejects.toThrow(
+      "meal_profile row missing for chat chat-1",
+    )
+
+    // The prior plan is still active, no successor, no orphan version.
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan WHERE status = 'active'")).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan WHERE status = 'replaced'")).toBe(0)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+  })
+
+  it("promotePlanVersion with a missing profile throws atomically: no version, no advance, no batch, inventory unmoved", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    await store.createActivePlan(createInput({ weeklyInventory: { items: [], notes: ["original"] } }))
+
+    db.prepare("DELETE FROM meal_profile WHERE chat_id = ?").run(CHAT)
+    await expect(
+      store.promotePlanVersion(
+        promoteInput({
+          inventory: {
+            weeklyInventory: { items: [{ name: "dosa", status: "available" as const }], notes: ["stale write"] },
+            weeklyExceptions: { items: [] },
+          },
+          feedbackBatch: { batchId: "plan-1:v2", items: [{ id: "tg-9", text: "x" }] },
+        }),
+      ),
+    ).rejects.toThrow("meal_profile row missing for chat chat-1")
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(1)
+    expect(active?.plan.weeklyInventory.notes).toEqual(["original"])
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(0)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan WHERE status = 'active'")).toBe(1)
+  })
+
+  it("a stale promote returns stale with no state changes", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    await store.createActivePlan(createInput())
+    const first = await store.promotePlanVersion(promoteInput())
+    expect(first.ok).toBe(true)
+
+    const stale = await store.promotePlanVersion(
+      promoteInput({ baseVersion: 1, feedbackBatch: { batchId: "plan-1:v2", items: [{ id: "tg-5", text: "late" }] } }),
+    )
+    expect(stale).toEqual({ ok: false, reason: "stale" })
+
+    expect(await store.activePlan(CHAT)).toMatchObject({
+      plan: { currentVersion: 2 },
+      version: { version: 2 },
+    })
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+  })
+
+  it("serialize-and-supersede at the D1 level: a second create replaces the first, generation 1 then 2", async () => {
+    const { store } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    const first = await store.createActivePlan(createInput())
+    expect(first.generation).toBe(1)
+    const second = await store.createActivePlan(createInput({ planId: "plan-2" }))
+    expect(second.previousReplaced).toBe(true)
+    expect(second.generation).toBe(2)
+    expect(await store.activePlan(CHAT)).toMatchObject({ plan: { planId: "plan-2", currentVersion: 1 } })
   })
 })

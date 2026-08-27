@@ -332,15 +332,20 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
 
     async createActivePlan(input) {
       const now = nowIso()
-      // The plan/version inserts are guarded on the profile row existing, so a
+      // Every mutating statement is guarded on the profile row existing, so a
       // missing profile (a programming error — the workflow always calls
-      // loadOrCreateProfile first) makes the whole batch write nothing; the
-      // zero-row generation bump below turns that into an atomic failure
-      // instead of a committed plan with `generation: NaN`.
+      // loadOrCreateProfile first) makes the whole batch write nothing: the
+      // supersede no-ops (a prior active plan stays active), the plan/version
+      // inserts no-op, and the zero-row generation bump turns the batch into
+      // an atomic failure instead of a committed plan with `generation: NaN`.
       const results = await db.batch([
         db
-          .prepare("UPDATE meal_plan SET status = 'replaced', updated_at = ? WHERE chat_id = ? AND status = 'active'")
-          .bind(now, input.chatId),
+          .prepare(
+            `UPDATE meal_plan SET status = 'replaced', updated_at = ?
+             WHERE chat_id = ? AND status = 'active'
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+          )
+          .bind(now, input.chatId, input.chatId),
         db
           .prepare(
             `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status,
@@ -414,13 +419,24 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const now = nowIso()
       const newVersion = input.baseVersion + 1
       const batchId = input.feedbackBatch?.batchId ?? null
+      // The missing-profile precondition is checked before the batch commits:
+      // a missing profile throws with nothing written rather than surfacing as
+      // a misleading "stale" (the profile row is never deleted, so the check
+      // cannot race the batch; every mutating statement below is additionally
+      // guarded on the profile existing, so even a hypothetical mid-batch
+      // absence no-ops the whole transaction).
+      const profilePresent = await db.prepare("SELECT 1 FROM meal_profile WHERE chat_id = ?").bind(input.chatId).first()
+      if (!profilePresent) {
+        throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      }
       const statements = [
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, created_at)
              SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan
-             WHERE plan_id = ? AND current_version = ? AND status = 'active'`,
+             WHERE plan_id = ? AND current_version = ? AND status = 'active'
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
             input.planId,
@@ -433,6 +449,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             now,
             input.planId,
             input.baseVersion,
+            input.chatId,
           ),
         db
           .prepare(
@@ -448,7 +465,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           db
             .prepare(
               `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
-               WHERE plan_id = ? AND current_version = ? AND status = 'active'`,
+               WHERE plan_id = ? AND current_version = ? AND status = 'active'
+                 AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
             )
             .bind(
               JSON.stringify(input.inventory.weeklyInventory),
@@ -456,6 +474,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
               now,
               input.planId,
               input.baseVersion,
+              input.chatId,
             ),
         )
       }
@@ -463,14 +482,16 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         db
           .prepare(
             `UPDATE meal_plan SET current_version = ?, updated_at = ?
-             WHERE plan_id = ? AND current_version = ? AND status = 'active'`,
+             WHERE plan_id = ? AND current_version = ? AND status = 'active'
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
-          .bind(newVersion, now, input.planId, input.baseVersion),
+          .bind(newVersion, now, input.planId, input.baseVersion, input.chatId),
         db
           .prepare(
             `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at)
              SELECT ?, plan_id, ?, ?, ? FROM meal_plan
-             WHERE plan_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL`,
+             WHERE plan_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
             batchId,
@@ -480,18 +501,12 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.planId,
             newVersion,
             batchId,
+            input.chatId,
           ),
       )
       const results = await db.batch(statements)
       const promoted = Number((results[0] as { meta: { changes?: number } }).meta.changes) === 1
       if (!promoted) return { ok: false as const, reason: "stale" as const }
-      // The version insert succeeded (the plan matched the CAS), so a zero-row
-      // generation bump means the profile row is missing — fail instead of
-      // returning `generation: NaN` (matches the in-memory store's behavior).
-      const generationChanged = Number((results[1] as { meta: { changes?: number } }).meta.changes) === 1
-      if (!generationChanged) {
-        throw new Error(`meal_profile row missing for chat ${input.chatId}`)
-      }
       const generation = Number(
         (results[2] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
       )
