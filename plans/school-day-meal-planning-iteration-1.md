@@ -155,18 +155,23 @@ CREATE TABLE meal_plan_version (
   PRIMARY KEY (plan_id, version)
 );
 
--- Feedback: batched against an exact base version; applied or rejected once
+-- Feedback: one open batch per plan version, created empty and atomically with
+-- the version row it tracks (no Telegram update id exists at creation — the
+-- row is opened when the plan is persisted, not when a reply arrives). Items
+-- are appended from force-reply text; idempotency is per item via
+-- FeedbackItem.updateId (see store invariants), not at the batch level.
 CREATE TABLE feedback_batch (
-  batch_id TEXT PRIMARY KEY,
+  batch_id TEXT PRIMARY KEY,             -- plan_id || ':v' || base_version
   chat_id TEXT NOT NULL, plan_id TEXT NOT NULL,
-  base_version INTEGER NOT NULL,
-  items_json TEXT NOT NULL,              -- FeedbackItem[] (stable ids)
+  base_version INTEGER NOT NULL,         -- plan version this feedback targets
+  items_json TEXT NOT NULL DEFAULT '[]', -- FeedbackItem[] (stable ids; each carries updateId?)
   status TEXT NOT NULL DEFAULT 'open',   -- open | applied | rejected
   applied_to_version INTEGER,
-  source_update_id INTEGER NOT NULL,     -- Telegram update id → idempotency
   created_at TEXT NOT NULL, applied_at TEXT
 );
-CREATE UNIQUE INDEX idx_feedback_update ON feedback_batch(chat_id, source_update_id);
+-- One open batch per plan version (defense in depth: creation is serialized by
+-- the persistence batch, which is the only writer).
+CREATE UNIQUE INDEX idx_feedback_open_batch ON feedback_batch(plan_id, base_version) WHERE status = 'open';
 
 -- Agent job: one row per workflow run (outcome + metadata, no transcripts)
 CREATE TABLE agent_job (
@@ -213,43 +218,87 @@ CREATE TABLE recipe_video_cache (
 Invariants enforced at the store layer (deterministic, unit-tested):
 
 - **One active plan per chat, by construction:** the partial unique index
-  `idx_meal_plan_one_active` rejects a second active row for the same chat.
-  Week semantics: an explicit `/mealplan` always creates a new active plan and
-  atomically supersedes the previous active row in the same batch (spec §2:
-  "the latest plan is the active plan for that week"). The superseded plan
-  stays readable in `meal_plan_version` history; the parent is told the
-  previous plan was replaced.
+  `idx_meal_plan_one_active` rejects any insert of a second active row that did
+  not first supersede its predecessor (it is the database-level invariant; the
+  in-memory fake enforces the same rule). Week semantics: an explicit
+  `/mealplan` always creates a new active plan and atomically supersedes the
+  previous active row in the same batch (spec §2: "the latest plan is the
+  active plan for that week"). The superseded plan stays readable in
+  `meal_plan_version` history; the parent is told the previous plan was
+  replaced.
 - **Immutable versions:** insert-only `meal_plan_version`; a version row is
   never updated or deleted.
 - **Atomic create-active-plan (initial):** one `db.batch` of
-  1. `UPDATE meal_plan SET status = 'replaced' WHERE chat_id = ? AND status = 'active'`
+  1. `UPDATE meal_plan SET status = 'replaced', updated_at = ? WHERE chat_id = ? AND status = 'active'`
   2. `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, status, current_version, ...) VALUES (?, ?, ..., 'active', 1, ...)`
   3. `INSERT INTO meal_plan_version (plan_id, version, ...) VALUES (?, 1, ...)`
-  D1 batch is a single transaction: if the partial index rejects statement 2
-  (concurrent `/mealplan`), the whole batch rolls back and the caller returns
-  a `plan-already-active` notice (job recorded, no orphan rows).
+  4. `INSERT INTO feedback_batch (batch_id, chat_id, plan_id, base_version, items_json, status, created_at) VALUES (?, ?, ?, 1, '[]', 'open', ?)` (batch_id = `plan_id || ':v1'`)
+  D1 batch is a single transaction: **either the whole new plan exists (active
+  row + version 1 + its empty open feedback batch) and any previous active row
+  is atomically replaced, or nothing changes** — any statement failure rolls
+  back the entire batch (no orphan version row, no half-replaced state).
+  **Concurrency semantic is deliberately serialize-and-supersede**, matching
+  spec §2: a second `/mealplan` batch that commits after the first likewise
+  replaces the first batch's fresh active row (its supersede-UPDATE matches it
+  because it is still `active`), so its INSERT never violates the partial
+  index. The `plan-already-active` rejection cannot arise from this SQL and is
+  not part of the design; there is no atomic compare/insert guard. The caller
+  reads statement 1's `meta.changes` — `0` → first plan for the chat (no
+  notice); `>= 1` → a previous active plan was replaced and the parent gets a
+  "previous plan replaced" notice. Two concurrent starts simply resolve
+  last-commit-wins; the superseded plan stays readable in version history and
+  any button on its stale message routes to a replaced plan (revision returns
+  `stale`, §6).
 - **Atomic revision promotion (`plan_id`-scoped):** one `db.batch` of
   1. `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind, base_version, feedback_batch_id, video_json, created_at) SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan WHERE plan_id = ? AND current_version = ? AND status = 'active'`
   2. `UPDATE meal_plan SET current_version = ?, updated_at = ? WHERE plan_id = ? AND current_version = ? AND status = 'active'`
-  The version row is inserted only when the plan row still holds the expected
-  `current_version` (the INSERT … SELECT yields 0 rows otherwise), and both
-  statements commit or roll back together. The caller reads `meta.changes` of
-  statement 1: `1` → success; `0` → `{ ok: false, reason: "stale" }`, no
-  compensation needed, audit row `{ action: "rejected", detail: { reason:
-  "stale" } }`. `plan_id` is the PK and `status = 'active'` is guarded, so the
-  CAS can never promote more than one row or a replaced plan. Concurrent
-  revisions with the same base serialize on the transaction; the loser's
-  SELECT matches 0 rows.
-- **Feedback idempotency:** unique `(chat_id, source_update_id)` — a retried
-  Telegram delivery inserts nothing the second time.
+  3. `UPDATE feedback_batch SET status = 'applied', applied_to_version = ?, applied_at = ? WHERE plan_id = ? AND base_version = ? AND status = 'open'`
+  4. `INSERT INTO feedback_batch (batch_id, chat_id, plan_id, base_version, items_json, status, created_at) SELECT ?, chat_id, plan_id, ?, '[]', 'open', ? FROM meal_plan WHERE plan_id = ? AND current_version = ? AND status = 'active'` (batch_id = `plan_id || ':v' || newVersion`)
+  **One defined atomic outcome:** the new version row, the `current_version`
+  advance, the source feedback-batch transition to `applied`, and the fresh
+  empty open batch for the new version all commit or all roll back together.
+  Every statement is guarded so a stale run changes nothing: the version row
+  is inserted only when the plan row still holds the expected `current_version`
+  (the `INSERT … SELECT` yields 0 rows otherwise), and statements 2–4 share
+  that guard or match only `open` batches, so they no-op on stale. `plan_id`
+  is the PK and `status = 'active'` is guarded, so the batch can never promote
+  more than one row or a replaced plan. Concurrent same-base revisions
+  serialize on the transaction; the loser's SELECT matches 0 rows.
+  **Post-batch diagnostics (recovery defined):** the caller gates on statement
+  1's `meta.changes` — `1` → success; `0` → `{ ok: false, reason: "stale" }`.
+  On stale, no compensation is needed (nothing changed) and the caller writes
+  the `rejected/stale` audit + agent-job rows and sends `meal-stale-plan`.
+  Audit and job rows are written *after* the batch commits, best-effort: a
+  failure there loses diagnostics only, never state. They are idempotent —
+  `agent_job.job_id` = workflow instance id with `INSERT OR IGNORE` (a retry
+  after crash writes at most one job row), and `meal_audit` is append-only so
+  a duplicated row is harmless.
+- **One open feedback batch per plan version:** every persisted version has
+  exactly one empty `open` batch row, created atomically with the version
+  (statement 4 of each persistence batch above). `appendFeedback(planId,
+  baseVersion, item)` finds the open batch for `(plan_id, base_version)` and
+  appends; if no `open` batch exists for that base version (it was already
+  applied or the version was superseded) the append is a defined no-op —
+  `{ ok: false, reason: "no_open_batch" }` — and the branch drops the reply.
+  The router's version-scoped cleanup (§6) makes this unreachable in normal
+  flow; the store contract is still total.
+- **Feedback idempotency (per item):** each reply-derived `FeedbackItem`
+  carries `updateId` = the Telegram update id of the force-reply. The router's
+  durable single-claim on `consumed_update_id` is the primary dedupe — a
+  retried delivery of the same update id resolves to `{ interaction: null }`
+  and never reaches the store. `appendFeedback` adds a store-level guard: if
+  an item with the same `updateId` is already in `items_json`, it no-ops
+  (`{ ok: true, duplicate: true }`). The batch row itself carries no Telegram
+  update id — it exists from plan-send time, when no update exists.
 - **Seed profile:** `loadOrCreateProfile(chatId)` inserts the initial household
   configuration (spec §5.11 initial set: Snack policy, Equipment gap, Packing
   capacity, two Nutrition targets) on first use, stored as generic properties +
   custom policies + the five-slot Mon–Sat schedule.
 
 The in-memory fake mirrors the same operations and result semantics
-(`ok`/`reason: "stale"`, one-active constraint, insert-only versions) so the
-unit and integration suites exercise identical invariants without SQL.
+(`ok`/`reason: "stale"`, one-active constraint, insert-only versions, one
+open batch per plan version, per-item append idempotency) so the unit and
+integration suites exercise identical invariants without SQL.
 
 ## 5. Planning-agent loop and tools
 
@@ -285,8 +334,8 @@ candidate and the handler re-verifies it deterministically.
 `runAgentCenteredMealPlanningWorkflow(env, event, step)`:
 
 1. **Load state:** `loadOrCreateProfile(chatId)`; active plan for chat
-   (becomes `recentPlan` for variety); pending feedback batch for the active
-   plan (revision only).
+   (becomes `recentPlan` for variety); the open feedback batch for the active
+   plan's current version (its items feed the revision context).
 2. **Session turn loop** (bounded by `MEAL_PLANNING_TTL_MS`, default 30 min per
    interaction):
    - Build `MealPlanContext` (profile, custom policies, weekly inventory/
@@ -298,10 +347,12 @@ candidate and the handler re-verifies it deterministically.
    - `propose_plan` → persist (below) → break.
    - Agent failure/timeout → `meal-agent-unavailable` notice; record job.
 3. **Persist:** initial → `createActivePlan` (atomic batch, §4); revision →
-   `promotePlanVersion` (`plan_id`-scoped atomic batch, §4). Mark the feedback
-   batch `applied` in the same revision path; write audit + agent job rows.
-   Promotion failure → `meal-stale-plan` notice, no version written, audit
-   `{ action: "rejected", reason: "stale" }`.
+   `promotePlanVersion` (`plan_id`-scoped atomic batch, §4). Each batch makes
+   the plan/version/feedback-batch state changes one atomic outcome and opens
+   the next version's empty feedback batch; audit + agent-job rows are written
+   after commit as idempotent, best-effort diagnostics (§4 recovery).
+   Promotion failure (stale) → `meal-stale-plan` notice, no version written,
+   `rejected/stale` audit + job rows.
 4. **Optional enrichment:** fill `recipeVideo` for school-lunch and home-lunch
    cells via `video.ts` **before** persisting the version (deterministic gate,
    never blocking; see §8).
@@ -313,7 +364,12 @@ candidate and the handler re-verifies it deterministically.
      meal-feedback, callbackToken, botMessageId: planMessageId }`
    - same for `meal-update` and `meal-done` (distinct tokens).
    `version` binds the buttons to the plan version the parent is looking at and
-   is the base version used by the revision branch.
+   is the base version used by the revision branch. Registering the new action
+   set also removes the previous version's unconsumed interactions in the same
+   group (router `DELETE … WHERE interaction_group = ? AND version < ? AND
+   consumed_update_id IS NULL`), so buttons on a superseded plan message
+   resolve nothing after its successor is sent — for revisions and for a newer
+   `/mealplan` alike.
 6. **Feedback window loop** until absolute deadline (`MEAL_FEEDBACK_WINDOW_MS`,
    default 48 h, env-overridable). `step.waitForEvent("telegram-reply",
    timeout = remaining)`, then dispatch on `interactionKind`:
@@ -321,8 +377,8 @@ candidate and the handler re-verifies it deterministically.
    | Event kind | Source | Branch (all sends/registers inside `step.do`) |
    | --- | --- | --- |
    | `meal-feedback` | inline-button callback, one-time | `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: feedbackDeadline, interactionGroup: "meal-planning" }`. Continue waiting. |
-   | `meal-feedback-reply` | force-reply text (replyTo the prompt) | Append `FeedbackItem { id, text, scope: undefined }` to the open `feedback_batch` — idempotent by unique `(chat_id, source_update_id)`; send `meal-feedback-noted` notice. Continue waiting. |
-   | `meal-update` | inline-button callback, one-time | Run the revision session (step 2) with `basePlanVersion = interaction.version`. Success → send the new plan message with fresh buttons + register a new action set (step 5), open a new feedback batch. Stale (`promotePlanVersion` returns `stale`) → `meal-stale-plan` notice. Continue waiting. |
+   | `meal-feedback-reply` | force-reply text (replyTo the prompt) | Append `FeedbackItem { id, text, updateId: <reply update id> }` to the open batch for `(plan_id, interaction.version)` via `appendFeedback` — idempotent per item (router single-claim + store guard on `updateId`, §4); send `meal-feedback-noted` notice. Continue waiting. |
+   | `meal-update` | inline-button callback, one-time | Run the revision session (step 2) with `basePlanVersion = interaction.version`. Success → send the new plan message with fresh buttons + register a new action set (step 5); the promotion batch (§4) applied the source batch and opened the new version's empty batch. Stale (`promotePlanVersion` returns `stale`) → `meal-stale-plan` notice. Continue waiting. |
    | `meal-done` | inline-button callback, one-time | Send `meal-finalized` notice; end. The active plan stays in D1. |
    | timeout | `waitForEvent` deadline | End. The active plan stays in D1. |
 
@@ -357,7 +413,8 @@ help; `/plan` shows the active plan (or help).
 - Plan message: compact fridge-board-equivalent, phone-friendly, deterministic
   (`messages.ts`, pure function, snapshot-tested). Per day, five slot lines;
   dish + optional prep label + easy-buy marker; a short pending-feedback
-  indicator when the batch is open; material trade-offs summarized from
+  indicator when the version's open batch has items (spec §5.11: pending
+  changes exist only while feedback exists); material trade-offs summarized from
   `policyOutcomes` (labels only, no essay). Video links shown only when a
   `found` result exists.
 - Interaction kinds added to `INTERACTION_KIND`: `meal-clarification`,
@@ -392,30 +449,36 @@ help; `/plan` shows the active plan (or help).
   with the expected policy outcomes. This makes the corpus the documented gate
   for the planning loop (issue acceptance criterion 5).
 - New `meal-planning-store.test.ts`: one-active-per-chat constraint,
-  `createActivePlan` atomicity (supersede + insert + version 1 roll back
-  together), `promotePlanVersion` stale rejection with no orphan version row,
-  insert-only versions, feedback idempotency, restart survival (fresh store
-  instance reads the active plan).
+  `createActivePlan` atomicity — a second create supersedes the first
+  (serialize-and-supersede) and any statement failure rolls back the whole
+  batch (no orphan version row, previous active stays), `promotePlanVersion`
+  stale rejection with no orphan version row and no feedback-batch state
+  change (plus: success applies the open source batch and opens the next
+  version's batch in the same transaction), insert-only versions, one open batch per
+  plan version, `appendFeedback` idempotency by item `updateId`, restart
+  survival (fresh store instance reads the active plan).
 - New Telegram e2e (`meal-planning-telegram-workflow.integration.test.ts`):
   webhook → workflow → in-memory store → fake Telegram, covering: full happy
   path (context → plan v1 → [Give feedback] button → force-reply prompt →
   feedback text → [Update plan] → plan v2), stale revision rejection (base
   version < current), retried callback and retried feedback delivery (router
-  single-claim + unique `source_update_id`), and restart survival.
+  single-claim + per-item `updateId` guard), and restart survival.
 
 ## 10. File changes
 
 New:
 
 - `migrations/0001_init.sql` — D1 schema above, including the partial unique
-  index `idx_meal_plan_one_active`. During `wrangler d1 migrations apply`,
-  confirm the partial index is accepted; fallback if rejected: single active
-  row per chat enforced by making `chat_id` the `meal_plan` PK and moving
-  superseded plans to a `meal_plan_record` history table (same store
-  interface, same invariants).
+  index `idx_meal_plan_one_active` and `idx_feedback_open_batch`. During
+  `wrangler d1 migrations apply`, confirm the partial indexes are accepted;
+  fallback if rejected: single active row per chat enforced by making
+  `chat_id` the `meal_plan` PK and moving superseded plans to a
+  `meal_plan_record` history table (same store interface, same invariants).
 - `src/meal-planning/store.ts` — store interface + D1 impl + in-memory fake +
   seed profile; operations `loadOrCreateProfile`, `createActivePlan`,
-  `promotePlanVersion`, `activePlan`, `appendFeedback`,
+  `promotePlanVersion` (both persistence batches also open the next version's
+  empty feedback batch and apply the source batch on promotion),
+  `activePlan`, `appendFeedback` (per-item `updateId` dedupe),
   `markFeedbackBatchApplied`, `recordJob`, `recordAudit`.
 - `src/meal-planning/workflow.ts` — `MealPlanningWorkflow` entrypoint.
 - `src/meal-planning/agent-workflow.ts` — runner (session loop, persistence, feedback window, revision).
@@ -435,7 +498,11 @@ Modified:
   `MEAL_PLANNING_WORKFLOW: Workflow`, `YOUTUBE_API_KEY?`), `INTERACTION_KIND` meal kinds.
 - `src/triggers/telegram-webhook.ts` — `/mealplan`, `/plan` commands; `meal-*` dispatch.
 - `src/index.ts` — export `MealPlanningWorkflow`.
-- `src/meal-planning/types.ts` — `MealCell.recipeVideo` (optional).
+- `src/meal-planning/types.ts` — `MealCell.recipeVideo` (optional),
+  `FeedbackItem.updateId` (optional; reply-derived items only).
+- `src/meal-planning/corpus/schema.ts` — `feedbackItemSchema` accepts the
+  optional `updateId` field (strict schema, so the type change must be
+  mirrored here; corpus items omit it).
 - `docs/architecture/architecture.yaml`, `data-and-state.md`, `modules.md`,
   `request-flows.md` — per ADR-001 (D1 store, meal-planning workflow module,
   Telegram commands).
@@ -456,7 +523,8 @@ commit itself is documentation-only and does not touch `src/`.
 ## 12. Follow-ups (separate issues)
 
 - Long-lived midweek feedback window after the conversation deadline (new
-  instance per feedback event, `createBatch`-seeded per chat).
+  instance per feedback event; the version's open batch is reused, so no
+  create-batch step is needed).
 - Profile-editing conversation (open product decision).
 - #60 remaining production work: YouTube secret binding, rate limiting,
   cache cleanup, refresh policy.
