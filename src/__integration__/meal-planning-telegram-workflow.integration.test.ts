@@ -418,7 +418,7 @@ describe("agent-centered meal-planning Telegram integration", () => {
     await second.run
   })
 
-  it("does not let a superseded initial-planning clarification create and replace the newer plan", async () => {
+  it("lets a later-persisted initial plan supersede an earlier one when its clarification is answered after the other persisted", async () => {
     const base = seedCandidate()
     const { env, network } = runtimeEnv({})
     const wf = mealWorkflowBinding()
@@ -436,29 +436,22 @@ describe("agent-centered meal-planning Telegram integration", () => {
     queueInitialPlan(base)
     await handleTelegramWebhook(message("/mealplan this week", 2), env)
     const second = startedWorkflowRun(wf, env)
-    await waitForMessageText(network, "School week of")
+    const secondPlanIndex = await waitForMessageText(network, "School week of")
 
-    // The user answers the FIRST prompt. Persisting the second plan tagged the clarification
-    // with a generation the second plan superseded, so the reply resolves nothing: the stale
-    // planning session never revives, so it can never persist over the newer plan.
+    // Answering the FIRST prompt later: the clarification registered before any plan
+    // existed carries no generation, so it still resolves and the first session
+    // persists. Its persistence batch commits after the second plan, so
+    // last-commit-wins: the first plan supersedes the second as the active plan.
+    queueInitialPlan(base)
     await handleTelegramWebhook(message("7 people", 60, clarifyPromptId), env)
+    await waitForMessageText(network, "School week of", secondPlanIndex)
 
-    // The stale instance's clarification prompt times out and it cancels without persisting.
-    first.step.timeout()
-    await first.run
-    expect(
-      network.getState().telegramMessages.some((candidate) => candidate.text.includes("run /mealplan to try again")),
-    ).toBe(true)
-
-    // The second instance's plan is still the active one, and no third plan was created.
     const store = createMealPlanningStore(env.MEAL_PLANNING_DB as D1Database)
     const active = await store.activePlan("100")
-    expect(active?.plan.instanceId).toBe("meal-wf-2")
-    expect(active?.plan.currentVersion).toBe(1)
-    expect(
-      network.getState().telegramMessages.filter((candidate) => candidate.text.includes("School week of")).length,
-    ).toBe(1)
+    expect(active?.plan.instanceId).toBe("meal-wf-1")
 
+    first.step.timeout()
+    await first.run
     second.step.timeout()
     await second.run
   })
