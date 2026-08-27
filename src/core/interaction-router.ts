@@ -9,6 +9,8 @@ interface Registration {
   botMessageId?: number
   expiresAt: number
   interactionGroup?: string
+  /** Chat-scoped plan-message generation (§6); carries group invalidation when present. */
+  generation?: number
 }
 
 interface ResolvedInteraction extends WorkflowInteraction {
@@ -22,6 +24,8 @@ type InteractionRow = {
   kind: WorkflowInteractionKind
   expires_at: number
   consumed_update_id: number | null
+  interaction_group: string | null
+  generation: number | null
 }
 
 export const CONSUMED_INTERACTION_RETENTION_MS = 3_600_000 // ponytail: 1 hour
@@ -31,6 +35,8 @@ const PLAIN_TEXT_INTERACTION_KINDS = [
   INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
   INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
   INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+  INTERACTION_KIND.MEAL_CLARIFICATION,
+  INTERACTION_KIND.MEAL_FEEDBACK_REPLY,
 ] as const
 
 /** Returns a JSON response with the given status code. */
@@ -59,6 +65,11 @@ export class InteractionRouterDO implements DurableObject {
     } catch {
       // Existing Durable Object databases already have this optional column.
     }
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE interactions ADD COLUMN generation INTEGER")
+    } catch {
+      // Existing Durable Object databases already have this optional column.
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -81,14 +92,20 @@ export class InteractionRouterDO implements DurableObject {
       return new Response("invalid registration", { status: 400 })
     this.removeExpiredOrOldConsumedInteractions()
     if (r.kind === INTERACTION_KIND.REVISION_FEEDBACK) this.removeActiveRevisionFeedback()
-    if (r.interactionGroup) this.removeOlderGroupInteractions(r.interactionGroup, r.version)
+    if (r.interactionGroup) {
+      if (r.generation !== undefined) {
+        this.removeOlderGroupInteractionsByGeneration(r.interactionGroup, r.generation)
+      } else {
+        this.removeOlderGroupInteractions(r.interactionGroup, r.version)
+      }
+    }
     this.saveRegistration(r)
     return json({ ok: true })
   }
 
   private saveRegistration(registration: Registration): void {
     this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO interactions (interaction_id, version, workflow_id, kind, callback_token, bot_message_id, expires_at, consumed_update_id, interaction_group) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+      "INSERT OR REPLACE INTO interactions (interaction_id, version, workflow_id, kind, callback_token, bot_message_id, expires_at, consumed_update_id, interaction_group, generation) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
       registration.interactionId,
       registration.version,
       registration.workflowId,
@@ -97,6 +114,7 @@ export class InteractionRouterDO implements DurableObject {
       registration.botMessageId ?? null,
       registration.expiresAt,
       registration.interactionGroup ?? null,
+      registration.generation ?? null,
     )
   }
 
@@ -123,6 +141,28 @@ export class InteractionRouterDO implements DurableObject {
     )
   }
 
+  /** Deletes a group's unconsumed rows below the given plan-message generation (§6). */
+  private removeOlderGroupInteractionsByGeneration(interactionGroup: string, generation: number): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM interactions WHERE interaction_group = ? AND generation < ? AND consumed_update_id IS NULL",
+      interactionGroup,
+      generation,
+    )
+  }
+
+  /** True when the row's plan-message generation is below the group's highest present generation (§6). */
+  private isGenerationInvalidated(row: InteractionRow): boolean {
+    if (row.generation === null || row.interaction_group === null) return false
+    const result = this.ctx.storage.sql
+      .exec(
+        "SELECT MAX(generation) AS max_generation FROM interactions WHERE interaction_group = ? AND generation IS NOT NULL",
+        row.interaction_group,
+      )
+      .toArray()[0] as { max_generation: number | null } | undefined
+    const max = result?.max_generation ?? null
+    return max !== null && max > row.generation
+  }
+
   private findInteraction(input: { token?: string; replyTo?: number; plainText?: string }): InteractionRow | undefined {
     const rows = input.token
       ? this.ctx.storage.sql.exec("SELECT * FROM interactions WHERE callback_token = ?", input.token).toArray()
@@ -137,7 +177,7 @@ export class InteractionRouterDO implements DurableObject {
         : input.plainText !== undefined
           ? this.ctx.storage.sql
               .exec(
-                "SELECT * FROM interactions WHERE kind IN (?, ?, ?, ?, ?) AND consumed_update_id IS NULL ORDER BY rowid DESC LIMIT 1",
+                `SELECT * FROM interactions WHERE kind IN (${PLAIN_TEXT_INTERACTION_KINDS.map(() => "?").join(", ")}) AND consumed_update_id IS NULL ORDER BY rowid DESC LIMIT 1`,
                 ...PLAIN_TEXT_INTERACTION_KINDS,
               )
               .toArray()
@@ -165,6 +205,7 @@ export class InteractionRouterDO implements DurableObject {
     const row = this.findInteraction({ token, replyTo, plainText })
     if (!row || row.expires_at <= Date.now()) return json({ interaction: null })
     if (row.consumed_update_id !== null) return json({ interaction: null })
+    if (this.isGenerationInvalidated(row)) return json({ interaction: null })
     this.claimInteraction(row.interaction_id, numericUpdateId)
     const interaction: ResolvedInteraction = {
       interactionId: row.interaction_id,

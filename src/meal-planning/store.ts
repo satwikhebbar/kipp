@@ -126,12 +126,20 @@ export type PromotePlanVersionResult =
   | { ok: true; version: MealPlanVersionRecord; generation: number }
   | { ok: false; reason: "stale" }
 
+/** The active plan's identity plus live instance — the webhook's level-3 fallthrough pointer (§6). */
+export interface ActivePlanPointer {
+  instanceId: string
+  weekEnd: string
+}
+
 /** The typed meal-planning store surface. The D1 and in-memory implementations share the same invariants. */
 export interface MealPlanningStore {
   loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
   createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
   promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
   activePlan(chatId: string): Promise<ActivePlanRecord | null>
+  /** Reads the active plan's live instance pointer (whether or not its week has ended). */
+  activePlanPointer(chatId: string): Promise<ActivePlanPointer | null>
 }
 
 /**
@@ -589,6 +597,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         },
       }
     },
+    async activePlanPointer(chatId) {
+      const row = await db
+        .prepare("SELECT instance_id, week_end FROM meal_plan WHERE chat_id = ? AND status = 'active' LIMIT 1")
+        .bind(chatId)
+        .first()
+      if (!row) return null
+      return { instanceId: String(row.instance_id), weekEnd: String(row.week_end) }
+    },
   }
 }
 
@@ -721,6 +737,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       if (!version) return null
       return { plan, version }
+    },
+
+    async activePlanPointer(chatId) {
+      const plan = activePlanForChat(chatId)
+      if (!plan) return null
+      return { instanceId: plan.instanceId, weekEnd: plan.weekEnd }
     },
   }
 }

@@ -17,6 +17,7 @@ export const MEAL_FEEDBACK_NOT_APPLIED =
   "No reply received — your feedback was not applied; tap [Give feedback] to try again."
 export const MEAL_NO_CHANGES = "No changes — your feedback is noted."
 export const MEAL_OPEN_FEEDBACK_PROMPT = "Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."
+export const MEAL_PLAN_ENDED = "This week's plan has ended — run /mealplan for the next week."
 
 /** Formats one stored ISO instant as a short weekday-and-date label (e.g. "Mon Sep 7") in the plan's timezone. */
 function formatWeekDay(iso: string, timezone: string): string {

@@ -5,6 +5,8 @@ import { type Env, INTERACTION_KIND } from "../core/types"
 import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager } from "../linkedin/ideas/manager"
+import { MEAL_HELP, MEAL_PLAN_ENDED } from "../meal-planning/messages"
+import { createMealPlanningStore } from "../meal-planning/store"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
 
@@ -53,7 +55,7 @@ interface TelegramCommand {
   argument: string
 }
 
-const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "calendar"])
+const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "calendar", "mealplan"])
 
 /** Reads a Telegram slash command from its bot_command entity, with a text fallback for test and legacy updates. */
 function telegramCommand(message: TelegramMessage): TelegramCommand | null {
@@ -178,6 +180,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
     if (msg.reply_to_message?.from?.is_bot) {
       await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
         telegramUpdateId: msg.message_id,
+        messageId: msg.message_id,
         replyToMessageId: msg.reply_to_message.message_id,
         text: msg.text,
       })
@@ -219,6 +222,28 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
       return new Response("OK")
     }
 
+    if (command?.name === "mealplan") {
+      if (!command.argument) {
+        await tg.sendMessage(msg.chat.id, MEAL_HELP)
+        return new Response("OK")
+      }
+      if (!env.MEAL_PLANNING_WORKFLOW) {
+        await tg.sendMessage(msg.chat.id, "Meal planning is not configured yet.")
+        return new Response("OK")
+      }
+      await env.MEAL_PLANNING_WORKFLOW.create({
+        params: {
+          chatId: String(msg.chat.id),
+          requestText: command.argument,
+          telegramMessageId: msg.message_id,
+          // The webhook's clock anchors week resolution; replays must be deterministic.
+          invokedAtMs: Date.now(),
+        },
+      })
+      await tg.sendMessage(msg.chat.id, "Planning that now.")
+      return new Response("OK")
+    }
+
     {
       const text = msg.text
 
@@ -252,9 +277,12 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
       const routed = await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
         telegramUpdateId: msg.message_id,
+        messageId: msg.message_id,
         text,
       })
       if (routed) return new Response("OK")
+
+      if (await dispatchMealFallthrough(env, msg, tg)) return new Response("OK")
 
       await tg.sendMessage(
         msg.chat.id,
@@ -288,7 +316,13 @@ async function dispatchRoutedInteraction(
   env: Env,
   chatId: number,
   userId: number,
-  input: { telegramUpdateId: number; callbackToken?: string; replyToMessageId?: number; text?: string },
+  input: {
+    telegramUpdateId: number
+    messageId?: number
+    callbackToken?: string
+    replyToMessageId?: number
+    text?: string
+  },
 ): Promise<boolean> {
   const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
   const { interaction } = await router.resolve(input)
@@ -297,7 +331,11 @@ async function dispatchRoutedInteraction(
     logRuntime(env, { event: "telegram-interaction-route", outcome: "ignored", details: { inputKind } })
     return false
   }
-  const workflow = interaction.kind.startsWith("calendar-") ? env.CALENDAR_WORKFLOW : env.PIPELINE_WORKFLOW
+  const workflow = interaction.kind.startsWith("calendar-")
+    ? env.CALENDAR_WORKFLOW
+    : interaction.kind.startsWith("meal-")
+      ? env.MEAL_PLANNING_WORKFLOW
+      : env.PIPELINE_WORKFLOW
   if (!workflow) {
     logRuntime(env, {
       workflow: interaction.workflowId,
@@ -325,6 +363,7 @@ async function dispatchRoutedInteraction(
       interactionVersion: interaction.version,
       interactionKind: interaction.kind,
       telegramUpdateId: interaction.telegramUpdateId,
+      ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
     },
   })
   logRuntime(env, {
@@ -335,8 +374,50 @@ async function dispatchRoutedInteraction(
     details: {
       inputKind,
       interactionKind: interaction.kind,
-      workflowType: interaction.kind.startsWith("calendar-") ? "calendar" : "linkedin",
+      workflowType: interaction.kind.startsWith("calendar-")
+        ? "calendar"
+        : interaction.kind.startsWith("meal-")
+          ? "meal"
+          : "linkedin",
     },
   })
+  return true
+}
+
+/**
+ * Level-3 fallthrough (§6): unaddressed plain text reaches the active plan's
+ * live workflow instance as a `meal-feedback-submission` event. When the
+ * active plan's week has ended, replies with the ended-plan notice instead.
+ */
+async function dispatchMealFallthrough(
+  env: Env,
+  msg: TelegramMessage,
+  tg: ReturnType<typeof createTelegramClient>,
+): Promise<boolean> {
+  if (!env.MEAL_PLANNING_DB || !env.MEAL_PLANNING_WORKFLOW || !msg.text || !msg.from) return false
+  const store = createMealPlanningStore(env.MEAL_PLANNING_DB)
+  const pointer = await store.activePlanPointer(String(msg.chat.id))
+  if (!pointer) return false
+  if (pointer.weekEnd > new Date().toISOString()) {
+    const instance = await env.MEAL_PLANNING_WORKFLOW.get(pointer.instanceId)
+    await instance.sendEvent({
+      type: "telegram-reply",
+      payload: {
+        userId: msg.from.id,
+        text: msg.text,
+        messageId: msg.message_id,
+        telegramUpdateId: msg.message_id,
+        interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
+        source: "telegram-text",
+      },
+    })
+    logRuntime(env, {
+      workflow: pointer.instanceId,
+      event: "telegram-meal-fallthrough",
+      outcome: "succeeded",
+    })
+    return true
+  }
+  await tg.sendMessage(msg.chat.id, MEAL_PLAN_ENDED)
   return true
 }

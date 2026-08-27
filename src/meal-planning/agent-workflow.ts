@@ -114,8 +114,8 @@ export async function runAgentCenteredMealPlanningWorkflow(
     }),
   )
 
-  await sendPlanAndRegister(env, step, event, profile, persisted.plan, persisted.version)
-  await liveWeekLoop(env, step, event, store, profile, persisted.plan)
+  await sendPlanAndRegister(env, step, event, profile, persisted.plan, persisted.version, persisted.generation)
+  await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
 }
 
 /** Resolves the store binding, failing loudly when the D1 database is not configured. */
@@ -241,6 +241,7 @@ async function sendPlanAndRegister(
   profile: StoredMealProfile,
   plan: MealPlanRecord,
   version: MealPlanVersionRecord,
+  generation: number,
 ): Promise<void> {
   const chatId = event.payload.chatId
   const message = renderPlanMessage(plan, version, profile.schedule, profile.customPolicies)
@@ -262,6 +263,7 @@ async function sendPlanAndRegister(
       botMessageId: sent.messageId,
       expiresAt: Date.parse(plan.weekEnd),
       interactionGroup: MEAL_PLANNING_GROUP,
+      generation,
     } satisfies InteractionRegistration)
   })
 }
@@ -281,9 +283,13 @@ async function liveWeekLoop(
   store: MealPlanningStore,
   profile: StoredMealProfile,
   plan: MealPlanRecord,
+  planGeneration: number,
 ): Promise<void> {
   const chatId = event.payload.chatId
   const weekEndMs = Date.parse(plan.weekEnd)
+  // Chat-scoped plan-message generation (§6): the current plan message's value,
+  // bumped by every persistence batch and carried on every post-persist registration.
+  let generation = planGeneration
   for (let iteration = 0; ; iteration++) {
     const remaining = weekEndMs - Date.now()
     if (remaining <= 0) return
@@ -305,7 +311,7 @@ async function liveWeekLoop(
         await notify(env, step, chatId, MEAL_STALE_PLAN)
         continue
       }
-      await promptForFeedbackReply(env, step, event, active.plan)
+      await promptForFeedbackReply(env, step, event, active.plan, generation)
       continue
     }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
@@ -313,7 +319,8 @@ async function liveWeekLoop(
       if (!submission) continue
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) continue
-      await runRevision(env, step, event, store, profile, active, submission)
+      const promotedGeneration = await runRevision(env, step, event, store, profile, active, submission)
+      if (promotedGeneration !== null) generation = promotedGeneration
       continue
     }
     logRuntime(env, {
@@ -335,7 +342,7 @@ function submissionFromPayload(payload: MealPlanningLiveEvent | undefined): Subm
   return coerceSubmission(payload.text, source, payload.messageId ?? 0)
 }
 
-/** Runs one feedback-driven revision: session → no-change gate → CAS promotion → new plan message. */
+/** Runs one feedback-driven revision: session → no-change gate → CAS promotion → new plan message. Returns the new plan-message generation on success, null otherwise. */
 async function runRevision(
   env: Env,
   step: WorkflowStep,
@@ -344,7 +351,7 @@ async function runRevision(
   profile: StoredMealProfile,
   active: ActivePlanRecord,
   submission: Submission,
-): Promise<void> {
+): Promise<number | null> {
   const context: MealPlanContext = {
     schedule: profile.schedule,
     profile: profile.profile,
@@ -362,11 +369,11 @@ async function runRevision(
     },
   ]
   const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true })
-  if (outcome?.kind !== "proposed") return
+  if (outcome?.kind !== "proposed") return null
   const propose = outcome.propose
   if (isNoChangeCandidate(propose.candidate, active.version.candidate)) {
     await notify(env, step, event.payload.chatId, MEAL_NO_CHANGES)
-    return
+    return null
   }
   const result = await stepDo(step, `meal-planning-promote-${active.plan.planId}`, () =>
     store.promotePlanVersion({
@@ -393,13 +400,14 @@ async function runRevision(
       failureCategory: result.reason,
     })
     await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN)
-    return
+    return null
   }
   const updated = await stepDo(step, `meal-planning-read-updated-${active.plan.planId}`, () =>
     store.activePlan(event.payload.chatId),
   )
-  if (!updated) return
-  await sendPlanAndRegister(env, step, event, profile, updated.plan, result.version)
+  if (!updated) return null
+  await sendPlanAndRegister(env, step, event, profile, updated.plan, result.version, result.generation)
+  return result.generation
 }
 
 /** Sends the 15-min force-reply feedback prompt and registers the meal-feedback-reply interaction. */
@@ -408,6 +416,7 @@ async function promptForFeedbackReply(
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
   plan: MealPlanRecord,
+  generation: number,
 ): Promise<void> {
   const chatId = event.payload.chatId
   const sent = await step.do(`meal-planning-feedback-prompt-${plan.planId}`, () =>
@@ -425,6 +434,7 @@ async function promptForFeedbackReply(
       botMessageId: sent.messageId,
       expiresAt: Date.now() + MEAL_FEEDBACK_REPLY_TTL_MS,
       interactionGroup: MEAL_PLANNING_GROUP,
+      generation,
     } satisfies InteractionRegistration)
   })
 }
