@@ -422,16 +422,18 @@ drives the real path with real text (§13.3).
    by single-claim + expiry alone. Calendar registrations carry no generation
    and keep the existing version-based cleanup.
 6. **Live week loop** until `week_end` (the plan row's `week_end`) or until a
-   fresh `/mealplan` supersedes the plan. Wait on both event types (Workflows
-   multi-event `waitForEvent`, timeout = remaining): `telegram-reply` (routed
-   interactions) and `meal-feedback-submission` (submissions with no
-   interaction row), then dispatch on the event kind:
+   fresh `/mealplan` supersedes the plan. One wait on the repo's proven
+   single-type `step.waitForEvent("telegram-reply", timeout = remaining)`;
+   every producer (button tap, force-reply text, webhook fallthrough,
+   iteration-2 API) sends that same event type and the loop dispatches on the
+   payload's `interactionKind` (the event type is a transport channel; the
+   payload discriminates — no multi-event API dependency):
 
    | Event kind | Source | Branch (all sends/registers inside `step.do`) |
    | --- | --- | --- |
    | `meal-feedback` | inline-button callback, one-time | Staleness guard first: if `interaction.version < current_version`, send `meal-stale-plan` notice and continue waiting (the tap targeted an outdated plan message). Otherwise `promptForFeedbackReply`: send force-reply prompt `"Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."` via `step.do`; register one reply interaction `{ interactionId, version: <planVersion>, workflowId: instanceId, kind: "meal-feedback-reply", botMessageId: promptMessageId, expiresAt: <interaction lifetime — 15 min, as clarifications>, interactionGroup: "meal-planning", generation: <planGeneration> }`. Continue waiting. |
    | `meal-feedback-reply` | force-reply text (replyTo the prompt) | The reply **is a feedback submission**: `coerceSubmission(text, "telegram-reply", messageId)` → one unbound `FeedbackItem`. Run the revision session (step 2) with the item as context; persist via `promotePlanVersion` (feedback-driven → submission batch row written and linked, §4); send the new plan message with a fresh button + register a new action set (step 5). Stale → `meal-stale-plan` notice. Continue waiting. |
-   | `meal-feedback-submission` | webhook fallthrough (level 3) or iteration-2 mini-app API (future; event seam defined now) | Same as `meal-feedback-reply`: a submission — coerced from raw text by the fallthrough, or already structured (`items: FeedbackItem[]`) by the mini-app. No store, session, or version-chain change is needed to add the mini-app producer. |
+   | `meal-feedback-submission` | `telegram-reply` event with `interactionKind: "meal-feedback-submission"`: webhook fallthrough (level 3) or iteration-2 mini-app API (future; event seam defined now) | Same as `meal-feedback-reply`: a submission — coerced from raw text by the fallthrough, or already structured (`items: FeedbackItem[]`) by the mini-app. No store, session, or version-chain change is needed to add the mini-app producer. |
    | timeout | `waitForEvent` deadline = `week_end` | End. The active plan stays in D1, approved by default. |
 
    **Duplicate and stale handling** (deterministic, no LLM):
@@ -464,6 +466,14 @@ drives the real path with real text (§13.3).
       "previous plan replaced" notice. Accepted as user-visible-but-harmless;
       a deterministic instance id (`mealplan-<chatId>-<telegramMessageId>`)
       is the future fix if it ever proves annoying.
+   - **The level-3 fallthrough is likewise not deduped** (same category): it
+      bypasses the router (no interaction row), so a retried delivery sends a
+      duplicate `meal-feedback-submission` event → the loop runs a second
+      revision from the same text (not a stale CAS — the first revision
+      already advanced the version, so the duplicate is a fresh revision).
+      Accepted as user-visible-but-harmless (one extra plan message); a
+      `lastSubmissionMessageId` guard in the loop's closure is the future fix
+      if it ever proves annoying.
 
 Routing (`telegram-webhook.ts`): kinds `meal-*` dispatch to
 `MEAL_PLANNING_WORKFLOW`; planning-conversation interactions carry the live
@@ -480,6 +490,9 @@ timezone. `resolvePlanningWeek(invokedAtMs, timezone, requestText)`
   week`, or a date (`/mealplan 2026-09-14`) → the week containing it.
   Unparsed text → the default. This is the "confirmation" mechanism —
   deterministic, zero conversation state, no new interaction kind.
+- The resolved week is clamped: if its `week_end` is before `invokedAtMs`
+  (a past week — e.g., a stale date override), fall back to the default
+  rule; a plan is never created for a week that has ended.
 - `invokedAtMs` is captured by the webhook at `/mealplan` and passed in the
   workflow params; week resolution never calls `Date.now()` inside the
   workflow (replays must be deterministic).
@@ -514,9 +527,11 @@ stack is empty, so it never competes with a real pending prompt. Wiring:
 (`meal_plan.instance_id` = `event.instanceId`, §4), and the webhook, on a
 plain-text input that resolved nothing, reads
 `SELECT instance_id FROM meal_plan WHERE chat_id = ? AND status = 'active' AND week_end > ?`
-and sends `{ type: "meal-feedback-submission", payload: { source:
-"telegram-text", text, messageId } }` to that instance (coercion stays in the
-workflow). This slots in before the "Unknown command" reply — slash-prefixed
+and sends the repo's standard `{ type: "telegram-reply", payload: {
+interactionKind: "meal-feedback-submission", source: "telegram-text", text,
+messageId } }` to that instance (coercion stays in the workflow; the event
+type is a transport channel, the payload discriminates — step 6). This slots
+in before the "Unknown command" reply — slash-prefixed
 text still short-circuits to command handling, so a bare typo becomes
 feedback only when an active plan exists (intended). Prompt
 lifetimes bound the switch: meal prompts (clarification, feedback reply) are
@@ -593,8 +608,10 @@ submissions (spec §8.1 — pending edit, see §13 note 4).
   pipeline unchanged — the exact shape iteration-2 `feedback-submit` will send.
 - New `meal-planning-week.test.ts`: `resolvePlanningWeek` — Mon/Tue/Wed →
   current week, Thu/Fri/Sat/Sun → next week, Sunday → next week; "this
-  week"/"next week"/date overrides; timezone boundary (the week flips at
-  Monday 00:00 / Saturday 23:59:59 in the profile timezone, not UTC).
+  week"/"next week"/date overrides; past-week clamp (a date override landing
+  on an ended week falls back to the default); timezone boundary (the week
+  flips at Monday 00:00 / Saturday 23:59:59 in the profile timezone, not
+  UTC).
 - New `meal-planning-store.test.ts`: one-active-per-chat constraint,
   `createActivePlan` atomicity — a second create supersedes the first
   (serialize-and-supersede), any statement failure rolls back the whole batch
@@ -680,7 +697,8 @@ Modified:
 - `src/triggers/telegram-webhook.ts` — `/mealplan` command (captures
   `invokedAtMs`; ack states the week); `meal-*` dispatch (third workflow
   branch); level-3 fallthrough (`meal_plan.instance_id` lookup →
-  `meal-feedback-submission` event) before the "Unknown command" reply.
+  `telegram-reply` event with `interactionKind: "meal-feedback-submission"`)
+  before the "Unknown command" reply.
 - `src/index.ts` — export `MealPlanningWorkflow`.
 - `src/core/interaction-router.ts` — optional chat-scoped generation on group
   registrations: new nullable `generation` column (same ALTER pattern as
@@ -721,8 +739,11 @@ commit itself is documentation-only and does not touch `src/`.
 ## 12. Follow-ups (separate issues)
 
 - Mini-app feedback surface (iteration 2): `feedback-submit` API endpoint that
-  sends the submission to the live instance; the immutable submission-batch
-  contract, session, and version chain need no changes.
+  sends the submission to the live instance via the same `telegram-reply`
+  channel (`interactionKind: "meal-feedback-submission"`, step 6), using the
+  same `meal_plan.instance_id` pointer the webhook fallthrough reads; the
+  immutable submission-batch contract, session, and version chain need no
+  changes.
 - Profile-editing conversation (open product decision).
 - #60 remaining production work: YouTube secret binding, rate limiting,
   refresh policy (KV handles cache expiry itself).
