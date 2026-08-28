@@ -100,7 +100,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
     context,
     messages,
     isRevision: false,
-    notifyPrefix: "meal-planning-notify-initial",
+    occurrence: "initial",
   })
   if (outcome?.kind !== "proposed") return
 
@@ -126,7 +126,16 @@ export async function runAgentCenteredMealPlanningWorkflow(
     }),
   )
 
-  await sendPlanAndRegister(env, step, event, profile, persisted.plan, persisted.version, persisted.generation)
+  await sendPlanAndRegister(
+    env,
+    step,
+    event,
+    profile,
+    persisted.plan,
+    persisted.version,
+    persisted.generation,
+    "initial",
+  )
   await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
 }
 
@@ -145,21 +154,25 @@ async function stepDo<T>(step: WorkflowStep, name: string, fn: () => Promise<T>)
  * Runs one bounded planning session turn loop (bounded by the 30-min session
  * TTL and the turn cap): a `needs_clarification` handoff blocks on a 15-min
  * force-reply prompt (timeout → canceled/not-applied notice), a `propose_plan`
- * handoff returns the candidate for persistence.
+ * handoff returns the candidate for persistence. `occurrence` is a stable
+ * per-session key (`initial` or `revision-<live-loop-iteration>`) that scopes
+ * every durable step name so name-memoized replays never reuse another
+ * session's steps.
  */
 async function runPlanningSession(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
-  options: { context: MealPlanContext; messages: ToolConversationMessage[]; isRevision: boolean; notifyPrefix: string },
+  options: { context: MealPlanContext; messages: ToolConversationMessage[]; isRevision: boolean; occurrence: string },
 ): Promise<PlanningOutcome | null> {
+  const notifyPrefix = `meal-planning-notify-${options.occurrence}`
   const sessionDeadline = Date.now() + MEAL_PLANNING_TTL_MS
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
     if (Date.now() > sessionDeadline) {
-      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${options.notifyPrefix}-session-deadline`)
+      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-deadline`)
       return { kind: "abandoned" }
     }
-    const session = await stepDo(step, `meal-planning-agent-session-${turn}`, async () => {
+    const session = await stepDo(step, `meal-planning-agent-session-${options.occurrence}-${turn}`, async () => {
       const provider = createToolProvider(
         env.LLM_API_KEY,
         env.LLM_PROVIDER,
@@ -171,19 +184,19 @@ async function runPlanningSession(
     options.messages = session.messages
     logAgentSession(env, event.instanceId, session)
     if (!session.completed || !session.terminal) {
-      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${options.notifyPrefix}-session-failed`)
+      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
       return { kind: "abandoned" }
     }
     const terminal = session.terminal
     if (terminal.kind === "needs_clarification") {
-      const reply = await promptForClarification(env, step, event, turn, terminal.message)
+      const reply = await promptForClarification(env, step, event, options.occurrence, turn, terminal.message)
       if (!reply) {
         await notify(
           env,
           step,
           event.payload.chatId,
           options.isRevision ? MEAL_FEEDBACK_NOT_APPLIED : MEAL_PLANNING_CANCELED,
-          `${options.notifyPrefix}-clarification-timeout`,
+          `${notifyPrefix}-clarification-timeout`,
         )
         return { kind: "abandoned" }
       }
@@ -192,7 +205,7 @@ async function runPlanningSession(
     }
     return { kind: "proposed", propose: terminal }
   }
-  await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${options.notifyPrefix}-session-exhausted`)
+  await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-exhausted`)
   return { kind: "abandoned" }
 }
 
@@ -201,20 +214,21 @@ async function promptForClarification(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
+  occurrence: string,
   turn: number,
   message: string,
 ): Promise<string | null> {
   const chatId = event.payload.chatId
   // The interaction id is minted inside the cached send step and returned, so a
   // replayed workflow reuses the same id for registration and reply matching.
-  const sent = await step.do(`meal-planning-clarify-notify-${turn}`, async () => {
+  const sent = await step.do(`meal-planning-clarify-notify-${occurrence}-${turn}`, async () => {
     const interactionId = crypto.randomUUID()
     const sentMessage = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
       replyMarkup: { force_reply: true },
     })
     return { interactionId, messageId: sentMessage.messageId }
   })
-  await step.do(`meal-planning-clarify-register-${turn}`, async () => {
+  await step.do(`meal-planning-clarify-register-${occurrence}-${turn}`, async () => {
     const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
     await router.register({
       interactionId: sent.interactionId,
@@ -231,10 +245,13 @@ async function promptForClarification(
   for (;;) {
     const remaining = deadline - Date.now()
     if (remaining <= 0) return null
-    const response = await step.waitForEvent<MealPlanningLiveEvent>(`meal-planning-clarify-wait-${turn}-${attempt}`, {
-      type: "telegram-reply",
-      timeout: `${Math.max(1, Math.ceil(remaining / MILLISECONDS_PER_SECOND))} seconds` as never,
-    })
+    const response = await step.waitForEvent<MealPlanningLiveEvent>(
+      `meal-planning-clarify-wait-${occurrence}-${turn}-${attempt}`,
+      {
+        type: "telegram-reply",
+        timeout: `${Math.max(1, Math.ceil(remaining / MILLISECONDS_PER_SECOND))} seconds` as never,
+      },
+    )
     if (response.type === "timeout") return null
     const payload = response.payload
     if (payload?.interactionId === sent.interactionId && payload.text) return payload.text
@@ -249,7 +266,7 @@ async function promptForClarification(
   }
 }
 
-/** Sends the rendered plan message with a [Give feedback] button and registers the meal-feedback interaction. */
+/** Sends the rendered plan message with a [Give feedback] button and registers the meal-feedback interaction. `occurrence` is a stable per-message key (`initial` or `revision-<live-loop-iteration>`). */
 async function sendPlanAndRegister(
   env: Env,
   step: WorkflowStep,
@@ -258,13 +275,14 @@ async function sendPlanAndRegister(
   plan: MealPlanRecord,
   version: MealPlanVersionRecord,
   generation: number,
+  occurrence: string,
 ): Promise<void> {
   const chatId = event.payload.chatId
   const message = renderPlanMessage(plan, version, profile.schedule, profile.customPolicies)
   // The callback token and interaction id are minted inside the cached send step
   // and returned, so a replayed workflow registers the credentials the parent
   // actually sees on the (cached) plan message instead of a fresh pair.
-  const sent = await step.do(`meal-planning-send-plan-${plan.planId}`, async () => {
+  const sent = await step.do(`meal-planning-send-plan-${occurrence}`, async () => {
     const callbackToken = crypto.randomUUID()
     const interactionId = crypto.randomUUID()
     const sentMessage = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
@@ -272,7 +290,7 @@ async function sendPlanAndRegister(
     })
     return { interactionId, callbackToken, messageId: sentMessage.messageId }
   })
-  await step.do(`meal-planning-register-feedback-${plan.planId}`, async () => {
+  await step.do(`meal-planning-register-feedback-${occurrence}`, async () => {
     const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
     await router.register({
       interactionId: sent.interactionId,
@@ -331,7 +349,7 @@ async function liveWeekLoop(
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-plan`)
         continue
       }
-      await promptForFeedbackReply(env, step, event, active.plan, generation)
+      await promptForFeedbackReply(env, step, event, active.plan, generation, iteration)
       continue
     }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
@@ -373,7 +391,8 @@ async function runRevision(
   submission: Submission,
   iteration: number,
 ): Promise<number | null> {
-  const notifyPrefix = `meal-planning-notify-revision-${active.plan.currentVersion}-${iteration}`
+  const occurrence = `revision-${iteration}`
+  const notifyPrefix = `meal-planning-notify-${occurrence}`
   const context: MealPlanContext = {
     schedule: profile.schedule,
     profile: profile.profile,
@@ -390,17 +409,17 @@ async function runRevision(
       text: `Current instant: ${new Date().toISOString()}\nTime zone: ${active.plan.timezone}\nRevision feedback: ${submission.items.map((item) => item.text).join(" ")}`,
     },
   ]
-  const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true, notifyPrefix })
+  const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true, occurrence })
   if (outcome?.kind !== "proposed") return null
   const propose = outcome.propose
   if (isNoChangeCandidate(propose.candidate, active.version.candidate)) {
     await notify(env, step, event.payload.chatId, MEAL_NO_CHANGES, `${notifyPrefix}-no-change`)
     return null
   }
-  const enriched = await stepDo(step, `meal-planning-video-enrich-${active.plan.planId}`, () =>
+  const enriched = await stepDo(step, `meal-planning-video-enrich-${occurrence}`, () =>
     enrichLunchVideos(env, propose.candidate),
   )
-  const result = await stepDo(step, `meal-planning-promote-${active.plan.planId}`, () =>
+  const result = await stepDo(step, `meal-planning-promote-${occurrence}`, () =>
     store.promotePlanVersion({
       planId: active.plan.planId,
       chatId: event.payload.chatId,
@@ -428,29 +447,30 @@ async function runRevision(
     await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-plan`)
     return null
   }
-  const updated = await stepDo(step, `meal-planning-read-updated-${active.plan.planId}`, () =>
+  const updated = await stepDo(step, `meal-planning-read-updated-${occurrence}`, () =>
     store.activePlan(event.payload.chatId),
   )
   if (!updated) return null
-  await sendPlanAndRegister(env, step, event, profile, updated.plan, result.version, result.generation)
+  await sendPlanAndRegister(env, step, event, profile, updated.plan, result.version, result.generation, occurrence)
   return result.generation
 }
 
-/** Sends the 15-min force-reply feedback prompt and registers the meal-feedback-reply interaction. */
+/** Sends the 15-min force-reply feedback prompt and registers the meal-feedback-reply interaction (live-loop iteration scopes the step names). */
 async function promptForFeedbackReply(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
   plan: MealPlanRecord,
   generation: number,
+  iteration: number,
 ): Promise<void> {
   const chatId = event.payload.chatId
-  const sent = await step.do(`meal-planning-feedback-prompt-${plan.planId}`, () =>
+  const sent = await step.do(`meal-planning-feedback-prompt-${iteration}`, () =>
     createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, MEAL_OPEN_FEEDBACK_PROMPT, {
       replyMarkup: { force_reply: true },
     }),
   )
-  await step.do(`meal-planning-register-feedback-reply-${plan.planId}`, async () => {
+  await step.do(`meal-planning-register-feedback-reply-${iteration}`, async () => {
     const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
     await router.register({
       interactionId: crypto.randomUUID(),

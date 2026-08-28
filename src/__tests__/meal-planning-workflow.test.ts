@@ -316,6 +316,80 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 2, generation: 2 }))
   })
 
+  it("completes two revisions under name-memoized steps, persisting v2 and v3 with fresh plan messages and registrations", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace, registrations } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("idli", ["rice"], "snack1") })
+    // The v3 candidate keeps the v2 Mon change and adds a Tue change.
+    const revisedAgain = {
+      ...revised,
+      grid: { ...revised.grid, Tue: { ...revised.grid.Tue, snack1: cell("poha", ["rice"], "snack1") } },
+    }
+    // Every revision runs through distinct per-occurrence step names, so the
+    // memoized runtime cannot return the initial plan's send/register/promote
+    // results for v2/v3.
+    const step = createMemoizingStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "Mon snack: prefer idli",
+          messageId: 200,
+        },
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "Tue snack: prefer poha",
+          messageId: 201,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([
+        {
+          name: "propose_plan",
+          input: proposeInput(revised, [
+            { id: "tg-200", text: "Mon snack: prefer idli", scope: { day: "Mon", slot: "snack1" } },
+          ]),
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revisedAgain }]),
+      deepseekResponse([
+        {
+          name: "propose_plan",
+          input: proposeInput(revisedAgain, [
+            { id: "tg-201", text: "Tue snack: prefer poha", scope: { day: "Tue", slot: "snack1" } },
+          ]),
+        },
+      ]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const store = createMealPlanningStore(d1)
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(3)
+    expect(active?.version.version).toBe(3)
+    expect(active?.version.requestKind).toBe("revision")
+    expect(active?.version.feedbackBatchId).toBe(`${active?.plan.planId}:v3`)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(2)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(3)
+    expect(telegramMessages.filter((message) => message.text.includes("School week of")).length).toBe(3)
+    expect(registrations.filter((registration) => registration.kind === "meal-feedback").length).toBe(3)
+    expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 1, generation: 1 }))
+    expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 2, generation: 2 }))
+    expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 3, generation: 3 }))
+  })
+
   it("sends meal-agent-unavailable and persists nothing when the agent fails", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
