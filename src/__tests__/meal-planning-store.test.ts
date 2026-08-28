@@ -83,6 +83,8 @@ describe("createInMemoryMealPlanningStore", () => {
       "packing-capacity",
       "nutrition-target-fruit",
       "nutrition-target-nuts",
+      "school-rule",
+      "cheat-day",
     ])
     expect(profile.schedule.days).toEqual(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"])
     expect(profile.schedule.slots).toHaveLength(5)
@@ -344,7 +346,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     const { store, db } = createD1Store()
     const profile = await store.loadOrCreateProfile(CHAT)
     expect(profile.interactionGeneration).toBe(0)
-    expect(profile.customPolicies).toHaveLength(5)
+    expect(profile.customPolicies).toHaveLength(7)
 
     const created = await store.createActivePlan(createInput())
     expect(created.generation).toBe(1)

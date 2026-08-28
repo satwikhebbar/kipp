@@ -207,7 +207,7 @@ const SEED_PROFILE: MealProfile = {
   foodPreferences: { favourites: ["paratha"], avoid: [] },
   allowNewFoods: false,
   sensoryGuidelines: [],
-  morningCookingBudgetMinutes: 40,
+  morningCookingBudgetMinutes: 35,
   priorNightPrepAllowed: false,
   pantryBaseline: ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"],
 }
@@ -238,6 +238,19 @@ const SEED_CUSTOM_POLICIES: CustomPolicy[] = [
     label: "Nutrition target",
     scope: "persistent",
     value: "Include nuts or dry fruits regularly.",
+  },
+  {
+    id: "school-rule",
+    label: "School rule",
+    scope: "persistent",
+    value: "Avoid biscuits, chips, and junk food in packed meals.",
+  },
+  {
+    id: "cheat-day",
+    label: "Friday cheat day",
+    scope: "persistent",
+    value:
+      "School-day meals are planned healthy and nutritious by default. Friday is the single scheduled exception: one indulgent treat (e.g., a sweeter breakfast, a richer dish, or a dessert) may appear that day. The treat never relaxes hard dietary exclusions, vegetarian school meals, the dry/packable snack rule, the school rule against biscuits/chips/junk in packed meals, the morning cook budget, or the prior-night-prep rules.",
   },
 ]
 

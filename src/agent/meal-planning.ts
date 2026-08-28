@@ -19,8 +19,20 @@ export const mealCellSchema = z
     priorNightPrep: z.boolean(),
   })
   .strict()
+  .describe(
+    'One meal cell. Include every field. Example: {"dish": "paratha", "vegetarian": true, "items": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false}',
+  )
 
-const gridSchema = z.record(z.string(), z.record(z.string(), mealCellSchema))
+const gridSchema = z
+  .record(
+    z.string(),
+    z
+      .record(z.string(), mealCellSchema)
+      .describe(
+        'one entry per slot id present that day, keyed by slot id (e.g. "breakfast", "snack1", "school-lunch")',
+      ),
+  )
+  .describe('one entry per school day, keyed by day ("Mon".."Sat")')
 
 const policyOutcomeSchema = z
   .object({
@@ -28,6 +40,7 @@ const policyOutcomeSchema = z
     rationale: z.string(),
   })
   .strict()
+  .describe('{"outcome": "satisfied" | "trade-off" | "needs-clarification", "rationale": "short reason"}')
 
 export const mealPlanCandidateSchema = z
   .object({
