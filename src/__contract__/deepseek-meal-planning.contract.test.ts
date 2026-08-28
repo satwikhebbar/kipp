@@ -40,7 +40,10 @@ const SLOTS_PER_DAY = 5
 /** Drives one real-provider session as the workflow does (context injected into the user message). */
 async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessionResult> {
   const provider = createToolProvider(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
-  const userText = `Request: ${context.request.text}\n\n${renderHouseholdContext(context)}`
+  const userText =
+    context.request.kind === "revision"
+      ? `Revision feedback: ${(context.feedbackItems ?? []).map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(context)}`
+      : `Request: ${context.request.text}\n\n${renderHouseholdContext(context)}`
   try {
     return await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], { context })
   } catch (error) {
