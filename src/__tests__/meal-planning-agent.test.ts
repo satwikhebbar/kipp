@@ -307,6 +307,7 @@ describe("bounded meal-planning agent session", () => {
     const candidate = {
       ...passingCandidate(),
       grid: gridWith("Mon", "home-lunch", cell("rice and beans", ["rice", "beans"], "home-lunch")),
+      easyBuys: ["beans", "carrots"],
     }
     const supplied = {
       items: [

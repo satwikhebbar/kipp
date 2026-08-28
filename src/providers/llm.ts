@@ -35,7 +35,8 @@ export interface ToolProviderResponse {
 }
 
 export type ToolChoice = "auto" | "required"
-export type ToolReasoningMode = "enabled" | "disabled"
+/** Provider reasoning mode; effort levels map to provider-native effort controls where supported. */
+export type ToolReasoningMode = "disabled" | "enabled" | "low" | "high" | "max"
 
 export interface ToolProviderClient {
   generate(input: {

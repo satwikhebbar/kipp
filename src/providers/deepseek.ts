@@ -83,6 +83,8 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
           content: message.text,
         }
       })
+      const thinkingEnabled = reasoning !== undefined && reasoning !== "disabled"
+      const effort = reasoning === "enabled" ? undefined : thinkingEnabled ? reasoning : undefined
       const response = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
@@ -91,7 +93,8 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
           messages: wireMessages,
           tools: tools.map((tool) => ({ type: FUNCTION_TOOL_TYPE, function: toolDeclaration(tool) })),
           ...(toolChoice ? { tool_choice: toolChoice } : {}),
-          ...(reasoning ? { thinking: { type: reasoning } } : {}),
+          ...(reasoning ? { thinking: { type: thinkingEnabled ? "enabled" : "disabled" } } : {}),
+          ...(effort ? { reasoning_effort: effort } : {}),
         }),
       })
       if (!response.ok) {
