@@ -10,6 +10,8 @@ export class ToolHandlerError extends Error {
     readonly category: "authorization-failed" | "invalid-state",
     /** HTTP status only; never a provider response body or user-supplied value. */
     readonly status?: number,
+    /** Enum failure codes only; never user-supplied values or provider text. */
+    readonly rejectionCodes?: string[],
   ) {
     super(message)
   }
@@ -47,6 +49,8 @@ export type ToolResult =
       validationErrors?: string[]
       /** Safe upstream HTTP status when a handler explicitly exposes one. */
       status?: number
+      /** Enum rejection codes only; never user-supplied values or provider text. */
+      rejectionCodes?: string[]
     }
 
 /** Deterministic permission and schema boundary around every future tool call. */
@@ -82,7 +86,12 @@ export class ToolGuard {
       return { ok: true, output }
     } catch (error) {
       if (error instanceof ToolHandlerError)
-        return { ok: false, category: error.category, ...(error.status === undefined ? {} : { status: error.status }) }
+        return {
+          ok: false,
+          category: error.category,
+          ...(error.status === undefined ? {} : { status: error.status }),
+          ...(error.rejectionCodes?.length ? { rejectionCodes: [...new Set(error.rejectionCodes)] } : {}),
+        }
       return { ok: false, category: "handler-failed" }
     }
   }

@@ -71,6 +71,9 @@ export async function runTools(
   const toolNames: string[] = []
   const toolExecutions: ToolExecutionSummary[] = []
   const usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
+  // Cumulative across turns: once a tool has succeeded, later failures in the
+  // session must not revoke the tools the model already unlocked.
+  const successfulTools: string[] = []
   const maxTurns = options.maxProviderTurns ?? MAX_TOOL_PROVIDER_TURNS
   const maxCalls = options.maxToolCalls ?? MAX_TOOL_CALLS
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -131,7 +134,6 @@ export async function runTools(
     const allowedNonHandoffCalls = response.toolCalls.filter(
       (call) => allowedTools.includes(call.name) && !options.handoffTools?.includes(call.name),
     )
-    const successfulTools: string[] = []
     let handoffActionCompleted = false
     let fatalToolFailure = false
     for (const call of response.toolCalls) {
