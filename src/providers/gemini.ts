@@ -4,6 +4,21 @@ import { type GenerateOptions, type ToolProviderClient, ToolProviderProtocolErro
 
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
 
+/** Gemini's function-declaration schema is a narrow OpenAPI subset that rejects
+ * JSON-Schema keywords like `additionalProperties`; strip them recursively. */
+function geminiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(geminiSchema)
+  if (schema && typeof schema === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+      if (key === "additionalProperties") continue
+      out[key] = geminiSchema(value)
+    }
+    return out
+  }
+  return schema
+}
+
 /** Creates a Gemini text generation client (non-tool-calling). */
 export function createGeminiGenerator(apiKey: string, modelName = GEMINI_DEFAULT_MODEL) {
   const genAI = new GoogleGenerativeAI(apiKey)
@@ -76,7 +91,14 @@ export function createGeminiToolClient(apiKey: string, modelName = GEMINI_DEFAUL
       const result = await model.generateContent({
         systemInstruction: system ? { role: "system", parts: [{ text: system }] } : undefined,
         contents,
-        tools: [{ functionDeclarations: tools.map(toolDeclaration) }],
+        tools: [
+          {
+            functionDeclarations: tools.map((tool) => ({
+              ...toolDeclaration(tool),
+              parameters: geminiSchema(toolDeclaration(tool).parameters),
+            })),
+          },
+        ],
       } as never)
       const response = result.response
       const candidate = response.candidates?.[0]
