@@ -19,13 +19,17 @@ const REQUIRED_IDS = [
   "midweek-shortage",
   "whole-day-replan",
   "batched-feedback",
+  "cheat-day",
+  "no-dairy-week",
+  "sat-open-week",
+  "vague-feedback",
 ]
 
 describe("meal-planning corpus health", () => {
   const scenarios = loadScenarios()
 
-  it("loads the 12 required scenario fixtures", () => {
-    expect(scenarios).toHaveLength(12)
+  it("loads the 16 required scenario fixtures", () => {
+    expect(scenarios).toHaveLength(16)
     const ids = new Set(scenarios.map((scenario) => scenario.id))
     for (const id of REQUIRED_IDS) expect(ids.has(id), `missing scenario ${id}`).toBe(true)
   })
@@ -106,6 +110,10 @@ describe("meal-planning corpus health", () => {
       "midweek-shortage": ["inventory_item_unavailable", "unscoped_cell_changed", "inventory_item_unknown"],
       "whole-day-replan": ["unscoped_cell_changed"],
       "batched-feedback": ["unaddressed_feedback"],
+      "cheat-day": ["missing_policy_outcome"],
+      "no-dairy-week": ["hard_exclusion"],
+      "sat-open-week": ["dish_repeated"],
+      "vague-feedback": ["unscoped_cell_changed", "unaddressed_feedback"],
     }
     const loadedIds = new Set(scenarios.map((scenario) => scenario.id))
     for (const id of Object.keys(branchByScenario)) {

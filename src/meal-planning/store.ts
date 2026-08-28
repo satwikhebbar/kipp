@@ -164,7 +164,7 @@ export interface InMemoryMealPlanningStoreOptions {
   failNextOn?: "createActivePlan" | "promotePlanVersion"
 }
 
-const SEED_SCHEDULE: MealSchedule = {
+export const SEED_SCHEDULE: MealSchedule = {
   days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
   slots: [
     { id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null },
@@ -175,7 +175,7 @@ const SEED_SCHEDULE: MealSchedule = {
   ],
 }
 
-const SEED_PROFILE: MealProfile = {
+export const SEED_PROFILE: MealProfile = {
   dietaryExclusions: ["peanut", "egg"],
   dishRepertoire: [
     "paratha",

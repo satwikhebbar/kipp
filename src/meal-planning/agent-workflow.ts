@@ -228,14 +228,29 @@ async function runPlanningSession(
       return { kind: "abandoned" }
     }
     const session = await stepDo(step, `meal-planning-agent-session-${options.occurrence}-${turn}`, async () => {
-      const provider = createToolProvider(
-        env.LLM_API_KEY,
-        env.LLM_PROVIDER,
-        env.LLM_MODEL,
-        Number(env.LLM_MAX_RETRIES || "3"),
-      )
-      return runMealPlanningAgentSession(provider, options.messages, { context: options.context })
+      try {
+        const provider = createToolProvider(
+          env.LLM_API_KEY,
+          env.LLM_PROVIDER,
+          env.LLM_MODEL,
+          Number(env.LLM_MAX_RETRIES || "3"),
+        )
+        return await runMealPlanningAgentSession(provider, options.messages, { context: options.context })
+      } catch (error) {
+        // Upstream provider failure becomes an intelligible notice, not a crashed instance.
+        logRuntime(env, {
+          workflow: event.instanceId,
+          event: "meal-planning-agent-session",
+          outcome: "failed",
+          failureCategory: "provider-error",
+        })
+        return null
+      }
     })
+    if (session === null) {
+      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
+      return { kind: "abandoned" }
+    }
     options.messages = session.messages
     logAgentSession(env, event.instanceId, session)
     if (!session.completed || !session.terminal) {

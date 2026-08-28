@@ -111,7 +111,7 @@ function zodProperty(schema: unknown): Record<string, unknown> {
   if (typeName === "ZodRecord")
     return {
       type: "object",
-      additionalProperties: definition?.innerType ? zodProperty(definition?.innerType) : {},
+      additionalProperties: definition?.valueType ? zodProperty(definition?.valueType) : {},
       ...(definition?.description ? { description: definition.description } : {}),
     }
   if (typeName === "ZodEnum") return { type: "string", enum: definition?.values }
@@ -131,6 +131,7 @@ type ZodProperty = {
   _def?: {
     typeName?: string
     innerType?: ZodProperty
+    valueType?: ZodProperty
     values?: readonly string[]
     value?: unknown
     type?: ZodProperty

@@ -177,6 +177,28 @@ function liveStep() {
   }
 }
 
+/** A step that memoizes `do` by name like the Workflows runtime, so a replayed instance resumes completed steps. */
+function memoStep() {
+  const cache = new Map<string, unknown>()
+  let ended = false
+  return {
+    do: vitest.fn(async (name: string, fn: () => unknown) => {
+      if (cache.has(name)) return cache.get(name)
+      const result = await fn()
+      cache.set(name, result)
+      return result
+    }),
+    waitForEvent: vitest.fn(async () => {
+      if (ended) return { type: "timeout" }
+      ended = true
+      vitest.setSystemTime(Date.now() + 8 * 86_400_000)
+      return { type: "timeout" }
+    }),
+    sleep: vitest.fn(),
+    sleepUntil: vitest.fn(),
+  }
+}
+
 function mealWorkflowBinding() {
   const created: Array<{ id: string; params: unknown }> = []
   const steps = new Map<string, ReturnType<typeof liveStep>>()
@@ -512,5 +534,53 @@ describe("agent-centered meal-planning Telegram integration", () => {
     step.timeout()
     await run
     void planIndex
+  })
+
+  it("sends meal-agent-unavailable and persists nothing when the provider rejects", async () => {
+    const { env, network } = runtimeEnv({})
+    const wf = mealWorkflowBinding()
+    env.MEAL_PLANNING_WORKFLOW = wf as never
+    mockGenerate.mockRejectedValue(new Error("upstream down"))
+
+    await handleTelegramWebhook(message("/mealplan this week"), env)
+    const { step, run } = startedWorkflowRun(wf, env)
+    await waitForMessageText(network, "couldn't reach")
+
+    const store = createMealPlanningStore(env.MEAL_PLANNING_DB as D1Database)
+    expect(await store.activePlan("100")).toBeNull()
+    step.timeout()
+    await run
+  })
+
+  it("replays a completed instance (restart) without re-sending the plan or duplicating rows", async () => {
+    const base = seedCandidate()
+    const { env, network } = runtimeEnv({})
+    const wf = mealWorkflowBinding()
+    env.MEAL_PLANNING_WORKFLOW = wf as never
+    queueInitialPlan(base)
+
+    await handleTelegramWebhook(message("/mealplan this week"), env)
+    const created = wf.created[wf.created.length - 1]
+    if (!created) throw new Error("meal workflow was not created")
+    const event = {
+      instanceId: created.id,
+      payload: (created.params as { params: MealPlanningWorkflowParams }).params,
+      timestamp: new Date().toISOString(),
+      workflowName: "meal-planning",
+    } as never
+    const step = memoStep()
+    await runAgentCenteredMealPlanningWorkflow(env, event, step as never)
+    await waitForMessageText(network, "School week of")
+
+    const store = createMealPlanningStore(env.MEAL_PLANNING_DB as D1Database)
+    expect((await store.activePlan("100"))?.plan.currentVersion).toBe(1)
+
+    // "Restart" the same instance: memoized durable steps replay, so the plan
+    // message is not re-sent and no rows are duplicated.
+    await runAgentCenteredMealPlanningWorkflow(env, event, step as never)
+    expect(
+      network.getState().telegramMessages.filter((candidate) => candidate.text.includes("School week of")).length,
+    ).toBe(1)
+    expect((await store.activePlan("100"))?.plan.currentVersion).toBe(1)
   })
 })

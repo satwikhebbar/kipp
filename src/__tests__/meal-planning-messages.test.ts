@@ -108,6 +108,21 @@ describe("renderPlanMessage", () => {
     )
   })
 
+  it("leaves the meal intact and renders no URL when a recipe video is missing or unsuitable", () => {
+    const missingGrid = grid()
+    missingGrid.Mon["school-lunch"] = cell("idli", { status: "no_suitable_video" })
+    missingGrid.Tue["school-lunch"] = cell("idli", { status: "not_attempted" })
+    const rendered = renderPlanMessage(
+      PLAN,
+      { ...VERSION, candidate: { ...CANDIDATE, grid: missingGrid } },
+      SCHEDULE,
+      [],
+    )
+    expect(rendered).toContain("School lunch: idli")
+    expect(rendered).not.toContain("Recipe video")
+    expect(rendered).not.toContain("youtube.com")
+  })
+
   it("escapes only Telegram Markdown special characters", () => {
     expect(escapeTelegramMarkdown("a_b *c* [d] `e` \\f")).toBe("a\\_b \\*c\\* \\[d\\] \\`e\\` \\\\f")
   })

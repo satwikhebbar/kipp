@@ -404,6 +404,27 @@ describe("tool declaration projection", () => {
       },
     })
   })
+
+  it("projects z.record shapes to object schemas with additionalProperties", () => {
+    const recordTool: ToolDefinition = {
+      ...ECHO_TOOL,
+      input: z.object({
+        grid: z.record(z.string().min(1), z.record(z.string().min(1), z.string())).describe("the week grid"),
+      }),
+    }
+    expect(toolDeclaration(recordTool).parameters).toMatchObject({
+      properties: {
+        grid: {
+          type: "object",
+          description: "the week grid",
+          additionalProperties: {
+            type: "object",
+            additionalProperties: { type: "string" },
+          },
+        },
+      },
+    })
+  })
 })
 
 const mockModel = vi.hoisted(() => ({ generateContent: vi.fn() }))
