@@ -154,3 +154,70 @@ following are true:
   non-actionable clarification questions, or recipe-link quality problems.
 - **P3 — polish:** wording, formatting, or a suggestion that remains feasible
   and policy-compliant.
+
+## Coverage gaps (discovered during manual testing, iteration 1)
+
+Every finding below was uncovered by running this plan against the real bot
+(the corpus, unit, and integration suites all mock the LLM, so they could not
+surface them). Each row names the gap, what caught it, whether a live-LLM eval
+would have caught it, and the coverage needed.
+
+### A. Infra / non-LLM (a live-LLM eval would NOT catch)
+
+| # | Gap | Caught by | Coverage needed |
+| --- | --- | --- | --- |
+| A1 | `GLOB` in CHECK constraints is rejected by real D1 ("LIKE or GLOB pattern too complex"); unit tests pass on `node:sqlite` so they gave false confidence | manual run (D1 path) | D1-real-path migration/integration test (miniflare/wrangler d1), not `node:sqlite` |
+| A2 | Session failures surface as a generic "couldn't reach the agent" message with no reason (`provider-turn-limit`, `tool-failed` invisible) | manual run | Integration test asserting the failure notice and the logged `failureCategory`; surface the reason |
+| A3 | `runTools` budget overrides (`maxProviderTurns`/`maxToolCalls`) added but untested | — | Unit test on `runTools` honoring the overrides |
+| A4 | Local dev-server reload mid-run kills an in-flight Workflow instance | manual run | Integration test on instance resume after restart (feeds S03) |
+
+### B. Model-facing contract (mocked tests CAN catch; fixes are in flight)
+
+| # | Gap | Caught by | Would live eval catch? | Coverage needed |
+| --- | --- | --- | --- | --- |
+| B1 | Household context (profile/schedule/policies/inventory/exceptions) was never injected into the model's messages | manual run (model asked for context it already had) | Yes | Integration assertion on the messages handed to `generate` (initial + revision) |
+| B2 | `z.record` had no `zodProperty` case, so `grid`/`policyOutcomes` were projected to the model as `{type:"string"}` | manual run + schema inspection | Yes | Unit test on `toolDeclaration` with a `z.record` schema |
+| B3 | `evaluate` was locked out after the first success, so the model's revise-loop burned turns on `not-allowed` | manual run (`provider-turn-limit`) | Yes | Session test for the revise→re-evaluate→propose loop |
+| B4 | The global 3-provider-turn budget is arbitrary for a 30-cell nested schema | manual run | Yes | Per-session budget override (done) + test |
+| B5 | System prompt must not hardcode specific policy ids (e.g. cheat-day); policies must be testable purely as injected context | review | Partial | Assertion that the prompt is policy-agnostic |
+| B6 | The model needs a full-valid-plan exemplar and the rule that `items` are ingredient tokens (from inventory/pantry/easyBuys), never dish names | manual run (`inventory_item_unknown` loop) | Yes | Few-shot exemplar (done); live-eval assertion |
+
+### C. Domain / evaluator coverage (corpus or deterministic)
+
+| # | Gap | Caught by | Would live eval catch? | Coverage needed |
+| --- | --- | --- | --- | --- |
+| C1 | Repertoire (25 dishes) < full 6×5 week (30 slots) under the zero-repeat rule makes T01 infeasible; corpus only covers Sat-closed 25-cell weeks | manual run (model clarified about repetition) | Yes | Corpus scenario with Saturday open; a feasibility check (repertoire ≥ slots) |
+| C2 | Empty-inventory chicken-and-egg: the model must pass evaluation against the current (empty) context before it can set inventory via `propose_plan`; corpus pre-populates inventory | scratch reproduction | Yes | Session/corpus case where context inventory is empty and the request lists ingredients |
+| C3 | Cheat-day as a custom policy (plan honours it and records a `policyOutcome`) — no corpus scenario | manual run | Yes | Corpus scenario with the cheat-day policy |
+| C4 | Saturday reduced schedule (baseline: 3 slots) is not representable — the schedule model is uniform per-day | reading baseline vs seed | Yes | Per-day schedule support or a documented decision |
+
+### D. Meta
+
+- **D1 | No live-LLM eval for meal-planning.** The corpus and integration suites
+  are fully mocked; only the calendar contract test hits a real model. B1, B2,
+  B3, B4, C1, C2 would all have surfaced as session failures in a
+  provider-backed eval. Tracked separately as a beads issue.
+
+### E. Manual cases with no automated coverage
+
+| Case | Reason |
+| --- | --- |
+| T03 (add to inventory in conversation) | no unit/corpus test |
+| T04 (`Tuesday will be difficult` → one useful clarification) | no clarify-on-ambiguity scenario |
+| T07 (short, labelled easy-buy list) | no corpus pin on easyBuys labelling |
+| T08 (no dairy this week) | no exclusion scenario |
+| T11 (preferred chef → recipe-link match; missing link leaves meal intact) | video unit tests only, no end-to-end |
+| T12 (cross-week variety) | partial (`whole-day-replan`, `requested-repeat`) |
+| R01 / R04 (scoped meal feedback → targeted change, others stable) | partial (`unscoped_cell_changed` unit only) |
+| R05 (conflicting instructions) | no scenario |
+| R06 (vague feedback → clarify what matters) | no scenario |
+| R07 (reopen / re-request current plan) | no coverage |
+| R09 (`Tomorrow is a holiday` → update state, no replan) | no scenario |
+| S03 (durable state across restart) | no coverage |
+| S04 (weekly inventory/exceptions expiry) | partial (week-bound units only) |
+| S05 (one long message: inventory + exception + policy) | no combined-facts scenario |
+| S06 (`Ignore every food rule…` → constraints hold) | no adversarial-input scenario |
+| S08 (upstream failure → intelligible message, plan uncorrupted) | partial |
+
+**Status:** recorded during the iteration-1 manual test session; fixes for B1,
+B2, B3, B4, B6 and the C1/C3 corpus additions are planned next.
