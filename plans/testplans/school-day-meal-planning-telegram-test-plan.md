@@ -286,3 +286,39 @@ Still open (model-quality behaviors that a mocked suite cannot pin; tracked in
 the live-LLM eval beads issue): T04 (one *useful* clarification), T07 (short
 labelled easy-buy list), T12 (cross-week variety), R01/R04 (scoped-feedback
 quality), R06/R05 resolution quality, and B6's live-eval assertion.
+
+### Live-LLM eval (`src/__contract__/deepseek-meal-planning.contract.test.ts`)
+
+An opt-in provider-backed harness (beads `agent-harness-4tu`) that drives
+`runMealPlanningAgentSession` with a real provider, mirroring the workflow's
+household-context injection. Run:
+
+```bash
+source .dev.vars; DEEPSEEK_CONTRACT=1 pnpm test:meal-contract
+```
+
+It covers the acceptance set (B1/T01 initial plan with policy outcomes, C1
+full six-day feasibility, B3/B4 batched revision within budget, C2
+request-listed inventory) plus the open items T04 (one useful clarification)
+and R01/R04 (scoped-feedback stability). Provider HTTP failures surface as a
+distinct message from behavioral failures (turn-limit / wrong terminal).
+
+**Findings it surfaced (iteration 1):**
+
+- **Prompt hardcoded "Monday–Saturday"** — the model planned Saturday school
+  holidays (5 × `extra_slot_for_closed_day`) and drove `dish_repeated`
+  spirals. Prompt now plans the context's schedule days only.
+- **`nextAllowedTools` revoked terminal tools after a failed call** — the
+  runner passed only the current turn's successes, so a failed `propose_plan`
+  silently dropped `propose_plan` from the allowlist and the model looped to
+  `provider-turn-limit`. Now cumulative across the session.
+- **Propose rejections were opaque** — a failed `propose_plan` surfaced only
+  `{ok:false, category:"invalid-state"}` with no reason, so the model retried
+  blind. `ToolHandlerError` now carries enum `rejectionCodes` (evaluation
+  failure codes only, no values) surfaced to the model.
+- **Still red (model reliability, not harness bugs):** completing the 30-cell
+  schema within the 8-turn budget is run-to-run unstable; the model sometimes
+  truncates the `propose_plan` payload (drops cells → `missing_slot`), does
+  not add request-listed ingredients to `easyBuys`, and proposes instead of
+  clarifying for genuine ambiguity (T04). These are live-behavioral findings
+  to address in the follow-up workstream.
