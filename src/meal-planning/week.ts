@@ -32,6 +32,16 @@ function mondayOfWeek(localDate: string): string {
   return addDays(localDate, -((weekdayOf(localDate) + DAYS_BETWEEN_MONDAY_AND_SUNDAY) % DAYS_PER_WEEK))
 }
 
+/** Returns the `YYYY-MM-DD` override date only when it is a real calendar date (rejects e.g. 2026-02-30). */
+function parseDateOverride(normalized: string): string | null {
+  if (!DATE_PATTERN.test(normalized)) return null
+  const [year, month, day] = normalized.split("-").map(Number)
+  const asUtc = new Date(Date.UTC(year, month - 1, day))
+  // toISOString zero-pads UTC components, so an impossible date (e.g. 2026-02-30)
+  // normalizes to a different string and fails the round-trip comparison.
+  return asUtc.toISOString().slice(0, 10) === normalized ? normalized : null
+}
+
 /** Applies the default rule: Mon–Wed invoke the current week; Thu–Sun invoke the next week (Sunday's school week ended Saturday). */
 function defaultMonday(invokedDate: string): string {
   const weekday = weekdayOf(invokedDate)
@@ -52,7 +62,7 @@ function defaultMonday(invokedDate: string): string {
 export function resolvePlanningWeek(invokedAtMs: number, timezone: string, requestText?: string): ResolvedPlanningWeek {
   const invokedDate = localDateAt(invokedAtMs, timezone)
   const normalized = (requestText ?? "").trim().toLowerCase()
-  const overrideDate = DATE_PATTERN.test(normalized) ? normalized : null
+  const overrideDate = parseDateOverride(normalized)
 
   let monday: string
   if (overrideDate) monday = mondayOfWeek(overrideDate)

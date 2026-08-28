@@ -1,6 +1,6 @@
 # School-Day Meal Planning — Iteration 1: Telegram-first Workflow
 
-> **Status:** Plan for GitHub issue #65 (parent: #59; prerequisite: #64 corpus/evaluator, merged)
+> **Status:** Plan for Bead `agent-harness-znw` (GitHub issue #65; parent: #59; prerequisite: #64 corpus/evaluator, merged)
 > **Document role:** Design of the first deliverable slice of the School-Day Meal
 > Planning workflow: durable D1 contracts, the bounded planning-agent loop wired
 > to the deterministic `evaluateMealPlan` evaluator, a Telegram-first
@@ -340,7 +340,9 @@ candidate and the handler re-verifies it deterministically.
 ## 6. Workflow sequence (`meal-planning/workflow.ts` + `agent-workflow.ts`)
 
 `MealPlanningWorkflowParams`:
-`{ chatId, telegramMessageId, requestText }`.
+`{ chatId, telegramMessageId, requestText, invokedAtMs }` — `invokedAtMs` is the
+webhook-captured invocation instant consumed by `resolvePlanningWeek` for
+deterministic, replay-safe week selection.
 
 **Submission payload (canonical, identical in iteration 1 and 2):** feedback
 arrives as one JSON object `{ items: FeedbackItem[] }` with
@@ -835,21 +837,22 @@ pnpm test:integration
 `lefthook` pre-commit runs typecheck, lint, and both test suites. The plan
 commit itself is documentation-only and does not touch `src/`.
 
-## 12. Follow-ups (separate issues)
+## 12. Follow-ups (separate issues, tracked as Beads discovered from `agent-harness-znw`)
 
-- Mini-app feedback surface (iteration 2): `feedback-submit` API endpoint that
-  sends the submission to the live instance via the same `telegram-reply`
-  channel (`interactionKind: "meal-feedback-submission"`, step 6), using the
-  same `meal_plan.instance_id` pointer the webhook fallthrough reads; the
-  immutable submission-batch contract, session, and version chain need no
-  changes.
-- Profile-editing conversation (open product decision).
-- #60 remaining production work: YouTube secret binding, rate limiting,
-  refresh policy (KV handles cache expiry itself).
-- D1 backup/export automation and read/write metrics (feasibility guardrails).
-- Plan-vs-actual recording: the weekly grid is a plan, not an actuals ledger —
-  out of scope for iterations 1–2 (revisit only if the mini-app's grid is
-  later read as actuals tracking).
+- Mini-app feedback surface (iteration 2) — Bead `agent-harness-ke7`:
+  `feedback-submit` API endpoint that sends the submission to the live instance
+  via the same `telegram-reply` channel (`interactionKind:
+  "meal-feedback-submission"`, step 6), using the same `meal_plan.instance_id`
+  pointer the webhook fallthrough reads; the immutable submission-batch
+  contract, session, and version chain need no changes.
+- Profile-editing conversation (open product decision) — Bead `agent-harness-e04`.
+- #60 remaining production work — Bead `agent-harness-awg`: YouTube secret
+  binding, rate limiting, refresh policy (KV handles cache expiry itself).
+- D1 backup/export automation and read/write metrics (feasibility guardrails) —
+  Bead `agent-harness-puu`.
+- Plan-vs-actual recording — Bead `agent-harness-432`: the weekly grid is a
+  plan, not an actuals ledger — out of scope for iterations 1–2 (revisit only
+  if the mini-app's grid is later read as actuals tracking).
 - Durable usage metrics for all workflows (per-run outcome, failure reason,
   turn/tool-call counts; designed once, not per workflow) — backlog
   `agent-harness-fuc`.

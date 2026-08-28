@@ -11,7 +11,7 @@
   <body>
     <h1>School-Day Meal Planning — Iteration 1: Telegram-first Workflow</h1>
     <p class="lede">Design of the first deliverable slice of the School-Day Meal Planning workflow: durable D1 contracts, the bounded planning-agent loop wired to the deterministic <code>evaluateMealPlan</code> evaluator, a Telegram-first conversation surface, versioned plan persistence with stale-revision rejection, and the #64 corpus as the documented quality gate.</p>
-    <div class="callout"><strong>Status:</strong> Plan for GitHub issue #65 (parent: #59; prerequisite: #64 corpus/evaluator, merged).<br /><span class="tag">D1 contracts</span><span class="tag">Telegram-first</span><span class="tag">Versioned plans</span><span class="tag">Bounded agent loop</span><span class="tag">Generation invalidation</span><span class="tag">#64 corpus gate</span></div>
+    <div class="callout"><strong>Status:</strong> Plan for Bead <code>agent-harness-znw</code> (GitHub issue #65; parent: #59; prerequisite: #64 corpus/evaluator, merged).<br /><span class="tag">D1 contracts</span><span class="tag">Telegram-first</span><span class="tag">Versioned plans</span><span class="tag">Bounded agent loop</span><span class="tag">Generation invalidation</span><span class="tag">#64 corpus gate</span></div>
 
     <h2>1. Goal</h2>
     <p>Deliver a usable Telegram-first school-week meal-planning workflow. A parent can start a planning conversation in Telegram text, receive a Monday–Saturday plan rendered as Telegram text, reply with targeted meal feedback, and receive a new persisted active-plan version. The active plan and its revision history survive process restarts as versioned canonical records in Cloudflare D1.</p>
@@ -317,13 +317,13 @@ pnpm test            # unit: store, messages, agent, evaluator + corpus suites
 pnpm test:integration</code></pre>
     <p><code>lefthook</code> pre-commit runs typecheck, lint, and both test suites. The plan commit itself is documentation-only and does not touch <code>src/</code>.</p>
 
-    <h2>12. Follow-ups (separate issues)</h2>
+    <h2>12. Follow-ups (separate issues, tracked as Beads discovered from <code>agent-harness-znw</code>)</h2>
     <ul>
-      <li>Mini-app feedback surface (iteration 2): <code>feedback-submit</code> API endpoint that sends the submission to the live instance via the same <code>telegram-reply</code> channel (<code>interactionKind: "meal-feedback-submission"</code>, step 6), using the same <code>meal_plan.instance_id</code> pointer the webhook fallthrough reads; the immutable submission-batch contract, session, and version chain need no changes.</li>
-      <li>Profile-editing conversation (open product decision).</li>
-      <li>#60 remaining production work: YouTube secret binding, rate limiting, refresh policy (KV handles cache expiry itself).</li>
-      <li>D1 backup/export automation and read/write metrics (feasibility guardrails).</li>
-      <li>Plan-vs-actual recording: the weekly grid is a plan, not an actuals ledger — out of scope for iterations 1–2 (revisit only if the mini-app's grid is later read as actuals tracking).</li>
+      <li>Mini-app feedback surface (iteration 2) — Bead <code>agent-harness-ke7</code>: <code>feedback-submit</code> API endpoint that sends the submission to the live instance via the same <code>telegram-reply</code> channel (<code>interactionKind: "meal-feedback-submission"</code>, step 6), using the same <code>meal_plan.instance_id</code> pointer the webhook fallthrough reads; the immutable submission-batch contract, session, and version chain need no changes.</li>
+      <li>Profile-editing conversation (open product decision) — Bead <code>agent-harness-e04</code>.</li>
+      <li>#60 remaining production work — Bead <code>agent-harness-awg</code>: YouTube secret binding, rate limiting, refresh policy (KV handles cache expiry itself).</li>
+      <li>D1 backup/export automation and read/write metrics (feasibility guardrails) — Bead <code>agent-harness-puu</code>.</li>
+      <li>Plan-vs-actual recording — Bead <code>agent-harness-432</code>: the weekly grid is a plan, not an actuals ledger — out of scope for iterations 1–2 (revisit only if the mini-app's grid is later read as actuals tracking).</li>
       <li>Durable usage metrics for all workflows (per-run outcome, failure reason, turn/tool-call counts; designed once, not per workflow) — backlog <code>agent-harness-fuc</code>.</li>
     </ul>
 

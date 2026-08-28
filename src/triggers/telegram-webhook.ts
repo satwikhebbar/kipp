@@ -270,7 +270,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
       if (text.startsWith("/")) {
         await tg.sendMessage(
           msg.chat.id,
-          "Unknown command. Use /add <text>, /generate, /calendar <request>, or tap inline buttons.",
+          "Unknown command. Use /add <text>, /generate, /calendar <request>, /mealplan <request>, or tap inline buttons.",
         )
         return new Response("OK")
       }
@@ -286,7 +286,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
       await tg.sendMessage(
         msg.chat.id,
-        "Unknown command. Use /add <text>, /generate, /calendar <request>, or tap inline buttons.",
+        "Unknown command. Use /add <text>, /generate, /calendar <request>, /mealplan <request>, or tap inline buttons.",
       )
       return new Response("OK")
     }
@@ -387,7 +387,9 @@ async function dispatchRoutedInteraction(
 /**
  * Level-3 fallthrough (§6): unaddressed plain text reaches the active plan's
  * live workflow instance as a `meal-feedback-submission` event. When the
- * active plan's week has ended, replies with the ended-plan notice instead.
+ * active plan's week has ended or its workflow instance is unreachable (e.g.
+ * terminated by an earlier failure), replies with the ended-plan notice instead
+ * of letting the delivery failure surface as a generic error.
  */
 async function dispatchMealFallthrough(
   env: Env,
@@ -400,17 +402,28 @@ async function dispatchMealFallthrough(
   if (!pointer) return false
   if (pointer.weekEnd > new Date().toISOString()) {
     const instance = await env.MEAL_PLANNING_WORKFLOW.get(pointer.instanceId)
-    await instance.sendEvent({
-      type: "telegram-reply",
-      payload: {
-        userId: msg.from.id,
-        text: msg.text,
-        messageId: msg.message_id,
-        telegramUpdateId: msg.message_id,
-        interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
-        source: "telegram-text",
-      },
-    })
+    try {
+      await instance.sendEvent({
+        type: "telegram-reply",
+        payload: {
+          userId: msg.from.id,
+          text: msg.text,
+          messageId: msg.message_id,
+          telegramUpdateId: msg.message_id,
+          interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
+          source: "telegram-text",
+        },
+      })
+    } catch {
+      logRuntime(env, {
+        workflow: pointer.instanceId,
+        event: "telegram-meal-fallthrough",
+        outcome: "failed",
+        failureCategory: "workflow-unreachable",
+      })
+      await tg.sendMessage(msg.chat.id, MEAL_PLAN_ENDED)
+      return true
+    }
     logRuntime(env, {
       workflow: pointer.instanceId,
       event: "telegram-meal-fallthrough",

@@ -14,6 +14,8 @@ const SECONDS_PER_HOUR = 3600
 const SECONDS_PER_MINUTE = 60
 /** Hard ceiling on YouTube calls per plan (one search per lunch cell plus one batched videos.list). */
 const MAX_YOUTUBE_CALLS_PER_PLAN = 13
+/** Short deadline per YouTube request: a stalled call aborts instead of delaying the optional enrichment step. */
+const YOUTUBE_REQUEST_TIMEOUT_MS = 5_000
 
 /** Narrow cache surface so tests can supply an in-memory fake; `KVNamespace` satisfies it structurally. */
 export interface RecipeVideoCache {
@@ -64,6 +66,25 @@ export async function enrichLunchVideos(
   const cells = lunchCells(candidate.grid, slotIds)
   if (!apiKey || !cache) return { candidate: markNotAttempted(candidate, slotIds), video: {} }
 
+  const { results, dishByKey, byDishSlot } = await readVideoCache(cache, cells)
+  const { topByKey, calls } = await searchTopVideos(
+    doFetch,
+    apiKey,
+    byDishSlot,
+    options.trustedChannelIds ?? [],
+    results,
+  )
+  const durations = await fetchDurations(doFetch, apiKey, topByKey, calls)
+  await applyVideoResults(cache, results, dishByKey, topByKey, durations)
+
+  return { candidate: withVideos(candidate, results), video: Object.fromEntries(results) }
+}
+
+/** Reads the cache once per distinct dish+slot, degrading each cell on a failing KV read. */
+async function readVideoCache(
+  cache: RecipeVideoCache,
+  cells: Array<{ key: string; slot: string; cell: MealCell }>,
+): Promise<{ results: Map<string, RecipeVideo>; dishByKey: Map<string, string>; byDishSlot: DishSlotGroups }> {
   const results = new Map<string, RecipeVideo>()
   // One lookup per distinct dish+slot; every cell sharing it reuses the same result.
   const dishByKey = new Map<string, string>()
@@ -90,8 +111,17 @@ export async function enrichLunchVideos(
     }
     group.keys.push(key)
   }
+  return { results, dishByKey, byDishSlot }
+}
 
-  // One search.list per uncached dish+slot, under the per-plan call ceiling.
+/** Runs one search.list per uncached dish+slot, under the per-plan call ceiling; a failing search degrades its cells. */
+async function searchTopVideos(
+  doFetch: typeof globalThis.fetch,
+  apiKey: string,
+  byDishSlot: DishSlotGroups,
+  trustedChannelIds: string[],
+  results: Map<string, RecipeVideo>,
+): Promise<{ topByKey: Map<string, YouTubeSearchItem>; calls: number }> {
   let calls = 0
   const topByKey = new Map<string, YouTubeSearchItem>()
   for (const group of byDishSlot.values()) {
@@ -101,29 +131,43 @@ export async function enrichLunchVideos(
     }
     calls += 1
     try {
-      const top = await searchTopVideo(doFetch, apiKey, group.dish, options.trustedChannelIds ?? [])
+      const top = await searchTopVideo(doFetch, apiKey, group.dish, trustedChannelIds)
       if (top) for (const key of group.keys) topByKey.set(key, top)
       else for (const key of group.keys) results.set(key, { status: "no_suitable_video" })
     } catch {
       for (const key of group.keys) results.set(key, { status: "no_suitable_video" })
     }
   }
+  return { topByKey, calls }
+}
 
-  // One batched videos.list for every collected candidate's duration.
-  let durations: Record<string, number> = {}
-  if (topByKey.size > 0 && calls < MAX_YOUTUBE_CALLS_PER_PLAN) {
-    calls += 1
-    try {
-      durations = await fetchVideoDurations(
-        doFetch,
-        apiKey,
-        [...topByKey.values()].map((item) => item.videoId),
-      )
-    } catch {
-      durations = {}
-    }
+/** Fetches durations for every collected candidate via one batched videos.list (under the call ceiling); a failure yields no durations. */
+async function fetchDurations(
+  doFetch: typeof globalThis.fetch,
+  apiKey: string,
+  topByKey: Map<string, YouTubeSearchItem>,
+  calls: number,
+): Promise<Record<string, number>> {
+  if (topByKey.size === 0 || calls >= MAX_YOUTUBE_CALLS_PER_PLAN) return {}
+  try {
+    return await fetchVideoDurations(
+      doFetch,
+      apiKey,
+      [...topByKey.values()].map((item) => item.videoId),
+    )
+  } catch {
+    return {}
   }
+}
 
+/** Finalizes each candidate (duration gate), records it, and best-effort caches the result. */
+async function applyVideoResults(
+  cache: RecipeVideoCache,
+  results: Map<string, RecipeVideo>,
+  dishByKey: Map<string, string>,
+  topByKey: Map<string, YouTubeSearchItem>,
+  durations: Record<string, number>,
+): Promise<void> {
   for (const [key, top] of topByKey) {
     const video: RecipeVideo =
       (durations[top.videoId] ?? 0) >= MIN_SUITABLE_VIDEO_SECONDS
@@ -146,9 +190,9 @@ export async function enrichLunchVideos(
         // A cache write is best-effort; a transient KV failure never blocks plan persistence.
       }
   }
-
-  return { candidate: withVideos(candidate, results), video: Object.fromEntries(results) }
 }
+
+type DishSlotGroups = Map<string, { dish: string; slot: string; keys: string[] }>
 
 /** Collects the lunch cells to enrich as `day:slot` keys. */
 function lunchCells(grid: MealGrid, slotIds: readonly string[]): Array<{ key: string; slot: string; cell: MealCell }> {
@@ -201,6 +245,21 @@ function parseCached(value: string): RecipeVideo {
   }
 }
 
+/** Runs one fetch with a short AbortController deadline so a stalled YouTube request cannot delay plan persistence. */
+async function fetchWithDeadline(
+  doFetch: typeof globalThis.fetch,
+  url: URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), YOUTUBE_REQUEST_TIMEOUT_MS)
+  try {
+    return await doFetch(url, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** Runs one YouTube search.list for a dish and returns the preferred result (trusted channel first). */
 async function searchTopVideo(
   doFetch: typeof globalThis.fetch,
@@ -214,7 +273,7 @@ async function searchTopVideo(
   url.searchParams.set("q", `${dish} recipe`)
   url.searchParams.set("maxResults", String(YOUTUBE_SEARCH_MAX_RESULTS))
   url.searchParams.set("key", apiKey)
-  const response = await doFetch(url, { headers: { accept: "application/json" } })
+  const response = await fetchWithDeadline(doFetch, url, { headers: { accept: "application/json" } })
   if (!response.ok) throw new Error(`YouTube search failed: ${response.status}`)
   const body = (await response.json()) as {
     items?: Array<{ id: { videoId: string }; snippet: { channelId: string; channelTitle: string; title: string } }>
@@ -242,7 +301,7 @@ async function fetchVideoDurations(
   url.searchParams.set("part", "contentDetails")
   url.searchParams.set("id", videoIds.join(","))
   url.searchParams.set("key", apiKey)
-  const response = await doFetch(url, { headers: { accept: "application/json" } })
+  const response = await fetchWithDeadline(doFetch, url, { headers: { accept: "application/json" } })
   if (!response.ok) throw new Error(`YouTube videos failed: ${response.status}`)
   const body = (await response.json()) as { items?: Array<{ id: string; contentDetails: { duration: string } }> }
   const durations: Record<string, number> = {}

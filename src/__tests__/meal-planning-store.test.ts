@@ -197,7 +197,7 @@ describe("createInMemoryMealPlanningStore", () => {
     expect(profile.interactionGeneration).toBe(2)
   })
 
-  it("the same-target race (a concurrent revision already committed the same newVersion) resolves stale, not an error, and leaves no extra version", async () => {
+  it("a stale-base race (the winner already committed a newer version) resolves stale and leaves no extra version", async () => {
     const store = await newStore()
     await store.createActivePlan(createInput())
     const winner = await store.promotePlanVersion(

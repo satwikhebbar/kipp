@@ -76,21 +76,26 @@ export async function runMealPlanningAgentSession(
           weeklyInventory: input.weeklyInventory,
           weeklyExceptions: input.weeklyExceptions,
         }
-        // A revision's evaluation uses the agent's scoped interpretation of the
-        // feedback (the submitted items, when present) so `unscoped_cell_changed`
-        // can be satisfied for the cells the feedback targets.
-        const evaluationContext = input.feedbackItems?.length
-          ? { ...context, feedbackItems: input.feedbackItems }
-          : context
-        const evaluation = evaluateMealPlan(input.candidate, evaluationContext)
+        const rawFeedback = options.context.feedbackItems ?? []
+        const submittedFeedback = input.feedbackItems ?? []
+        // The model-controlled submission cannot redefine feedback: ids and text
+        // must match the authoritative items exactly, and an explicit
+        // authoritative scope cannot be altered or dropped. Free-text feedback
+        // carries no parsed scope, so the model may attach the interpretation it
+        // actually plans against — that is what the evaluator's scope checks need.
+        assertAuthoritativeFeedback(rawFeedback, submittedFeedback)
+        const evaluation = evaluateMealPlan(input.candidate, {
+          ...context,
+          feedbackItems: submittedFeedback.length ? submittedFeedback : rawFeedback,
+        })
         if (!evaluation.pass) throw new ToolHandlerError("proposed plan did not pass evaluation", "invalid-state")
-        enforceFeedbackCoverage(options.context.feedbackItems ?? [], input.feedbackItems ?? [], input.candidate)
+        enforceFeedbackCoverage(rawFeedback, submittedFeedback, input.candidate)
         terminal = {
           kind: "propose_plan",
           candidate: input.candidate,
           weeklyInventory: input.weeklyInventory,
           weeklyExceptions: input.weeklyExceptions,
-          ...(input.feedbackItems?.length ? { feedbackItems: input.feedbackItems } : {}),
+          ...(submittedFeedback.length ? { feedbackItems: submittedFeedback } : {}),
           evaluation,
         }
         return { accepted: true as const }
@@ -139,6 +144,30 @@ export async function runMealPlanningAgentSession(
     toolExecutions: result.toolExecutions,
     usage: result.usage,
   }
+}
+
+/**
+ * Rejects a model-controlled feedback submission that invents or alters an
+ * item: each submitted item must match an authoritative raw item's id and text
+ * exactly, and must not drop or change an explicit authoritative scope (a scope
+ * may be attached only when the raw item carries none).
+ */
+function assertAuthoritativeFeedback(rawFeedback: FeedbackItem[], submittedFeedback: FeedbackItem[]): void {
+  const authoritative = new Map(rawFeedback.map((item) => [item.id, item]))
+  for (const item of submittedFeedback) {
+    const raw = authoritative.get(item.id)
+    if (!raw || raw.text !== item.text || (raw.scope && !scopeEqual(raw.scope, item.scope)))
+      throw new ToolHandlerError(
+        "proposed feedback items must match the authoritative feedback exactly",
+        "invalid-state",
+      )
+  }
+}
+
+/** True when two feedback scopes are equal (either both unset, or same day and slot). */
+function scopeEqual(a: FeedbackItem["scope"], b: FeedbackItem["scope"]): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return a.day === b.day && a.slot === b.slot
 }
 
 /**

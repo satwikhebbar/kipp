@@ -3,21 +3,23 @@ import type { Env } from "../core/types"
 import type { MealCell, MealGrid, MealPlanCandidate } from "../meal-planning/types"
 import { enrichLunchVideos, type RecipeVideoCache } from "../meal-planning/video"
 
-const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-const SLOT_COOK: Record<string, number> = { breakfast: 15, snack1: 0, "school-lunch": 20, "home-lunch": 20 }
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const
+type SlotId = "breakfast" | "snack1" | "school-lunch" | "home-lunch"
+const SLOT_COOK: Record<SlotId, number> = { breakfast: 15, snack1: 0, "school-lunch": 20, "home-lunch": 20 }
 
-function cell(dish: string, slot: string): MealCell {
+function cell(dish: string, slot: SlotId): MealCell {
   return { dish, vegetarian: true, items: [dish], cookMinutes: SLOT_COOK[slot], priorNightPrep: false }
 }
 
 function candidateGrid(): MealGrid {
   const grid: MealGrid = {}
   for (const day of DAYS) {
-    grid[day] = {
+    const slots: Partial<Record<SlotId, MealCell>> = {
       breakfast: cell("paratha", "breakfast"),
       "school-lunch": cell("idli", "school-lunch"),
       "home-lunch": cell("rice and dal", "home-lunch"),
     }
+    grid[day] = slots
   }
   return grid
 }
@@ -138,7 +140,7 @@ describe("optional recipe-video enrichment", () => {
       title: "Perfect Idli",
       channel: "Idli Chef",
     })
-    expect(enriched.grid["Wed"]["home-lunch"].recipeVideo).toMatchObject({ status: "found" })
+    expect(enriched.grid.Wed["home-lunch"].recipeVideo).toMatchObject({ status: "found" })
     expect(cache.put).toHaveBeenCalledWith("video:idli:school-lunch", expect.any(String), { expirationTtl: 86_400 })
     expect(cache.put).toHaveBeenCalledWith("video:rice and dal:home-lunch", expect.any(String), {
       expirationTtl: 86_400,
@@ -156,7 +158,7 @@ describe("optional recipe-video enrichment", () => {
     const { candidate: enriched, video } = await enrichLunchVideos(videoEnv(cache), candidate(), undefined, { fetch })
     expect(video["Mon:school-lunch"]).toEqual({ status: "found", url: "https://y/1" })
     expect(video["Mon:home-lunch"]).toEqual({ status: "found", url: "https://y/2" })
-    expect(enriched.grid["Tue"]["school-lunch"].recipeVideo).toEqual({ status: "found", url: "https://y/1" })
+    expect(enriched.grid.Tue["school-lunch"].recipeVideo).toEqual({ status: "found", url: "https://y/1" })
     expect(fetch).not.toHaveBeenCalled()
   })
 
@@ -174,7 +176,7 @@ describe("optional recipe-video enrichment", () => {
     ])
     const { candidate: enriched, video } = await enrichLunchVideos(videoEnv(cache), candidate(), undefined, { fetch })
     expect(video["Mon:school-lunch"]).toEqual({ status: "no_suitable_video" })
-    expect(enriched.grid["Mon"]["school-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
+    expect(enriched.grid.Mon["school-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
 
     const fetchMissing = vi.fn(async () => new Response(JSON.stringify({ items: [] }), { status: 200 }))
     const { candidate: enrichedMissing, video: videoMissing } = await enrichLunchVideos(
@@ -184,7 +186,7 @@ describe("optional recipe-video enrichment", () => {
       { fetch: fetchMissing },
     )
     expect(videoMissing["Mon:home-lunch"]).toEqual({ status: "no_suitable_video" })
-    expect(enrichedMissing.grid["Mon"]["home-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
+    expect(enrichedMissing.grid.Mon["home-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
   })
 
   it("prefers a trusted channel over the first search result", async () => {
@@ -231,7 +233,7 @@ describe("optional recipe-video enrichment", () => {
     )
     expect(video["Mon:school-lunch"]).toEqual({ status: "no_suitable_video" })
     expect(video["Mon:home-lunch"]).toEqual({ status: "no_suitable_video" })
-    expect(enriched.grid["Mon"]["school-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
+    expect(enriched.grid.Mon["school-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
     expect(fetch).not.toHaveBeenCalled()
   })
 
@@ -255,7 +257,7 @@ describe("optional recipe-video enrichment", () => {
       },
     )
     expect(video["Mon:school-lunch"]).toMatchObject({ status: "found", url: "https://www.youtube.com/watch?v=idli-1" })
-    expect(enriched.grid["Mon"]["school-lunch"].recipeVideo).toMatchObject({ status: "found" })
+    expect(enriched.grid.Mon["school-lunch"].recipeVideo).toMatchObject({ status: "found" })
   })
 
   it("respects the hard per-plan call ceiling", async () => {
@@ -264,7 +266,8 @@ describe("optional recipe-video enrichment", () => {
     const grid: MealGrid = {}
     for (const day of DAYS) {
       grid[day] = {}
-      for (const slot of ["breakfast", "snack1", "school-lunch", "home-lunch"]) {
+      const slots: SlotId[] = ["breakfast", "snack1", "school-lunch", "home-lunch"]
+      for (const slot of slots) {
         grid[day][slot] = cell(`${day}-${slot}-dish`, slot)
       }
     }
