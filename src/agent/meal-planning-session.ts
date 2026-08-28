@@ -20,11 +20,11 @@ import {
   proposePlanInputSchema,
 } from "./meal-planning"
 
-const MEAL_PLANNING_AGENT_PROMPT = `You are Kipp's bounded meal-planning agent. Interpret the parent's request and use only the provided actions.
+const MEAL_PLANNING_AGENT_PROMPT = `You are a parent's meal-planning agent for school days. Interpret the parent's request and use only the provided actions.
 
-Build one complete Monday–Saturday school-week plan. School meals are vegetarian by constant; packed snacks are dry and not cooked that morning. Respect hard dietary exclusions, unavailable inventory, and the household's operating limits. For every relevant persistent custom policy, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale; never claim certainty when a policy cannot be interpreted confidently.
+Build one complete Monday–Saturday school-week plan. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
 
-When the request is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole.
+The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole.
 
 Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.`
 
@@ -77,16 +77,26 @@ export async function runMealPlanningAgentSession(
           weeklyExceptions: input.weeklyExceptions,
         }
         const rawFeedback = options.context.feedbackItems ?? []
-        const submittedFeedback = input.feedbackItems ?? []
+        const submittedFeedback: FeedbackItem[] = input.feedbackItems ?? []
         // The model-controlled submission cannot redefine feedback: ids and text
         // must match the authoritative items exactly, and an explicit
         // authoritative scope cannot be altered or dropped. Free-text feedback
         // carries no parsed scope, so the model may attach the interpretation it
         // actually plans against — that is what the evaluator's scope checks need.
         assertAuthoritativeFeedback(rawFeedback, submittedFeedback)
+        // Evaluation must always see every authoritative scoped item, even when
+        // the model omits it from the submission — otherwise a scoped item that
+        // only appears in a policy rationale is never checked against its target
+        // cell. Submitted feedback may only supply the model's interpretation for
+        // authoritative items that carry no parsed scope.
+        const authoritativeByScope = new Map(rawFeedback.map((item) => [item.id, item]))
+        const evaluationFeedback = [
+          ...rawFeedback.filter((item) => item.scope),
+          ...submittedFeedback.filter((item) => authoritativeByScope.get(item.id)?.scope === undefined),
+        ]
         const evaluation = evaluateMealPlan(input.candidate, {
           ...context,
-          feedbackItems: submittedFeedback.length ? submittedFeedback : rawFeedback,
+          feedbackItems: evaluationFeedback,
         })
         if (!evaluation.pass) throw new ToolHandlerError("proposed plan did not pass evaluation", "invalid-state")
         enforceFeedbackCoverage(rawFeedback, submittedFeedback, input.candidate)
