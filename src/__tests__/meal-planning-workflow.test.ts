@@ -16,6 +16,8 @@ const POLICY_IDS = [
   "packing-capacity",
   "nutrition-target-fruit",
   "nutrition-target-nuts",
+  "school-rule",
+  "cheat-day",
 ]
 const CHAT = "chat-1"
 const TZ = "Asia/Kolkata"

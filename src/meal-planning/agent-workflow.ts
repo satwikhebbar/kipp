@@ -56,6 +56,61 @@ type PlanningOutcome =
   | { kind: "proposed"; propose: Extract<MealPlanningTerminalOutcome, { kind: "propose_plan" }> }
   | { kind: "abandoned" }
 
+/** Renders the household operating context the planning model must see (profile, schedule, policies, week state). */
+export function renderHouseholdContext(context: MealPlanContext): string {
+  const p = context.profile
+  const lines = [
+    `Household operating context:`,
+    `- Schedule days: ${context.schedule.days.join(", ")}`,
+    `- Slots: ${context.schedule.slots
+      .map(
+        (s) =>
+          `${s.id} (${s.packed ? "packed" : "not packed"}, ${s.dry ? "dry" : "not dry"}, maxCookMinutes: ${s.maxCookMinutes ?? "unlimited"})`,
+      )
+      .join(", ")}`,
+    `- Dietary exclusions (hard): ${p.dietaryExclusions.join(", ") || "none"}`,
+    `- Dish repertoire: ${p.dishRepertoire.join(", ")}`,
+    `- Food preferences: favourites = ${p.foodPreferences.favourites.join(", ") || "none"}, avoid = ${p.foodPreferences.avoid.join(", ") || "none"}`,
+    `- New foods allowed: ${p.allowNewFoods ? "yes" : "no"}`,
+    `- Sensory guidelines: ${p.sensoryGuidelines.join(", ") || "none"}`,
+    `- Morning cook budget: ${p.morningCookingBudgetMinutes} minutes per day`,
+    `- Prior-night prep allowed: ${p.priorNightPrepAllowed ? "yes" : "no"}`,
+    `- Pantry baseline: ${p.pantryBaseline.join(", ") || "none"}`,
+  ]
+  if (context.customPolicies.length) {
+    lines.push(`- Persistent custom policies:`)
+    for (const policy of context.customPolicies) {
+      lines.push(`    [${policy.id}] ${policy.label}: "${policy.value}"`)
+    }
+  }
+  lines.push(
+    `- Weekly inventory: ${
+      context.weeklyInventory.items.map((item) => `${item.name} (${item.status})`).join(", ") || "none"
+    }`,
+  )
+  if (context.weeklyInventory.notes.length) lines.push(`  inventory notes: ${context.weeklyInventory.notes.join("; ")}`)
+  if (context.weeklyExceptions.items.length) {
+    lines.push(`- Weekly exceptions:`)
+    for (const exception of context.weeklyExceptions.items) {
+      const appliesTo = exception.appliesTo
+      const target = appliesTo ? ` (${[appliesTo.day, ...(appliesTo.mealSlots ?? [])].filter(Boolean).join(", ")})` : ""
+      lines.push(`    ${exception.kind}${target}: "${exception.instruction}"`)
+    }
+  }
+  lines.push(`- Request kind: ${context.request.kind}`)
+  if (context.recentPlan) {
+    lines.push(`- Recent plan (change only the cells feedback targets):`)
+    for (const [day, cells] of Object.entries(context.recentPlan)) {
+      for (const [slot, cell] of Object.entries(cells)) {
+        lines.push(
+          `    ${day} ${slot}: ${cell.dish} (items: ${cell.items.join(", ")}; cook ${cell.cookMinutes} min; prior-night prep: ${cell.priorNightPrep ? "yes" : "no"})`,
+        )
+      }
+    }
+  }
+  return lines.join("\n")
+}
+
 /**
  * Runs the bounded meal-planning workflow: load household state, resolve the
  * target week, run the planning-agent session (with 15-min clarification
@@ -93,7 +148,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${timezone}\nRequest: ${event.payload.requestText || "/mealplan"}`,
+      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${timezone}\nRequest: ${event.payload.requestText || "/mealplan"}\n\n${renderHouseholdContext(context)}`,
     },
   ]
   const outcome = await runPlanningSession(env, step, event, {
@@ -406,7 +461,7 @@ async function runRevision(
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${active.plan.timezone}\nRevision feedback: ${submission.items.map((item) => item.text).join(" ")}`,
+      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${active.plan.timezone}\nRevision feedback: ${submission.items.map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(context)}`,
     },
   ]
   const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true, occurrence })

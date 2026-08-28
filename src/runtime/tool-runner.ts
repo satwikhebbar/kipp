@@ -48,6 +48,10 @@ export interface ToolRunOptions {
   reasoning?: ToolReasoningMode
   /** Chooses the allowlist for the next provider turn after a successful tool batch. */
   nextAllowedTools?: (executedTools: readonly string[]) => readonly string[]
+  /** Provider-turn budget for this session; defaults to the global MAX_TOOL_PROVIDER_TURNS. */
+  maxProviderTurns?: number
+  /** Aggregate tool-call budget for this session; defaults to the global MAX_TOOL_CALLS. */
+  maxToolCalls?: number
 }
 
 /**
@@ -67,7 +71,9 @@ export async function runTools(
   const toolNames: string[] = []
   const toolExecutions: ToolExecutionSummary[] = []
   const usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
-  for (let turn = 0; turn < MAX_TOOL_PROVIDER_TURNS; turn++) {
+  const maxTurns = options.maxProviderTurns ?? MAX_TOOL_PROVIDER_TURNS
+  const maxCalls = options.maxToolCalls ?? MAX_TOOL_CALLS
+  for (let turn = 0; turn < maxTurns; turn++) {
     const guard = new ToolGuard(registry, allowedTools)
     const response = await provider.generate({
       messages,
@@ -81,7 +87,7 @@ export async function runTools(
       if (options.requireHandoff) {
         if (response.text) messages.push({ role: "assistant", text: response.text })
         messages.push({ role: "user", text: REQUIRED_HANDOFF_REPAIR_MESSAGE })
-        if (turn + 1 < MAX_TOOL_PROVIDER_TURNS) continue
+        if (turn + 1 < maxTurns) continue
         return {
           messages,
           completed: false,
@@ -104,7 +110,7 @@ export async function runTools(
         usage,
       }
     }
-    if (toolCalls + response.toolCalls.length > MAX_TOOL_CALLS)
+    if (toolCalls + response.toolCalls.length > maxCalls)
       return {
         messages,
         completed: false,
@@ -187,7 +193,7 @@ export async function runTools(
     messages,
     completed: false,
     failureReason: "provider-turn-limit",
-    providerTurns: MAX_TOOL_PROVIDER_TURNS,
+    providerTurns: maxTurns,
     toolCallCount: toolCalls,
     toolNames,
     toolExecutions,

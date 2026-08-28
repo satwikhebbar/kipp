@@ -55,6 +55,8 @@ const POLICY_IDS = [
   "packing-capacity",
   "nutrition-target-fruit",
   "nutrition-target-nuts",
+  "school-rule",
+  "cheat-day",
 ]
 
 function cell(dish: string, items: string[], slot: string): MealCell {
@@ -301,6 +303,15 @@ describe("agent-centered meal-planning Telegram integration", () => {
     expect(network.getState().telegramMessages.some((candidate) => candidate.text === "Planning that now.")).toBe(true)
     const { step, run } = startedWorkflowRun(wf, env)
     const planIndex = await waitForMessageText(network, "School week of")
+
+    // The planning model must see the household context: profile, schedule,
+    // policies, and week state are injected into its first turn's messages.
+    const firstGenerateMessages = mockGenerate.mock.calls[0][0].messages.map(
+      (message: { role: string; text: string }) => message.text,
+    )
+    expect(firstGenerateMessages.join("\n")).toContain("Morning cook budget: 35")
+    expect(firstGenerateMessages.join("\n")).toContain("Dietary exclusions (hard)")
+    expect(firstGenerateMessages.join("\n")).toContain("[cheat-day] Friday cheat day")
 
     const token = callbackToken(network, planIndex)
     await handleTelegramWebhook(callback(token, 20), env)

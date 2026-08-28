@@ -22,11 +22,21 @@ import {
 
 const MEAL_PLANNING_AGENT_PROMPT = `You are a parent's meal-planning agent for school days. Interpret the parent's request and use only the provided actions.
 
-Build one complete Monday–Saturday school-week plan. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
+Build one complete Monday–Saturday school-week plan. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
 
 The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole.
 
-Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.`
+Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
+
+A cell's items are the dish's ingredient tokens, drawn only from the weekly inventory, the pantry baseline, or the easy-buys list (the short list of ordinary ingredients you are adding). Never put a dish name itself in items or easyBuys. When the request lists ingredients, add them to easyBuys so the evaluator accepts them.
+
+Example of one day's cells:
+Mon: breakfast { "dish": "paratha", "vegetarian": true, "items": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false }
+     snack1 { "dish": "banana", "vegetarian": true, "items": ["banana"], "cookMinutes": 0, "priorNightPrep": false }
+     snack2 { "dish": "roasted chana", "vegetarian": true, "items": ["chana"], "cookMinutes": 0, "priorNightPrep": false }
+     school-lunch { "dish": "bottle gourd dal", "vegetarian": true, "items": ["bottle gourd", "moong dal"], "cookMinutes": 20, "priorNightPrep": false }
+     home-lunch { "dish": "rice and beans", "vegetarian": true, "items": ["rice", "beans"], "cookMinutes": 20, "priorNightPrep": false }
+with easyBuys = ["banana", "chana", "bottle gourd", "beans"] when those are not already in inventory. Other days follow the same shape with the same five slots.`
 
 export interface MealPlanningAgentSessionOptions {
   context: MealPlanContext
@@ -137,7 +147,14 @@ export async function runMealPlanningAgentSession(
       toolChoice: "required",
       reasoning: "disabled",
       nextAllowedTools: (executedTools) =>
-        executedTools.includes(MEAL_PLANNING_TOOL.EVALUATE) ? terminalTools : initialAllowedTools,
+        executedTools.includes(MEAL_PLANNING_TOOL.EVALUATE)
+          ? [MEAL_PLANNING_TOOL.EVALUATE, ...terminalTools]
+          : initialAllowedTools,
+      // A full Mon–Sat candidate is a large nested schema; the model often needs
+      // an extra evaluate-revise turn, so grant more turns than the default
+      // shared budget without changing other workflows.
+      maxProviderTurns: 8,
+      maxToolCalls: 12,
     },
     initialMessages[0]?.role === "system"
       ? initialMessages

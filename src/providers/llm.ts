@@ -108,6 +108,12 @@ function zodProperty(schema: unknown): Record<string, unknown> {
     return { type: definition?.checks?.some((check) => check.kind === "int") ? "integer" : "number" }
   if (typeName === "ZodBoolean") return { type: "boolean" }
   if (typeName === "ZodArray") return { type: "array", items: zodProperty(definition?.type) }
+  if (typeName === "ZodRecord")
+    return {
+      type: "object",
+      additionalProperties: definition?.innerType ? zodProperty(definition?.innerType) : {},
+      ...(definition?.description ? { description: definition.description } : {}),
+    }
   if (typeName === "ZodEnum") return { type: "string", enum: definition?.values }
   if (typeName === "ZodLiteral") return literalProperty(definition?.value)
   return { type: "string" }
@@ -131,6 +137,7 @@ type ZodProperty = {
     options?: ZodProperty[]
     checks?: Array<{ kind?: string }>
     shape?: () => Record<string, ZodProperty>
+    description?: string
   }
 }
 
