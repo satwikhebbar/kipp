@@ -8,8 +8,13 @@ import { ToolProviderHttpError } from "../providers/llm"
 
 declare const process: { env: Record<string, string | undefined> }
 
-const apiKey = process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY
-const enabled = process.env.DEEPSEEK_CONTRACT === "1" && Boolean(apiKey)
+const providerName = process.env.LIVE_PROVIDER ?? "deepseek"
+const model = process.env.LIVE_MODEL ?? (providerName === "gemini" ? "gemini-3.7-flash" : "deepseek-v4-flash")
+const apiKey =
+  providerName === "gemini"
+    ? (process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.LLM_API_KEY ?? "")
+    : (process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY ?? "")
+const enabled = (process.env.LIVE_CONTRACT === "1" || process.env.DEEPSEEK_CONTRACT === "1") && Boolean(apiKey)
 // Each test is a real multi-turn session; thinking mode makes turns slower, so
 // give each scenario a generous ceiling well inside the workflow's 30-min TTL.
 const CONTRACT_TIMEOUT_MS = 600_000
@@ -25,6 +30,7 @@ const scenario = (id: string): MealPlanScenario => {
 }
 
 const MAX_PROVIDER_TURNS = 8
+const PROVIDER_MAX_RETRIES = 3
 const MAX_EASY_BUYS = 5
 const MAX_REQUESTED_EASY_BUYS = 8
 const MAX_CLARIFY_LENGTH = 300
@@ -33,7 +39,7 @@ const SLOTS_PER_DAY = 5
 
 /** Drives one real-provider session as the workflow does (context injected into the user message). */
 async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessionResult> {
-  const provider = createToolProvider(apiKey ?? "", "deepseek", "deepseek-v4-flash", 0)
+  const provider = createToolProvider(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
   const userText = `Request: ${context.request.text}\n\n${renderHouseholdContext(context)}`
   try {
     return await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], { context })
