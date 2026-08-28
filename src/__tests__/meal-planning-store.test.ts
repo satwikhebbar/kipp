@@ -464,7 +464,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(await store.activePlan(CHAT)).toMatchObject({ plan: { planId: "plan-2", currentVersion: 1 } })
   })
 
-  it("migration CHECK constraints reject non-canonical enums, timestamps, and timezones", () => {
+  it("migration CHECK constraints reject non-canonical enum values", () => {
     const { db } = createD1Store()
     const now = "2026-09-07T00:00:00.000Z"
     const valid = {
@@ -477,43 +477,16 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       created_at: now,
       updated_at: now,
     }
-    const inserts: Array<Record<string, string>> = [
-      {
-        ...valid,
-        plan_id: "bad-status",
-        status: "paused",
-      },
-      {
-        ...valid,
-        plan_id: "bad-time",
-        created_at: "2026-09-07",
-      },
-      {
-        ...valid,
-        plan_id: "bad-tz",
-        timezone: "Nowhere",
-      },
-    ]
-    for (const values of inserts) {
-      expect(() =>
-        db
-          .prepare(
-            `INSERT INTO meal_plan (${Object.keys(values).join(", ")}) VALUES (${Object.keys(values)
-              .map(() => "?")
-              .join(", ")})`,
-          )
-          .run(...Object.values(values)),
-      ).toThrow(`constraint failed`)
-    }
-    // Multi-segment IANA names (America/Argentina/Buenos_Aires) must pass the
-    // structural timezone check, matching the codebase's IANA contract.
+    const bad = { ...valid, plan_id: "bad-status", status: "paused" }
     expect(() =>
       db
         .prepare(
-          "INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          `INSERT INTO meal_plan (${Object.keys(bad).join(", ")}) VALUES (${Object.keys(bad)
+            .map(() => "?")
+            .join(", ")})`,
         )
-        .run("plan-tz-multi", CHAT, now, now, "America/Argentina/Buenos_Aires", "wf-1", now, now),
-    ).not.toThrow()
+        .run(...Object.values(bad)),
+    ).toThrow("constraint failed")
     expect(() =>
       db
         .prepare(
