@@ -462,6 +462,35 @@ Idea 2`
     })
   })
 
+  it("sends a private-chat Mini App launch button for /mealplan", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) })
+    const env = { ...mockEnv(), MINI_APP_URL: "https://example.ngrok.app/mini-app" }
+    const response = await handleTelegramWebhook(
+      new Request("https://example.ngrok.app/webhook/telegram", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          update_id: 6,
+          message: {
+            message_id: 10,
+            from: { id: 42 },
+            chat: { id: 100, type: "private" },
+            text: "/mealplan",
+          },
+        }),
+      }),
+      env as never,
+    )
+
+    expect(response.status).toBe(200)
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("sendMessage"),
+      expect.objectContaining({
+        body: expect.stringContaining('"web_app":{"url":"https://example.ngrok.app/mini-app"}'),
+      }),
+    )
+  })
+
   it("routes an entity-addressed Calendar command separated by Telegram whitespace", async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) })
     const env = mockEnv()

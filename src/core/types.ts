@@ -7,6 +7,8 @@ export interface Env {
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_WEBHOOK_SECRET: string
   TELEGRAM_ALLOWED_USER_ID: string
+  /** Optional public tunnel URL used by the development Mini App launch button. */
+  MINI_APP_URL?: string
   PROMPT_STYLE_PATH?: string
   LINKEDIN_CLIENT_ID: string
   LINKEDIN_CLIENT_SECRET: string

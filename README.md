@@ -284,6 +284,10 @@ Telegram permits only one webhook per bot, so use a separate development bot.
 4. Expose it with `ngrok http 8787`.
 5. Run `pnpm run webhook:dev` to point the development bot at the active tunnel.
 
+### Throwaway Mini App feedback spike
+
+With the local Worker and ngrok tunnel running, set `MINI_APP_URL="https://<current-ngrok-host>/mini-app"` in `.dev.vars`, then send `/mealplan` to the **development bot** in a private chat. It returns a **Review this week's plan** button that opens the mock-data Mini App. The prototype verifies Telegram's signed launch data and collects typed feedback locally until **Replan** submits it as one batch. Unsubmitted feedback persists locally on that Telegram device for the active plan, then is cleared after a successful Replan. The Mini App confirms the handoff, closes, and the development bot sends a mock clarification in the Telegram chat. It uses only in-memory state: restarting the Worker resets the plan.
+
 Scheduled jobs (RSS ingest, cadence, token check) do not fire locally on their
 own. Start Wrangler with scheduled-event testing and trigger them by URL:
 

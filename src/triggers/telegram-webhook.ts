@@ -53,7 +53,7 @@ interface TelegramCommand {
   argument: string
 }
 
-const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "calendar"])
+const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "calendar", "mealplan"])
 
 /** Reads a Telegram slash command from its bot_command entity, with a text fallback for test and legacy updates. */
 function telegramCommand(message: TelegramMessage): TelegramCommand | null {
@@ -216,6 +216,20 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         params: { chatId: String(msg.chat.id), requestText, telegramMessageId: msg.message_id, setupOrigin },
       })
       await tg.sendMessage(msg.chat.id, "Scheduling that now.")
+      return new Response("OK")
+    }
+
+    if (command?.name === "mealplan" && !command.argument) {
+      if (msg.chat.type !== "private") {
+        await tg.sendMessage(msg.chat.id, "Open this command in a private chat with the development bot.")
+        return new Response("OK")
+      }
+      const miniAppUrl = env.MINI_APP_URL?.trim() || `${setupOrigin}/mini-app`
+      await tg.sendMessage(msg.chat.id, "Open the mock weekly plan and leave feedback.", {
+        replyMarkup: {
+          inline_keyboard: [[{ text: "Review this week's plan", web_app: { url: miniAppUrl } }]],
+        },
+      })
       return new Response("OK")
     }
 

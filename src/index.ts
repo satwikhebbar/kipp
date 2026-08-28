@@ -3,6 +3,8 @@ import { CalendarWorkflow } from "./calendar/workflow"
 import { createTokenVault } from "./core/token-vault-client"
 import type { Env } from "./core/types"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "./integrations/telegram"
+import { miniAppPage } from "./meal-plan-spike/page"
+import { createMiniAppSession, readMiniAppPlan, submitMiniAppFeedback } from "./meal-plan-spike/routes"
 import { HTTP_STATUS } from "./runtime/http"
 import { logRuntime } from "./runtime/logging"
 import { userFacingFailureMessage } from "./runtime/user-failures"
@@ -23,6 +25,11 @@ export { CalendarWorkflow }
 const app = new Hono<{ Bindings: Env }>()
 
 app.get("/", (c) => c.text("linkedin-pipeline"))
+
+app.get("/mini-app", (c) => c.html(miniAppPage()))
+app.post("/api/mini-app/session", (c) => createMiniAppSession(c.req.raw, c.env))
+app.get("/api/mini-app/plan", (c) => readMiniAppPlan(c.req.raw))
+app.post("/api/mini-app/feedback", (c) => submitMiniAppFeedback(c.req.raw, c.env))
 
 app.get("/setup/linkedin", async (c) => handleAuthStart(c.req.raw, c.req.header("host") ?? "", c.env))
 
