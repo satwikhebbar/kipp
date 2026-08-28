@@ -10,7 +10,9 @@ declare const process: { env: Record<string, string | undefined> }
 
 const apiKey = process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY
 const enabled = process.env.DEEPSEEK_CONTRACT === "1" && Boolean(apiKey)
-const CONTRACT_TIMEOUT_MS = 120_000
+// Each test is a real multi-turn session; thinking mode makes turns slower, so
+// give each scenario a generous ceiling well inside the workflow's 30-min TTL.
+const CONTRACT_TIMEOUT_MS = 600_000
 // A live meal-planning session is up to 8 provider turns of a 30-cell nested schema.
 const contractIt = enabled
   ? (name: string, fn: () => void | Promise<void>) => it(name, fn, CONTRACT_TIMEOUT_MS)

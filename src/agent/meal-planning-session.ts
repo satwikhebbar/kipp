@@ -22,7 +22,7 @@ import {
 
 export const MEAL_PLANNING_AGENT_PROMPT = `You are a parent's meal-planning agent for school days. Interpret the parent's request and use only the provided actions.
 
-Build one complete school-week plan covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
+Build one complete school-week plan covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. The plan must contain a cell for every slot on every open schedule day — never fewer, never a day outside the schedule. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
 
 The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole.
 
@@ -81,11 +81,6 @@ export async function runMealPlanningAgentSession(
       privacy: "private",
       batching: "isolated",
       handler: async (input) => {
-        const context = {
-          ...options.context,
-          weeklyInventory: input.weeklyInventory,
-          weeklyExceptions: input.weeklyExceptions,
-        }
         const rawFeedback = options.context.feedbackItems ?? []
         const submittedFeedback: FeedbackItem[] = input.feedbackItems ?? []
         // The model-controlled submission cannot redefine feedback: ids and text
@@ -104,8 +99,11 @@ export async function runMealPlanningAgentSession(
           ...rawFeedback.filter((item) => item.scope),
           ...submittedFeedback.filter((item) => authoritativeByScope.get(item.id)?.scope === undefined),
         ]
+        // Re-validate against the authoritative week state plus the candidate's
+        // easy-buys, exactly as evaluate_meal_plan did — never against a
+        // re-emitted echo the model may have drifted from the source of truth.
         const evaluation = evaluateMealPlan(input.candidate, {
-          ...context,
+          ...options.context,
           feedbackItems: evaluationFeedback,
         })
         if (!evaluation.pass)
@@ -119,8 +117,8 @@ export async function runMealPlanningAgentSession(
         terminal = {
           kind: "propose_plan",
           candidate: input.candidate,
-          weeklyInventory: input.weeklyInventory,
-          weeklyExceptions: input.weeklyExceptions,
+          weeklyInventory: input.weeklyInventory ?? options.context.weeklyInventory,
+          weeklyExceptions: input.weeklyExceptions ?? options.context.weeklyExceptions,
           ...(submittedFeedback.length ? { feedbackItems: submittedFeedback } : {}),
           evaluation,
         }
@@ -150,8 +148,8 @@ export async function runMealPlanningAgentSession(
       allowedTools: initialAllowedTools,
       handoffTools: terminalTools,
       requireHandoff: true,
-      toolChoice: "required",
-      reasoning: "disabled",
+      toolChoice: "auto",
+      reasoning: "high",
       nextAllowedTools: (executedTools) =>
         executedTools.includes(MEAL_PLANNING_TOOL.EVALUATE)
           ? [MEAL_PLANNING_TOOL.EVALUATE, ...terminalTools]

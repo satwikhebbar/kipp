@@ -322,3 +322,14 @@ distinct message from behavioral failures (turn-limit / wrong terminal).
   not add request-listed ingredients to `easyBuys`, and proposes instead of
   clarifying for genuine ambiguity (T04). These are live-behavioral findings
   to address in the follow-up workstream.
+
+**Thinking mode (iteration 1, post-eval):** meal-planning sessions now run with
+DeepSeek thinking enabled at `high` effort (`tool_choice: "auto"` — thinking
+mode rejects `"required"`; prose is absorbed by the runner's repair turns).
+The eval timeout was raised to 600s; with a realistic ceiling the high-thinking
+run passes **B1/T01 and C1** (the full 30-slot week), with B3/C2/T04/R01 still
+failing on model behavior, not timeouts. DeepSeek's effort levels map
+`medium→high`, so the real choices are `low | high | max`. Per-turn latency is
+2–3× versus thinking off, which is acceptable inside the workflow's 30-minute
+TTL. A next iteration should re-run the same scenarios against another
+provider (for example Gemini Flash) for cost/latency comparison.

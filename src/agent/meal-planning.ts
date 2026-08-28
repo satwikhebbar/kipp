@@ -134,8 +134,12 @@ export const feedbackItemSchema = z
 export const proposePlanInputSchema = z
   .object({
     candidate: mealPlanCandidateSchema,
-    weeklyInventory: weeklyInventorySchema,
-    weeklyExceptions: weeklyExceptionsSchema,
+    // Optional: the authoritative week state already exists in the workflow
+    // context. The model only supplies these to add items (request-listed
+    // ingredients) or adjust exceptions; the plan is still validated against
+    // the authoritative state plus the candidate's easy-buys.
+    weeklyInventory: weeklyInventorySchema.optional(),
+    weeklyExceptions: weeklyExceptionsSchema.optional(),
     feedbackItems: z.array(feedbackItemSchema).optional(),
   })
   .strict()
