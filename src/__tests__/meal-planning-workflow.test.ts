@@ -178,6 +178,28 @@ function createFakeStep(events: MealPlanningLiveEvent[], endTime: number) {
   }
 }
 
+/** A fake step that memoizes `do` by step name like the Workflows runtime, so a repeated name returns the cached result without re-running. */
+function createMemoizingStep(events: MealPlanningLiveEvent[], endTime: number) {
+  const queue = [...events]
+  const cache = new Map<string, unknown>()
+  return {
+    do: vi.fn(async (name: string, fn: () => unknown) => {
+      if (cache.has(name)) return cache.get(name)
+      const result = await fn()
+      cache.set(name, result)
+      return result
+    }),
+    waitForEvent: vi.fn(async () => {
+      const next = queue.shift()
+      if (next) return { type: "event" as const, payload: next }
+      vi.setSystemTime(endTime)
+      return { type: "timeout" as const }
+    }),
+    sleep: vi.fn(),
+    sleepUntil: vi.fn(),
+  }
+}
+
 function mealEvent(invokedAtMs: number): WorkflowEvent<MealPlanningWorkflowParams> {
   return {
     instanceId: "wf-meal-1",
@@ -309,6 +331,35 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const store = createMealPlanningStore(d1)
     expect(await store.activePlan(CHAT)).toBeNull()
     expect(telegramMessages.some((message) => message.text.includes("couldn't reach"))).toBe(true)
+  })
+
+  it("delivers two distinct notifications in one instance under name-memoized steps", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    // Two stale button taps: each must send its own stale-plan notice even
+    // though the memoized runtime would return an earlier same-named step's
+    // result instead of delivering the second message.
+    const base = seedCandidate()
+    const step = createMemoizingStep(
+      [
+        { interactionKind: "meal-feedback", source: "telegram-reply", version: 0 },
+        { interactionKind: "meal-feedback", source: "telegram-reply", version: 0 },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const stalePlans = telegramMessages.filter((message) => message.text.includes("already updated"))
+    expect(stalePlans.length).toBe(2)
   })
 
   it("carries the clarification transcript into the next provider request", async () => {
