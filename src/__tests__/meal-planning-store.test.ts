@@ -463,4 +463,54 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(second.generation).toBe(2)
     expect(await store.activePlan(CHAT)).toMatchObject({ plan: { planId: "plan-2", currentVersion: 1 } })
   })
+
+  it("migration CHECK constraints reject non-canonical enums, timestamps, and timezones", () => {
+    const { db } = createD1Store()
+    const now = "2026-09-07T00:00:00.000Z"
+    const valid = {
+      plan_id: "plan-1",
+      chat_id: CHAT,
+      week_start: now,
+      week_end: now,
+      timezone: "Asia/Kolkata",
+      instance_id: "wf-1",
+      created_at: now,
+      updated_at: now,
+    }
+    const inserts: Array<Record<string, string>> = [
+      {
+        ...valid,
+        plan_id: "bad-status",
+        status: "paused",
+      },
+      {
+        ...valid,
+        plan_id: "bad-time",
+        created_at: "2026-09-07",
+      },
+      {
+        ...valid,
+        plan_id: "bad-tz",
+        timezone: "Nowhere",
+      },
+    ]
+    for (const values of inserts) {
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO meal_plan (${Object.keys(values).join(", ")}) VALUES (${Object.keys(values)
+              .map(() => "?")
+              .join(", ")})`,
+          )
+          .run(...Object.values(values)),
+      ).toThrow(`constraint failed`)
+    }
+    expect(() =>
+      db
+        .prepare(
+          "INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run("plan-1", 99, "{}", "{}", "supersede", now),
+    ).toThrow("constraint failed")
+  })
 })

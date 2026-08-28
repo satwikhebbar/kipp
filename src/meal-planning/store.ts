@@ -5,10 +5,14 @@ import type {
   MealPlanEvaluation,
   MealProfile,
   MealSchedule,
+  RecipeVideo,
   RequestKind,
   WeeklyExceptions,
   WeeklyInventory,
 } from "./types"
+
+/** The empty per-cell video record written when enrichment is absent. */
+const NO_VIDEOS: Record<string, RecipeVideo> = {}
 
 /** `{ country, city }` location snapshot stored on the household profile row. */
 export interface StoredLocation {
@@ -56,8 +60,8 @@ export interface MealPlanVersionRecord {
   requestKind: RequestKind
   baseVersion: number | null
   feedbackBatchId: string | null
-  /** Per-cell video results (lunch slots), as stored; iteration 1 keeps this opaque. */
-  video: unknown
+  /** Per-cell video results (lunch slots), as stored; keyed by `${dish}:${slotId}`. */
+  video: Record<string, RecipeVideo>
   createdAt: string
 }
 
@@ -89,7 +93,7 @@ export interface CreateActivePlanInput {
   evaluation: MealPlanEvaluation
   weeklyInventory: WeeklyInventory
   weeklyExceptions: WeeklyExceptions
-  video?: unknown
+  video?: Record<string, RecipeVideo>
 }
 
 /** Result of a committed initial-plan batch. */
@@ -114,7 +118,7 @@ export interface PromotePlanVersionInput {
   baseVersion: number
   candidate: MealPlanCandidate
   evaluation: MealPlanEvaluation
-  video?: unknown
+  video?: Record<string, RecipeVideo>
   /** Week-scoped state captured by the revision session; omit (or null) to skip the refresh. */
   inventory?: { weeklyInventory: WeeklyInventory; weeklyExceptions: WeeklyExceptions } | null
   /** The submission that drove this revision; omit (or null) only defensively — every revision is submission-driven. */
@@ -284,7 +288,7 @@ function makeVersionRecord(
   requestKind: RequestKind,
   baseVersion: number | null,
   feedbackBatchId: string | null,
-  video: unknown,
+  video: Record<string, RecipeVideo>,
   now: string,
 ): MealPlanVersionRecord {
   return { planId, version, candidate, evaluation, requestKind, baseVersion, feedbackBatchId, video, createdAt: now }
@@ -386,7 +390,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.planId,
             JSON.stringify(input.candidate),
             JSON.stringify(input.evaluation),
-            JSON.stringify(input.video ?? {}),
+            JSON.stringify(input.video ?? NO_VIDEOS),
             now,
             input.chatId,
           ),
@@ -415,7 +419,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           "initial_plan",
           null,
           null,
-          input.video ?? {},
+          input.video ?? NO_VIDEOS,
           now,
         ),
         generation,
@@ -453,7 +457,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             JSON.stringify(input.evaluation),
             input.baseVersion,
             batchId,
-            JSON.stringify(input.video ?? {}),
+            JSON.stringify(input.video ?? NO_VIDEOS),
             now,
             input.planId,
             input.chatId,
@@ -531,7 +535,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           "revision",
           input.baseVersion,
           batchId,
-          input.video ?? {},
+          input.video ?? NO_VIDEOS,
           now,
         ),
         generation,
@@ -592,7 +596,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           requestKind: String(row.request_kind) as RequestKind,
           baseVersion: row.base_version === null ? null : Number(row.base_version),
           feedbackBatchId: row.feedback_batch_id === null ? null : String(row.feedback_batch_id),
-          video: parseJson<unknown>(String(row.video_json), {}),
+          video: parseJson<Record<string, RecipeVideo>>(String(row.video_json), {}),
           createdAt: String(row.version_created_at),
         },
       }
@@ -676,7 +680,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         "initial_plan",
         null,
         null,
-        input.video ?? {},
+        input.video ?? NO_VIDEOS,
         now,
       )
       backing.versions.set(versionKey(input.planId, 1), version)
@@ -703,7 +707,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         "revision",
         input.baseVersion,
         input.feedbackBatch?.batchId ?? null,
-        input.video ?? {},
+        input.video ?? NO_VIDEOS,
         now,
       )
       backing.versions.set(versionKey(input.planId, newVersion), version)

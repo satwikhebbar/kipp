@@ -207,6 +207,40 @@ describe("bounded meal-planning agent session", () => {
     if (result.terminal?.kind === "propose_plan") expect(result.terminal.feedbackItems).toEqual(raw)
   })
 
+  it("evaluates a scoped authoritative feedback item even when the model omits it from the submission", async () => {
+    const raw = [
+      { id: "tg-A", text: "Wed lunch: prefer poha", scope: { day: "Wed", slot: "home-lunch" as const } },
+      { id: "tg-B", text: "Wed snack: add banana", scope: { day: "Wed", slot: "snack1" as const } },
+    ]
+    const recentPlan = gridWith("Wed", "home-lunch", cell("khichdi", ["rice"], "home-lunch"))
+    recentPlan.Wed.snack1 = cell("khichdi", ["rice"], "snack1")
+    const candidate = gridWith("Wed", "home-lunch", cell("poha", ["rice"], "home-lunch"))
+    candidate.Wed.snack1 = cell("banana", ["banana"], "snack1")
+    const submission = {
+      grid: candidate,
+      easyBuys: [] as string[],
+      policyOutcomes: { "household-rule": { outcome: "satisfied", rationale: "tg-A tg-B" } },
+    }
+    // The model submits only B; A is dropped from feedbackItems yet its target
+    // cell (Wed home-lunch) is changed and its id appears in a rationale. The
+    // evaluator must still see A so that cell change is recognized as scoped.
+    const provider = providerWith(evaluateResponse(submission), proposeResponse(proposeInput(submission, [raw[1]])))
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "make these two changes" }], {
+      context: context({
+        request: { kind: "revision", text: "make these two changes" },
+        feedbackItems: raw,
+        recentPlan,
+        profile: {
+          ...context().profile,
+          dishRepertoire: ["paratha", "poha", "banana"],
+          pantryBaseline: ["wheat flour", "rice", "banana"],
+        },
+      }),
+    })
+    expect(result.completed).toBe(true)
+    expect(result.terminal?.kind).toBe("propose_plan")
+  })
+
   it("never exposes opaque feedback ids in a clarification message", async () => {
     const provider = providerWith(
       clarifyResponse({

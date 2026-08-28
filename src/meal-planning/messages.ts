@@ -6,8 +6,7 @@ export const MEAL_HELP = `Start a school-week meal plan with /mealplan.
 By default the plan covers the current Mon–Sat school week (invoked Mon–Wed)
 or the next one (invoked Thu–Sun). Overrides:
 /mealplan this week
-/mealplan next week
-/mealplan YYYY-MM-DD`
+/mealplan next week`
 
 export const MEAL_AGENT_UNAVAILABLE = "I couldn't reach the meal-planning agent. Please try again shortly."
 export const MEAL_STALE_PLAN =
