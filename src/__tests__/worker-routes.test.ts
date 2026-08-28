@@ -504,14 +504,14 @@ describe("scheduled() cron failure notification", () => {
     } as unknown as Env
   }
 
-  function failingRssFetch(telegramBodies: Array<{ chat_id?: string | number; text?: string }>) {
+  function failingRssFetch(telegramBodies: Array<{ chat_id?: string | number; text?: string }>, status = 404) {
     return vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
       if (url.includes("api.telegram.org")) {
         const body = JSON.parse(opts?.body as string) as { chat_id?: string | number; text?: string }
         telegramBodies.push(body)
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
       }
-      return { ok: false, status: 404 }
+      return { ok: false, status }
     })
   }
 
@@ -528,6 +528,25 @@ describe("scheduled() cron failure notification", () => {
     expect(telegramBodies).toHaveLength(1)
     expect(telegramBodies[0].chat_id).toBe("42")
     expect(telegramBodies[0].text).toBe("⚠️ Something went wrong. Please try again shortly.")
+  })
+
+  it("logs but does not notify when RSS retries are exhausted by a transient upstream failure", async () => {
+    const env = cronEnv({ LOG_LEVEL: "info" })
+    const telegramBodies: Array<{ chat_id?: string | number; text?: string }> = []
+    const fetch = failingRssFetch(telegramBodies, 503)
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    vi.stubGlobal("fetch", fetch)
+
+    const scheduled = worker.scheduled(
+      { cron: "0 9 * * *", scheduledTime: Date.now(), noRetry: false } as unknown as ScheduledController,
+      env,
+    )
+    await vi.advanceTimersByTimeAsync(10_000)
+    await scheduled
+
+    expect(fetch).toHaveBeenCalledTimes(4)
+    expect(telegramBodies).toHaveLength(0)
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('"failureCategory":"rss-upstream-transient"'))
   })
 
   it("does not notify and does not throw when the operator id is empty or whitespace-only", async () => {
