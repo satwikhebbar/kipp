@@ -38,7 +38,7 @@ const MEAL_CLARIFICATION_TTL_MS = 900_000 // 15 minutes: clarification prompt li
 const MEAL_FEEDBACK_REPLY_TTL_MS = 900_000 // 15 minutes: feedback prompt lifetime
 const MEAL_PLANNING_GROUP = "meal-planning"
 const MEAL_LIVE_WAIT_CHUNK_MS = 86_400_000 // 24 hours: parked live-loop re-wait chunk
-const MEAL_MAX_SESSION_TURNS = 8
+const MEAL_MAX_SESSION_TURNS = 10
 const MILLISECONDS_PER_SECOND = 1_000
 
 export interface MealPlanningLiveEvent {
@@ -199,16 +199,19 @@ async function promptForClarification(
   message: string,
 ): Promise<string | null> {
   const chatId = event.payload.chatId
-  const interactionId = crypto.randomUUID()
-  const sent = await step.do(`meal-planning-clarify-notify-${turn}-${interactionId}`, () =>
-    createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
+  // The interaction id is minted inside the cached send step and returned, so a
+  // replayed workflow reuses the same id for registration and reply matching.
+  const sent = await step.do(`meal-planning-clarify-notify-${turn}`, async () => {
+    const interactionId = crypto.randomUUID()
+    const sentMessage = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
       replyMarkup: { force_reply: true },
-    }),
-  )
-  await step.do(`meal-planning-clarify-register-${turn}-${interactionId}`, async () => {
+    })
+    return { interactionId, messageId: sentMessage.messageId }
+  })
+  await step.do(`meal-planning-clarify-register-${turn}`, async () => {
     const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
     await router.register({
-      interactionId,
+      interactionId: sent.interactionId,
       version: 0,
       workflowId: event.instanceId,
       kind: INTERACTION_KIND.MEAL_CLARIFICATION,
@@ -228,7 +231,7 @@ async function promptForClarification(
     })
     if (response.type === "timeout") return null
     const payload = response.payload
-    if (payload?.interactionId === interactionId && payload.text) return payload.text
+    if (payload?.interactionId === sent.interactionId && payload.text) return payload.text
     // A foreign event for a different interaction: discard and keep waiting with the remaining time.
     attempt += 1
     logRuntime(env, {
@@ -252,21 +255,25 @@ async function sendPlanAndRegister(
 ): Promise<void> {
   const chatId = event.payload.chatId
   const message = renderPlanMessage(plan, version, profile.schedule, profile.customPolicies)
-  const callbackToken = crypto.randomUUID()
-  const sent = await step.do(`meal-planning-send-plan-${plan.planId}`, () =>
-    createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
+  // The callback token and interaction id are minted inside the cached send step
+  // and returned, so a replayed workflow registers the credentials the parent
+  // actually sees on the (cached) plan message instead of a fresh pair.
+  const sent = await step.do(`meal-planning-send-plan-${plan.planId}`, async () => {
+    const callbackToken = crypto.randomUUID()
+    const interactionId = crypto.randomUUID()
+    const sentMessage = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
       replyMarkup: { inline_keyboard: [[{ text: "Give feedback", callback_data: callbackToken }]] },
-    }),
-  )
-  const interactionId = crypto.randomUUID()
+    })
+    return { interactionId, callbackToken, messageId: sentMessage.messageId }
+  })
   await step.do(`meal-planning-register-feedback-${plan.planId}`, async () => {
     const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
     await router.register({
-      interactionId,
+      interactionId: sent.interactionId,
       version: version.version,
       workflowId: event.instanceId,
       kind: INTERACTION_KIND.MEAL_FEEDBACK,
-      callbackToken,
+      callbackToken: sent.callbackToken,
       botMessageId: sent.messageId,
       expiresAt: Date.parse(plan.weekEnd),
       interactionGroup: MEAL_PLANNING_GROUP,
@@ -511,9 +518,7 @@ function logAgentSession(env: Env, workflow: string, session: MealPlanningAgentS
   })
 }
 
-/** Sends one deterministic workflow notification through a durable step. */
+/** Sends one deterministic workflow notification through a durable step (the step-name counter disambiguates calls within a run). */
 async function notify(env: Env, step: WorkflowStep, chatId: string, message: string): Promise<void> {
-  await step.do(`meal-planning-notify-${crypto.randomUUID()}`, () =>
-    createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message),
-  )
+  await step.do("meal-planning-notify", () => createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message))
 }

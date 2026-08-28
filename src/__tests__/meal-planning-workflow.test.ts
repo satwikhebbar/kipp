@@ -237,6 +237,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       expect.objectContaining({
         kind: "meal-feedback",
         version: 1,
+        generation: 1,
         workflowId: "wf-meal-1",
         interactionGroup: "meal-planning",
       }),
@@ -289,6 +290,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
     expect(telegramMessages.filter((message) => message.text.includes("School week of")).length).toBe(2)
     expect(registrations.filter((registration) => registration.kind === "meal-feedback").length).toBe(2)
+    expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 1, generation: 1 }))
+    expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 2, generation: 2 }))
   })
 
   it("sends meal-agent-unavailable and persists nothing when the agent fails", async () => {

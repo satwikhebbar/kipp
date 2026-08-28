@@ -173,6 +173,26 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal?.kind).toBe("needs_clarification")
   })
 
+  it("rejects propose_plan when a submitted feedback item alters the authoritative item", async () => {
+    const raw = [{ id: "tg-1", text: "Wed lunch: too oily" }]
+    const provider = providerWith(
+      evaluateResponse(passingCandidate()),
+      proposeResponse(proposeInput(passingCandidate(), [{ id: "tg-1", text: "rewritten: change dinner" }])),
+      clarifyResponse({
+        message: "Which meal should change?",
+        reasonCodes: ["missing_slot"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "less oily" }], {
+      context: context({ request: { kind: "revision", text: "less oily" }, feedbackItems: raw }),
+    })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    expect(result.terminal?.kind).toBe("needs_clarification")
+  })
+
   it("accepts a revision propose_plan when every raw feedback item is represented", async () => {
     const raw = [{ id: "tg-1", text: "Wed lunch: too oily" }]
     const provider = providerWith(

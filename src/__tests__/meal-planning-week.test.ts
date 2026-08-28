@@ -65,6 +65,11 @@ describe("resolvePlanningWeek", () => {
     expect(result).toEqual({ weekStart: CURRENT_WEEK_START, weekEnd: CURRENT_WEEK_END })
   })
 
+  it("rejects impossible calendar dates in a date override instead of normalizing them", () => {
+    const result = resolvePlanningWeek(at("2026-09-09T03:30:00.000Z"), TZ, "2026-02-30")
+    expect(result).toEqual({ weekStart: CURRENT_WEEK_START, weekEnd: CURRENT_WEEK_END })
+  })
+
   it("treats unparsed text as the default rule", () => {
     expect(resolvePlanningWeek(at("2026-09-07T03:30:00.000Z"), TZ, "paneer please")).toEqual({
       weekStart: CURRENT_WEEK_START,

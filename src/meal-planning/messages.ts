@@ -19,6 +19,11 @@ export const MEAL_NO_CHANGES = "No changes — your feedback is noted."
 export const MEAL_OPEN_FEEDBACK_PROMPT = "Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."
 export const MEAL_PLAN_ENDED = "This week's plan has ended — run /mealplan for the next week."
 
+/** Escapes Telegram legacy-Markdown special characters so dynamic text renders literally. */
+export function escapeTelegramMarkdown(text: string): string {
+  return text.replace(/[_*`[\]\\]/g, (ch) => `\\${ch}`)
+}
+
 /** Formats one stored ISO instant as a short weekday-and-date label (e.g. "Mon Sep 7") in the plan's timezone. */
 function formatWeekDay(iso: string, timezone: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -52,7 +57,7 @@ export function renderPlanMessage(
       if (!cell) continue
       lines.push(`  ${slot.name}: ${cell.dish}${cellMarkers(version, cell.dish, cell.priorNightPrep)}`)
       if (cell.recipeVideo?.status === "found" && cell.recipeVideo.url)
-        lines.push(`    ${cell.recipeVideo.title ?? "Recipe video"}: ${cell.recipeVideo.url}`)
+        lines.push(`    ${escapeTelegramMarkdown(cell.recipeVideo.title ?? "Recipe video")}: ${cell.recipeVideo.url}`)
     }
     lines.push("")
   }
