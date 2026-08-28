@@ -505,6 +505,15 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
           .run(...Object.values(values)),
       ).toThrow(`constraint failed`)
     }
+    // Multi-segment IANA names (America/Argentina/Buenos_Aires) must pass the
+    // structural timezone check, matching the codebase's IANA contract.
+    expect(() =>
+      db
+        .prepare(
+          "INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run("plan-tz-multi", CHAT, now, now, "America/Argentina/Buenos_Aires", "wf-1", now, now),
+    ).not.toThrow()
     expect(() =>
       db
         .prepare(

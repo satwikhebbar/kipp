@@ -25,7 +25,7 @@ CREATE TABLE meal_plan (
   chat_id TEXT NOT NULL,
   week_start TEXT NOT NULL CHECK (week_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
   week_end TEXT NOT NULL CHECK (week_end GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
-  timezone TEXT NOT NULL CHECK (timezone GLOB '?[A-Za-z_]*/[A-Za-z0-9_+-]*' OR timezone IN ('UTC', 'GMT')),
+  timezone TEXT NOT NULL CHECK (timezone GLOB '?[A-Za-z_]*/[A-Za-z0-9_+/-]*' OR timezone IN ('UTC', 'GMT')),
   instance_id TEXT NOT NULL,             -- live Workflow instance id (the webhook's fallthrough pointer, §6)
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'replaced')), -- active | replaced
   current_version INTEGER NOT NULL DEFAULT 0,
