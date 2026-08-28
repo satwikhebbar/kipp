@@ -131,6 +131,8 @@ export const feedbackItemSchema = z
   })
   .strict()
 
+const PROPOSE_JUSTIFICATION_MAX_CHARACTERS = 500
+
 export const proposePlanInputSchema = z
   .object({
     candidate: mealPlanCandidateSchema,
@@ -141,6 +143,9 @@ export const proposePlanInputSchema = z
     weeklyInventory: weeklyInventorySchema.optional(),
     weeklyExceptions: weeklyExceptionsSchema.optional(),
     feedbackItems: z.array(feedbackItemSchema).optional(),
+    // Debug aid: the model explains the plan so we can audit its reasoning.
+    // Remove once testing and stabilization are complete.
+    justification: z.string().trim().min(1).max(PROPOSE_JUSTIFICATION_MAX_CHARACTERS).optional(),
   })
   .strict()
 

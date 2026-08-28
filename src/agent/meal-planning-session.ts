@@ -26,7 +26,7 @@ Build one complete school-week plan covering exactly the schedule days listed in
 
 The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole.
 
-Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
+Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Include a short justification in propose_plan explaining the plan in plain language. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
 
 A cell's items are the dish's ingredient tokens, drawn only from the weekly inventory, the pantry baseline, or the easy-buys list (the short list of ordinary ingredients you are adding). Never put a dish name itself in items or easyBuys. When the request lists ingredients, add them to easyBuys so the evaluator accepts them. Favourite dishes (from the food preferences in the context) may be repeated across the week; keep other dishes distinct.
 
@@ -40,6 +40,8 @@ with easyBuys = ["banana", "chana", "bottle gourd", "beans"] when those are not 
 
 export interface MealPlanningAgentSessionOptions {
   context: MealPlanContext
+  /** Debug aid: keep provider reasoning in the returned transcript. */
+  retainReasoning?: boolean
 }
 
 export type MealPlanningTerminalOutcome =
@@ -50,6 +52,8 @@ export type MealPlanningTerminalOutcome =
       weeklyExceptions: WeeklyExceptions
       feedbackItems?: FeedbackItem[]
       evaluation: MealPlanEvaluation
+      /** Debug aid: the model's own explanation of the proposed plan. */
+      justification?: string
     }
   | { kind: "needs_clarification"; message: string; reasonCodes: FailureCode[] }
 
@@ -81,27 +85,25 @@ export async function runMealPlanningAgentSession(
       privacy: "private",
       batching: "isolated",
       handler: async (input) => {
-        const rawFeedback = options.context.feedbackItems ?? []
-        const submittedFeedback: FeedbackItem[] = input.feedbackItems ?? []
-        // The model-controlled submission cannot redefine feedback: ids and text
-        // must match the authoritative items exactly, and an explicit
-        // authoritative scope cannot be altered or dropped. Free-text feedback
-        // carries no parsed scope, so the model may attach the interpretation it
-        // actually plans against — that is what the evaluator's scope checks need.
-        assertAuthoritativeFeedback(rawFeedback, submittedFeedback)
-        // Evaluation must always see every authoritative scoped item, even when
-        // the model omits it from the submission — otherwise a scoped item that
-        // only appears in a policy rationale is never checked against its target
-        // cell. Submitted feedback may only supply the model's interpretation for
-        // authoritative items that carry no parsed scope.
-        const authoritativeByScope = new Map(rawFeedback.map((item) => [item.id, item]))
-        const evaluationFeedback = [
-          ...rawFeedback.filter((item) => item.scope),
-          ...submittedFeedback.filter((item) => authoritativeByScope.get(item.id)?.scope === undefined),
-        ]
+        const authoritative = options.context.feedbackItems ?? []
+        const submitted: FeedbackItem[] = input.feedbackItems ?? []
+        // The model never needs to echo feedback items back: scoped items are
+        // covered by the authoritative set alone. A submission may only attach
+        // a scope interpretation to a free-text item (one that has no parsed
+        // scope), and only by its exact text — never by inventing or rewriting.
+        assertInterpretationsOnly(authoritative, submitted)
+        const submittedByText = new Map(submitted.map((item) => [item.text, item]))
+        const evaluationFeedback = authoritative.map((raw) => {
+          if (raw.scope) return raw
+          const interpretation = submittedByText.get(raw.text)
+          return interpretation?.scope ? { ...raw, scope: interpretation.scope } : raw
+        })
         // Re-validate against the authoritative week state plus the candidate's
         // easy-buys, exactly as evaluate_meal_plan did — never against a
         // re-emitted echo the model may have drifted from the source of truth.
+        // Every authoritative item is in the evaluation set, so the evaluator's
+        // `unaddressed_feedback` check is the coverage gate (with codes the
+        // model can act on), replacing any session-side echo requirement.
         const evaluation = evaluateMealPlan(input.candidate, {
           ...options.context,
           feedbackItems: evaluationFeedback,
@@ -113,13 +115,13 @@ export async function runMealPlanningAgentSession(
             undefined,
             evaluation.failures.map((failure) => failure.code),
           )
-        enforceFeedbackCoverage(rawFeedback, submittedFeedback, input.candidate)
         terminal = {
           kind: "propose_plan",
           candidate: input.candidate,
           weeklyInventory: input.weeklyInventory ?? options.context.weeklyInventory,
           weeklyExceptions: input.weeklyExceptions ?? options.context.weeklyExceptions,
-          ...(submittedFeedback.length ? { feedbackItems: submittedFeedback } : {}),
+          ...(evaluationFeedback.length ? { feedbackItems: evaluationFeedback } : {}),
+          ...(input.justification ? { justification: input.justification } : {}),
           evaluation,
         }
         return { accepted: true as const }
@@ -166,7 +168,7 @@ export async function runMealPlanningAgentSession(
   )
   return {
     terminal: result.completed ? terminal : null,
-    messages: persistableAgentMessages(result.messages),
+    messages: options.retainReasoning ? result.messages : persistableAgentMessages(result.messages),
     completed: result.completed,
     ...(result.failureReason ? { failureReason: result.failureReason } : {}),
     providerTurns: result.providerTurns,
@@ -178,20 +180,23 @@ export async function runMealPlanningAgentSession(
 }
 
 /**
- * Rejects a model-controlled feedback submission that invents or alters an
- * item: each submitted item must match an authoritative raw item's id and text
- * exactly, and must not drop or change an explicit authoritative scope (a scope
- * may be attached only when the raw item carries none).
+ * Rejects a feedback submission that invents or rewrites items: each submitted
+ * item must match an authoritative item's text exactly, must not be a
+ * duplicate, and must not alter or drop an authoritative scope (a scope may be
+ * attached only when the authoritative item carries none).
  */
-function assertAuthoritativeFeedback(rawFeedback: FeedbackItem[], submittedFeedback: FeedbackItem[]): void {
-  const authoritative = new Map(rawFeedback.map((item) => [item.id, item]))
-  for (const item of submittedFeedback) {
-    const raw = authoritative.get(item.id)
-    if (!raw || raw.text !== item.text || (raw.scope && !scopeEqual(raw.scope, item.scope)))
+function assertInterpretationsOnly(authoritative: FeedbackItem[], submitted: FeedbackItem[]): void {
+  const seen = new Set<string>()
+  for (const item of submitted) {
+    const raw = authoritative.find((candidate) => candidate.text === item.text)
+    if (!raw || seen.has(item.text))
       throw new ToolHandlerError(
-        "proposed feedback items must match the authoritative feedback exactly",
+        "proposed feedback items must match the authoritative feedback text exactly",
         "invalid-state",
       )
+    seen.add(item.text)
+    if (raw.scope && (!item.scope || !scopeEqual(raw.scope, item.scope)))
+      throw new ToolHandlerError("proposed feedback items must keep the authoritative scope unchanged", "invalid-state")
   }
 }
 
@@ -199,27 +204,6 @@ function assertAuthoritativeFeedback(rawFeedback: FeedbackItem[], submittedFeedb
 function scopeEqual(a: FeedbackItem["scope"], b: FeedbackItem["scope"]): boolean {
   if (a === undefined || b === undefined) return a === b
   return a.day === b.day && a.slot === b.slot
-}
-
-/**
- * Enforces that every raw feedback item driving a revision is represented in
- * the submitted payload or an outcome rationale — the session-side mirror of
- * the evaluator's `unaddressed_feedback`.
- */
-function enforceFeedbackCoverage(
-  rawFeedback: FeedbackItem[],
-  submittedFeedback: FeedbackItem[],
-  candidate: MealPlanCandidate,
-): void {
-  const submittedIds = new Set(submittedFeedback.map((item) => item.id))
-  for (const raw of rawFeedback) {
-    const inSubmitted = submittedIds.has(raw.id)
-    const inRationale = Object.values(candidate.policyOutcomes).some(
-      (outcome) => outcome.rationale.includes(raw.id) || outcome.rationale.includes(raw.text),
-    )
-    if (!inSubmitted && !inRationale)
-      throw new ToolHandlerError("proposed plan did not address all submitted feedback", "invalid-state")
-  }
 }
 
 /** Ensures the clarification surfaces every evaluator failure and never exposes opaque feedback ids. */
