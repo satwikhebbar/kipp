@@ -87,6 +87,14 @@ function validScenario(overrides: Partial<MealPlanScenario> = {}): MealPlanScena
   }
 }
 
+const FIVE_SLOTS = [
+  { id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null },
+  { id: "snack1", name: "Snack 1", packed: true, dry: true, maxCookMinutes: 0 },
+  { id: "snack2", name: "Snack 2", packed: true, dry: true, maxCookMinutes: 0 },
+  { id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null },
+  { id: "home-lunch", name: "Home lunch", packed: false, dry: false, maxCookMinutes: null },
+]
+
 describe("meal-planning corpus loader", () => {
   it("parses a valid fixture and computes the coverage set minus closed and half-day-dropped slots", () => {
     const scenario = parseScenario(validScenario())
@@ -131,6 +139,28 @@ describe("meal-planning corpus loader", () => {
       expect(coverage.required).not.toContainEqual({ day: "Wed", slotId: "home-lunch" })
       expect(coverage.required).toContainEqual({ day: "Wed", slotId: "snack1" })
     }
+  })
+
+  it("a Saturday half-day exception represents the reduced weekend schedule (3 of 5 slots)", () => {
+    const scenario = parseScenario(
+      validScenario({
+        context: validContext({
+          schedule: { days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], slots: FIVE_SLOTS },
+          weeklyExceptions: {
+            items: [
+              {
+                kind: "half_day",
+                appliesTo: { day: "Sat", mealSlots: ["school-lunch", "home-lunch"] },
+                instruction: "Half day",
+              },
+            ],
+          },
+        }),
+      }),
+    )
+    const coverage = computeCoverageSet(scenario.context)
+    expect(coverage.required.filter((cell) => cell.day === "Sat")).toHaveLength(3)
+    expect(coverage.required).toHaveLength(5 * 5 + 3)
   })
 
   it("rejects a grid day key that is not a configured day", () => {
@@ -259,7 +289,7 @@ describe("meal-planning corpus loader", () => {
 
   it("loads the full scenario corpus sorted by id", () => {
     const scenarios = loadScenarios()
-    expect(scenarios.length).toBe(12)
+    expect(scenarios.length).toBe(16)
     expect(scenarios.map((scenario) => scenario.id)).toEqual([...scenarios.map((scenario) => scenario.id)].sort())
   })
 

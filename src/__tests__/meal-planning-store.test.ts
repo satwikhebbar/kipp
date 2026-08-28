@@ -1,4 +1,7 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import type { DatabaseSync } from "node:sqlite"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import {
   type CreateActivePlanInput,
@@ -134,6 +137,25 @@ describe("createInMemoryMealPlanningStore", () => {
     await store.loadOrCreateProfile("chat-2")
     const other = await store.createActivePlan(createInput({ planId: "plan-3", chatId: "chat-2" }))
     expect(other.generation).toBe(1)
+  })
+
+  it("a next-week create replaces the prior week's inventory and exceptions (weekly state does not leak)", async () => {
+    const store = await newStore()
+    await store.createActivePlan(
+      createInput({ weeklyInventory: { items: [{ name: "poha", status: "available" as const }], notes: [] } }),
+    )
+    const next = await store.createActivePlan(
+      createInput({
+        planId: "plan-2",
+        weekStart: "2026-09-14T00:00:00.000Z",
+        weekEnd: "2026-09-19T23:59:59.000Z",
+        weeklyInventory: { items: [], notes: [] },
+      }),
+    )
+    expect(next.previousReplaced).toBe(true)
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.planId).toBe("plan-2")
+    expect(active?.plan.weeklyInventory.items).toEqual([])
   })
 
   it("promotePlanVersion commits a revision: version N+1, current_version advance, generation bump, and the immutable submission batch linked from the new version", async () => {
@@ -496,5 +518,15 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         )
         .run("plan-1", 99, "{}", "{}", "supersede", now),
     ).toThrow("constraint failed")
+  })
+
+  it("migration stays D1-compatible: no GLOB/LIKE patterns (node:sqlite accepts them, D1 rejects them) and the enum CHECKs are present", () => {
+    const migration = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../migrations/0001_init.sql"),
+      "utf8",
+    ).replace(/^\s*--.*$/gm, "")
+    expect(migration).not.toMatch(/GLOB|LIKE/i)
+    expect(migration).toMatch(/CHECK\s*\(\s*status\s+IN\s*\(\s*'active'\s*,\s*'replaced'\s*\)\s*\)/i)
+    expect(migration).toMatch(/CHECK\s*\(\s*request_kind\s+IN\s*\(\s*'initial_plan'\s*,\s*'revision'\s*\)\s*\)/i)
   })
 })

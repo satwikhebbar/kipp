@@ -294,6 +294,36 @@ describe("runTools", () => {
     expect(generate).toHaveBeenCalledTimes(3)
   })
 
+  it("honors a per-session maxProviderTurns override below the global default", async () => {
+    const generate = vi.fn().mockResolvedValue({
+      toolCalls: [{ id: "one", name: "echo", input: { value: "x" } }],
+      usage: {},
+    })
+
+    const result = await runTools({ generate }, registry, { allowedTools: ["echo"], maxProviderTurns: 2 }, [
+      { role: "user", text: "start" },
+    ])
+
+    expect(result).toMatchObject({ completed: false, failureReason: "provider-turn-limit", providerTurns: 2 })
+    expect(generate).toHaveBeenCalledTimes(2)
+  })
+
+  it("honors a per-session maxToolCalls override below the global default", async () => {
+    const generate = vi.fn().mockResolvedValue({
+      toolCalls: [
+        { id: "one", name: "echo", input: { value: "a" } },
+        { id: "two", name: "echo", input: { value: "b" } },
+      ],
+      usage: {},
+    })
+
+    const result = await runTools({ generate }, registry, { allowedTools: ["echo"], maxToolCalls: 1 }, [
+      { role: "user", text: "start" },
+    ])
+
+    expect(result).toMatchObject({ completed: false, failureReason: "tool-call-limit", toolCallCount: 0 })
+  })
+
   it("narrows the next turn to handoff tools after an availability action", async () => {
     const availability = {
       ...registry.echo,

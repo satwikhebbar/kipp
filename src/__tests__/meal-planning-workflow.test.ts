@@ -409,6 +409,56 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(telegramMessages.some((message) => message.text.includes("couldn't reach"))).toBe(true)
   })
 
+  it("logs the session failure category when the agent fails", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    stubNetwork([proseResponse(), proseResponse(), proseResponse()])
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    let captured: unknown[] = []
+    try {
+      await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+      captured = log.mock.calls.map((call) => call[0])
+    } finally {
+      log.mockRestore()
+    }
+    const sessionLine = captured.find(
+      (entry) => typeof entry === "string" && entry.includes('"event":"meal-planning-agent-session"'),
+    )
+    expect(sessionLine).toContain('"outcome":"failed"')
+    expect(sessionLine).toContain('"failureCategory":"missing-required-handoff"')
+  })
+
+  it("sends meal-agent-unavailable and persists nothing when the provider request fails", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const telegramMessages: string[] = []
+    const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes("api.deepseek.com")) throw new Error("upstream down")
+      const body = JSON.parse((init?.body as string) ?? "{}") as { text: string }
+      telegramMessages.push(body.text)
+      return jsonResponse({ ok: true, result: { message_id: 1 } })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await runAgentCenteredMealPlanningWorkflow(
+      { ...makeEnv(namespace, d1), LLM_MAX_RETRIES: "0" },
+      mealEvent(invokedAtMs),
+      step as never,
+    )
+    const store = createMealPlanningStore(d1)
+    expect(await store.activePlan(CHAT)).toBeNull()
+    expect(telegramMessages.some((text) => text.includes("couldn't reach"))).toBe(true)
+  })
+
   it("delivers two distinct notifications in one instance under name-memoized steps", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")

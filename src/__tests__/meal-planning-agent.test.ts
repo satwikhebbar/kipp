@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { runMealPlanningAgentSession } from "../agent/meal-planning-session"
+import { MEAL_PLANNING_AGENT_PROMPT, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import { evaluateMealPlan } from "../meal-planning/evaluation"
 import type { MealCell, MealGrid, MealPlanContext } from "../meal-planning/types"
@@ -264,6 +264,145 @@ describe("bounded meal-planning agent session", () => {
       expect.objectContaining({ tool: "needs_clarification", outcome: "failed", failureCategory: "invalid-state" }),
     )
     expect(result.terminal).toMatchObject({ kind: "needs_clarification" })
+  })
+
+  it("keeps evaluate_meal_plan available after a successful evaluation so the model can revise before proposing", async () => {
+    const provider = providerWith(
+      evaluateResponse(passingCandidate()),
+      evaluateResponse(passingCandidate()),
+      proposeResponse(proposeInput(passingCandidate())),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], { context: context() })
+    expect(result.completed).toBe(true)
+    expect(result.providerTurns).toBe(3)
+    expect(result.toolExecutions).toEqual([
+      { tool: "evaluate_meal_plan", outcome: "succeeded" },
+      { tool: "evaluate_meal_plan", outcome: "succeeded" },
+      { tool: "propose_plan", outcome: "succeeded" },
+    ])
+    expect(result.terminal).toMatchObject({ kind: "propose_plan" })
+  })
+
+  it("keeps the planning prompt policy-agnostic (no hardcoded custom-policy ids)", () => {
+    for (const id of [
+      "snack-policy",
+      "equipment-gap",
+      "packing-capacity",
+      "nutrition-target-fruit",
+      "nutrition-target-nuts",
+      "school-rule",
+      "cheat-day",
+    ]) {
+      expect(MEAL_PLANNING_AGENT_PROMPT, `${id} must not be hardcoded`).not.toContain(id)
+    }
+    expect(MEAL_PLANNING_AGENT_PROMPT).toContain("Plans default to healthy, nutritious meals")
+  })
+
+  it("accepts a plan whose ingredients come from inventory supplied at propose time, even when the context inventory is empty", async () => {
+    const ctx = context({
+      weeklyInventory: { items: [], notes: [] },
+      profile: { ...context().profile, dishRepertoire: ["paratha", "rice and beans"] },
+      request: { kind: "initial_plan", text: "I have beans, carrots, bottle gourd, peas, bananas and apples." },
+    })
+    const candidate = {
+      ...passingCandidate(),
+      grid: gridWith("Mon", "home-lunch", cell("rice and beans", ["rice", "beans"], "home-lunch")),
+    }
+    const supplied = {
+      items: [
+        { name: "beans", status: "available" as const },
+        { name: "carrots", status: "available" as const },
+      ],
+      notes: [],
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(
+        proposeInput(candidate, undefined, { weeklyInventory: supplied, weeklyExceptions: ctx.weeklyExceptions }),
+      ),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
+      context: ctx,
+    })
+    expect(result.completed).toBe(true)
+    if (result.terminal?.kind === "propose_plan")
+      expect(result.terminal.weeklyInventory.items.map((item) => item.name)).toEqual(
+        expect.arrayContaining(["beans", "carrots"]),
+      )
+  })
+
+  it("rejects a proposal that resolves conflicting feedback by violating a hard exclusion", async () => {
+    const ctx = context({
+      profile: {
+        ...context().profile,
+        dishRepertoire: ["paratha", "paneer paratha"],
+        dietaryExclusions: ["paneer"],
+        pantryBaseline: [...context().profile.pantryBaseline, "paneer"],
+      },
+      request: { kind: "revision", text: "No dairy, but make lunch paneer" },
+      feedbackItems: [{ id: "tg-1", text: "Make lunch paneer" }],
+    })
+    const candidate = {
+      ...passingCandidate(),
+      grid: gridWith("Mon", "school-lunch", cell("paneer paratha", ["wheat flour", "paneer"], "school-lunch")),
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(
+        proposeInput(candidate, ctx.feedbackItems, {
+          weeklyInventory: ctx.weeklyInventory,
+          weeklyExceptions: ctx.weeklyExceptions,
+        }),
+      ),
+      clarifyResponse({
+        message: "Paneer is excluded this week — should lunch stay dairy-free?",
+        reasonCodes: ["hard_exclusion"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
+      context: ctx,
+    })
+    expect(result.completed).toBe(true)
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["hard_exclusion"] })
+  })
+
+  it("accepts a revision that declares a mid-week holiday and drops that day without a missing_slot", async () => {
+    const ctx = context({
+      request: { kind: "revision", text: "Tomorrow is a holiday" },
+      weeklyExceptions: { items: [{ kind: "school_closed", appliesTo: { day: "Wed" }, instruction: "Holiday" }] },
+    })
+    const grid: MealGrid = {}
+    for (const day of DAYS) {
+      if (day === "Wed") continue
+      grid[day] = {}
+      for (const slot of Object.keys(SLOT_COOK)) {
+        grid[day][slot] = cell(
+          "paratha",
+          slot === "school-lunch" || slot === "home-lunch" ? ["rice"] : ["wheat flour"],
+          slot,
+        )
+      }
+    }
+    const candidate = { grid, easyBuys: [], policyOutcomes: {} }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(
+        proposeInput(candidate, undefined, {
+          weeklyInventory: ctx.weeklyInventory,
+          weeklyExceptions: ctx.weeklyExceptions,
+        }),
+      ),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
+      context: ctx,
+    })
+    expect(result.completed).toBe(true)
+    if (result.terminal?.kind === "propose_plan")
+      expect(result.terminal.evaluation.failures.filter((failure) => failure.day === "Wed")).toEqual([])
   })
 })
 
