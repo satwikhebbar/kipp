@@ -3,8 +3,9 @@
 -- precision (created_at, updated_at, week_start, week_end); week_end > ?
 -- comparisons are lexical, so writers must emit the identical format.
 -- No transcripts or raw provider text are stored (privacy rule).
--- CHECK constraints below enforce the fixed TEXT formats at the database
--- boundary: ISO-8601 UTC timestamps and IANA timezone ids.
+-- Timestamps and timezone ids are enforced by the app layer: D1 does not
+-- support GLOB in CHECK constraints ("LIKE or GLOB pattern too complex"), so
+-- the DB boundary only CHECKs the closed enums below.
 
 -- Household profile (single-bot: one row per Telegram chat)
 CREATE TABLE meal_profile (
@@ -15,24 +16,24 @@ CREATE TABLE meal_profile (
   location_json TEXT,                    -- { country, city } | NULL
   interaction_generation INTEGER NOT NULL DEFAULT 0, -- chat-scoped plan-message generation (§6)
   version INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL CHECK (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
-  updated_at TEXT NOT NULL CHECK (updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z')
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 -- Plan header: one active plan per chat (previous active -> 'replaced')
 CREATE TABLE meal_plan (
   plan_id TEXT PRIMARY KEY,
   chat_id TEXT NOT NULL,
-  week_start TEXT NOT NULL CHECK (week_start GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
-  week_end TEXT NOT NULL CHECK (week_end GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
-  timezone TEXT NOT NULL CHECK (timezone GLOB '?[A-Za-z_]*/[A-Za-z0-9_+/-]*' OR timezone IN ('UTC', 'GMT')),
+  week_start TEXT NOT NULL,
+  week_end TEXT NOT NULL,
+  timezone TEXT NOT NULL,
   instance_id TEXT NOT NULL,             -- live Workflow instance id (the webhook's fallthrough pointer, §6)
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'replaced')), -- active | replaced
   current_version INTEGER NOT NULL DEFAULT 0,
   weekly_inventory_json TEXT NOT NULL DEFAULT '{}', -- week-scoped state
   weekly_exceptions_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL CHECK (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
-  updated_at TEXT NOT NULL CHECK (updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z')
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 CREATE INDEX idx_meal_plan_chat ON meal_plan(chat_id, status);
 
@@ -50,7 +51,7 @@ CREATE TABLE meal_plan_version (
   base_version INTEGER,                  -- NULL for initial
   feedback_batch_id TEXT,                -- batch that drove this version (NULL only for the initial plan)
   video_json TEXT NOT NULL DEFAULT '{}', -- per-cell video results (lunch slots)
-  created_at TEXT NOT NULL CHECK (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  created_at TEXT NOT NULL,
   PRIMARY KEY (plan_id, version)
 );
 
@@ -63,5 +64,5 @@ CREATE TABLE feedback_batch (
   plan_id TEXT NOT NULL,
   base_version INTEGER NOT NULL,         -- the version the feedback targeted
   items_json TEXT NOT NULL,              -- FeedbackItem[] as submitted
-  created_at TEXT NOT NULL CHECK (created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z')
+  created_at TEXT NOT NULL
 );
