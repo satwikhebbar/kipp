@@ -10,7 +10,7 @@ import { handleCadenceCron } from "./triggers/cadence"
 import { handleGoogleCalendarAuthCallback, handleGoogleCalendarAuthStart } from "./triggers/google-calendar-auth"
 import { handleAuthCallback, handleAuthStart } from "./triggers/linkedin-auth"
 import { hasSetupAccess } from "./triggers/oauth"
-import { handleRssCron } from "./triggers/rss"
+import { handleRssCron, RssFetchError } from "./triggers/rss"
 import { handleTelegramWebhook } from "./triggers/telegram-webhook"
 import { handleTokenCheckCron } from "./triggers/token-check"
 
@@ -75,10 +75,39 @@ export default {
           break
       }
     } catch (err) {
-      logRuntime(env, { event: "scheduled-cron", outcome: "failed" })
-      console.error(new Date().toISOString(), "[scheduled] unhandled error:", err)
+      const rssFetchFailure = err instanceof RssFetchError ? err : null
+      logRuntime(env, {
+        event: "scheduled-cron",
+        outcome: "failed",
+        failureCategory: rssFetchFailure
+          ? rssFetchFailure.transient
+            ? "rss-upstream-transient"
+            : "rss-upstream-non-transient"
+          : "unclassified",
+        ...(rssFetchFailure
+          ? {
+              retryCount: rssFetchFailure.attempts - 1,
+              details: { rssStatus: rssFetchFailure.status, rssAttempts: rssFetchFailure.attempts },
+            }
+          : {}),
+      })
+      if (rssFetchFailure) {
+        console.error(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            component: "kipp-runtime",
+            event: "scheduled-cron",
+            outcome: "failed",
+            failureCategory: rssFetchFailure.transient ? "rss-upstream-transient" : "rss-upstream-non-transient",
+            rssStatus: rssFetchFailure.status,
+            rssAttempts: rssFetchFailure.attempts,
+          }),
+        )
+      } else {
+        console.error(new Date().toISOString(), "[scheduled] unhandled error:", err)
+      }
       const operatorChatId = env.TELEGRAM_ALLOWED_USER_ID.trim()
-      if (operatorChatId && env.TELEGRAM_BOT_TOKEN) {
+      if (operatorChatId && env.TELEGRAM_BOT_TOKEN && !rssFetchFailure?.transient) {
         await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
           .sendMessage(operatorChatId, userFacingFailureMessage(err), {
             signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),

@@ -66,6 +66,18 @@ const DEFAULT_RSS_RETRIES = 3
 const RSS_FETCH_MAX_RETRIES = 3
 const RSS_FETCH_BACKOFF_MS = 1_000
 
+/** Safe metadata for an RSS request that exhausted its bounded retry policy. */
+export class RssFetchError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly attempts: number,
+    public readonly transient: boolean,
+  ) {
+    super(`RSS fetch error ${status} after ${attempts} attempt${attempts === 1 ? "" : "s"}`)
+    this.name = "RssFetchError"
+  }
+}
+
 /** Stable non-empty identity for an RSS item: its GUID when present, else its canonical link. */
 export function itemIdentity(item: Pick<RssItem, "guid" | "link">): string {
   return item.guid ? `guid:${item.guid}` : `link:${item.link}`
@@ -144,12 +156,21 @@ export async function handleRssCron(env: Env): Promise<{
 /** Fetches and parses an RSS feed from a URL, retrying transient failures (429/5xx). */
 async function fetchRssItems(url: string): Promise<RssItem[]> {
   let lastStatus = 0
+  let attempts = 0
+  let lastFailureWasNetworkError = false
   for (let attempt = 0; attempt <= RSS_FETCH_MAX_RETRIES; attempt++) {
-    const res = await fetch(url)
-    if (res.ok) return parseRssFeed(await res.text())
-    lastStatus = res.status
-    if (!isTransientHttpStatus(res.status) || attempt === RSS_FETCH_MAX_RETRIES) break
+    attempts++
+    try {
+      const res = await fetch(url)
+      if (res.ok) return parseRssFeed(await res.text())
+      lastStatus = res.status
+      lastFailureWasNetworkError = false
+    } catch {
+      lastStatus = 0
+      lastFailureWasNetworkError = true
+    }
+    if (!(lastFailureWasNetworkError || isTransientHttpStatus(lastStatus)) || attempt === RSS_FETCH_MAX_RETRIES) break
     await new Promise((r) => setTimeout(r, RSS_FETCH_BACKOFF_MS * 2 ** attempt))
   }
-  throw new Error(`RSS fetch error ${lastStatus} for ${url}`)
+  throw new RssFetchError(lastStatus, attempts, lastFailureWasNetworkError || isTransientHttpStatus(lastStatus))
 }
