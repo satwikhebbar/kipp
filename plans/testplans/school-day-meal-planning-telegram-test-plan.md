@@ -221,3 +221,68 @@ would have caught it, and the coverage needed.
 
 **Status:** recorded during the iteration-1 manual test session; fixes for B1,
 B2, B3, B4, B6 and the C1/C3 corpus additions are planned next.
+
+### Addressed (non-LLM work, iteration 1)
+
+The deterministic subset of the gaps above is now covered; each links to its
+test:
+
+- **A1** — migration guard: `meal-planning-store.test.ts` rejects GLOB/LIKE in
+  the migration text (comment-stripped) and requires the enum CHECKs; the D1
+  divergence risk is pinned at the source.
+- **A2** — `meal-planning-workflow.test.ts` asserts the session-failure log
+  carries `failureCategory` (`missing-required-handoff`, `provider-error`) and
+  the unavailable notice goes out.
+- **A3** — `tool-runner.test.ts` covers per-session `maxProviderTurns` and
+  `maxToolCalls` overrides.
+- **A4 / S03** — `meal-planning-telegram-workflow.integration.test.ts` replays a
+  completed instance over a memoizing step: no duplicate plan message, no
+  duplicate rows.
+- **B1** — context-injection assertion already in the integration test.
+- **B2** — `providers.test.ts` projects `z.record` to
+  `additionalProperties`; the projection now reads `_def.valueType` (the
+  earlier fix read a non-existent `innerType`, so nested records were still
+  empty objects).
+- **B3** — `meal-planning-agent.test.ts` proves `evaluate_meal_plan` stays
+  available after a passing evaluation (revise → re-evaluate → propose).
+- **B4** — budget override exercised by the A3 tests.
+- **B5** — `meal-planning-agent.test.ts` asserts the prompt is policy-agnostic
+  (no hardcoded policy ids).
+- **C1** — corpus `sat-open-week` (full 6×5 week planable with enough distinct
+  dishes; an unrequested repeat fails); `meal-planning-evaluation.test.ts`
+  documents the seed ceiling (25 dishes, 30 slots, one favourite).
+- **C2 / T03** — `meal-planning-agent.test.ts` carries request-listed inventory
+  through `propose_plan` against an empty context inventory.
+- **C3** — corpus `cheat-day` (outcome recorded on the passing plan; omitting
+  the policy outcome fails with `missing_policy_outcome`).
+- **C4** — decision: the reduced Saturday schedule is expressed as a
+  `half_day` weekly exception (not per-day slots); `meal-planning-loader.test.ts`
+  pins Saturday at 3 of 5 slots.
+- **T08** — corpus `no-dairy-week` (concrete exclusion tokens `paneer`/`ghee`;
+  reintroducing either trips `hard_exclusion`).
+- **T11** — `meal-planning-messages.test.ts` renders no URL and keeps the meal
+  intact when a video is `no_suitable_video`/`not_attempted`.
+- **R05** — `meal-planning-agent.test.ts` proves a proposal that would resolve
+  conflicting feedback by violating a hard exclusion is rejected at
+  `propose_plan`, and the session clarifies instead.
+- **R06** — corpus `vague-feedback` (unbound feedback addressable via rationale;
+  an unscoped cell change fails).
+- **R09** — `meal-planning-agent.test.ts` accepts a revision that declares a
+  mid-week holiday and drops that day without `missing_slot`.
+- **S04** — `meal-planning-store.test.ts` shows a next-week create replaces the
+  prior week's inventory/exceptions (weekly state does not leak).
+- **S06** — `meal-planning-evaluation.test.ts` still enforces constraints when
+  the request text claims to ignore every food rule.
+- **S08** — `meal-planning-workflow.test.ts` + the integration test: a throwing
+  provider now surfaces the unavailable notice (was a crashed instance) and
+  persists nothing.
+
+Already covered by existing tests (no new work): **R07** (re-requesting the
+current plan → the "mid-week /mealplan supersedes" integration test) and **S05**
+(combined inventory + exception + policy in one context → the `baseline-week`
+corpus scenario).
+
+Still open (model-quality behaviors that a mocked suite cannot pin; tracked in
+the live-LLM eval beads issue): T04 (one *useful* clarification), T07 (short
+labelled easy-buy list), T12 (cross-week variety), R01/R04 (scoped-feedback
+quality), R06/R05 resolution quality, and B6's live-eval assertion.
