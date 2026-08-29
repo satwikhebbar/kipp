@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { renderHouseholdContext } from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
-import type { MealGrid, MealPlanContext, MealPlanScenario } from "../meal-planning/types"
-import { createToolProvider, type ToolConversationMessage } from "../providers"
-import { ToolProviderHttpError } from "../providers/llm"
+import type { MealGrid, MealPlanCandidate, MealPlanContext, MealPlanScenario } from "../meal-planning/types"
+import { createGenerator, createToolProvider, type GenerateFn, type ToolConversationMessage } from "../providers"
+import { messages, parseLLMJson, ToolProviderHttpError } from "../providers/llm"
 
 declare const process: { env: Record<string, string | undefined> }
 
@@ -32,10 +32,90 @@ const scenario = (id: string): MealPlanScenario => {
 const MAX_PROVIDER_TURNS = 8
 const PROVIDER_MAX_RETRIES = 3
 const MAX_EASY_BUYS = 5
-const MAX_REQUESTED_EASY_BUYS = 8
 const MAX_CLARIFY_LENGTH = 300
 const WEEK_DAY_COUNT = 6
 const SLOTS_PER_DAY = 5
+
+// Eval debugging is a first-class feature: every test already dumps a full
+// transcript (with provider reasoning) under EVAL_DEBUG=1, and vitest isolates
+// a single scenario with `vitest run -t "<scenario name>"` — no separate
+// debug scripts needed.
+const evalDebug = process.env.EVAL_DEBUG === "1"
+const MAX_LOG_SNIPPET = 1500
+
+function renderMessage(message: ToolConversationMessage): string {
+  switch (message.role) {
+    case "user":
+      return `USER: ${message.text}`
+    case "tool":
+      return `TOOL(${message.toolCallId}) ${JSON.stringify(message.output).slice(0, MAX_LOG_SNIPPET)}`
+    case "assistant": {
+      const calls =
+        "toolCalls" in message && message.toolCalls
+          ? message.toolCalls.map((call) => `  ${call.name}(${JSON.stringify(call.input)})`).join("\n")
+          : ""
+      const reasoning =
+        "reasoningContent" in message && message.reasoningContent ? `REASONING:\n${message.reasoningContent}` : ""
+      return `ASSISTANT${reasoning ? " (with reasoning)" : ""}:\n${calls}${reasoning ? `\n${reasoning}` : ""}`
+    }
+    default:
+      return `SYSTEM: ${message.text}`
+  }
+}
+
+function dumpResult(result: MealPlanningAgentSessionResult): void {
+  console.log(
+    `=== RESULT: completed=${result.completed} terminal=${result.terminal?.kind} turns=${result.providerTurns} ===`,
+  )
+  console.log(`failureReason=${JSON.stringify(result.failureReason ?? null)}`)
+  for (const message of result.messages) console.log(`---\n${renderMessage(message)}`)
+  if (result.terminal?.kind === "propose_plan") {
+    console.log("=== PROPOSAL justification ===")
+    console.log(JSON.stringify(result.terminal.justification, null, 2))
+    console.log("=== PROPOSAL feedbackItems ===")
+    console.log(JSON.stringify(result.terminal.feedbackItems, null, 2))
+    console.log("=== PROPOSAL easyBuys ===")
+    console.log(JSON.stringify(result.terminal.candidate.easyBuys))
+    console.log("=== PROPOSAL evaluation ===")
+    console.log(JSON.stringify(result.terminal.evaluation, null, 2))
+  }
+}
+
+/** One-shot LLM-as-a-judge: grades the plan on ONLY the rubric's properties, no tool loop. */
+async function judgePlan(
+  generator: GenerateFn,
+  requestText: string,
+  candidate: MealPlanCandidate,
+  pantryBaseline: string[],
+  rubric: string,
+): Promise<{ pass: boolean; justification: string; reasons: string[] }> {
+  const payload = JSON.stringify({
+    easyBuys: candidate.easyBuys,
+    pantryBaseline,
+    grid: Object.fromEntries(
+      Object.entries(candidate.grid).map(([day, slots]) => [
+        day,
+        Object.fromEntries(
+          Object.entries(slots).map(([slot, cell]) => [slot, `${cell.dish} [${cell.items.join(", ")}]`]),
+        ),
+      ]),
+    ),
+  })
+  const response = await generator(
+    messages(
+      'You are a strict but fair meal-plan grader. Read the parent\'s request and the generated plan, and judge ONLY the rubric\'s properties. Reply with JSON only: {"pass": boolean, "justification": string, "reasons": [string]}. The justification is a 1-3 sentence plain-language explanation of the verdict; reasons are short bullet-style strings for each rubric violation (empty when passing). Do not grade anything outside the rubric.',
+      `Parent request: "${requestText}"\n\nPlan: ${payload}\n\nRUBRIC (judge only this):\n${rubric}`,
+    ),
+  )
+  const parsed = parseLLMJson<{ pass?: boolean; justification?: string; reasons?: string[] }>(response.text ?? "")
+  return { pass: parsed.pass === true, justification: parsed.justification ?? "", reasons: parsed.reasons ?? [] }
+}
+
+const C2_JUDGE_RUBRIC = `The parent says they have specific ingredients and asked for a week of school meals. The kitchen is stocked for most of the week, but the produce the parent lists is not in the inventory.
+1. REPRESENTATION: every ingredient the parent says they have must be usable in the plan — present in the easyBuys list, in a dish's ingredients, or in the pantry baseline. Name any requested ingredient that is entirely missing.
+2. EASY-BUY DEFINITION: easyBuys may contain only staples, all-season vegetables and fruits, and everyday neighborhood-grocery items. It must NOT contain dry fruits (dates, raisins, dry coconut), nuts, seeds, jaggery, paneer, or other specialty or long-shelf items. Name any violation.
+3. SHORTNESS: the easyBuys list must be a short, purposeful list of the few ordinary ingredients being added — not the week's entire shopping list. Say whether it is over-stocked.
+Pass only if all three hold. When in doubt, pass if there is no clear violation.`
 
 /** Drives one real-provider session as the workflow does (context injected into the user message). */
 async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessionResult> {
@@ -45,13 +125,21 @@ async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessi
       ? `Revision feedback: ${(context.feedbackItems ?? []).map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(context)}`
       : `Request: ${context.request.text}\n\n${renderHouseholdContext(context)}`
   try {
-    return await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], { context })
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], {
+      context,
+      ...(evalDebug ? { retainReasoning: true } : {}),
+    })
+    if (evalDebug) dumpResult(result)
+    return result
   } catch (error) {
     if (error instanceof ToolProviderHttpError && error.providerMessage)
       throw new Error(`${error.message}: ${error.providerMessage}`)
     throw error
   }
 }
+
+/** Cheap one-shot text generator used by the LLM-as-a-judge checks. */
+const generator = createGenerator(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
 
 function requireProposal(result: MealPlanningAgentSessionResult) {
   expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
@@ -124,23 +212,38 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
   })
 
   contractIt(
-    "C2: request-listed ingredients are added to a short easy-buys list against an empty inventory",
+    "C2: request-listed ingredients land in a short easy-buys list against a stocked kitchen (judge-graded)",
     async () => {
       const base = scenario("baseline-week").context
       const ctx: MealPlanContext = {
         ...base,
-        weeklyInventory: { items: [], notes: [] },
+        // The request's produce (potato, tomato, onion, banana) is NOT stocked,
+        // so the model must buy it; the dry-fruit/seeds snacks and the rest of
+        // the week's staples ARE stocked, so easyBuys stays a short list.
+        weeklyInventory: {
+          items: base.weeklyInventory.items.filter((item) => item.name !== "banana"),
+          notes: [],
+        },
         request: {
           kind: "initial_plan",
           text: "Plan this week. We have rice, dal, potatoes, tomatoes, onions and bananas.",
         },
       }
       const terminal = requireProposal(await runLive(ctx))
-      const itemsInPlan = new Set(terminal.candidate.easyBuys)
-      for (const ingredient of ["rice", "dal", "bananas"]) {
-        expect(itemsInPlan.has(ingredient), `${ingredient} must be in easy-buys`).toBe(true)
-      }
-      expect(terminal.candidate.easyBuys.length).toBeLessThanOrEqual(MAX_REQUESTED_EASY_BUYS)
+      const verdict = await judgePlan(
+        generator,
+        ctx.request.text,
+        terminal.candidate,
+        ctx.profile.pantryBaseline,
+        C2_JUDGE_RUBRIC,
+      )
+      console.log(
+        `C2 judge: pass=${verdict.pass}\njustification: ${verdict.justification}\nreasons:\n${verdict.reasons.map((reason) => `  - ${reason}`).join("\n")}`,
+      )
+      expect(
+        verdict.pass,
+        `C2 judge justification:\n${verdict.justification}\n\nreasons:\n${verdict.reasons.join("\n")}`,
+      ).toBe(true)
     },
   )
 
