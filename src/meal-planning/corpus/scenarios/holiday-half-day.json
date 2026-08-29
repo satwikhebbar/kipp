@@ -1,7 +1,7 @@
 {
   "id": "holiday-half-day",
   "name": "Holiday and half day",
-  "summary": "Saturday is closed (no cells allowed) and Wednesday is a half day that drops the home-lunch slot.",
+  "summary": "Saturday is closed (no cells allowed) and Wednesday is a half day that drops the packed school-lunch slot (the child eats lunch at home).",
   "context": {
     "schedule": {
       "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
@@ -194,9 +194,9 @@
           "kind": "half_day",
           "appliesTo": {
             "day": "Wed",
-            "mealSlots": ["home-lunch"]
+            "mealSlots": ["school-lunch"]
           },
-          "instruction": "Wednesday is a half day; children eat home lunch"
+          "instruction": "Wednesday is a half day; the child eats lunch at home, so no packed school lunch"
         }
       ]
     },
@@ -208,7 +208,7 @@
   },
   "candidates": [
     {
-      "label": "valid-omits-wed-home",
+      "label": "valid-omits-wed-school",
       "plan": {
         "grid": {
           "Mon": {
@@ -307,7 +307,7 @@
               "cookMinutes": 0,
               "priorNightPrep": false
             },
-            "school-lunch": {
+            "home-lunch": {
               "dish": "khichdi",
               "vegetarian": true,
               "items": ["rice", "moong dal"],
@@ -497,10 +497,10 @@
               "cookMinutes": 0,
               "priorNightPrep": false
             },
-            "home-lunch": {
-              "dish": "sweet potato curry",
+            "school-lunch": {
+              "dish": "khichdi",
               "vegetarian": true,
-              "items": ["sweet potato"],
+              "items": ["rice", "moong dal"],
               "cookMinutes": 20,
               "priorNightPrep": false
             }
@@ -589,7 +589,7 @@
           {
             "code": "missing_slot",
             "day": "Wed",
-            "slot": "school-lunch"
+            "slot": "home-lunch"
           }
         ]
       }
@@ -692,13 +692,6 @@
               "vegetarian": true,
               "items": ["mixed seeds"],
               "cookMinutes": 0,
-              "priorNightPrep": false
-            },
-            "school-lunch": {
-              "dish": "khichdi",
-              "vegetarian": true,
-              "items": ["rice", "moong dal"],
-              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "home-lunch": {

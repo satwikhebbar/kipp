@@ -209,6 +209,15 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     }
   })
 
+  contractIt("T02: a half day and a holiday produce a plan that omits the dropped slots", async () => {
+    const ctx = scenario("holiday-half-day").context
+    const terminal = requireProposal(await runLive(ctx))
+    expect(Object.keys(terminal.candidate.grid.Sat ?? {}), "Sat is a school holiday; no cells allowed").toHaveLength(0)
+    const wed = terminal.candidate.grid.Wed ?? {}
+    expect(wed["school-lunch"], "Wed half day must skip the packed school lunch").toBeUndefined()
+    expect(wed["home-lunch"], "Wed half day keeps the home lunch").toBeDefined()
+  })
+
   contractIt("B3/B4: a two-item batched revision completes with both feedback items represented", async () => {
     const ctx = scenario("batched-feedback").context
     const result = await runLive(ctx)
