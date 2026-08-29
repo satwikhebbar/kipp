@@ -83,7 +83,7 @@ Run these in fresh test weeks unless the scenario explicitly says otherwise.
 | ID | Scenario and input | Expected result |
 | --- | --- | --- |
 | T01 | `Plan next week. I have beans, carrots, bottle gourd, peas, bananas and apples. Friday should be cheat day.` | A complete Monday–Saturday plan uses the inventory where sensible and visibly fulfils the Friday intent. |
-| T02 | `Wednesday is a half day and Saturday is a holiday.` | Kipp summarizes or confirms the exception, then removes irrelevant packed slots on Wednesday and Saturday. |
+| T02 | `Wednesday is a half day and Saturday is a holiday.` | Kipp summarizes or confirms the exception, then skips the packed school lunch on Wednesday (the child eats lunch at home, so home-lunch stays) and removes every slot on Saturday. |
 | T03 | After giving inventory: `Also add paneer and spinach to what we have.` | Weekly inventory is updated without an unnecessary question; later planning can use both items. |
 | T04 | `Tuesday will be difficult.` | Kipp either asks one targeted clarification, or reflects the difficulty from the cook's lens by making that day lighter (e.g. minimal morning cooking). A uniform plan with no Tuesday accommodation fails. |
 | T04a | `Please make Pav on Wednesday this week.` | Kipp asks one clarification: "Pav" is underspecified (Pav Bhaji vs Pav Misal) and not in the allowed dish list. |
@@ -260,6 +260,10 @@ test:
 - **C4** — decision: the reduced Saturday schedule is expressed as a
   `half_day` weekly exception (not per-day slots); `meal-planning-loader.test.ts`
   pins Saturday at 3 of 5 slots.
+- **T02** — decision: a half day means the child eats lunch at home, so the
+  packed **school-lunch** slot is dropped and **home-lunch** stays. Encoded in
+  the prompt (`meal-planning-session.ts`) and the `holiday-half-day` corpus
+  candidates; the loader/evaluation tests pin the coverage-set consequence.
 - **T08** — corpus `no-dairy-week` (concrete exclusion tokens `paneer`/`ghee`;
   reintroducing either trips `hard_exclusion`).
 - **T11** — `meal-planning-messages.test.ts` renders no URL and keeps the meal
@@ -343,6 +347,11 @@ genuinely-ambiguous clarify cases T04-CL (underspecified "Pav", contrarian
   value/count checks on `easyBuys` are brittle; C2 and T04 are now graded by a
   cheap one-shot LLM-as-a-judge that returns `pass`/`justification`/`reasons`
   and is easy to iterate as the rubric evolves.
+- **Half-day semantics were undefined** — on the T02 run the model kept *both*
+  the school and home lunch on the half day ("keeps the full schedule plus a
+  home lunch"), and the corpus even encoded the opposite reading (dropping
+  home-lunch). Semantics now defined in the prompt (skip the packed school
+  lunch, keep the home lunch) and fixed in the `holiday-half-day` corpus.
 
 **Status (latest runs):**
 
