@@ -307,6 +307,28 @@ Isolate one scenario with `vitest run -t "<scenario name>"`. Provider HTTP
 failures surface as a distinct message from behavioral failures (turn-limit /
 wrong terminal).
 
+**Working loop (do NOT run the full contract suite per change):**
+
+1. The fast layer is the real test suite: 570 unit + 58 integration tests,
+   deterministic, seconds. Pin every semantic here first (prompt, evaluator,
+   corpus candidates, loader/evaluation tests).
+2. A live failure is a *signal*, not a target: it means either a semantic gap
+   in the fast layer (fix it there, verify with mocked tests) or model
+   non-determinism (isolate as flaky; do not fight it live).
+3. When a scenario needs a live run, add a `contractIt` case (build context by
+   spreading a corpus scenario and overriding `request`/`profile` fields), then
+   run **only that one**: `source .dev.vars; DEEPSEEK_CONTRACT=1 pnpm exec
+   vitest run -t "<scenario name>" src/__contract__/deepseek-meal-planning.contract.test.ts`.
+4. Judge-graded outcomes (C2, T04) use a cheap one-shot LLM-as-a-judge
+   (`judgePlan`), since exact-value assertions are wrong for a non-deterministic
+   planner; everything else asserts deterministically.
+5. Commit when green (pre-commit hook runs lint/unit/integration/typecheck; the
+   repo has pre-existing lint warnings on HEAD — do not add new errors, e.g.
+   magic numbers). Then update this document's status.
+6. Per-scenario confirmation runs take 1.5–5 min (session uses DeepSeek thinking
+   `high`; the judge uses none). Only run the whole suite as an end-of-iteration
+   gate, never during iteration.
+
 Covers the acceptance set (B1/T01, C1, B3/B4, C2 request-listed produce,
 R01/R04 scoped-feedback stability) plus judge-graded behavioral cases: C2
 (easy-buys semantics), T04 (vague "Tuesday will be difficult"), the
@@ -353,7 +375,7 @@ morning budget with no night prep).
 
 **Status (latest runs):**
 
-- Passing: B1/T01, C1, C2 (judge-graded), R01/R04, T04-CL ×2.
+- Passing: B1/T01, C1, C2 (judge-graded), R01/R04, T02, T05, T04-CL ×2.
 - Flaky: B3 (passed 2 of the last 3 runs — the turn-budget and opaque-id bugs
   are fixed; remaining variance is run-to-run plan stability).
 - Judge-graded T04: passes when the model either clarifies or builds a plan
