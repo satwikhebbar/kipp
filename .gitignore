@@ -17,6 +17,9 @@ scripts/*
 # Env-specific Wrangler config (contain real credentials/hashes/URNs)
 wrangler.local.toml
 
+# Editor-local vault metadata
+.obsidian/
+
 # Local agent tooling (handoff queues, beads skill, tool configs)
 .agent-handoff/
 .agents/skills/beads/
