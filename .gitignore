@@ -18,6 +18,9 @@ scripts/*
 wrangler.local.toml
 wrangler.prod.toml
 
+# Editor-local vault metadata
+.obsidian/
+
 # Local agent tooling (handoff queues, beads skill, tool configs)
 .agent-handoff/
 .agents/skills/beads/
