@@ -309,9 +309,10 @@ wrong terminal).
 
 Covers the acceptance set (B1/T01, C1, B3/B4, C2 request-listed produce,
 R01/R04 scoped-feedback stability) plus judge-graded behavioral cases: C2
-(easy-buys semantics), T04 (vague "Tuesday will be difficult"), and the
+(easy-buys semantics), T04 (vague "Tuesday will be difficult"), the
 genuinely-ambiguous clarify cases T04-CL (underspecified "Pav", contrarian
-"pulao as a snack").
+"pulao as a snack"), T02 (half-day + holiday slot omission), and T05 (tight
+morning budget with no night prep).
 
 **Findings it surfaced (iteration 1):**
 

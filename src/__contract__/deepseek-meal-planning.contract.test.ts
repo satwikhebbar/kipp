@@ -36,6 +36,7 @@ const MAX_EASY_BUYS = 5
 const MAX_CLARIFY_LENGTH = 500
 const WEEK_DAY_COUNT = 6
 const SLOTS_PER_DAY = 5
+const MORNING_BUDGET_MINUTES = 35
 
 // Eval debugging is a first-class feature and ON BY DEFAULT for contract runs:
 // every test dumps a full transcript (with provider reasoning) plus the
@@ -207,6 +208,22 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     for (const day of Object.keys(terminal.candidate.grid)) {
       expect(Object.keys(terminal.candidate.grid[day])).toHaveLength(SLOTS_PER_DAY)
     }
+  })
+
+  contractIt("T05: a tight morning budget and no night prep keep every morning within 35 cook minutes", async () => {
+    const base = scenario("no-prior-night-prep").context
+    const ctx: MealPlanContext = {
+      ...base,
+      profile: { ...base.profile, morningCookingBudgetMinutes: MORNING_BUDGET_MINUTES },
+      request: {
+        kind: "initial_plan",
+        text: "No night prep this week. I have only 35 minutes before school, including getting him ready.",
+      },
+    }
+    const terminal = requireProposal(await runLive(ctx))
+    const measurements = terminal.evaluation.measurements
+    expect(measurements.morningCookMax).toBeLessThanOrEqual(MORNING_BUDGET_MINUTES)
+    expect(measurements.priorNightPrepMax).toBe(0)
   })
 
   contractIt("T02: a half day and a holiday produce a plan that omits the dropped slots", async () => {
