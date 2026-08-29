@@ -84,7 +84,6 @@ Run these in fresh test weeks unless the scenario explicitly says otherwise.
 | --- | --- | --- |
 | T01 | `Plan next week. I have beans, carrots, bottle gourd, peas, bananas and apples. Friday should be cheat day.` | A complete Monday–Saturday plan uses the inventory where sensible and visibly fulfils the Friday intent. |
 | T02 | `Wednesday is a half day and Saturday is a holiday.` | Kipp summarizes or confirms the exception, then skips the packed school lunch on Wednesday (the child eats lunch at home, so home-lunch stays) and removes every slot on Saturday. |
-| T03 | After giving inventory: `Also add paneer and spinach to what we have.` | Weekly inventory is updated without an unnecessary question; later planning can use both items. |
 | T04 | `Tuesday will be difficult.` | Kipp either asks one targeted clarification, or reflects the difficulty from the cook's lens by making that day lighter (e.g. minimal morning cooking). A uniform plan with no Tuesday accommodation fails. |
 | T04a | `Please make Pav on Wednesday this week.` | Kipp asks one clarification: "Pav" is underspecified (Pav Bhaji vs Pav Misal) and not in the allowed dish list. |
 | T04b | `Add pulao as a snack on Thursday.` | Kipp asks one clarification: a cooked dish in a dry, no-cook snack slot is contrarian. |
@@ -204,8 +203,6 @@ would have caught it, and the coverage needed.
 
 | Case | Reason |
 | --- | --- |
-| T03 (add to inventory in conversation) | no unit/corpus test |
-| T04 (`Tuesday will be difficult` → one useful clarification) | no clarify-on-ambiguity scenario |
 | T07 (short, labelled easy-buy list) | no corpus pin on easyBuys labelling |
 | T08 (no dairy this week) | no exclusion scenario |
 | T11 (preferred chef → recipe-link match; missing link leaves meal intact) | video unit tests only, no end-to-end |
@@ -253,7 +250,7 @@ test:
 - **C1** — corpus `sat-open-week` (full 6×5 week planable with enough distinct
   dishes; an unrequested repeat fails); `meal-planning-evaluation.test.ts`
   documents the seed ceiling (25 dishes, 30 slots, one favourite).
-- **C2 / T03** — `meal-planning-agent.test.ts` carries request-listed inventory
+- **C2** — `meal-planning-agent.test.ts` carries request-listed inventory
   through `propose_plan` against an empty context inventory.
 - **C3** — corpus `cheat-day` (outcome recorded on the passing plan; omitting
   the policy outcome fails with `missing_policy_outcome`).
