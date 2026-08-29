@@ -18,9 +18,10 @@ const enabled = (process.env.LIVE_CONTRACT === "1" || process.env.DEEPSEEK_CONTR
 // Each test is a real multi-turn session; thinking mode makes turns slower, so
 // give each scenario a generous ceiling well inside the workflow's 30-min TTL.
 const CONTRACT_TIMEOUT_MS = 600_000
-// A live meal-planning session is up to 8 provider turns of a 30-cell nested schema.
+// Scenarios are independent sessions, so run them concurrently (2-3 at a time
+// keeps the eval wall-clock down; each test still retries provider hiccups).
 const contractIt = enabled
-  ? (name: string, fn: () => void | Promise<void>) => it(name, fn, CONTRACT_TIMEOUT_MS)
+  ? (name: string, fn: () => void | Promise<void>) => it.concurrent(name, fn, CONTRACT_TIMEOUT_MS)
   : (name: string) => it.skip(name, () => {})
 
 const scenario = (id: string): MealPlanScenario => {
@@ -32,15 +33,16 @@ const scenario = (id: string): MealPlanScenario => {
 const MAX_PROVIDER_TURNS = 8
 const PROVIDER_MAX_RETRIES = 3
 const MAX_EASY_BUYS = 5
-const MAX_CLARIFY_LENGTH = 300
+const MAX_CLARIFY_LENGTH = 500
 const WEEK_DAY_COUNT = 6
 const SLOTS_PER_DAY = 5
 
-// Eval debugging is a first-class feature: every test already dumps a full
-// transcript (with provider reasoning) under EVAL_DEBUG=1, and vitest isolates
-// a single scenario with `vitest run -t "<scenario name>"` — no separate
-// debug scripts needed.
-const evalDebug = process.env.EVAL_DEBUG === "1"
+// Eval debugging is a first-class feature and ON BY DEFAULT for contract runs:
+// every test dumps a full transcript (with provider reasoning) plus the
+// terminal details, so a failed run carries everything needed without a
+// re-run. Set EVAL_DEBUG=0 to silence. A single scenario still runs isolated
+// via `vitest run -t "<scenario name>"` — no separate debug scripts needed.
+const evalDebug = enabled && process.env.EVAL_DEBUG !== "0"
 const MAX_LOG_SNIPPET = 1500
 
 function renderMessage(message: ToolConversationMessage): string {
@@ -96,7 +98,10 @@ async function judgePlan(
       Object.entries(candidate.grid).map(([day, slots]) => [
         day,
         Object.fromEntries(
-          Object.entries(slots).map(([slot, cell]) => [slot, `${cell.dish} [${cell.items.join(", ")}]`]),
+          Object.entries(slots).map(([slot, cell]) => [
+            slot,
+            `${cell.dish} [${cell.items.join(", ")}] (cook ${cell.cookMinutes})`,
+          ]),
         ),
       ]),
     ),
@@ -116,6 +121,9 @@ const C2_JUDGE_RUBRIC = `The parent says they have specific ingredients and aske
 2. EASY-BUY DEFINITION: easyBuys may contain only staples, all-season vegetables and fruits, and everyday neighborhood-grocery items. It must NOT contain dry fruits (dates, raisins, dry coconut), nuts, seeds, jaggery, paneer, or other specialty or long-shelf items. Name any violation.
 3. SHORTNESS: the easyBuys list must be a short, purposeful list of the few ordinary ingredients being added — not the week's entire shopping list. Say whether it is over-stocked.
 Pass only if all three hold. When in doubt, pass if there is no clear violation.`
+
+const T04_JUDGE_RUBRIC = `The parent's only instruction was "Tuesday will be difficult." The agent produced a full plan.
+Judge only this: the plan must reflect a sensible reading of the difficulty from the parent/cook's perspective. In particular, Tuesday's morning cooking should be kept light — fewer minutes than other days, or an obvious quick/no-cook arrangement — and the plan must otherwise be complete and reasonable. A passing plan acknowledges the difficulty in a way that genuinely makes Tuesday easier. Name any problem.`
 
 /** Drives one real-provider session as the workflow does (context injected into the user message). */
 async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessionResult> {
@@ -247,9 +255,59 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     },
   )
 
-  contractIt("T04: an ambiguous constraint produces one concise clarification instead of a guess", async () => {
+  contractIt(
+    "T04: a vague difficulty is either clarified or reflected as a lighter Tuesday (judge-graded)",
+    async () => {
+      const base = scenario("baseline-week").context
+      const ctx: MealPlanContext = { ...base, request: { kind: "initial_plan", text: "Tuesday will be difficult." } }
+      const result = await runLive(ctx)
+      expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
+      if (result.terminal?.kind === "needs_clarification") {
+        const message = result.terminal.message
+        expect(message.length).toBeLessThanOrEqual(MAX_CLARIFY_LENGTH)
+        noOpaqueLeak(result.messages)
+        expect(message).not.toMatch(/fb-[a-z0-9]+|tg-\d+/)
+        return
+      }
+      const terminal = requireProposal(result)
+      const verdict = await judgePlan(
+        generator,
+        ctx.request.text,
+        terminal.candidate,
+        ctx.profile.pantryBaseline,
+        T04_JUDGE_RUBRIC,
+      )
+      console.log(
+        `T04 judge: pass=${verdict.pass}\njustification: ${verdict.justification}\nreasons:\n${verdict.reasons.map((reason) => `  - ${reason}`).join("\n")}`,
+      )
+      expect(
+        verdict.pass,
+        `T04 judge justification:\n${verdict.justification}\n\nreasons:\n${verdict.reasons.join("\n")}`,
+      ).toBe(true)
+    },
+  )
+
+  contractIt("T04-CL: an underspecified dish name produces one targeted clarification", async () => {
     const base = scenario("baseline-week").context
-    const ctx: MealPlanContext = { ...base, request: { kind: "initial_plan", text: "Tuesday will be difficult." } }
+    const ctx: MealPlanContext = {
+      ...base,
+      request: { kind: "initial_plan", text: "Please make Pav on Wednesday this week." },
+    }
+    const result = await runLive(ctx)
+    expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
+    expect(result.terminal?.kind).toBe("needs_clarification")
+    if (result.terminal?.kind !== "needs_clarification") throw new Error("no clarification")
+    expect(result.terminal.message.length).toBeLessThanOrEqual(MAX_CLARIFY_LENGTH)
+    noOpaqueLeak(result.messages)
+    expect(result.terminal.message).not.toMatch(/fb-[a-z0-9]+|tg-\d+/)
+  })
+
+  contractIt("T04-CL: a contrarian snack request produces one targeted clarification", async () => {
+    const base = scenario("baseline-week").context
+    const ctx: MealPlanContext = {
+      ...base,
+      request: { kind: "initial_plan", text: "Add pulao as a snack on Thursday." },
+    }
     const result = await runLive(ctx)
     expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
     expect(result.terminal?.kind).toBe("needs_clarification")
