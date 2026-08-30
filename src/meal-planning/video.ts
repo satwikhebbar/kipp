@@ -12,8 +12,8 @@ const YOUTUBE_SEARCH_MAX_RESULTS = 5
 const MIN_SUITABLE_VIDEO_SECONDS = 120 // skip shorts; the #60 spike filters them via videos.list durations
 const SECONDS_PER_HOUR = 3600
 const SECONDS_PER_MINUTE = 60
-/** Hard ceiling on YouTube calls per plan (one search per lunch cell plus one batched videos.list). */
-const MAX_YOUTUBE_CALLS_PER_PLAN = 13
+/** Search budget per lunch cell (one global search; each configured trusted channel adds one channel-scoped search). */
+const SEARCH_BUDGET_PER_CELL = 13
 /** Short deadline per YouTube request: a stalled call aborts instead of delaying the optional enrichment step. */
 const YOUTUBE_REQUEST_TIMEOUT_MS = 5_000
 
@@ -67,15 +67,20 @@ export async function enrichLunchVideos(
   if (!apiKey || !cache) return { candidate: markNotAttempted(candidate, slotIds), video: {} }
 
   const { results, dishByKey, byDishSlot } = await readVideoCache(cache, cells)
-  const { topByKey, calls } = await searchTopVideos(
+  const trustedChannelIds = options.trustedChannelIds ?? []
+  // The base cap is one global search per lunch cell; each configured trusted channel adds one
+  // channel-scoped search per cell, so the ceiling scales with the channel count.
+  const callCeiling = SEARCH_BUDGET_PER_CELL * (1 + trustedChannelIds.length)
+  const { candidatesByKey, calls } = await searchTopVideos(
     doFetch,
     apiKey,
     byDishSlot,
-    options.trustedChannelIds ?? [],
+    trustedChannelIds,
+    callCeiling,
     results,
   )
-  const durations = await fetchDurations(doFetch, apiKey, topByKey, calls)
-  await applyVideoResults(cache, results, dishByKey, topByKey, durations)
+  const durations = await fetchDurations(doFetch, apiKey, candidatesByKey, calls, callCeiling)
+  await applyVideoResults(cache, results, dishByKey, candidatesByKey, durations)
 
   return { candidate: withVideos(candidate, results), video: Object.fromEntries(results) }
 }
@@ -120,64 +125,76 @@ async function searchTopVideos(
   apiKey: string,
   byDishSlot: DishSlotGroups,
   trustedChannelIds: string[],
+  callCeiling: number,
   results: Map<string, RecipeVideo>,
-): Promise<{ topByKey: Map<string, YouTubeSearchItem>; calls: number }> {
+): Promise<{ candidatesByKey: Map<string, YouTubeSearchItem[]>; calls: number }> {
   let calls = 0
-  const topByKey = new Map<string, YouTubeSearchItem>()
+  const candidatesByKey = new Map<string, YouTubeSearchItem[]>()
   for (const group of byDishSlot.values()) {
-    if (calls >= MAX_YOUTUBE_CALLS_PER_PLAN) {
+    if (calls >= callCeiling) {
       for (const key of group.keys) results.set(key, { status: "no_suitable_video" })
       continue
     }
-    calls += 1
-    try {
-      const top = await searchTopVideo(doFetch, apiKey, group.dish, trustedChannelIds)
-      if (top) for (const key of group.keys) topByKey.set(key, top)
-      else for (const key of group.keys) results.set(key, { status: "no_suitable_video" })
-    } catch {
+    // Search the trusted channels in preference order, then fall back to a global search. A dish a
+    // channel has titled in Hindi (e.g. "Lauki" vs "bottle gourd") never ranks in the global top
+    // results but surfaces under a channel-scoped search. Candidates stay in order so the first
+    // suitable duration wins (the later duration gate walks the list and skips unsuitable ones).
+    const candidates: YouTubeSearchItem[] = []
+    for (const channelId of [...trustedChannelIds, undefined]) {
+      if (calls >= callCeiling) break
+      calls += 1
+      let top: YouTubeSearchItem | null = null
+      try {
+        top = await searchTopVideo(doFetch, apiKey, group.dish, channelId)
+      } catch {
+        top = null
+      }
+      if (top) candidates.push(top)
+    }
+    if (candidates.length > 0) {
+      for (const key of group.keys) candidatesByKey.set(key, candidates)
+    } else {
       for (const key of group.keys) results.set(key, { status: "no_suitable_video" })
     }
   }
-  return { topByKey, calls }
+  return { candidatesByKey, calls }
 }
 
 /** Fetches durations for every collected candidate via one batched videos.list (under the call ceiling); a failure yields no durations. */
 async function fetchDurations(
   doFetch: typeof globalThis.fetch,
   apiKey: string,
-  topByKey: Map<string, YouTubeSearchItem>,
+  candidatesByKey: Map<string, YouTubeSearchItem[]>,
   calls: number,
+  callCeiling: number,
 ): Promise<Record<string, number>> {
-  if (topByKey.size === 0 || calls >= MAX_YOUTUBE_CALLS_PER_PLAN) return {}
+  const ids = [...new Set([...candidatesByKey.values()].flat().map((item) => item.videoId))]
+  if (ids.length === 0 || calls >= callCeiling) return {}
   try {
-    return await fetchVideoDurations(
-      doFetch,
-      apiKey,
-      [...topByKey.values()].map((item) => item.videoId),
-    )
+    return await fetchVideoDurations(doFetch, apiKey, ids)
   } catch {
     return {}
   }
 }
 
-/** Finalizes each candidate (duration gate), records it, and best-effort caches the result. */
+/** Finalizes each cell (duration gate), records it, and best-effort caches the result. */
 async function applyVideoResults(
   cache: RecipeVideoCache,
   results: Map<string, RecipeVideo>,
   dishByKey: Map<string, string>,
-  topByKey: Map<string, YouTubeSearchItem>,
+  candidatesByKey: Map<string, YouTubeSearchItem[]>,
   durations: Record<string, number>,
 ): Promise<void> {
-  for (const [key, top] of topByKey) {
-    const video: RecipeVideo =
-      (durations[top.videoId] ?? 0) >= MIN_SUITABLE_VIDEO_SECONDS
-        ? {
-            status: "found",
-            url: `https://www.youtube.com/watch?v=${top.videoId}`,
-            title: top.title,
-            channel: top.channelTitle,
-          }
-        : { status: "no_suitable_video" }
+  for (const [key, candidates] of candidatesByKey) {
+    const top = candidates.find((candidate) => (durations[candidate.videoId] ?? 0) >= MIN_SUITABLE_VIDEO_SECONDS)
+    const video: RecipeVideo = top
+      ? {
+          status: "found",
+          url: `https://www.youtube.com/watch?v=${top.videoId}`,
+          title: top.title,
+          channel: top.channelTitle,
+        }
+      : { status: "no_suitable_video" }
     results.set(key, video)
     const dish = dishByKey.get(key)
     const slot = key.slice(key.indexOf(":") + 1)
@@ -260,28 +277,26 @@ async function fetchWithDeadline(
   }
 }
 
-/** Runs one YouTube search.list for a dish and returns the preferred result (trusted channel first). */
+/** Runs one YouTube search.list for a dish (optionally scoped to a channel) and returns the first result. */
 async function searchTopVideo(
   doFetch: typeof globalThis.fetch,
   apiKey: string,
   dish: string,
-  trustedChannelIds: string[],
+  channelId?: string,
 ): Promise<YouTubeSearchItem | null> {
   const url = new URL(YOUTUBE_SEARCH_URL)
   url.searchParams.set("part", "snippet")
   url.searchParams.set("type", "video")
   url.searchParams.set("q", `${dish} recipe`)
   url.searchParams.set("maxResults", String(YOUTUBE_SEARCH_MAX_RESULTS))
+  if (channelId) url.searchParams.set("channelId", channelId)
   url.searchParams.set("key", apiKey)
   const response = await fetchWithDeadline(doFetch, url, { headers: { accept: "application/json" } })
   if (!response.ok) throw new Error(`YouTube search failed: ${response.status}`)
   const body = (await response.json()) as {
     items?: Array<{ id: { videoId: string }; snippet: { channelId: string; channelTitle: string; title: string } }>
   }
-  const items = body.items ?? []
-  const picked = trustedChannelIds.length
-    ? (items.find((item) => trustedChannelIds.includes(item.snippet.channelId)) ?? items[0])
-    : items[0]
+  const picked = body.items?.[0]
   if (!picked) return null
   return {
     videoId: picked.id.videoId,

@@ -41,8 +41,10 @@ function youTubeFetch(items: SearchItem[]): ReturnType<typeof vi.fn> {
   return vi.fn(async (url: RequestInfo | URL) => {
     const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
     if (href.includes("/youtube/v3/search")) {
-      const q = new URL(href).searchParams.get("q") ?? ""
-      const matches = items.filter((item) => item.q === q)
+      const searchUrl = new URL(href)
+      const q = searchUrl.searchParams.get("q") ?? ""
+      const channelId = searchUrl.searchParams.get("channelId")
+      const matches = items.filter((item) => item.q === q && (!channelId || item.channelId === channelId))
       return new Response(
         JSON.stringify({
           items: matches.map((item) => ({
@@ -189,13 +191,13 @@ describe("optional recipe-video enrichment", () => {
     expect(enrichedMissing.grid.Mon["home-lunch"].recipeVideo).toEqual({ status: "no_suitable_video" })
   })
 
-  it("prefers a trusted channel over the first search result", async () => {
+  it("searches trusted channels in preference order before the global fallback", async () => {
     const cache = fakeCache()
     const fetch = youTubeFetch([
       {
         q: "idli recipe",
-        videoId: "untrusted-1",
-        channelId: "c-untrusted",
+        videoId: "global-1",
+        channelId: "c-global",
         channelTitle: "Random Kitchen",
         title: "Idli",
         duration: "PT5M",
@@ -208,14 +210,66 @@ describe("optional recipe-video enrichment", () => {
         title: "Better Idli",
         duration: "PT6M",
       },
+      {
+        q: "idli recipe",
+        videoId: "trusted-2",
+        channelId: "c-trusted-2",
+        channelTitle: "Second Chef",
+        title: "Also Good",
+        duration: "PT7M",
+      },
     ])
     const { video } = await enrichLunchVideos(videoEnv(cache), candidate(), undefined, {
       fetch,
-      trustedChannelIds: ["c-trusted"],
+      trustedChannelIds: ["c-trusted", "c-trusted-2"],
     })
     expect(video["Mon:school-lunch"]).toMatchObject({
       status: "found",
       url: "https://www.youtube.com/watch?v=trusted-1",
+    })
+    const searchCalls = fetch.mock.calls
+      .map(([url]) => String(url))
+      .filter((href) => href.includes("/youtube/v3/search"))
+    const url = new URL(searchCalls[0])
+    expect(url.searchParams.get("channelId")).toBe("c-trusted")
+    expect(searchCalls.length).toBe(6)
+  })
+
+  it("walks to the next trusted channel when the first channel's top match is unsuitable", async () => {
+    const cache = fakeCache()
+    const fetch = youTubeFetch([
+      {
+        q: "idli recipe",
+        videoId: "short-1",
+        channelId: "c-trusted",
+        channelTitle: "Kipp Chef",
+        title: "Too Short Idli",
+        duration: "PT1M",
+      },
+      {
+        q: "idli recipe",
+        videoId: "trusted-2",
+        channelId: "c-trusted-2",
+        channelTitle: "Second Chef",
+        title: "Good Idli",
+        duration: "PT6M",
+      },
+      {
+        q: "idli recipe",
+        videoId: "global-1",
+        channelId: "c-global",
+        channelTitle: "Random Kitchen",
+        title: "Idli",
+        duration: "PT5M",
+      },
+    ])
+    const { video } = await enrichLunchVideos(videoEnv(cache), candidate(), undefined, {
+      fetch,
+      trustedChannelIds: ["c-trusted", "c-trusted-2"],
+    })
+    expect(video["Mon:school-lunch"]).toMatchObject({
+      status: "found",
+      url: "https://www.youtube.com/watch?v=trusted-2",
     })
   })
 
