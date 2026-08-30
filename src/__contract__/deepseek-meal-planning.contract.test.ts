@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
+import { expandMealCatalog } from "../agent/meal-catalog-expansion"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { renderHouseholdContext } from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
+import { SEED_SCHEDULE } from "../meal-planning/store"
 import type {
   FeedbackItem,
   MealCell,
@@ -10,7 +12,13 @@ import type {
   MealPlanContext,
   MealPlanScenario,
 } from "../meal-planning/types"
-import { createGenerator, createToolProvider, type GenerateFn, type ToolConversationMessage } from "../providers"
+import {
+  createGenerator,
+  createToolProvider,
+  type GenerateFn,
+  type ToolConversationMessage,
+  type ToolProviderClient,
+} from "../providers"
 import { messages, parseLLMJson, ToolProviderHttpError } from "../providers/llm"
 
 declare const process: { env: Record<string, string | undefined> }
@@ -258,6 +266,53 @@ async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessi
   }
 }
 
+interface CatalogExpansionExchange {
+  messages: ToolConversationMessage[]
+  toolCalls: unknown
+  error?: string
+}
+
+/** Runs catalog expansion against the live provider and retains a sign-off transcript without provider reasoning state. */
+async function runLiveCatalogExpansion(parentDishNames: string[]) {
+  const inner = createToolProvider(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
+  const exchanges: CatalogExpansionExchange[] = []
+  const provider: ToolProviderClient = {
+    async generate(input) {
+      const exchange: CatalogExpansionExchange = { messages: input.messages, toolCalls: [] }
+      exchanges.push(exchange)
+      try {
+        const response = await inner.generate(input)
+        exchange.toolCalls = response.toolCalls ?? []
+        return response
+      } catch (error) {
+        exchange.error = error instanceof ToolProviderHttpError ? error.providerMessage ?? error.message : String(error)
+        throw error
+      }
+    },
+  }
+  let result: Awaited<ReturnType<typeof expandMealCatalog>> | undefined
+  let failure: unknown
+  try {
+    result = await expandMealCatalog(provider, { parentDishNames, schedule: SEED_SCHEDULE })
+    return result
+  } catch (error) {
+    failure = error
+    throw error
+  } finally {
+    if (!evalDebug) return
+    console.log("=== MEAL CATALOG EXPANSION ===")
+    console.log(JSON.stringify({ parentDishNames, schedule: SEED_SCHEDULE.slots }, null, 2))
+    for (const [index, exchange] of exchanges.entries()) {
+      console.log(`--- catalog provider exchange ${index + 1} ---`)
+      for (const message of exchange.messages) console.log(renderMessage(message))
+      console.log(`TOOL CALLS: ${JSON.stringify(exchange.toolCalls, null, 2)}`)
+      if (exchange.error) console.log(`PROVIDER ERROR: ${exchange.error}`)
+    }
+    console.log("=== CATALOG EXPANSION RESULT ===")
+    console.log(JSON.stringify(result ?? { failure: String(failure) }, null, 2))
+  }
+}
+
 /** Cheap one-shot text generator used by the LLM-as-a-judge checks. */
 const generator = createGenerator(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
 
@@ -287,7 +342,73 @@ function dishesBySlot(grid: MealGrid, day: string): Record<string, string> {
   return Object.fromEntries(Object.entries(dayGrid).map(([slot, cell]) => [slot, cell?.dish ?? ""]))
 }
 
+function assertEstablishedCatalog(
+  parentDishNames: string[],
+  result: Awaited<ReturnType<typeof expandMealCatalog>>,
+): void {
+  expect(result.failures).toEqual([])
+  expect(result.definitions).toHaveLength(parentDishNames.length)
+  const definitions = result.definitions ?? []
+  const ids = new Set(definitions.map((definition) => definition.id))
+  expect(ids.size).toBe(parentDishNames.length)
+  const slots = new Map(SEED_SCHEDULE.slots.map((slot) => [slot.id, slot]))
+  for (const [index, definition] of definitions.entries()) {
+    expect(definition.aliases).toEqual([parentDishNames[index]])
+    expect(definition.id).toMatch(/^meal_/)
+    expect(definition.name.trim().toLocaleLowerCase()).toBe(parentDishNames[index].trim().toLocaleLowerCase())
+    expect(definition.status).toBe("established")
+    expect(definition.vegetarian).toBe(true)
+    expect(definition.principalIngredients.length).toBeGreaterThan(0)
+    expect(definition.requiredIngredients.length).toBeGreaterThan(0)
+    expect(definition.typicalCookMinutes).toSatisfy(Number.isInteger)
+    expect(definition.typicalCookMinutes).toBeGreaterThanOrEqual(0)
+    expect(["none", "optional", "required"]).toContain(definition.priorNightPrep)
+    expect(definition.packedFood).toMatchObject({ suitable: true })
+    expect(typeof definition.packedFood?.dry).toBe("boolean")
+    for (const slotId of definition.suitableSlots) {
+      const slot = slots.get(slotId)
+      expect(slot, `${definition.name} has unknown slot ${slotId}`).toBeDefined()
+      if (slot?.maxCookMinutes !== null && slot?.maxCookMinutes !== undefined)
+        expect(definition.typicalCookMinutes).toBeLessThanOrEqual(slot.maxCookMinutes)
+    }
+  }
+}
+
 describe("DeepSeek agent-centered meal-planning live contract", () => {
+  contractIt("M01: parent repertoire expands into five validated established definitions", async () => {
+    const parentDishNames = ["vegetable paratha", "poha", "idli chutney", "lemon rice", "roasted chana"]
+    const result = await runLiveCatalogExpansion(parentDishNames)
+    assertEstablishedCatalog(parentDishNames, result)
+  })
+
+  contractIt("M02: composed parent labels retain their scope", async () => {
+    const parentDishNames = ["Paniyaram Chutney", "Rajma Chawal", "Puri + Aloo Sabji"]
+    const result = await runLiveCatalogExpansion(parentDishNames)
+    assertEstablishedCatalog(parentDishNames, result)
+    const rajmaChawal = result.definitions?.find((definition) => definition.aliases?.[0] === "Rajma Chawal")
+    expect(rajmaChawal?.priorNightPrep).toBe("required")
+  })
+
+  contractIt("M03: no-cook snack slots exclude cooked meals", async () => {
+    const parentDishNames = ["Banana", "Roasted Chana", "Vegetable Paratha", "Lemon Rice"]
+    const result = await runLiveCatalogExpansion(parentDishNames)
+    assertEstablishedCatalog(parentDishNames, result)
+    const byParentName = new Map((result.definitions ?? []).map((definition) => [definition.aliases?.[0], definition]))
+    for (const name of ["Banana", "Roasted Chana"]) {
+      const definition = byParentName.get(name)
+      expect(definition?.suitableSlots.some((slot) => slot === "snack1" || slot === "snack2")).toBe(true)
+      expect(definition?.suitableSlots.every((slot) => slot === "snack1" || slot === "snack2")).toBe(true)
+      expect(definition?.typicalCookMinutes).toBe(0)
+      expect(definition?.packedFood?.dry).toBe(true)
+    }
+    for (const name of ["Vegetable Paratha", "Lemon Rice"]) {
+      const definition = byParentName.get(name)
+      expect(definition?.suitableSlots).not.toContain("snack1")
+      expect(definition?.suitableSlots).not.toContain("snack2")
+      expect(definition?.typicalCookMinutes).toBeGreaterThan(0)
+    }
+  })
+
   contractIt(
     "B1/T01: builds a full plan from context alone (no re-asking) with policy outcomes and short easy-buys",
     async () => {

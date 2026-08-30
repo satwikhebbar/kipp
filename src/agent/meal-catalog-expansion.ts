@@ -34,12 +34,20 @@ const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).strict()
 
 export const MEAL_CATALOG_EXPANSION_PROMPT = `You expand a parent's named meal repertoire into practical meal definitions. Use only the submit_meal_definitions action.
 
-The supplied names are parent-provided repertoire meals. Treat each as generally suitable for ordinary school-lunchbox transport: do not assess whether it is packable and do not return a packing-suitability field. Classify packedFood.dry only. Set dry true only for dry, spill-resistant food; uncertainty means false. Choose suitable slot ids only from the supplied schedule.
+The supplied names are parent-provided repertoire meals. Treat each as generally suitable for ordinary school-lunchbox transport: do not assess whether it is packable and do not return a packing-suitability field. Classify packedFood.dry only. Here dry means non-leaking and spill-resistant, not dehydrated: whole fruit and raw vegetable salad count as dry. Set dry false for food likely to spill or leak; uncertainty means false. Choose suitable slot ids only from the supplied schedule.
 
-Each definition is a practical meal option, not a fixed recipe. Include every required ingredient in requiredIngredients; optionalIngredients and allowedIngredientChoices are alternatives the planner may choose from. Return exactly one definition for each supplied name. sourceDishName must reproduce that supplied name exactly. You may improve the display name. All meals are vegetarian. typicalCookMinutes is a non-negative integer and priorNightPrep is none, optional, or required.
+Each supplied name is the parent's complete meal label — for example, "Idli Chutney", "Rajma Chawal", or "Puri + Aloo Sabji". Preserve its meal scope: do not add, remove, or infer an accompaniment in the display name. sourceDishName must reproduce that supplied name exactly. You may normalize presentation only.
+
+Each definition is a practical meal option, not a fixed recipe. Include every required ingredient in requiredIngredients; optionalIngredients and allowedIngredientChoices are alternatives the planner may choose from. Use prepared ingredient states when lengthy work happens before the meal: for example, use "idli batter" rather than rice and urad dal when grinding and fermentation are prior-night work. Mandatory soaking, fermentation, grinding, or marination means priorNightPrep is required: dried kidney beans (rajma), chickpeas, and similar legumes need overnight soaking before morning cooking. Keep the purchasable ingredient token (for example, "kidney beans") unless a prepared product such as idli batter is itself the real ingredient. Make typicalCookMinutes the day-of cooking and serving time after any required preparation. All meals are vegetarian. typicalCookMinutes is a non-negative integer and priorNightPrep is none, optional, or required.
+
+For a packed suitable slot, the whole named meal and its required components must travel safely in an ordinary lunchbox. Do not make a pourable accompaniment such as sambar a component of a packed meal; choose a thick, non-pourable accompaniment instead, or omit packed slots from suitableSlots.
+
+Include a slot in suitableSlots only when typicalCookMinutes fits that slot's maxCookMinutes. A slot with maxCookMinutes 0 is for no-cook food only. Prior-night preparation does not make a cooked meal eligible for that slot.
+
+Suitable slots must also reflect the meal's role, not merely whether it needs cooking. A light standalone snack such as whole fruit or roasted chana belongs only in snack slots; do not advertise it as breakfast, school lunch, or home lunch. Conversely, a substantial meal may use meal slots but must not claim snack slots unless it is genuinely a no-cook snack.
 
 Example action input:
-{"definitions":[{"sourceDishName":"Vegetable paratha","name":"Vegetable paratha","principalIngredients":["wheat flour","vegetables"],"vegetarian":true,"suitableSlots":["breakfast","school-lunch"],"packedFood":{"dry":false},"typicalCookMinutes":20,"priorNightPrep":"optional","requiredIngredients":["wheat flour","vegetables"],"optionalIngredients":["paneer"],"allowedIngredientChoices":["spinach"]}]}`
+{"definitions":[{"sourceDishName":"Idli Chutney","name":"Idli Chutney","principalIngredients":["idli batter","coconut"],"vegetarian":true,"suitableSlots":["breakfast","school-lunch","home-lunch"],"packedFood":{"dry":false},"typicalCookMinutes":12,"priorNightPrep":"required","requiredIngredients":["idli batter","thick coconut chutney"],"optionalIngredients":["coriander"],"allowedIngredientChoices":[]}]}`
 
 export interface MealCatalogExpansionOptions {
   /** Lets callers provide a deterministic opaque-id factory in tests. */
@@ -169,7 +177,10 @@ async function requestDefinitions(
       handoffTools: [SUBMIT_DEFINITIONS],
       requireHandoff: true,
       toolChoice: "required",
-      reasoning: "low",
+      // DeepSeek v4 rejects tool_choice while thinking is enabled. This task is
+      // a one-shot structured extraction, so reasoning is neither needed nor
+      // worth compromising the required terminal tool handoff.
+      reasoning: "disabled",
       maxProviderTurns: 2,
       maxToolCalls: 2,
     },

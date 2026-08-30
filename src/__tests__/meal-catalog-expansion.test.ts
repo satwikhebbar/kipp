@@ -36,7 +36,7 @@ describe("meal catalog expansion session", () => {
     const names = ["paratha", "poha", "idli", "upma", "dosa", "banana"]
     const provider = providerWith(
       catalogResponse(names.slice(0, 5).map((name) => catalogProposal(name))),
-      catalogResponse([catalogProposal("banana", { packedFood: { dry: true }, suitableSlots: ["snack1"] })]),
+      catalogResponse([catalogProposal("banana", { packedFood: { dry: true }, suitableSlots: ["snack1"], typicalCookMinutes: 0 })]),
     )
     let sequence = 0
     const result = await expandMealCatalog(provider, { parentDishNames: names, schedule: SEED_SCHEDULE }, {
@@ -79,6 +79,19 @@ describe("meal catalog expansion session", () => {
     expect((repair as { text: string }).text).toContain("invalid_cook_minutes")
   })
 
+  it("repairs a cooked meal that incorrectly advertises a no-cook snack slot", async () => {
+    const provider = providerWith(
+      catalogResponse([catalogProposal("poha", { suitableSlots: ["snack1"] })]),
+      catalogResponse([catalogProposal("poha", { suitableSlots: ["breakfast"] })]),
+    )
+    const result = await expandMealCatalog(provider, { parentDishNames: ["poha"], schedule: SEED_SCHEDULE })
+
+    expect(result.failures).toEqual([])
+    expect(result.definitions?.[0]?.suitableSlots).toEqual(["breakfast"])
+    const repair = vi.mocked(provider.generate).mock.calls[1]?.[0].messages[1]
+    expect((repair as { text: string }).text).toContain("slot_cook_time_exceeded")
+  })
+
   it("returns no definitions when a dish remains invalid after two focused repairs", async () => {
     const invalid = catalogProposal("poha", { suitableSlots: ["not-a-slot"] })
     const provider = providerWith(catalogResponse([invalid]), catalogResponse([invalid]), catalogResponse([invalid]))
@@ -92,5 +105,10 @@ describe("meal catalog expansion session", () => {
   it("includes a structured action example in the static prompt", () => {
     expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain('"definitions"')
     expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain('"sourceDishName"')
+    expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("idli batter")
+    expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("sambar")
+    expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("overnight soaking")
+    expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("whole fruit")
+    expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("raw vegetable salad")
   })
 })
