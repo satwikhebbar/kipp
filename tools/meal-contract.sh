@@ -11,6 +11,8 @@
 # - One scenario at a time; the full suite runs concurrently and burns quota.
 # - EVAL_DEBUG stays ON by default; the transcript dump is the evidence.
 # - Run the full suite only as an end-of-iteration gate, never per change.
+# - Every run is teed to logs/meal-contract-<timestamp>.log. When a run fails,
+#   read that file — do NOT re-run to reproduce; re-running burns a live session.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -37,5 +39,8 @@ if [ -z "$FILTER" ]; then
   exit 0
 fi
 
+mkdir -p logs
+
 DEEPSEEK_CONTRACT=1 LLM_API_KEY="$LLM_API_KEY" pnpm exec vitest run \
-  -t "$FILTER" "$@" src/__contract__/deepseek-meal-planning.contract.test.ts
+  -t "$FILTER" "$@" src/__contract__/deepseek-meal-planning.contract.test.ts 2>&1 |
+  tee "logs/meal-contract-$(date +%Y%m%d-%H%M%S).log"
