@@ -58,7 +58,9 @@ Apply this checklist to every proposed or revised plan.
 - Saturday uses its reduced schedule; holidays omit school-only slots.
 - All school meals are vegetarian.
 - Snacks are dry, portable, and mostly no-cook or prepared ahead; they are not
-  heavy meals such as cheese-corn sandwiches.
+  heavy meals such as cheese-corn sandwiches. Enforced structurally: snack slots
+  are `dry: true, maxCookMinutes: 0` (`store.ts`), so a cooked/heavy snack trips
+  `morning_capacity_exceeded`; no live scenario is needed (formerly T06).
 - Packed school lunch and home lunch are credible fresh-cook candidates.
 - The combined pre-school work is plausible; the plan does not routinely
   require freshly cooking breakfast, a snack, and packed lunch at once.
@@ -88,7 +90,6 @@ Run these in fresh test weeks unless the scenario explicitly says otherwise.
 | T04a | `Please make Pav on Wednesday this week.` | Kipp asks one clarification: "Pav" is underspecified (Pav Bhaji vs Pav Misal) and not in the allowed dish list. |
 | T04b | `Add pulao as a snack on Thursday.` | Kipp asks one clarification: a cooked dish in a dry, no-cook snack slot is contrarian. |
 | T05 | `No night prep this week. I have only 35 minutes before school, including getting him ready.` | The plan avoids stacking fresh breakfast, cooked snack, and cooked school lunch in the same morning. |
-| T06 | `Snacks should be dry and quick; no heavy sandwiches.` | Snacks are portable and mostly no-cook/pre-prepared. No wet, messy, or overly heavy snack is proposed. |
 | T07 | `I only have onions, tomatoes, potatoes, rice, atta, dal and bananas.` | The plan stays within inventory where possible. Any additional ingredients form a short, clearly labelled list of standard easy purchases. |
 | T08 | `No dairy products this week.` | Dairy-derived meals and ingredients are absent. If a prior setting or request conflicts, Kipp asks rather than silently violating the constraint. |
 | T09 | `He strongly dislikes mushrooms, but it is not an allergy.` | Kipp treats mushroom avoidance as a soft preference, not a medical restriction. |
@@ -333,8 +334,12 @@ Covers the acceptance set (B1/T01, C1, B3/B4, C2 request-listed produce,
 R01/R04 scoped-feedback stability) plus judge-graded behavioral cases: C2
 (easy-buys semantics), T04 (vague "Tuesday will be difficult"), the
 genuinely-ambiguous clarify cases T04-CL (underspecified "Pav", contrarian
-"pulao as a snack"), T02 (half-day + holiday slot omission), and T05 (tight
-morning budget with no night prep).
+"pulao as a snack"), T02 (half-day + holiday slot omission), T05 (tight
+morning budget with no night prep), T07 (scarce 7-item kitchen — accepts a
+sensible clarification or a judge-graded proposal; required `allowNewFoods:
+true` because only ~4 repertoire dishes are cookable from 7 items, which made
+the first setup unsatisfiable), and T08 (no-dairy week — deterministic
+dairy-token scan beyond the paneer/ghee hard exclusions).
 
 **Findings it surfaced (iteration 1):**
 
@@ -375,7 +380,8 @@ morning budget with no night prep).
 
 **Status (latest runs):**
 
-- Passing: B1/T01, C1, C2 (judge-graded), R01/R04, T02, T05, T04-CL ×2.
+- Passing: B1/T01, C1, C2 (judge-graded), R01/R04, T02, T05, T07 (clarify or
+  judge-graded proposal), T08, T04-CL ×2.
 - Flaky: B3 (passed 2 of the last 3 runs — the turn-budget and opaque-id bugs
   are fixed; remaining variance is run-to-run plan stability).
 - Judge-graded T04: passes when the model either clarifies or builds a plan

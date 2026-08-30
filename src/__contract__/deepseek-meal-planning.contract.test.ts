@@ -32,7 +32,11 @@ const scenario = (id: string): MealPlanScenario => {
 
 const MAX_PROVIDER_TURNS = 8
 const PROVIDER_MAX_RETRIES = 3
-const MAX_EASY_BUYS = 5
+// Mirror of the agent-facing prompt policy: at most 10 easy buys a week,
+// more only when the inventory cannot support a plausible plan. The judge
+// (C2/T07) decides "easy to buy", the cap guards the "not the whole shopping
+// list" clause on normal weeks.
+const MAX_EASY_BUYS = 10
 const MAX_CLARIFY_LENGTH = 500
 const WEEK_DAY_COUNT = 6
 const SLOTS_PER_DAY = 5
@@ -125,6 +129,32 @@ Pass only if all three hold. When in doubt, pass if there is no clear violation.
 
 const T04_JUDGE_RUBRIC = `The parent's only instruction was "Tuesday will be difficult." The agent produced a full plan.
 Judge only this: the plan must reflect a sensible reading of the difficulty from the parent/cook's perspective. In particular, Tuesday's morning cooking should be kept light — fewer minutes than other days, or an obvious quick/no-cook arrangement — and the plan must otherwise be complete and reasonable. A passing plan acknowledges the difficulty in a way that genuinely makes Tuesday easier. Name any problem.`
+
+const T07_JUDGE_RUBRIC = `The parent said they ONLY have onions, tomatoes, potatoes, rice, atta, dal and bananas, and asked for a full week of school meals.
+1. INVENTORY-USE: the plan should build on those seven items wherever reasonable — they should appear across the week rather than being ignored in favour of purchased ingredients.
+2. EASY-BUYS: anything purchased must be an ordinary, easy-to-find staple, all-season vegetable or fruit, or everyday neighborhood-grocery item — never dry fruits, nuts, seeds, paneer, or other specialty/long-shelf items.
+3. SIZING: the list must be a purposeful list of what this week genuinely needs given how little is in the kitchen — not padded, and not a huge one-shot stock-up. A scarce kitchen justifies more buys than a stocked one, so judge size relative to the week, not against a fixed number.
+Pass only if all three hold. When in doubt, pass if there is no clear violation.`
+
+// Broader than the scenario's hard exclusions (paneer, ghee): catches dairy
+// the exclusion net wouldn't flag, e.g. curd, milk, or butter in items, dish
+// names, or easy-buys.
+const DAIRY_TOKENS = [
+  "paneer",
+  "ghee",
+  "milk",
+  "curd",
+  "yogurt",
+  "yoghurt",
+  "cheese",
+  "butter",
+  "khoya",
+  "cream",
+  "malai",
+  "buttermilk",
+  "lassi",
+  "chaas",
+]
 
 /** Drives one real-provider session as the workflow does (context injected into the user message). */
 async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessionResult> {
@@ -280,6 +310,83 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
       ).toBe(true)
     },
   )
+
+  contractIt(
+    "T07: a scarce kitchen either clarifies sensibly or proposes using ordinary staples (judge-graded)",
+    async () => {
+      const base = scenario("baseline-week").context
+      const scarce = new Set(["onions", "tomatoes", "potatoes", "rice", "atta", "dal", "bananas"])
+      const ctx: MealPlanContext = {
+        ...base,
+        // The parent claims ONLY these seven items; the pantry baseline (oil,
+        // spices, ghee, flours...) stays as background kitchen staples. With
+        // so little to work from, the model must buy a fair amount — this is
+        // exactly the escape hatch in the easy-buys policy, so no hard cap.
+        // allowNewFoods must be ON: baseline-week's 25-dish repertoire has
+        // almost nothing cookable from a 7-item kitchen, so a plan from these
+        // items is impossible under the familiar-dishes-only rule.
+        weeklyInventory: {
+          items: [...scarce].map((name) => ({ name, status: "available" as const })),
+          notes: [],
+        },
+        profile: { ...base.profile, allowNewFoods: true },
+        request: {
+          kind: "initial_plan",
+          text: "I only have onions, tomatoes, potatoes, rice, atta, dal and bananas.",
+        },
+      }
+      const result = await runLive(ctx)
+      expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
+      // A scarce kitchen may legitimately ask (e.g. permission to repeat fruit
+      // snacks or add dry snacks) instead of committing to a plan. Both are
+      // acceptable terminals; only a proposal is judge-graded.
+      if (result.terminal?.kind === "needs_clarification") {
+        const message = result.terminal.message
+        expect(message.length).toBeLessThanOrEqual(MAX_CLARIFY_LENGTH)
+        noOpaqueLeak(result.messages)
+        expect(message).not.toMatch(/fb-[a-z0-9]+|tg-\d+/)
+        return
+      }
+      const terminal = requireProposal(result)
+      noOpaqueLeak(result.messages)
+      const verdict = await judgePlan(
+        generator,
+        ctx.request.text,
+        terminal.candidate,
+        ctx.profile.pantryBaseline,
+        T07_JUDGE_RUBRIC,
+      )
+      console.log(
+        `T07 judge: pass=${verdict.pass} easyBuys=${terminal.candidate.easyBuys.length}\njustification: ${verdict.justification}\nreasons:\n${verdict.reasons.map((reason) => `  - ${reason}`).join("\n")}`,
+      )
+      expect(
+        verdict.pass,
+        `T07 judge justification:\n${verdict.justification}\n\nreasons:\n${verdict.reasons.join("\n")}`,
+      ).toBe(true)
+    },
+  )
+
+  contractIt("T08: a no-dairy request keeps every dairy token out of the week", async () => {
+    const base = scenario("no-dairy-week").context
+    const ctx: MealPlanContext = {
+      ...base,
+      request: { kind: "initial_plan", text: "No dairy products this week." },
+    }
+    const result = await runLive(ctx)
+    const terminal = requireProposal(result)
+    noOpaqueLeak(result.messages)
+    const text = [
+      ...terminal.candidate.easyBuys,
+      ...Object.values(terminal.candidate.grid).flatMap((day) =>
+        Object.values(day).flatMap((cell) => [cell.dish, ...cell.items]),
+      ),
+    ]
+      .join(" ")
+      .toLowerCase()
+    for (const token of DAIRY_TOKENS) {
+      expect(text.includes(token), `dairy leak: "${token}"`).toBe(false)
+    }
+  })
 
   contractIt(
     "T04: a vague difficulty is either clarified or reflected as a lighter Tuesday (judge-graded)",
