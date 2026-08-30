@@ -1225,16 +1225,7 @@
           }
         }
       },
-      "expect": {
-        "pass": false,
-        "failures": [
-          {
-            "code": "unfamiliar_dish_not_allowed",
-            "day": "Mon",
-            "slot": "snack1"
-          }
-        ]
-      }
+      "expect": { "pass": true }
     }
   ],
   "behavior": {

@@ -2,11 +2,72 @@ import { describe, expect, it, vi } from "vitest"
 import { MEAL_PLANNING_AGENT_PROMPT, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import { evaluateMealPlan } from "../meal-planning/evaluation"
-import type { MealCell, MealGrid, MealPlanContext } from "../meal-planning/types"
+import type { MealCell, MealDefinition, MealGrid, MealPlanCandidate, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import type { ToolProviderClient } from "../providers"
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const SLOT_COOK: Record<string, number> = { breakfast: 15, snack1: 0, snack2: 0, "school-lunch": 20, "home-lunch": 20 }
+
+function fixtureIngredients(dish: string, slot: string): string[] {
+  if (dish === "paratha") return slot === "school-lunch" || slot === "home-lunch" ? ["rice"] : ["wheat flour"]
+  if (dish === "rice and beans") return ["rice", "beans"]
+  if (dish === "paneer paratha") return ["wheat flour", "paneer"]
+  if (dish === "banana") return ["banana"]
+  return ["rice"]
+}
+
+function fixtureDefinition(dish: string, slot: string, items = fixtureIngredients(dish, slot), cookMinutes = SLOT_COOK[slot]): MealDefinition {
+  return {
+    id: `fixture_${dish.replaceAll(" ", "_")}_${slot}`,
+    name: dish,
+    principalIngredients: items,
+    vegetarian: true,
+    suitableSlots: [slot],
+    packedFood: { suitable: true, dry: true },
+    typicalCookMinutes: cookMinutes,
+    priorNightPrep: "none",
+    requiredIngredients: items,
+    optionalIngredients: [],
+    status: "established",
+  }
+}
+
+const FIXTURE_DEFINITIONS = ["paratha", "poha", "banana", "rice and beans", "paneer paratha", "khichdi", "idli"]
+  .flatMap((dish) => Object.keys(SLOT_COOK).map((slot) => fixtureDefinition(dish, slot)))
+
+function selectionCandidate(candidate: MealPlanCandidate): MealPlanSelectionCandidate {
+  return {
+    ...candidate,
+    grid: Object.fromEntries(Object.entries(candidate.grid).map(([day, slots]) => [day, Object.fromEntries(
+      Object.entries(slots).map(([slot, cell]) => [slot, { mealDefinitionId: `fixture_${cell.dish.replaceAll(" ", "_")}_${slot}` }]),
+    )])),
+  }
+}
+
+function contextWithCandidateDefinitions(context: MealPlanContext, candidate: MealPlanCandidate): MealPlanContext {
+  const definitions = new Map<string, MealDefinition>()
+  for (const slots of Object.values(candidate.grid)) {
+    for (const [slot, cell] of Object.entries(slots)) {
+      const id = `fixture_${cell.dish.replaceAll(" ", "_")}_${slot}`
+      if (!definitions.has(id)) {
+        definitions.set(id, {
+          id,
+          name: cell.dish,
+          principalIngredients: cell.items,
+          vegetarian: true,
+          suitableSlots: [slot],
+          packedFood: { suitable: true, dry: true },
+          typicalCookMinutes: cell.cookMinutes,
+          priorNightPrep: cell.priorNightPrep ? "required" : "none",
+          requiredIngredients: cell.items,
+          optionalIngredients: [],
+          status: "established",
+        })
+      }
+    }
+  }
+  return { ...context, profile: { ...context.profile, mealDefinitions: [...definitions.values()] } }
+}
 
 function cell(dish: string, items: string[], slot: string): MealCell {
   return { dish, vegetarian: true, items, cookMinutes: SLOT_COOK[slot], priorNightPrep: false }
@@ -24,7 +85,7 @@ function gridWith(day: string, slot: string, override: MealCell): MealGrid {
   return grid
 }
 
-function passingCandidate(): { grid: MealGrid; easyBuys: string[]; policyOutcomes: Record<string, never> } {
+function passingCandidate(): MealPlanCandidate {
   return {
     grid: gridWith("Mon", "breakfast", cell("paratha", ["wheat flour"], "breakfast")),
     easyBuys: [],
@@ -32,7 +93,7 @@ function passingCandidate(): { grid: MealGrid; easyBuys: string[]; policyOutcome
   }
 }
 
-function failingCandidate(): { grid: MealGrid; easyBuys: string[]; policyOutcomes: Record<string, never> } {
+function failingCandidate(): MealPlanCandidate {
   return {
     grid: gridWith("Mon", "breakfast", cell("biryani", ["rice"], "breakfast")),
     easyBuys: [],
@@ -55,6 +116,7 @@ function context(overrides: Partial<MealPlanContext> = {}): MealPlanContext {
     profile: {
       dietaryExclusions: [],
       dishRepertoire: ["paratha"],
+      mealDefinitions: FIXTURE_DEFINITIONS,
       foodPreferences: { favourites: ["paratha"], avoid: [] },
       allowNewFoods: false,
       sensoryGuidelines: [],
@@ -79,7 +141,7 @@ function call(id: string, name: string, input: unknown) {
 }
 
 function evaluateResponse(candidate: unknown) {
-  return { toolCalls: [call("evaluate", "evaluate_meal_plan", candidate)], usage: { inputTokens: 0, outputTokens: 0 } }
+  return { toolCalls: [call("evaluate", "evaluate_meal_plan", selectionCandidate(candidate as MealPlanCandidate))], usage: { inputTokens: 0, outputTokens: 0 } }
 }
 
 function proposeResponse(input: unknown) {
@@ -96,7 +158,7 @@ function proposeInput(
   overrides?: { weeklyInventory?: unknown; weeklyExceptions?: unknown },
 ) {
   return {
-    candidate,
+    candidate: selectionCandidate(candidate as MealPlanCandidate),
     weeklyInventory: overrides?.weeklyInventory ?? { items: [], notes: [] },
     weeklyExceptions: overrides?.weeklyExceptions ?? { items: [] },
     ...(feedbackItems ? { feedbackItems } : {}),
@@ -121,7 +183,7 @@ describe("bounded meal-planning agent session", () => {
       proposeResponse(proposeInput(failingCandidate())),
       clarifyResponse({
         message: "Biryani is not in the repertoire; keep a familiar dish?",
-        reasonCodes: ["unfamiliar_dish_not_allowed"],
+        reasonCodes: ["unknown_meal_definition"],
         interaction: { kind: "reply" },
       }),
     )
@@ -142,7 +204,7 @@ describe("bounded meal-planning agent session", () => {
       }),
       clarifyResponse({
         message: "Keep a familiar dish for the mornings.",
-        reasonCodes: ["unfamiliar_dish_not_allowed"],
+        reasonCodes: ["unknown_meal_definition"],
         interaction: { kind: "reply" },
       }),
     )
@@ -150,7 +212,7 @@ describe("bounded meal-planning agent session", () => {
     expect(result.toolExecutions).toContainEqual(
       expect.objectContaining({ tool: "needs_clarification", outcome: "failed", failureCategory: "invalid-state" }),
     )
-    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["unfamiliar_dish_not_allowed"] })
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["unknown_meal_definition"] })
   })
 
   it("rejects propose_plan when a revision's raw feedback is left unrepresented", async () => {
@@ -426,7 +488,7 @@ describe("corpus-driven planning loop", () => {
       const result = await runMealPlanningAgentSession(
         provider,
         [{ role: "user", text: scenario.context.request.text }],
-        { context: scenario.context },
+        { context: contextWithCandidateDefinitions(scenario.context, candidate.plan) },
       )
       expect(result.completed, `${scenario.id}/${candidate.label}`).toBe(true)
       expect(result.terminal?.kind, `${scenario.id}/${candidate.label}`).toBe("propose_plan")
@@ -457,7 +519,7 @@ describe("corpus-driven planning loop", () => {
     const result = await runMealPlanningAgentSession(
       provider,
       [{ role: "user", text: scenario.context.request.text }],
-      { context: scenario.context },
+        { context: contextWithCandidateDefinitions(scenario.context, driving.plan) },
     )
     expect(result.terminal?.kind, scenario.id).toBe("needs_clarification")
     if (result.terminal?.kind === "needs_clarification")

@@ -2,8 +2,8 @@ import type { WorkflowEvent } from "cloudflare:workers"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { type MealPlanningLiveEvent, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
-import { createMealPlanningStore } from "../meal-planning/store"
-import type { MealCell, MealGrid } from "../meal-planning/types"
+import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE } from "../meal-planning/store"
+import type { MealCell, MealGrid, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 import { createD1TestDb, d1Count } from "./d1-test-db"
@@ -22,11 +22,40 @@ const POLICY_IDS = [
 const CHAT = "chat-1"
 const TZ = "Asia/Kolkata"
 
+// Workflow fixtures intentionally reuse paratha in every slot. Keep that
+// legacy fixture compact while giving its fixture definition stable metadata
+// that makes those placements valid under the selection contract.
+SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) =>
+  definition.id === SEED_MEAL_IDS.paratha
+    ? { ...definition, packedFood: { suitable: true, dry: true }, typicalCookMinutes: 0 }
+    : definition,
+)
+
 function cell(dish: string, items: string[], slot: string): MealCell {
   return { dish, vegetarian: true, items, cookMinutes: SLOT_COOK[slot], priorNightPrep: false }
 }
 
-function seedCandidate(override?: { day: string; slot: string; cell: MealCell }): {
+function seedCandidate(override?: { day: string; slot: string; cell: MealCell }): MealPlanSelectionCandidate {
+  const selectionBySlot: Record<string, string> = {
+    breakfast: SEED_MEAL_IDS.paratha,
+    snack1: SEED_MEAL_IDS.paratha,
+    snack2: SEED_MEAL_IDS.paratha,
+    "school-lunch": SEED_MEAL_IDS.paratha,
+    "home-lunch": SEED_MEAL_IDS.paratha,
+  }
+  const grid: MealPlanSelectionCandidate["grid"] = {}
+  for (const day of DAYS) {
+    grid[day] = Object.fromEntries(Object.keys(SLOT_COOK).map((slot) => [slot, { mealDefinitionId: selectionBySlot[slot] }]))
+  }
+  if (override) grid[override.day][override.slot] = { mealDefinitionId: SEED_MEAL_IDS[override.cell.dish]! }
+  return {
+    grid,
+    easyBuys: ["pomegranate", "apple"],
+    policyOutcomes: Object.fromEntries(POLICY_IDS.map((id) => [id, { outcome: "satisfied", rationale: "ok" }])),
+  }
+}
+
+function legacySeedCandidate(override?: { day: string; slot: string; cell: MealCell }): {
   grid: MealGrid
   easyBuys: string[]
   policyOutcomes: Record<string, { outcome: string; rationale: string }>
@@ -276,7 +305,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
-    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("idli", ["rice"], "snack1") })
+    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("pomegranate", ["pomegranate"], "snack1") })
     const step = createFakeStep(
       [
         {
@@ -326,11 +355,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
-    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("idli", ["rice"], "snack1") })
+    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("pomegranate", ["pomegranate"], "snack1") })
     // The v3 candidate keeps the v2 Mon change and adds a Tue change.
     const revisedAgain = {
       ...revised,
-      grid: { ...revised.grid, Tue: { ...revised.grid.Tue, snack1: cell("poha", ["rice"], "snack1") } },
+      grid: { ...revised.grid, Tue: { ...revised.grid.Tue, snack1: { mealDefinitionId: SEED_MEAL_IDS.apple } } },
     }
     // Every revision runs through distinct per-occurrence step names, so the
     // memoized runtime cannot return the initial plan's send/register/promote

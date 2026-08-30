@@ -180,6 +180,28 @@ export const SEED_SCHEDULE: MealSchedule = {
   ],
 }
 
+const SEED_MEAL_INGREDIENTS: Record<string, string[]> = {
+  paratha: ["wheat flour"], banana: ["banana"], "roasted chana": ["chana"], "bottle gourd dal": ["bottle gourd", "moong dal"],
+  "rice and beans": ["rice", "beans"], poha: ["poha"], apple: ["apple"], dates: ["dates"], rajma: ["rajma"],
+  "quinoa bowl": ["quinoa"], idli: ["idli"], orange: ["orange"], "mixed seeds": ["mixed seeds"], khichdi: ["rice", "moong dal"],
+  "sweet potato curry": ["sweet potato"], upma: ["semolina"], pear: ["pear"], "dry coconut": ["dry coconut"], chole: ["chickpeas"],
+  "ghee rice": ["rice", "ghee"], dosa: ["dosa batter"], pomegranate: ["pomegranate"], "jaggery cubes": ["jaggery"],
+  "paneer paratha": ["wheat flour", "paneer"], "masala oats": ["oats"],
+}
+
+/** Fixed opaque ids for the development catalog; names are deliberately not encoded in ids. */
+export const SEED_MEAL_IDS: Record<string, string> = {
+  paratha: "meal_01j1f0a7q2e6m3z8", banana: "meal_01j1f0b4w9k2r6x5", "roasted chana": "meal_01j1f0c8n4v7p2s6",
+  "bottle gourd dal": "meal_01j1f0d3h8t5y9a1", "rice and beans": "meal_01j1f0e6c2m8q4w7", poha: "meal_01j1f0f9r5x3k7n2",
+  apple: "meal_01j1f0g2v8p4s6h9", dates: "meal_01j1f0h7m3z9e5q1", rajma: "meal_01j1f0j4k8n2w6x3",
+  "quinoa bowl": "meal_01j1f0k9p5s7h3v8", idli: "meal_01j1f0m2q6w4y8r5", orange: "meal_01j1f0n8x3c7m9z2",
+  "mixed seeds": "meal_01j1f0p5h9v2k6n4", khichdi: "meal_01j1f0q1s7e3x8w6", "sweet potato curry": "meal_01j1f0r6m2z5p9h3",
+  upma: "meal_01j1f0s4k8n6v2q7", pear: "meal_01j1f0t9w3x7m5z1", "dry coconut": "meal_01j1f0v2h6p4s8k9",
+  chole: "meal_01j1f0w7n3q9x5m2", "ghee rice": "meal_01j1f0x5p8v2h6s4", dosa: "meal_01j1f0y1k7m4z9q3",
+  pomegranate: "meal_01j1f0z8x2w6n5v7", "jaggery cubes": "meal_01j1f101h9s3p8k5", "paneer paratha": "meal_01j1f102m6q4x7z2",
+  "masala oats": "meal_01j1f103v5n8h2s6",
+}
+
 export const SEED_PROFILE: MealProfile = {
   dietaryExclusions: ["peanut", "egg"],
   dishRepertoire: [
@@ -214,17 +236,17 @@ export const SEED_PROFILE: MealProfile = {
     "rajma", "quinoa bowl", "idli", "orange", "mixed seeds", "khichdi", "sweet potato curry", "upma",
     "pear", "dry coconut", "chole", "ghee rice", "dosa", "pomegranate", "jaggery cubes", "paneer paratha", "masala oats",
   ].map((name): MealDefinition => ({
-    id: `seed_${name.replaceAll(" ", "_")}`,
+    id: SEED_MEAL_IDS[name]!,
     name,
     aliases: [name],
-    principalIngredients: [name],
+    principalIngredients: SEED_MEAL_INGREDIENTS[name] ?? [name],
     vegetarian: true,
     suitableSlots: ["breakfast", "snack1", "snack2", "school-lunch", "home-lunch"],
     // Parent-provided repertoire meals are trusted as packable. Dry classification is deliberately conservative.
     packedFood: { suitable: true, dry: ["banana", "roasted chana", "apple", "dates", "orange", "mixed seeds", "pear", "dry coconut", "pomegranate", "jaggery cubes"].includes(name) },
     typicalCookMinutes: ["banana", "roasted chana", "apple", "dates", "orange", "mixed seeds", "pear", "dry coconut", "pomegranate", "jaggery cubes"].includes(name) ? 0 : 20,
     priorNightPrep: "none",
-    requiredIngredients: [name],
+    requiredIngredients: SEED_MEAL_INGREDIENTS[name] ?? [name],
     optionalIngredients: [],
     status: "established",
   })),

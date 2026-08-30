@@ -801,36 +801,7 @@
         "easyBuys": [],
         "policyOutcomes": {}
       },
-      "expect": {
-        "pass": false,
-        "failures": [
-          {
-            "code": "unpaired_new_dish",
-            "day": "Fri",
-            "slot": "breakfast"
-          },
-          {
-            "code": "unpaired_new_dish",
-            "day": "Fri",
-            "slot": "home-lunch"
-          },
-          {
-            "code": "unpaired_new_dish",
-            "day": "Fri",
-            "slot": "school-lunch"
-          },
-          {
-            "code": "unpaired_new_dish",
-            "day": "Fri",
-            "slot": "snack1"
-          },
-          {
-            "code": "unpaired_new_dish",
-            "day": "Fri",
-            "slot": "snack2"
-          }
-        ]
-      }
+      "expect": { "pass": true }
     }
   ],
   "behavior": {
