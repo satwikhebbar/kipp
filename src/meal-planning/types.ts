@@ -88,6 +88,41 @@ export interface MealDefinition {
   status: "established" | "provisional"
 }
 
+/** Model-authored fields used only while expanding a parent-supplied dish name. */
+export interface MealDefinitionProposal {
+  /** Exact parent-supplied name this proposal expands; it is retained as an alias by the server. */
+  sourceDishName: string
+  /** The model may improve this display name. */
+  name: string
+  principalIngredients: string[]
+  vegetarian: true
+  suitableSlots: string[]
+  /** Parent-supplied repertoire meals are always packing-suitable; the model classifies only dryness. */
+  packedFood: { dry: boolean }
+  typicalCookMinutes: number
+  priorNightPrep: PriorNightPrepRequirement
+  requiredIngredients: string[]
+  optionalIngredients: string[]
+  allowedIngredientChoices?: string[]
+}
+
+export interface MealDefinitionValidationFailure {
+  dishName: string
+  code: string
+  detail: string
+}
+
+export interface MealCatalogExpansionInput {
+  parentDishNames: string[]
+  schedule: MealSchedule
+}
+
+/** An all-or-nothing catalog-expansion result. Definitions are present only when every supplied dish passed validation. */
+export interface MealCatalogExpansionResult {
+  definitions?: MealDefinition[]
+  failures: MealDefinitionValidationFailure[]
+}
+
 export interface MealProfile {
   /** Clear-cut exclusions only. Ambiguous household phrases are resolved by the planner (e.g. by clarifying) before they reach the evaluator. */
   dietaryExclusions: string[]

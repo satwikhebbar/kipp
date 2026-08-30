@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { type MealPlanningLiveEvent, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE } from "../meal-planning/store"
-import type { MealCell, MealGrid, MealPlanSelectionCandidate } from "../meal-planning/types"
+import type { MealCell, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 import { createD1TestDb, d1Count } from "./d1-test-db"
@@ -51,30 +51,6 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
   return {
     grid,
     easyBuys: ["pomegranate", "apple"],
-    policyOutcomes: Object.fromEntries(POLICY_IDS.map((id) => [id, { outcome: "satisfied", rationale: "ok" }])),
-  }
-}
-
-function legacySeedCandidate(override?: { day: string; slot: string; cell: MealCell }): {
-  grid: MealGrid
-  easyBuys: string[]
-  policyOutcomes: Record<string, { outcome: string; rationale: string }>
-} {
-  const grid: MealGrid = {}
-  for (const day of DAYS) {
-    grid[day] = {}
-    for (const slot of Object.keys(SLOT_COOK)) {
-      grid[day][slot] = cell(
-        "paratha",
-        slot === "school-lunch" || slot === "home-lunch" ? ["rice"] : ["wheat flour"],
-        slot,
-      )
-    }
-  }
-  if (override) grid[override.day][override.slot] = override.cell
-  return {
-    grid,
-    easyBuys: [],
     policyOutcomes: Object.fromEntries(POLICY_IDS.map((id) => [id, { outcome: "satisfied", rationale: "ok" }])),
   }
 }
