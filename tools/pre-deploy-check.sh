@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Cloudflare Dashboard check (reminder only — can't enforce from here)
-echo "Reminder: Verify ACCESS_TEAM, ACCESS_AUDIENCE, and ACCESS_ADMIN_EMAILS"
-echo "         are set in Dashboard → Workers & Pages → linkedin-pipeline → Settings → Environment Variables."
-echo ""
+node tools/verify-runtime-config.mjs
 
-for cfg in wrangler.toml wrangler.prod.toml; do
+cfg="wrangler.prod.toml"
+
+if ! grep -Eq '^keep_vars[[:space:]]*=[[:space:]]*true' "$cfg"; then
+  echo "ERROR: $cfg must set keep_vars = true."
+  echo "       Cloudflare Dashboard is the source of truth for production runtime variables and secrets."
+  exit 1
+fi
+
+if grep -Eq '^\[vars\]' "$cfg"; then
+  echo "ERROR: $cfg must not define [vars]."
+  echo "       Keep production runtime values in Cloudflare Dashboard so deploys cannot remove omitted variables."
+  exit 1
+fi
+
+for cfg in wrangler.prod.toml; do
   if grep -Eq '^ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK[[:space:]]*=[[:space:]]*"true"' "$cfg" 2>/dev/null; then
     echo "ERROR: ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK is set to \"true\" in $cfg."
     echo "       This is unsafe for production. Keep it only in .dev.vars (gitignored)."

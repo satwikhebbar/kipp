@@ -147,9 +147,11 @@ routes.
 
 ### 3. Configure variables and secrets
 
-Use `wrangler.local.toml` for local non-secret variables and
-`wrangler.prod.toml` for production. Put local secrets in `.dev.vars` and
-production secrets in Cloudflare's secret store. Never commit credentials.
+Use `wrangler.local.toml` for local non-secret variables and `.dev.vars` for
+local secrets. `wrangler.prod.toml` is checked in and defines production
+structure only; Cloudflare Dashboard owns production text values and secrets.
+See [the production runtime configuration guide](docs/production-runtime-configuration.md)
+before adding or changing a variable. Never commit credentials.
 
 | Category | Names |
 | --- | --- |
@@ -329,7 +331,8 @@ pnpm deploy
 ```
 
 The deploy command runs the pre-deployment checks and deploys with
-`wrangler.prod.toml`. `pnpm dev` uses `wrangler.local.toml`.
+`wrangler.prod.toml`. `pnpm deploy:check` runs the same checks and a Wrangler
+dry-run without uploading. `pnpm dev` uses `wrangler.local.toml`.
 
 ### Calendar operational runbook
 

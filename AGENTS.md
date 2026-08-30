@@ -2,6 +2,10 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
+## Production configuration
+
+For any change to `Env`, a Worker binding, workflow, cron, or Durable Object, read `docs/production-runtime-configuration.md` before editing. Keep `wrangler.prod.toml` as the tracked structural deployment manifest; Cloudflare Dashboard owns all production runtime values and secrets. A new `Env` variable requires its entry in `config/runtime-variables.json` and corresponding local/production provisioning before the change is ready to deploy.
+
 > **Architecture in one line:** Issues live in a local Dolt database
 > (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
 > git-compatible protocol), stored under `refs/dolt/data` on your git

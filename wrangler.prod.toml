@@ -1,0 +1,60 @@
+name = "linkedin-pipeline"
+main = "src/index.ts"
+compatibility_date = "2025-07-01"
+compatibility_flags = ["nodejs_compat"]
+# Runtime values and secrets are managed in Cloudflare Dashboard. Preserve them on deploy.
+keep_vars = true
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
+# Durable Object — token vault
+[[durable_objects.bindings]]
+name = "TOKEN_VAULT"
+class_name = "TokenVaultDO"
+
+[[durable_objects.bindings]]
+name = "INTERACTION_ROUTER"
+class_name = "InteractionRouterDO"
+
+[[durable_objects.bindings]]
+name = "IDEA_INGEST"
+class_name = "IdeaIngestDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TokenVaultDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["InteractionRouterDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["IdeaIngestDO"]
+
+# Cloudflare Workflow binding
+[[workflows]]
+binding = "PIPELINE_WORKFLOW"
+name = "linkedin-pipeline"
+class_name = "PipelineWorkflow"
+
+[[workflows]]
+binding = "CALENDAR_WORKFLOW"
+name = "kipp-calendar"
+class_name = "CalendarWorkflow"
+
+[triggers]
+crons = ["0 9 * * *", "0 8 * * 1", "0 9 * * 1"]

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev --config wrangler.local.toml",
     "webhook:dev": "bash tools/dev-webhook.sh",
-    "deploy": "bash tools/pre-deploy-check.sh && wrangler deploy --config wrangler.prod.toml",
+    "deploy:check": "bash tools/pre-deploy-check.sh && wrangler deploy --dry-run --config wrangler.prod.toml",
+    "deploy": "pnpm run deploy:check && wrangler deploy --config wrangler.prod.toml",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "lint:ci": "biome ci src/",

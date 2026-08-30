@@ -16,7 +16,6 @@ scripts/*
 
 # Env-specific Wrangler config (contain real credentials/hashes/URNs)
 wrangler.local.toml
-wrangler.prod.toml
 
 # Local agent tooling (handoff queues, beads skill, tool configs)
 .agent-handoff/
