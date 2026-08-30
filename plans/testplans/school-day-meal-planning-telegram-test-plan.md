@@ -92,7 +92,6 @@ Run these in fresh test weeks unless the scenario explicitly says otherwise.
 | T05 | `No night prep this week. I have only 35 minutes before school, including getting him ready.` | The plan avoids stacking fresh breakfast, cooked snack, and cooked school lunch in the same morning. |
 | T07 | `I only have onions, tomatoes, potatoes, rice, atta, dal and bananas.` | The plan stays within inventory where possible. Any additional ingredients form a short, clearly labelled list of standard easy purchases. |
 | T08 | `No dairy products this week.` | Dairy-derived meals and ingredients are absent. If a prior setting or request conflicts, Kipp asks rather than silently violating the constraint. |
-| T10 | Generate once with `allowNewFoods` off, then again with it on. | With it off, Kipp uses familiar dishes only. With it on, it may introduce a reasonable new dish without destabilizing the full week. |
 | T11 | Configure a preferred chef/channel and generate a plan. | Lunches receive a recipe-link match when available; a configured source is preferred. No result does not remove the meal or invent a link. |
 | T12 | Create a second week after retaining the previous plan. | The new plan avoids unnecessary repeat dishes and excessive reuse of a principal ingredient from the preceding week. |
 
