@@ -553,46 +553,6 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(evaluation)).toEqual(["dish_repeated", "unaddressed_feedback", "unscoped_cell_changed"])
   })
 
-  it("rejects unfamiliar dishes when new foods are disallowed", () => {
-    const candidate = baseCandidate()
-    candidate.grid.Mon.breakfast = cellFor("breakfast", "paneer paratha")
-    const evaluation = evaluateMealPlan(candidate, baseContext())
-    expect(failureCodes(evaluation)).toEqual(["unfamiliar_dish_not_allowed"])
-  })
-
-  it("requires new dishes to be paired with familiar food when new foods are allowed", () => {
-    const context = baseContext({
-      schedule: {
-        days: ["Mon"],
-        slots: [
-          { id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null },
-          { id: "snack1", name: "Snack 1", packed: true, dry: true, maxCookMinutes: 0 },
-        ],
-      },
-      profile: { ...baseContext().profile, allowNewFoods: true },
-      customPolicies: [],
-    })
-    const paired: MealPlanCandidate = {
-      grid: gridFrom([
-        ["Mon", "breakfast", "paneer paratha"],
-        ["Mon", "snack1", "banana"],
-      ]),
-      easyBuys: [],
-      policyOutcomes: {},
-    }
-    expect(evaluateMealPlan(paired, context).pass).toBe(true)
-
-    const unpaired: MealPlanCandidate = {
-      grid: gridFrom([
-        ["Mon", "breakfast", "paneer paratha"],
-        ["Mon", "snack1", "ghee rice"],
-      ]),
-      easyBuys: [],
-      policyOutcomes: {},
-    }
-    expect(failureCodes(evaluateMealPlan(unpaired, context))).toEqual(["unpaired_new_dish", "unpaired_new_dish"])
-  })
-
   it("requires a recorded outcome for every persistent custom policy", () => {
     const candidate = baseCandidate()
     candidate.policyOutcomes = {}
@@ -770,6 +730,25 @@ describe("structured meal hydration", () => {
     expect(hydrateMealPlan({ grid: { Mon: { "home-lunch": selection } }, easyBuys: [], policyOutcomes: {} }, context).failures[0]?.code).toBe("new_meal_not_allowed")
     const allowed = hydrateMealPlan({ grid: { Mon: { "home-lunch": selection } }, easyBuys: [], policyOutcomes: {} }, { ...context, profile: { ...context.profile, allowNewFoods: true } }, () => "provisional-1")
     expect(allowed.provisionalMealDefinitions).toMatchObject([{ id: "provisional-1", status: "provisional", name: "Vegetable rice" }])
+  })
+
+  it("rejects an unknown known-meal id when new foods are disabled", () => {
+    const context = baseContext({ profile: { ...SEED_PROFILE, mealDefinitions: [], allowNewFoods: false } })
+    const result = evaluateMealPlanSelection({
+      grid: { Mon: { breakfast: { mealDefinitionId: "meal_not_in_catalog" } } },
+      easyBuys: [], policyOutcomes: {},
+    }, context)
+    expect(result.evaluation.failures).toMatchObject([{ code: "unknown_meal_definition", day: "Mon", slot: "breakfast" }])
+  })
+
+  it("accepts a standalone structured new meal when the household allows new foods", () => {
+    const context = baseContext({ profile: { ...SEED_PROFILE, mealDefinitions: [], allowNewFoods: true } })
+    const result = evaluateMealPlanSelection({
+      grid: { Mon: { "home-lunch": { proposedMeal: { name: "Vegetable rice", principalIngredients: ["rice"], vegetarian: true, suitableSlots: ["home-lunch"], cookMinutes: 20, priorNightPrep: "none", ingredients: ["rice"] } } } },
+      easyBuys: [], policyOutcomes: {},
+    }, context)
+    expect(result.candidate).toBeDefined()
+    expect(result.provisionalMealDefinitions).toHaveLength(1)
   })
 
   it("rejects duplicate and non-permitted known-meal choices", () => {
