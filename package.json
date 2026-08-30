@@ -19,6 +19,7 @@
     "test:migration": "vitest run --config vitest.migration.config.ts",
     "test:provider-contract": "DEEPSEEK_CONTRACT=1 vitest run src/__contract__/deepseek-calendar.contract.test.ts",
     "test:meal-contract": "DEEPSEEK_CONTRACT=1 vitest run src/__contract__/deepseek-meal-planning.contract.test.ts",
+    "test:meal-contract:one": "bash tools/meal-contract.sh",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },

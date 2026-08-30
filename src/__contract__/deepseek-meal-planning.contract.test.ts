@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { renderHouseholdContext } from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
-import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext, MealPlanScenario } from "../meal-planning/types"
+import type { FeedbackItem, MealCell, MealGrid, MealPlanCandidate, MealPlanContext, MealPlanScenario } from "../meal-planning/types"
 import { createGenerator, createToolProvider, type GenerateFn, type ToolConversationMessage } from "../providers"
 import { messages, parseLLMJson, ToolProviderHttpError } from "../providers/llm"
 
@@ -290,6 +290,104 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     }
   })
 
+  contractIt("R02: two independent comments both land in one complete revised plan", async () => {
+    const ctx = scenario("batched-feedback").context
+    const recent = ctx.recentPlan
+    if (!recent) throw new Error("batched-feedback needs recentPlan")
+    const terminal = requireProposal(await runLive(ctx))
+
+    const scoped = (ctx.feedbackItems ?? []).filter(
+      (item): item is FeedbackItem & { scope: { day: string; slot: string } } => Boolean(item.scope?.day && item.scope.slot),
+    )
+    expect(scoped.length, "batched-feedback needs two scoped items").toBeGreaterThanOrEqual(2)
+    for (const item of scoped) {
+      const before = recent[item.scope.day]?.[item.scope.slot]?.dish
+      const after = terminal.candidate.grid[item.scope.day]?.[item.scope.slot]?.dish
+      const cellMoved = before !== undefined && after !== undefined && after !== before
+      const rationaleCovered = Object.values(terminal.candidate.policyOutcomes).some((outcome) =>
+        outcome.rationale.includes(item.id),
+      )
+      expect(
+        cellMoved || rationaleCovered,
+        `feedback ${item.id} (${item.text}) must be addressed by a cell change or outcome rationale`,
+      ).toBe(true)
+    }
+  })
+
+  contractIt("R05: conflicting feedback ('no dairy' + 'make paneer') is clarified, not silently violated", async () => {
+    const base = scenario("no-dairy-week").context
+    // Graft a dairy-free Mon–Fri recent plan onto the no-dairy context (which
+    // stocks paneer and knows paneer paratha, so the conflict is reachable).
+    const cell = (dish: string, items: string[], cookMinutes: number): MealCell => ({
+      dish,
+      vegetarian: true,
+      items,
+      cookMinutes,
+      priorNightPrep: false,
+    })
+    const recentPlan: MealGrid = {
+      Mon: {
+        breakfast: cell("paratha", ["wheat flour"], BREAKFAST_COOK_MIN),
+        snack1: cell("banana", ["banana"], SNACK_COOK_MIN),
+        snack2: cell("roasted chana", ["chana"], SNACK_COOK_MIN),
+        "school-lunch": cell("bottle gourd dal", ["bottle gourd", "moong dal"], MAIN_COOK_MIN),
+        "home-lunch": cell("rice and beans", ["rice", "beans"], MAIN_COOK_MIN),
+      },
+      Tue: {
+        breakfast: cell("poha", ["poha"], BREAKFAST_COOK_MIN),
+        snack1: cell("apple", ["apple"], SNACK_COOK_MIN),
+        snack2: cell("dates", ["dates"], SNACK_COOK_MIN),
+        "school-lunch": cell("rajma", ["kidney beans"], MAIN_COOK_MIN),
+        "home-lunch": cell("quinoa bowl", ["quinoa"], MAIN_COOK_MIN),
+      },
+      Wed: {
+        breakfast: cell("idli", ["idli rice"], BREAKFAST_COOK_MIN),
+        snack1: cell("orange", ["orange"], SNACK_COOK_MIN),
+        snack2: cell("mixed seeds", ["mixed seeds"], SNACK_COOK_MIN),
+        "school-lunch": cell("khichdi", ["rice", "moong dal"], MAIN_COOK_MIN),
+        "home-lunch": cell("sweet potato curry", ["sweet potato"], MAIN_COOK_MIN),
+      },
+      Thu: {
+        breakfast: cell("upma", ["upma rava"], BREAKFAST_COOK_MIN),
+        snack1: cell("pear", ["pear"], SNACK_COOK_MIN),
+        snack2: cell("dry coconut", ["dry coconut"], SNACK_COOK_MIN),
+        "school-lunch": cell("chole", ["chickpeas"], MAIN_COOK_MIN),
+        "home-lunch": cell("dal fry", ["toor dal"], MAIN_COOK_MIN),
+      },
+      Fri: {
+        breakfast: cell("dosa", ["dosa batter"], BREAKFAST_COOK_MIN),
+        snack1: cell("pomegranate", ["pomegranate"], SNACK_COOK_MIN),
+        snack2: cell("jaggery cubes", ["jaggery"], SNACK_COOK_MIN),
+        "school-lunch": cell("masala oats", ["oats"], MAIN_COOK_MIN),
+        "home-lunch": cell("vegetable poha", ["poha", "carrot"], MAIN_COOK_MIN),
+      },
+    }
+    const ctx: MealPlanContext = {
+      ...base,
+      recentPlan,
+      request: {
+        kind: "revision",
+        text: "No dairy this week, but make Tuesday lunch paneer.",
+      },
+      feedbackItems: [{ id: "tg-dairy", text: "Make Tuesday lunch paneer.", scope: { day: "Tue", slot: "school-lunch" } }],
+    }
+    const result = await runLive(ctx)
+    // R05 must NOT end with a plan that smuggles dairy past the exclusion.
+    if (result.terminal?.kind === "propose_plan") {
+      const text = Object.values(result.terminal.candidate.grid)
+        .flatMap((day) => Object.values(day).flatMap((c) => [c.dish, ...c.items]))
+        .join(" ")
+        .toLowerCase()
+      for (const token of DAIRY_TOKENS) {
+        expect(text.includes(token), `dairy leak in proposal: "${token}"`).toBe(false)
+      }
+      return
+    }
+    expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
+    expect(result.terminal?.kind, "conflict must resolve as a clarification").toBe("needs_clarification")
+    expect(result.terminal?.reasonCodes).toContain("hard_exclusion")
+  })
+
   contractIt(
     "C2: request-listed ingredients land in a short easy-buys list against a stocked kitchen (judge-graded)",
     async () => {
@@ -475,6 +573,27 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     if (!target?.day || !target.slot) throw new Error("midweek-shortage needs a scoped feedback item")
     expect(terminal.candidate.grid[target.day][target.slot].dish).not.toBe(recent[target.day][target.slot].dish)
     for (const day of ["Mon", "Tue", "Wed", "Thu"]) {
+      expect(dishesBySlot(terminal.candidate.grid, day), `${day} must stay stable`).toEqual(dishesBySlot(recent, day))
+    }
+  })
+
+  contractIt("R03: day-level feedback replans the targeted day and leaves other days stable", async () => {
+    const ctx = scenario("whole-day-replan").context
+    const recent = ctx.recentPlan
+    if (!recent) throw new Error("whole-day-replan needs recentPlan")
+    const scope = ctx.feedbackItems?.[0]?.scope
+    if (!scope?.day || scope.slot) throw new Error("whole-day-replan needs a day-scoped feedback item")
+    const terminal = requireProposal(await runLive(ctx))
+
+    const replanned = Object.keys(terminal.candidate.grid[scope.day] ?? {})
+    const original = Object.keys(recent[scope.day] ?? {})
+    expect(replanned.length, "replanned day must keep its slots").toBe(original.length)
+    expect(
+      dishesBySlot(terminal.candidate.grid, scope.day),
+      "day-scoped feedback must change the targeted day",
+    ).not.toEqual(dishesBySlot(recent, scope.day))
+    for (const day of Object.keys(recent)) {
+      if (day === scope.day) continue
       expect(dishesBySlot(terminal.candidate.grid, day), `${day} must stay stable`).toEqual(dishesBySlot(recent, day))
     }
   })
