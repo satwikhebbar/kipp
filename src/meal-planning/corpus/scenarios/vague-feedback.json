@@ -1,7 +1,7 @@
 {
   "id": "vague-feedback",
   "name": "Vague feedback",
-  "summary": "Unbound feedback can be answered by a rationale without changing cells; an unrelated cell change stays out of scope.",
+  "summary": "The evaluator keeps an arbitrary unscoped change out of scope; the live planner must clarify what \"better\" means before proposing a revision.",
   "context": {
     "schedule": {
       "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],

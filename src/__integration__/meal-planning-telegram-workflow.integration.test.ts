@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
 import type { Env } from "../core/types"
-import type { MealCell, MealPlanCandidate } from "../meal-planning/types"
+import type { MealCell, MealPlanCandidate, MealPlanSelectionCandidate } from "../meal-planning/types"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 
 vitest.mock("../providers", () => ({ createToolProvider: () => ({ generate: mockGenerate }) }))
@@ -14,7 +14,7 @@ function queueResponse(label: string, response: unknown): void {
 }
 
 function queueInitialPlan(base: MealPlanCandidate): void {
-  queueResponse("evaluate", { toolCalls: [{ id: "evaluate", name: "evaluate_meal_plan", input: base }], usage: {} })
+  queueResponse("evaluate", { toolCalls: [{ id: "evaluate", name: "evaluate_meal_plan", input: selectionCandidate(base) }], usage: {} })
   queueResponse("propose", {
     toolCalls: [{ id: "propose", name: "propose_plan", input: proposeInput(base) }],
     usage: {},
@@ -26,7 +26,7 @@ function queueRevision(
   feedback: { id: string; text: string; scope?: { day: string; slot: string } },
 ): void {
   queueResponse("evaluate-rev", {
-    toolCalls: [{ id: "evaluate-rev", name: "evaluate_meal_plan", input: revised }],
+    toolCalls: [{ id: "evaluate-rev", name: "evaluate_meal_plan", input: selectionCandidate(revised) }],
     usage: {},
   })
   queueResponse("propose-rev", {
@@ -37,7 +37,7 @@ function queueRevision(
 
 import { createD1TestDb, d1Count } from "../__tests__/d1-test-db"
 import { type MealPlanningLiveEvent, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
-import { createMealPlanningStore } from "../meal-planning/store"
+import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE } from "../meal-planning/store"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
 import { createFakeInteractionRouter, createFakeNetwork } from "./setup"
 
@@ -58,6 +58,21 @@ const POLICY_IDS = [
   "school-rule",
   "cheat-day",
 ]
+
+// These workflow fixtures deliberately keep one compact hydrated-cell grid.
+// The provider still submits catalog selections, and these three fixture
+// definitions make its slot placements valid under hydration.
+SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) =>
+  [SEED_MEAL_IDS.paratha, SEED_MEAL_IDS.idli, SEED_MEAL_IDS.poha].includes(definition.id)
+    ? {
+        ...definition,
+        suitableSlots: ["breakfast", "snack1", "snack2", "school-lunch", "home-lunch"],
+        packedFood: { suitable: true, dry: true },
+        typicalCookMinutes: 0,
+        requiredIngredients: definition.id === SEED_MEAL_IDS.paratha ? ["wheat flour"] : ["rice"],
+      }
+    : definition,
+)
 
 function cell(dish: string, items: string[], slot: string): MealCell {
   return { dish, vegetarian: true, items, cookMinutes: SLOT_COOK[slot], priorNightPrep: false }
@@ -83,12 +98,26 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
   }
 }
 
+function selectionCandidate(candidate: MealPlanCandidate): MealPlanSelectionCandidate {
+  return {
+    ...candidate,
+    grid: Object.fromEntries(Object.entries(candidate.grid).map(([day, slots]) => [
+      day,
+      Object.fromEntries(Object.entries(slots).map(([slot, cell]) => {
+        const mealDefinitionId = SEED_MEAL_IDS[cell.dish]
+        if (!mealDefinitionId) throw new Error(`missing integration fixture definition for ${cell.dish}`)
+        return [slot, { mealDefinitionId }]
+      })),
+    ])),
+  }
+}
+
 function proposeInput(
   candidate: MealPlanCandidate,
   feedbackItems?: Array<{ id: string; text: string; scope?: { day: string; slot: string } }>,
 ) {
   return {
-    candidate,
+    candidate: selectionCandidate(candidate),
     weeklyInventory: { items: [], notes: [] },
     weeklyExceptions: { items: [] },
     ...(feedbackItems ? { feedbackItems } : {}),

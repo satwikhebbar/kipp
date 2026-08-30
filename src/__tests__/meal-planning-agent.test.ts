@@ -215,6 +215,24 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["unknown_meal_definition"] })
   })
 
+  it("allows a targeted clarification with no evaluator failure for vague feedback", async () => {
+    const provider = providerWith(
+      clarifyResponse({
+        message: "What should improve most: speed, nutrition, packing dryness, preference, or inventory use?",
+        reasonCodes: [],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "Make this better." }], {
+      context: context({
+        request: { kind: "revision", text: "Make this better." },
+        feedbackItems: [{ id: "tg-vague", text: "Make this better." }],
+      }),
+    })
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: [] })
+  })
+
   it("rejects propose_plan when a revision's raw feedback is left unrepresented", async () => {
     const raw = [{ id: "tg-1", text: "Wed lunch: too oily" }]
     const provider = providerWith(
