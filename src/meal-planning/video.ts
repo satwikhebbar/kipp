@@ -17,6 +17,9 @@ const MAX_YOUTUBE_CALLS_PER_PLAN = 13
 /** Short deadline per YouTube request: a stalled call aborts instead of delaying the optional enrichment step. */
 const YOUTUBE_REQUEST_TIMEOUT_MS = 5_000
 
+/** Preferred channel ids, highest preference first; used when the caller passes none. */
+const DEFAULT_TRUSTED_CHANNEL_IDS = ["UCPPIsrNlEkaFQBk-4uNkOaw", "UCGG2Jjzzb5WotOEwzYmgEgg"]
+
 /** Narrow cache surface so tests can supply an in-memory fake; `KVNamespace` satisfies it structurally. */
 export interface RecipeVideoCache {
   get(key: string): Promise<string | null>
@@ -31,7 +34,7 @@ interface YouTubeSearchItem {
 }
 
 export interface EnrichLunchVideosOptions {
-  /** Preferred channel ids, highest preference first; unused while empty (iteration 1 has no configured channels). */
+  /** Preferred channel ids, highest preference first; defaults to the Hebbars Kitchen and Kunal Kapur channels. */
   trustedChannelIds?: string[]
   fetch?: typeof globalThis.fetch
 }
@@ -71,7 +74,7 @@ export async function enrichLunchVideos(
     doFetch,
     apiKey,
     byDishSlot,
-    options.trustedChannelIds ?? [],
+    options.trustedChannelIds ?? DEFAULT_TRUSTED_CHANNEL_IDS,
     results,
   )
   const durations = await fetchDurations(doFetch, apiKey, topByKey, calls)
