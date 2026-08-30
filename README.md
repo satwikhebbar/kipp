@@ -327,12 +327,15 @@ Lefthook runs typecheck, lint, and tests before each commit.
 ## Deployment
 
 ```bash
-pnpm deploy
+pnpm run deploy
 ```
 
-The deploy command runs the pre-deployment checks and deploys with
-`wrangler.prod.toml`. `pnpm deploy:check` runs the same checks and a Wrangler
-dry-run without uploading. `pnpm dev` uses `wrangler.local.toml`.
+The live deploy command runs the pre-deployment checks and uploads with
+`wrangler.prod.toml`. Use `pnpm run deploy`, not `pnpm deploy`: the latter is
+pnpm's workspace deployment command. `pnpm deploy:check` runs the same checks
+and a Wrangler dry-run without uploading. After a live upload, verify in the
+Cloudflare Dashboard that **Observability → Redact query string** remains
+enabled. `pnpm dev` uses `wrangler.local.toml`.
 
 ### Calendar operational runbook
 
@@ -359,7 +362,7 @@ logs are required. Those records contain outcome categories, opaque workflow or
 interaction IDs, safe failure details, and retry counts—never Calendar content,
 Telegram text, OAuth codes, tokens, or provider response bodies.
 
-Run `pnpm check`, then `pnpm deploy`. Validate the deployed slice only with the
+Run `pnpm check`, then `pnpm run deploy`. Validate the deployed slice only with the
 separate development Telegram bot: connect its Google account through
 `/setup/google-calendar`, create a uniquely labelled, short-lived `/calendar`
 test event (and one supported short test series when recurrence changes), inspect

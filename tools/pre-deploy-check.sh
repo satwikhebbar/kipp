@@ -3,6 +3,10 @@ set -euo pipefail
 
 node tools/verify-runtime-config.mjs
 
+echo "Reminder: Wrangler does not yet support observability.redact_query_string in TOML."
+echo "          After a live upload, verify in Cloudflare Dashboard that query-string redaction is enabled."
+echo ""
+
 cfg="wrangler.prod.toml"
 
 if ! grep -Eq '^keep_vars[[:space:]]*=[[:space:]]*true' "$cfg"; then

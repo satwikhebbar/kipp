@@ -10,6 +10,11 @@ secrets. Deploying Kipp must preserve that set; do not copy values into the
 production TOML. The full value-free contract is
 [`config/runtime-variables.json`](../config/runtime-variables.json).
 
+Set **Observability → Redact query string** to enabled in Cloudflare Dashboard.
+Wrangler does not currently support that setting in its TOML schema, so verify
+it after every live upload. This prevents OAuth callback query parameters from
+being retained in Workers logs or traces.
+
 `DATA_REPO_BRANCH` is retained as an additional provisioned variable while it
 is unused by the current runtime; it remains in the contract so a deployment
 does not accidentally remove it.
@@ -28,5 +33,5 @@ does not accidentally remove it.
 5. Run `pnpm deploy:check`. It validates the runtime-variable contract, blocks
    unsafe production TOML changes, and performs a Wrangler dry-run.
 
-`pnpm deploy` runs `deploy:check` before its live upload. Never put a secret in
+`pnpm run deploy` runs `deploy:check` before its live upload. Never put a secret in
 the production TOML, repository, test fixtures, or logs.
