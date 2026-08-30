@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { loadScenarios } from "../meal-planning/corpus/load"
-import { evaluateMealPlan } from "../meal-planning/evaluation"
+import { evaluateMealPlan, evaluateMealPlanSelection } from "../meal-planning/evaluation"
+import { hydrateMealPlan } from "../meal-planning/hydration"
 import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
 
@@ -724,5 +725,109 @@ describe("corpus scenario runner", () => {
         ).toEqual(value)
       }
     }
+  })
+})
+
+describe("structured meal hydration", () => {
+  const definition = {
+    id: "meal-paratha",
+    name: "Paratha",
+    aliases: ["paratha"],
+    principalIngredients: ["wheat flour"],
+    vegetarian: true as const,
+    suitableSlots: ["breakfast", "school-lunch"],
+    packedFood: { suitable: true, dry: false },
+    typicalCookMinutes: 15,
+    priorNightPrep: "optional" as const,
+    requiredIngredients: ["wheat flour"],
+    optionalIngredients: ["paneer"],
+    allowedIngredientChoices: ["spinach"],
+    status: "established" as const,
+  }
+
+  it("hydrates known selections and rejects invalid choices before evaluation", () => {
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour", "paneer"] },
+    })
+    const selection = {
+      grid: { Mon: { breakfast: { mealDefinitionId: "meal-paratha", ingredientChoices: ["paneer"], usesPriorNightPrep: true } } },
+      easyBuys: [], policyOutcomes: {},
+    }
+    const hydrated = hydrateMealPlan(selection, context)
+    expect(hydrated.failures).toEqual([])
+    expect(hydrated.candidate?.grid.Mon.breakfast).toMatchObject({ dish: "Paratha", items: ["wheat flour", "paneer"], cookMinutes: 15, priorNightPrep: true })
+    expect(evaluateMealPlanSelection(selection, context).evaluation.failures).toEqual(
+      evaluateMealPlan(hydrated.candidate!, context).failures,
+    )
+
+    const invalid = hydrateMealPlan({ grid: { Mon: { breakfast: { mealDefinitionId: "missing", ingredientChoices: ["not-allowed"] } } }, easyBuys: [], policyOutcomes: {} }, context)
+    expect(invalid.failures.map((failure) => failure.code)).toEqual(["unknown_meal_definition"])
+  })
+
+  it("gates new meals and snapshots permitted provisional meals", () => {
+    const context = baseContext({ profile: { ...SEED_PROFILE, mealDefinitions: [], allowNewFoods: false } })
+    const selection = { proposedMeal: { name: "Vegetable rice", principalIngredients: ["rice"], vegetarian: true as const, suitableSlots: ["home-lunch"], cookMinutes: 20, priorNightPrep: "none" as const, ingredients: ["rice"] } }
+    expect(hydrateMealPlan({ grid: { Mon: { "home-lunch": selection } }, easyBuys: [], policyOutcomes: {} }, context).failures[0]?.code).toBe("new_meal_not_allowed")
+    const allowed = hydrateMealPlan({ grid: { Mon: { "home-lunch": selection } }, easyBuys: [], policyOutcomes: {} }, { ...context, profile: { ...context.profile, allowNewFoods: true } }, () => "provisional-1")
+    expect(allowed.provisionalMealDefinitions).toMatchObject([{ id: "provisional-1", status: "provisional", name: "Vegetable rice" }])
+  })
+
+  it("rejects duplicate and non-permitted known-meal choices", () => {
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour", "paneer"] },
+    })
+    const result = hydrateMealPlan({
+      grid: { Mon: { breakfast: { mealDefinitionId: definition.id, ingredientChoices: ["paneer", "paneer", "tomato"] } } },
+      easyBuys: [], policyOutcomes: {},
+    }, context)
+    expect(result.candidate).toBeUndefined()
+    expect(result.failures.map((failure) => failure.code)).toEqual(["invalid_ingredient_choice", "invalid_ingredient_choice"])
+  })
+
+  it("rejects unavailable required ingredients before producing a candidate", () => {
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: [] },
+      weeklyInventory: { items: [{ name: "wheat flour", status: "unavailable" }], notes: [] },
+    })
+    const result = hydrateMealPlan({ grid: { Mon: { breakfast: { mealDefinitionId: definition.id } } }, easyBuys: [], policyOutcomes: {} }, context)
+    expect(result.failures).toMatchObject([{ code: "required_ingredient_unavailable", day: "Mon", slot: "breakfast" }])
+    expect(result.candidate).toBeUndefined()
+  })
+
+  it("enforces definition slots, packed and dry-slot suitability during hydration", () => {
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour"] },
+    })
+    const result = hydrateMealPlan({ grid: { Mon: { snack1: { mealDefinitionId: definition.id } } }, easyBuys: [], policyOutcomes: {} }, context)
+    expect(result.failures.map((failure) => failure.code)).toEqual(["slot_unsuitable", "packed_slot_unsuitable"])
+  })
+
+  it("maps none, optional, and required prep definitions deterministically", () => {
+    const none = { ...definition, id: "none", priorNightPrep: "none" as const }
+    const required = { ...definition, id: "required", priorNightPrep: "required" as const, suitableSlots: [...definition.suitableSlots, "home-lunch"] }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [none, definition, required], pantryBaseline: ["wheat flour"] },
+    })
+    const result = hydrateMealPlan({
+      grid: { Mon: { breakfast: { mealDefinitionId: "none", usesPriorNightPrep: true }, "school-lunch": { mealDefinitionId: definition.id }, "home-lunch": { mealDefinitionId: "required" } } },
+      easyBuys: [], policyOutcomes: {},
+    }, context)
+    expect(result.candidate?.grid.Mon).toMatchObject({
+      breakfast: { priorNightPrep: false },
+      "school-lunch": { priorNightPrep: false },
+      "home-lunch": { priorNightPrep: true },
+    })
+  })
+
+  it("reuses inherited provisional definitions exactly without creating another snapshot", () => {
+    const provisional = { ...definition, id: "provisional-old", status: "provisional" as const, name: "Old rice" }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [], pantryBaseline: ["wheat flour"] },
+      provisionalMealDefinitions: [provisional],
+    })
+    const result = hydrateMealPlan({ grid: { Mon: { breakfast: { provisionalMealId: provisional.id } } }, easyBuys: [], policyOutcomes: {} }, context, () => "unexpected")
+    expect(result.failures).toEqual([])
+    expect(result.provisionalMealDefinitions).toEqual([provisional])
+    expect(result.candidate?.grid.Mon.breakfast.dish).toBe("Old rice")
   })
 })

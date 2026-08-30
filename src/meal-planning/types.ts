@@ -16,6 +16,13 @@ export const FAILURE_CODES = [
   "missing_policy_outcome",
   "unscoped_cell_changed",
   "unaddressed_feedback",
+  "unknown_meal_definition",
+  "invalid_ingredient_choice",
+  "required_ingredient_unavailable",
+  "new_meal_not_allowed",
+  "invalid_new_meal",
+  "packed_slot_unsuitable",
+  "duplicate_meal_selection",
 ] as const
 
 export type FailureCode = (typeof FAILURE_CODES)[number]
@@ -61,10 +68,32 @@ export interface FoodPreferences {
   avoid: string[]
 }
 
+export type PriorNightPrepRequirement = "none" | "optional" | "required"
+
+/** A practical, household-owned meal option. It intentionally is not a recipe. */
+export interface MealDefinition {
+  /** Opaque, server-generated identifier. */
+  id: string
+  name: string
+  aliases?: string[]
+  principalIngredients: string[]
+  vegetarian: true
+  suitableSlots: string[]
+  packedFood?: { suitable: boolean; dry: boolean }
+  typicalCookMinutes: number
+  priorNightPrep: PriorNightPrepRequirement
+  requiredIngredients: string[]
+  optionalIngredients: string[]
+  allowedIngredientChoices?: string[]
+  status: "established" | "provisional"
+}
+
 export interface MealProfile {
   /** Clear-cut exclusions only. Ambiguous household phrases are resolved by the planner (e.g. by clarifying) before they reach the evaluator. */
   dietaryExclusions: string[]
+  /** Deprecated setup compatibility data. Planning must use mealDefinitions. */
   dishRepertoire: string[]
+  mealDefinitions?: MealDefinition[]
   foodPreferences: FoodPreferences
   allowNewFoods: boolean
   sensoryGuidelines: string[]
@@ -151,6 +180,8 @@ export interface MealPlanContext {
   urgentUseByDay?: string
   requireUrgentUseEarly?: boolean
   requestedRepeats?: string[]
+  /** Plan-local definitions inherited from the version being revised. */
+  provisionalMealDefinitions?: MealDefinition[]
 }
 
 export interface PolicyOutcome {
@@ -162,6 +193,56 @@ export interface MealPlanCandidate {
   grid: MealGrid
   easyBuys: string[]
   policyOutcomes: Record<string, PolicyOutcome>
+}
+
+export interface KnownMealSelection {
+  mealDefinitionId: string
+  ingredientChoices?: string[]
+  usesPriorNightPrep?: boolean
+}
+
+export interface NewMealProposal {
+  name: string
+  principalIngredients: string[]
+  vegetarian: true
+  suitableSlots: string[]
+  packedFood?: { suitable: boolean; dry: boolean }
+  cookMinutes: number
+  priorNightPrep: PriorNightPrepRequirement
+  ingredients: string[]
+}
+
+export interface NewMealSelection {
+  proposedMeal: NewMealProposal
+  usesPriorNightPrep?: boolean
+}
+
+/** Exact reuse of a provisional definition already snapshotted on a plan version. */
+export interface ProvisionalMealSelection {
+  provisionalMealId: string
+  ingredientChoices?: string[]
+  usesPriorNightPrep?: boolean
+}
+
+export type MealSelection = KnownMealSelection | NewMealSelection | ProvisionalMealSelection
+export type MealSelectionGrid = Record<string, Record<string, MealSelection>>
+
+/** The LLM-facing plan contract. It is hydrated before evaluation or persistence. */
+export interface MealPlanSelectionCandidate {
+  grid: MealSelectionGrid
+  easyBuys: string[]
+  policyOutcomes: Record<string, PolicyOutcome>
+}
+
+export interface MealPlanHydrationResult {
+  candidate?: MealPlanCandidate
+  provisionalMealDefinitions: MealDefinition[]
+  failures: MealPlanFailure[]
+}
+
+/** The selection-facing evaluation result: hydration failures or evaluator results, plus its durable candidate. */
+export interface MealPlanSelectionEvaluation extends MealPlanHydrationResult {
+  evaluation: MealPlanEvaluation
 }
 
 export interface MealPlanMeasurements {

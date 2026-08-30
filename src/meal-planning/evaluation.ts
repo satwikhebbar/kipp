@@ -1,4 +1,5 @@
 import { computeCoverageSet } from "./coverage"
+import { hydrateMealPlan } from "./hydration"
 import type {
   MealCell,
   MealGrid,
@@ -7,6 +8,8 @@ import type {
   MealPlanEvaluation,
   MealPlanFailure,
   MealPlanMeasurements,
+  MealPlanSelectionCandidate,
+  MealPlanSelectionEvaluation,
   MealSlot,
 } from "./types"
 
@@ -17,6 +20,33 @@ interface GridCellRef {
   day: string
   slotId: string
   cell: MealCell
+}
+
+/**
+ * Evaluates the LLM-facing selection contract as one deterministic operation:
+ * first validate and hydrate definitions, then apply the existing candidate
+ * evaluator. The hydrated candidate is returned only when it is valid enough
+ * to be evaluated or persisted.
+ */
+export function evaluateMealPlanSelection(
+  selectionCandidate: MealPlanSelectionCandidate,
+  context: MealPlanContext,
+): MealPlanSelectionEvaluation {
+  const hydration = hydrateMealPlan(selectionCandidate, context)
+  if (!hydration.candidate) {
+    return {
+      ...hydration,
+      evaluation: {
+        pass: false,
+        failures: hydration.failures,
+        measurements: {
+          morningCookByDay: {}, morningCookMax: 0, priorNightPrepByDay: {}, priorNightPrepMax: 0,
+          dishRepeatCount: 0, dishRepeats: [], inventoryUsed: [], easyBuyCount: selectionCandidate.easyBuys.length,
+        },
+      },
+    }
+  }
+  return { ...hydration, evaluation: evaluateMealPlan(hydration.candidate, context) }
 }
 
 /** Enumerates every (day, slotId, cell) triple in a grid, in insertion order. */
@@ -93,7 +123,6 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   const recentDishes = new Set(
     Object.values(context.recentPlan ?? {}).flatMap((slots) => Object.values(slots).map((cell) => cell.dish)),
   )
-  const repertoire = new Set([...profile.dishRepertoire, ...recentDishes])
   const favourites = new Set(profile.foodPreferences.favourites)
   const requestedRepeats = new Set(context.requestedRepeats ?? [])
   const persistentPolicies = context.customPolicies.filter((policy) => policy.scope === "persistent")
@@ -161,14 +190,6 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
           detail: `item "${item}" is not in inventory, pantry, or easy buys`,
         })
       }
-    }
-    if (!profile.allowNewFoods && !repertoire.has(cell.dish)) {
-      failures.push({
-        code: "unfamiliar_dish_not_allowed",
-        day,
-        slot: slotId,
-        detail: `dish "${cell.dish}" is not in the repertoire`,
-      })
     }
   }
 
@@ -261,21 +282,6 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       code: "dish_repeated",
       detail: `dish "${dish}" is repeated without a favourite or requested-repeat exemption`,
     })
-  }
-
-  if (profile.allowNewFoods) {
-    for (const ref of refs) {
-      if (repertoire.has(ref.cell.dish)) continue
-      const dayHasFamiliar = (refsByDay.get(ref.day) ?? []).some((other) => repertoire.has(other.cell.dish))
-      if (!dayHasFamiliar) {
-        failures.push({
-          code: "unpaired_new_dish",
-          day: ref.day,
-          slot: ref.slotId,
-          detail: `new dish "${ref.cell.dish}" is not paired with a familiar dish`,
-        })
-      }
-    }
   }
 
   if (context.requireUrgentUseEarly) {

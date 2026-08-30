@@ -82,6 +82,7 @@ const VERSION: MealPlanVersionRecord = {
   baseVersion: null,
   feedbackBatchId: null,
   video: {},
+  provisionalMealDefinitions: [],
   createdAt: "2026-09-07T00:00:00.000Z",
 }
 

@@ -69,7 +69,8 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       )
       .join(", ")}`,
     `- Dietary exclusions (hard): ${p.dietaryExclusions.join(", ") || "none"}`,
-    `- Dish repertoire: ${p.dishRepertoire.join(", ")}`,
+    `- Established meal definitions (select only by opaque id): ${(p.mealDefinitions ?? []).filter((meal) => meal.status === "established").map((meal) => `${meal.id}: ${meal.name}; slots=${meal.suitableSlots.join("/")}; optional choices=${[...meal.optionalIngredients, ...(meal.allowedIngredientChoices ?? [])].join("/") || "none"}`).join(" | ") || "none"}`,
+    `- Plan-local provisional definitions: ${(context.provisionalMealDefinitions ?? []).map((meal) => `${meal.id}: ${meal.name}`).join(" | ") || "none"}`,
     `- Food preferences: favourites = ${p.foodPreferences.favourites.join(", ") || "none"}, avoid = ${p.foodPreferences.avoid.join(", ") || "none"}`,
     `- New foods allowed: ${p.allowNewFoods ? "yes" : "no"}`,
     `- Sensory guidelines: ${p.sensoryGuidelines.join(", ") || "none"}`,
@@ -143,6 +144,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
     weeklyInventory: recent?.plan.weeklyInventory ?? { items: [], notes: [] },
     weeklyExceptions: recent?.plan.weeklyExceptions ?? { items: [] },
     recentPlan: recent?.version.candidate.grid ?? null,
+    provisionalMealDefinitions: recent?.version.provisionalMealDefinitions ?? [],
     request: { kind: "initial_plan", text: event.payload.requestText },
   }
   const messages: ToolConversationMessage[] = [
@@ -178,6 +180,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
       evaluation: outcome.propose.evaluation,
       weeklyInventory: outcome.propose.weeklyInventory,
       weeklyExceptions: outcome.propose.weeklyExceptions,
+      provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
     }),
   )
 
@@ -472,6 +475,7 @@ async function runRevision(
     recentPlan: active.version.candidate.grid,
     request: { kind: "revision", text: submission.items.map((item) => item.text).join(" ") },
     feedbackItems: submission.items,
+    provisionalMealDefinitions: active.version.provisionalMealDefinitions,
   }
   const messages: ToolConversationMessage[] = [
     {
@@ -497,6 +501,7 @@ async function runRevision(
       candidate: enriched.candidate,
       video: enriched.video,
       evaluation: propose.evaluation,
+      provisionalMealDefinitions: propose.provisionalMealDefinitions,
       inventory: {
         weeklyInventory: propose.weeklyInventory,
         weeklyExceptions: propose.weeklyExceptions,
