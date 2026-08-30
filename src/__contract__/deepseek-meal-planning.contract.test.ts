@@ -585,7 +585,9 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     }
     expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
     expect(result.terminal?.kind, "conflict must resolve as a clarification").toBe("needs_clarification")
-    expect(result.terminal?.reasonCodes).toContain("hard_exclusion")
+    // The conflict is detected before evaluating a candidate, so the terminal
+    // explanation carries no evaluator failure codes.
+    expect(result.terminal?.reasonCodes).toEqual([])
   })
 
   contractIt("R06: vague feedback asks which improvement matters before changing the plan", async () => {
