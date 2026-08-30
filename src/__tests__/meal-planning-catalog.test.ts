@@ -43,4 +43,12 @@ describe("meal definition catalog validation", () => {
       packedFood: { suitable: true, dry: false },
     })
   })
+
+  it("rejects a cooked meal advertising a no-cook snack slot", () => {
+    const failures = validateMealDefinitionProposal({
+      ...proposal,
+      suitableSlots: ["snack1"],
+    }, "Paratha", { schedule: SEED_SCHEDULE })
+    expect(failures).toMatchObject([{ code: "slot_cook_time_exceeded", dishName: "Paratha" }])
+  })
 })

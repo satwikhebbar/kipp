@@ -52,9 +52,23 @@ export function validateMealDefinitionProposal(
   failures.push(...validateNames(expectedDishName, "requiredIngredients", proposal.requiredIngredients, true))
   failures.push(...validateNames(expectedDishName, "optionalIngredients", proposal.optionalIngredients, false))
   failures.push(...validateNames(expectedDishName, "allowedIngredientChoices", proposal.allowedIngredientChoices ?? [], false))
-  const validSlots = new Set(input.schedule.slots.map((slot) => slot.id))
+  const slotById = new Map(input.schedule.slots.map((slot) => [slot.id, slot]))
   for (const slot of proposal.suitableSlots) {
-    if (!validSlots.has(slot)) failures.push(invalid(expectedDishName, "unknown_slot", `suitableSlots contains unknown slot "${slot}"`))
+    const scheduleSlot = slotById.get(slot)
+    if (!scheduleSlot) {
+      failures.push(invalid(expectedDishName, "unknown_slot", `suitableSlots contains unknown slot "${slot}"`))
+    } else if (
+      Number.isInteger(proposal.typicalCookMinutes) &&
+      proposal.typicalCookMinutes >= 0 &&
+      scheduleSlot.maxCookMinutes !== null &&
+      proposal.typicalCookMinutes > scheduleSlot.maxCookMinutes
+    ) {
+      failures.push(invalid(
+        expectedDishName,
+        "slot_cook_time_exceeded",
+        `${proposal.typicalCookMinutes} cook minutes exceeds ${slot}'s ${scheduleSlot.maxCookMinutes}-minute limit`,
+      ))
+    }
   }
   const required = new Set(proposal.requiredIngredients.map(normalized))
   for (const ingredient of [...proposal.optionalIngredients, ...(proposal.allowedIngredientChoices ?? [])]) {
