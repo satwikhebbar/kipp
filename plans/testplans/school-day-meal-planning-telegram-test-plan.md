@@ -269,8 +269,9 @@ test:
 - **R05** — `meal-planning-agent.test.ts` proves a proposal that would resolve
   conflicting feedback by violating a hard exclusion is rejected at
   `propose_plan`, and the session clarifies instead.
-- **R06** — corpus `vague-feedback` (unbound feedback addressable via rationale;
-  an unscoped cell change fails).
+- **R06** — live `contractIt` asks a targeted question for vague feedback; the
+  `vague-feedback` corpus retains the deterministic revision-scope guard that
+  rejects arbitrary unscoped cell changes.
 - **R09** — `meal-planning-agent.test.ts` accepts a revision that declares a
   mid-week holiday and drops that day without `missing_slot`.
 - **S04** — `meal-planning-store.test.ts` shows a next-week create replaces the
@@ -295,6 +296,14 @@ live manual evidence (YouTube API, trusted channels) and R02/R03/R05 have live
 contractIt coverage, so they move out of this list.
 
 ### Live-LLM eval (`src/__contract__/deepseek-meal-planning.contract.test.ts`)
+
+**Catalog-contract revalidation:** The recorded planning-session results below
+predate the switch from agent-authored `MealCell`s to established-meal
+selections. They are superseded until each scenario is re-run against the
+catalog-aware live harness. The harness now supplies the same established seed
+definitions as the initial household profile; run one case at a time and keep
+its debug transcript as the new evidence. M01–M03 validate expansion only and
+do not replace planning-session evidence.
 
 An opt-in provider-backed harness (beads `agent-harness-4tu`) that drives
 `runMealPlanningAgentSession` with a real provider, mirroring the workflow's

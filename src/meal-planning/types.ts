@@ -11,8 +11,6 @@ export const FAILURE_CODES = [
   "inventory_item_unavailable",
   "use_early_ignored",
   "dish_repeated",
-  "unfamiliar_dish_not_allowed",
-  "unpaired_new_dish",
   "missing_policy_outcome",
   "unscoped_cell_changed",
   "unaddressed_feedback",

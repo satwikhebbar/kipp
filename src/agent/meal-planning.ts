@@ -181,7 +181,10 @@ export const proposePlanInputSchema = z
 export const needsClarificationInputSchema = z
   .object({
     message: z.string().trim().min(1),
-    reasonCodes: z.array(z.enum(FAILURE_CODES)).min(1),
+    // A clarification about an ambiguous parent preference need not follow an
+    // evaluator failure. When evaluation did run, the session still requires
+    // every reported failure code to be included.
+    reasonCodes: z.array(z.enum(FAILURE_CODES)),
     interaction: z.object({ kind: z.literal("reply") }).strict(),
   })
   .strict()

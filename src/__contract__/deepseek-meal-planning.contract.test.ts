@@ -3,7 +3,7 @@ import { expandMealCatalog } from "../agent/meal-catalog-expansion"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { renderHouseholdContext } from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
-import { SEED_SCHEDULE } from "../meal-planning/store"
+import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type {
   FeedbackItem,
   MealCell,
@@ -247,14 +247,24 @@ function assertRequestedRepresented(requested: string[], candidate: MealPlanCand
 
 /** Drives one real-provider session as the workflow does (context injected into the user message). */
 async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessionResult> {
+  // Corpus fixtures intentionally retain hydrated MealCells as evaluator
+  // examples. Live agent runs must instead receive the real established
+  // catalog that production's initial profile provides.
+  const catalogContext: MealPlanContext = {
+    ...context,
+    profile: {
+      ...context.profile,
+      mealDefinitions: context.profile.mealDefinitions ?? SEED_PROFILE.mealDefinitions,
+    },
+  }
   const provider = createToolProvider(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
   const userText =
-    context.request.kind === "revision"
-      ? `Revision feedback: ${(context.feedbackItems ?? []).map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(context)}`
-      : `Request: ${context.request.text}\n\n${renderHouseholdContext(context)}`
+    catalogContext.request.kind === "revision"
+      ? `Revision feedback: ${(catalogContext.feedbackItems ?? []).map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(catalogContext)}`
+      : `Request: ${catalogContext.request.text}\n\n${renderHouseholdContext(catalogContext)}`
   try {
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], {
-      context,
+      context: catalogContext,
       ...(evalDebug ? { retainReasoning: true } : {}),
     })
     if (evalDebug) dumpResult(result)
@@ -576,6 +586,18 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
     expect(result.terminal?.kind, "conflict must resolve as a clarification").toBe("needs_clarification")
     expect(result.terminal?.reasonCodes).toContain("hard_exclusion")
+  })
+
+  contractIt("R06: vague feedback asks which improvement matters before changing the plan", async () => {
+    const ctx = scenario("vague-feedback").context
+    const result = await runLive(ctx)
+    expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
+    expect(result.terminal?.kind).toBe("needs_clarification")
+    if (result.terminal?.kind !== "needs_clarification") throw new Error("vague feedback must clarify")
+    expect(result.terminal.reasonCodes).toEqual([])
+    expect(result.terminal.message.length).toBeLessThanOrEqual(MAX_CLARIFY_LENGTH)
+    expect(result.terminal.message).toMatch(/speed|quick|health|nutrition|dry|pack|preference|inventory/i)
+    noOpaqueLeak(result.messages)
   })
 
   contractIt("C2: request-listed ingredients land in a short easy-buys list against a stocked kitchen", async () => {
