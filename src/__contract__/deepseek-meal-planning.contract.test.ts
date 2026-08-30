@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { renderHouseholdContext } from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
-import type { MealGrid, MealPlanCandidate, MealPlanContext, MealPlanScenario } from "../meal-planning/types"
+import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext, MealPlanScenario } from "../meal-planning/types"
 import { createGenerator, createToolProvider, type GenerateFn, type ToolConversationMessage } from "../providers"
 import { messages, parseLLMJson, ToolProviderHttpError } from "../providers/llm"
 
@@ -41,6 +41,10 @@ const MAX_CLARIFY_LENGTH = 500
 const WEEK_DAY_COUNT = 6
 const SLOTS_PER_DAY = 5
 const MORNING_BUDGET_MINUTES = 35
+// Cook minutes used to build the T12 prior-week grid (mirrors the seed schedule).
+const BREAKFAST_COOK_MIN = 15
+const MAIN_COOK_MIN = 20
+const SNACK_COOK_MIN = 0
 
 // Eval debugging is a first-class feature and ON BY DEFAULT for contract runs:
 // every test dumps a full transcript (with provider reasoning) plus the
@@ -134,6 +138,17 @@ const T07_JUDGE_RUBRIC = `The parent said they ONLY have onions, tomatoes, potat
 1. INVENTORY-USE: the plan should build on those seven items wherever reasonable — they should appear across the week rather than being ignored in favour of purchased ingredients.
 2. EASY-BUYS: anything purchased must be an ordinary, easy-to-find staple, all-season vegetable or fruit, or everyday neighborhood-grocery item — never dry fruits, nuts, seeds, paneer, or other specialty/long-shelf items.
 3. SIZING: the list must be a purposeful list of what this week genuinely needs given how little is in the kitchen — not padded, and not a huge one-shot stock-up. A scarce kitchen justifies more buys than a stocked one, so judge size relative to the week, not against a fixed number.
+Pass only if all three hold. When in doubt, pass if there is no clear violation.`
+
+// T12 cross-week variety rubric. The prior week is fixed by the scenario; its
+// cooked dishes and principal ingredients are spelled out so the judge can
+// compare without needing the recent plan passed in.
+const T12_JUDGE_RUBRIC = `The family already planned and cooked the previous week, whose dishes were: paratha, poha, upma, bottle gourd dal, rajma, khichdi, chole, and rice and beans, plus fruit and dry snacks (banana, apple, orange, pear, dates, mixed seeds, dry coconut). The principal ingredients that anchored that week were rice, moong dal, kidney beans, chickpeas, and wheat flour.
+
+The plan below is for the FOLLOWING week.
+1. COOKED-DISH ROTATION: the new week should not repeat the previous week's cooked dishes (breakfast, school lunch, home lunch) unless the dish is a declared favourite. Repeating fruit or dry snacks as snacks is acceptable. The declared favourite is "paratha", so paratha may repeat.
+2. PRINCIPAL-INGREDIENT ROTATION: a principal ingredient that anchored the previous week (e.g. moong dal, kidney beans, rice, chickpeas, wheat flour) should not anchor a large share of the new week's cooked meals.
+3. OVERALL VARIETY: the two weeks should feel distinct, not a re-skin of the same dishes. Do not pass a plan that fills most of the week with the favourite dish or a single renamed anchor.
 Pass only if all three hold. When in doubt, pass if there is no clear violation.`
 
 // Broader than the scenario's hard exclusions (paneer, ghee): catches dairy
@@ -463,4 +478,109 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
       expect(dishesBySlot(terminal.candidate.grid, day), `${day} must stay stable`).toEqual(dishesBySlot(recent, day))
     }
   })
+
+  contractIt(
+    "T12: a second week avoids unnecessary cross-week dish repeats and excessive principal-ingredient reuse",
+    async () => {
+      // Prior week built from a realistic SUBSET of the seed repertoire: fruit
+      // and dry snacks repeat across days (the snack escape hatch), leaving
+      // enough unused repertoire for the new week to vary. The new week must
+      // also pass the evaluator, which enforces the same dish-repeat rule.
+      const cell = (dish: string, items: string[], cookMinutes: number): MealCell => ({
+        dish,
+        vegetarian: true,
+        items,
+        cookMinutes,
+        priorNightPrep: false,
+      })
+      const priorWeek: MealGrid = {
+        Mon: {
+          breakfast: cell("paratha", ["wheat flour"], BREAKFAST_COOK_MIN),
+          snack1: cell("banana", ["banana"], SNACK_COOK_MIN),
+          snack2: cell("dates", ["dates"], SNACK_COOK_MIN),
+          "school-lunch": cell("bottle gourd dal", ["bottle gourd", "moong dal"], MAIN_COOK_MIN),
+          "home-lunch": cell("rice and beans", ["rice", "beans"], MAIN_COOK_MIN),
+        },
+        Tue: {
+          breakfast: cell("poha", ["poha"], BREAKFAST_COOK_MIN),
+          snack1: cell("apple", ["apple"], SNACK_COOK_MIN),
+          snack2: cell("mixed seeds", ["mixed seeds"], SNACK_COOK_MIN),
+          "school-lunch": cell("rajma", ["kidney beans"], MAIN_COOK_MIN),
+          "home-lunch": cell("chole", ["chickpeas"], MAIN_COOK_MIN),
+        },
+        Wed: {
+          breakfast: cell("paratha", ["wheat flour"], BREAKFAST_COOK_MIN),
+          snack1: cell("banana", ["banana"], SNACK_COOK_MIN),
+          snack2: cell("dry coconut", ["dry coconut"], SNACK_COOK_MIN),
+          "school-lunch": cell("khichdi", ["rice", "moong dal"], MAIN_COOK_MIN),
+          "home-lunch": cell("rice and beans", ["rice", "beans"], MAIN_COOK_MIN),
+        },
+        Thu: {
+          breakfast: cell("poha", ["poha"], BREAKFAST_COOK_MIN),
+          snack1: cell("orange", ["orange"], SNACK_COOK_MIN),
+          snack2: cell("dates", ["dates"], SNACK_COOK_MIN),
+          "school-lunch": cell("rajma", ["kidney beans"], MAIN_COOK_MIN),
+          "home-lunch": cell("bottle gourd dal", ["bottle gourd", "moong dal"], MAIN_COOK_MIN),
+        },
+        Fri: {
+          breakfast: cell("upma", ["upma rava"], BREAKFAST_COOK_MIN),
+          snack1: cell("pear", ["pear"], SNACK_COOK_MIN),
+          snack2: cell("mixed seeds", ["mixed seeds"], SNACK_COOK_MIN),
+          "school-lunch": cell("khichdi", ["rice", "moong dal"], MAIN_COOK_MIN),
+          "home-lunch": cell("chole", ["chickpeas"], MAIN_COOK_MIN),
+        },
+      }
+      const base = scenario("baseline-week").context
+      const ctx: MealPlanContext = {
+        ...base,
+        profile: { ...base.profile, allowNewFoods: true },
+        weeklyInventory: {
+          items: base.weeklyInventory.items,
+          notes: ["A fresh stock for the new week; some items overlap with last week."],
+        },
+        recentPlan: priorWeek,
+        request: { kind: "initial_plan", text: "Plan next week." },
+      }
+      const result = await runLive(ctx)
+      const terminal = requireProposal(result)
+      noOpaqueLeak(result.messages)
+
+      // Structural: the evaluator already rejects cross-week repeats of
+      // non-snack dishes. Assert the plan is non-trivial — it must actually use
+      // the repertoire headroom / new foods rather than repeating the prior week.
+      const priorCooked = new Set(
+        Object.values(priorWeek).flatMap((day) =>
+          Object.entries(day)
+            .filter(([slot]) => !["snack1", "snack2"].includes(slot))
+            .map(([, cell]) => cell.dish),
+        ),
+      )
+      const newCooked = new Set(
+        Object.values(terminal.candidate.grid).flatMap((day) =>
+          Object.entries(day)
+            .filter(([slot]) => !["snack1", "snack2"].includes(slot))
+            .map(([, cell]) => cell.dish),
+        ),
+      )
+      const overlap = [...priorCooked].filter(
+        (dish) => newCooked.has(dish) && !ctx.profile.foodPreferences.favourites.includes(dish),
+      )
+      expect(overlap, `cooked dishes repeated from the prior week (favourites are exempt)`).toEqual([])
+
+      const verdict = await judgePlan(
+        generator,
+        ctx.request.text,
+        terminal.candidate,
+        ctx.profile.pantryBaseline,
+        T12_JUDGE_RUBRIC,
+      )
+      console.log(
+        `T12 judge: pass=${verdict.pass}\njustification: ${verdict.justification}\nreasons:\n${verdict.reasons.map((reason) => `  - ${reason}`).join("\n")}`,
+      )
+      expect(
+        verdict.pass,
+        `T12 judge justification:\n${verdict.justification}\n\nreasons:\n${verdict.reasons.join("\n")}`,
+      ).toBe(true)
+    },
+  )
 })
