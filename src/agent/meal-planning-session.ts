@@ -1,10 +1,11 @@
-import { evaluateMealPlan } from "../meal-planning/evaluation"
+import { evaluateMealPlanSelection } from "../meal-planning/evaluation"
 import type {
   FailureCode,
   FeedbackItem,
   MealPlanCandidate,
   MealPlanContext,
   MealPlanEvaluation,
+  MealDefinition,
   WeeklyExceptions,
   WeeklyInventory,
 } from "../meal-planning/types"
@@ -28,15 +29,13 @@ The context's request.kind tells you whether the request is an initial_plan or a
 
 Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Include a short justification in propose_plan explaining the plan in plain language. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
 
-A cell's items are the dish's ingredient tokens, drawn only from the weekly inventory, the pantry baseline, or the easy-buys list. easyBuys is the short list of ordinary ingredients you are adding this week: staples, all-season vegetables and fruits, and everyday items from a neighborhood grocery. It is not the week's whole shopping list, and do not ask the parent to make more than 10 easy buys in a given week unless the inventory cannot support a plausible plan without those extra purchases. Dry fruits (dates, raisins, dry coconut), nuts, seeds, jaggery, paneer, and other specialty or long-shelf items are NOT easy-buys; if a dish needs one of those and it is not already in the inventory or pantry baseline, pick a different dish. Never put a dish name itself in items or easyBuys. When the request lists ingredients you have, make sure each is represented in the inventory, the pantry baseline, or easyBuys so the evaluator accepts the plan. Favourite dishes (from the food preferences in the context) may be repeated across the week; keep other dishes distinct. A new week's plan should also differ from the previous week (the Recent plan in the context): do not reuse its cooked dishes, and do not merely rename an anchor — if the previous week built its mains on moong dal, kidney beans, rice, or similar principal ingredients, the new week should not build its own mains on the same anchors. When the previous week used a fruit, dry fruit, or dry snack in a snack slot, repeating that same item as a snack is acceptable rather than forcing an unnecessary new snack — but treat this only as a last resort, not a pattern: introduce a new snack whenever a sensible one exists.
+Build the candidate grid from meal selections. Established meals use their mealDefinitionId; ingredientChoices may contain only the permitted choices listed for that definition, and usesPriorNightPrep is meaningful only when prep is optional. A plan-local provisional meal is reused by its provisionalMealId exactly as listed in the context.
 
-Example of one day's cells:
-Mon: breakfast { "dish": "paratha", "vegetarian": true, "items": ["wheat flour"], "cookMinutes": 15, "priorNightPrep": false }
-     snack1 { "dish": "banana", "vegetarian": true, "items": ["banana"], "cookMinutes": 0, "priorNightPrep": false }
-     snack2 { "dish": "roasted chana", "vegetarian": true, "items": ["chana"], "cookMinutes": 0, "priorNightPrep": false }
-     school-lunch { "dish": "bottle gourd dal", "vegetarian": true, "items": ["bottle gourd", "moong dal"], "cookMinutes": 20, "priorNightPrep": false }
-     home-lunch { "dish": "rice and beans", "vegetarian": true, "items": ["rice", "beans"], "cookMinutes": 20, "priorNightPrep": false }
-with easyBuys = ["banana", "chana", "bottle gourd", "beans"] when those are not already in inventory. Other days follow the same shape with the same five slots.`
+Known selection example: { "mealDefinitionId": "meal_opaque_paratha", "ingredientChoices": ["spinach"], "usesPriorNightPrep": true }.
+
+When new foods are allowed and no suitable known meal can be selected, submit a structured proposal, for example: { "proposedMeal": { "name": "Vegetable rice", "principalIngredients": ["rice", "vegetables"], "vegetarian": true, "suitableSlots": ["home-lunch"], "packedFood": { "suitable": false, "dry": false }, "cookMinutes": 20, "priorNightPrep": "optional", "ingredients": ["rice", "vegetables"] }, "usesPriorNightPrep": false }. A new packed meal must travel safely in an ordinary lunchbox, have no likely spill or leak, be independently edible by hand or ordinary spoon, and require no reheating, cooking, assembly, or special equipment; dry slots additionally require dry spill-resistant food.
+
+easyBuys is the short list of ordinary ingredients you are adding this week: staples, all-season vegetables and fruits, and everyday items from a neighborhood grocery. It is not the week's whole shopping list. Do not place a dish name in easyBuys. When a request lists ingredients, ensure they are represented in inventory, pantry baseline, or easyBuys. Favourites may repeat; keep other dishes distinct. A new week's plan should differ from the previous week's cooked mains while a fruit, dry fruit, or dry snack may repeat in a snack slot as a last resort.`
 
 export interface MealPlanningAgentSessionOptions {
   context: MealPlanContext
@@ -48,6 +47,7 @@ export type MealPlanningTerminalOutcome =
   | {
       kind: "propose_plan"
       candidate: MealPlanCandidate
+      provisionalMealDefinitions: MealDefinition[]
       weeklyInventory: WeeklyInventory
       weeklyExceptions: WeeklyExceptions
       feedbackItems?: FeedbackItem[]
@@ -104,10 +104,18 @@ export async function runMealPlanningAgentSession(
         // Every authoritative item is in the evaluation set, so the evaluator's
         // `unaddressed_feedback` check is the coverage gate (with codes the
         // model can act on), replacing any session-side echo requirement.
-        const evaluation = evaluateMealPlan(input.candidate, {
+        const selectionEvaluation = evaluateMealPlanSelection(input.candidate, {
           ...options.context,
           feedbackItems: evaluationFeedback,
         })
+        if (!selectionEvaluation.candidate)
+          throw new ToolHandlerError(
+            "proposed plan could not be hydrated",
+            "invalid-state",
+            undefined,
+            selectionEvaluation.evaluation.failures.map((failure) => failure.code),
+          )
+        const evaluation = selectionEvaluation.evaluation
         if (!evaluation.pass)
           throw new ToolHandlerError(
             "proposed plan did not pass evaluation",
@@ -117,7 +125,8 @@ export async function runMealPlanningAgentSession(
           )
         terminal = {
           kind: "propose_plan",
-          candidate: input.candidate,
+          candidate: selectionEvaluation.candidate,
+          provisionalMealDefinitions: selectionEvaluation.provisionalMealDefinitions,
           weeklyInventory: input.weeklyInventory ?? options.context.weeklyInventory,
           weeklyExceptions: input.weeklyExceptions ?? options.context.weeklyExceptions,
           ...(evaluationFeedback.length ? { feedbackItems: evaluationFeedback } : {}),

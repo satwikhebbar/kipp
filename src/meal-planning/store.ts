@@ -3,6 +3,7 @@ import type {
   FeedbackItem,
   MealPlanCandidate,
   MealPlanEvaluation,
+  MealDefinition,
   MealProfile,
   MealSchedule,
   RecipeVideo,
@@ -62,6 +63,8 @@ export interface MealPlanVersionRecord {
   feedbackBatchId: string | null
   /** Per-cell video results (lunch slots), as stored; keyed by `${dish}:${slotId}`. */
   video: Record<string, RecipeVideo>
+  /** Full plan-local snapshot, including inherited unchanged provisional meals. */
+  provisionalMealDefinitions: MealDefinition[]
   createdAt: string
 }
 
@@ -94,6 +97,7 @@ export interface CreateActivePlanInput {
   weeklyInventory: WeeklyInventory
   weeklyExceptions: WeeklyExceptions
   video?: Record<string, RecipeVideo>
+  provisionalMealDefinitions?: MealDefinition[]
 }
 
 /** Result of a committed initial-plan batch. */
@@ -119,6 +123,7 @@ export interface PromotePlanVersionInput {
   candidate: MealPlanCandidate
   evaluation: MealPlanEvaluation
   video?: Record<string, RecipeVideo>
+  provisionalMealDefinitions?: MealDefinition[]
   /** Week-scoped state captured by the revision session; omit (or null) to skip the refresh. */
   inventory?: { weeklyInventory: WeeklyInventory; weeklyExceptions: WeeklyExceptions } | null
   /** The submission that drove this revision; omit (or null) only defensively — every revision is submission-driven. */
@@ -204,6 +209,25 @@ export const SEED_PROFILE: MealProfile = {
     "paneer paratha",
     "masala oats",
   ],
+  mealDefinitions: [
+    "paratha", "banana", "roasted chana", "bottle gourd dal", "rice and beans", "poha", "apple", "dates",
+    "rajma", "quinoa bowl", "idli", "orange", "mixed seeds", "khichdi", "sweet potato curry", "upma",
+    "pear", "dry coconut", "chole", "ghee rice", "dosa", "pomegranate", "jaggery cubes", "paneer paratha", "masala oats",
+  ].map((name): MealDefinition => ({
+    id: `seed_${name.replaceAll(" ", "_")}`,
+    name,
+    aliases: [name],
+    principalIngredients: [name],
+    vegetarian: true,
+    suitableSlots: ["breakfast", "snack1", "snack2", "school-lunch", "home-lunch"],
+    // Parent-provided repertoire meals are trusted as packable. Dry classification is deliberately conservative.
+    packedFood: { suitable: true, dry: ["banana", "roasted chana", "apple", "dates", "orange", "mixed seeds", "pear", "dry coconut", "pomegranate", "jaggery cubes"].includes(name) },
+    typicalCookMinutes: ["banana", "roasted chana", "apple", "dates", "orange", "mixed seeds", "pear", "dry coconut", "pomegranate", "jaggery cubes"].includes(name) ? 0 : 20,
+    priorNightPrep: "none",
+    requiredIngredients: [name],
+    optionalIngredients: [],
+    status: "established",
+  })),
   foodPreferences: { favourites: ["paratha"], avoid: [] },
   allowNewFoods: false,
   sensoryGuidelines: [],
@@ -302,9 +326,10 @@ function makeVersionRecord(
   baseVersion: number | null,
   feedbackBatchId: string | null,
   video: Record<string, RecipeVideo>,
+  provisionalMealDefinitions: MealDefinition[],
   now: string,
 ): MealPlanVersionRecord {
-  return { planId, version, candidate, evaluation, requestKind, baseVersion, feedbackBatchId, video, createdAt: now }
+  return { planId, version, candidate, evaluation, requestKind, baseVersion, feedbackBatchId, video, provisionalMealDefinitions, createdAt: now }
 }
 
 /**
@@ -395,8 +420,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
-                                            base_version, feedback_batch_id, video_json, created_at)
-             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?
+                                            base_version, feedback_batch_id, video_json, provisional_meals_json, created_at)
+             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
@@ -404,6 +429,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             JSON.stringify(input.candidate),
             JSON.stringify(input.evaluation),
             JSON.stringify(input.video ?? NO_VIDEOS),
+            JSON.stringify(input.provisionalMealDefinitions ?? []),
             now,
             input.chatId,
           ),
@@ -433,6 +459,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           null,
           null,
           input.video ?? NO_VIDEOS,
+          input.provisionalMealDefinitions ?? [],
           now,
         ),
         generation,
@@ -458,8 +485,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
-                                            base_version, feedback_batch_id, video_json, created_at)
-             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ? FROM meal_plan
+                                            base_version, feedback_batch_id, video_json, provisional_meals_json, created_at)
+             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ? FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
@@ -471,6 +498,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.baseVersion,
             batchId,
             JSON.stringify(input.video ?? NO_VIDEOS),
+            JSON.stringify(input.provisionalMealDefinitions ?? []),
             now,
             input.planId,
             input.chatId,
@@ -549,6 +577,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.baseVersion,
           batchId,
           input.video ?? NO_VIDEOS,
+          input.provisionalMealDefinitions ?? [],
           now,
         ),
         generation,
@@ -561,7 +590,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           `SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
                   p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
                   v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
-                  v.feedback_batch_id, v.video_json, v.created_at AS version_created_at
+                  v.feedback_batch_id, v.video_json, v.provisional_meals_json, v.created_at AS version_created_at
            FROM meal_plan p
            JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
            WHERE p.chat_id = ? AND p.status = 'active'`,
@@ -610,6 +639,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           baseVersion: row.base_version === null ? null : Number(row.base_version),
           feedbackBatchId: row.feedback_batch_id === null ? null : String(row.feedback_batch_id),
           video: parseJson<Record<string, RecipeVideo>>(String(row.video_json), {}),
+          provisionalMealDefinitions: parseJson<MealDefinition[]>(String(row.provisional_meals_json), []),
           createdAt: String(row.version_created_at),
         },
       }
@@ -694,6 +724,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         null,
         null,
         input.video ?? NO_VIDEOS,
+        input.provisionalMealDefinitions ?? [],
         now,
       )
       backing.versions.set(versionKey(input.planId, 1), version)
@@ -721,6 +752,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         input.baseVersion,
         input.feedbackBatch?.batchId ?? null,
         input.video ?? NO_VIDEOS,
+        input.provisionalMealDefinitions ?? [],
         now,
       )
       backing.versions.set(versionKey(input.planId, newVersion), version)

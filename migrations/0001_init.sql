@@ -51,6 +51,7 @@ CREATE TABLE meal_plan_version (
   base_version INTEGER,                  -- NULL for initial
   feedback_batch_id TEXT,                -- batch that drove this version (NULL only for the initial plan)
   video_json TEXT NOT NULL DEFAULT '{}', -- per-cell video results (lunch slots)
+  provisional_meals_json TEXT NOT NULL DEFAULT '[]', -- plan-local provisional MealDefinition snapshots
   created_at TEXT NOT NULL,
   PRIMARY KEY (plan_id, version)
 );

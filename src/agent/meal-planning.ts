@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { evaluateMealPlan } from "../meal-planning/evaluation"
+import { evaluateMealPlanSelection } from "../meal-planning/evaluation"
 import type { MealPlanContext } from "../meal-planning/types"
 import { EXCEPTION_KINDS, FAILURE_CODES, INVENTORY_STATUSES, POLICY_OUTCOMES } from "../meal-planning/types"
 import type { ToolDefinition } from "../runtime/tools"
@@ -48,6 +48,35 @@ export const mealPlanCandidateSchema = z
     easyBuys: z.array(z.string()),
     policyOutcomes: z.record(z.string(), policyOutcomeSchema),
   })
+  .strict()
+
+const priorNightPrepSchema = z.enum(["none", "optional", "required"])
+const packedFoodSchema = z.object({ suitable: z.boolean(), dry: z.boolean() }).strict()
+const ingredientChoicesSchema = z.array(z.string()).optional()
+const knownMealSelectionSchema = z
+  .object({ mealDefinitionId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, usesPriorNightPrep: z.boolean().optional() })
+  .strict()
+const provisionalMealSelectionSchema = z
+  .object({ provisionalMealId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, usesPriorNightPrep: z.boolean().optional() })
+  .strict()
+const newMealSelectionSchema = z
+  .object({
+    proposedMeal: z.object({
+      name: z.string().min(1),
+      principalIngredients: z.array(z.string()).min(1),
+      vegetarian: z.literal(true),
+      suitableSlots: z.array(z.string()).min(1),
+      packedFood: packedFoodSchema.optional(),
+      cookMinutes: z.number().int().min(0),
+      priorNightPrep: priorNightPrepSchema,
+      ingredients: z.array(z.string()).min(1),
+    }).strict(),
+    usesPriorNightPrep: z.boolean().optional(),
+  })
+  .strict()
+const selectionGridSchema = z.record(z.string(), z.record(z.string(), z.union([knownMealSelectionSchema, provisionalMealSelectionSchema, newMealSelectionSchema])))
+export const mealPlanSelectionCandidateSchema = z
+  .object({ grid: selectionGridSchema, easyBuys: z.array(z.string()), policyOutcomes: z.record(z.string(), policyOutcomeSchema) })
   .strict()
 
 const failureSchema = z
@@ -135,7 +164,7 @@ const PROPOSE_JUSTIFICATION_MAX_CHARACTERS = 500
 
 export const proposePlanInputSchema = z
   .object({
-    candidate: mealPlanCandidateSchema,
+    candidate: mealPlanSelectionCandidateSchema,
     // Optional: the authoritative week state already exists in the workflow
     // context. The model only supplies these to add items (request-listed
     // ingredients) or adjust exceptions; the plan is still validated against
@@ -165,11 +194,13 @@ export function createEvaluateMealPlanTool(context: MealPlanContext): ToolDefini
     name: MEAL_PLANNING_TOOL.EVALUATE,
     description:
       "Validate exactly one complete Mon–Sat meal-plan candidate against the household context. Returns typed failures and measurements; it never persists a plan.",
-    input: mealPlanCandidateSchema,
+    input: mealPlanSelectionCandidateSchema,
     output: mealPlanEvaluationSchema,
     privacy: "private",
     batching: "isolated",
-    handler: async (candidate) => evaluateMealPlan(candidate, context),
+    handler: async (candidate) => {
+      return evaluateMealPlanSelection(candidate, context).evaluation
+    },
   }
 }
 
