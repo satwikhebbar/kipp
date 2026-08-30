@@ -70,7 +70,8 @@ stores the draft, sends it to Telegram, and durably waits for approval or
 revision feedback. Feedback resumes the bounded agent with its prior transcript.
 Only an explicit **Approve** action allows deterministic code to create a
 LinkedIn post with `lifecycleState: DRAFT`, then marks the idea `finalized` in
-Notion. A feedback wait expires after `WAIT_FOR_FEEDBACK_HOURS` (12 hours by
+Notion. A feedback wait expires after `WAIT_FOR_FEEDBACK_HOURS` (up to 11 hours
+45 minutes; Cloudflare's 12-hour workflow limit reserves a safety buffer) by
 default).
 
 ### Calendar scheduling

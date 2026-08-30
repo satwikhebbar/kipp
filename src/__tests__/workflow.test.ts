@@ -64,7 +64,7 @@ vi.mock("../core/conversation", async () => {
   }
 })
 
-import { PipelineWorkflow } from "../linkedin/workflow"
+import { PipelineWorkflow, remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../linkedin/workflow"
 
 function b64(s: string): string {
   const bytes = new TextEncoder().encode(s)
@@ -243,6 +243,16 @@ describe("PipelineWorkflow", () => {
       workflowName: "",
     }
   }
+
+  it("caps the feedback session before Cloudflare's twelve-hour workflow limit", () => {
+    const startedAt = Date.UTC(2026, 7, 29, 9, 1, 15)
+    const deadline = resolveFeedbackDeadline(startedAt, "12")
+
+    expect(deadline - startedAt).toBe(11 * 60 * 60 * 1_000 + 45 * 60 * 1_000)
+    expect(resolveFeedbackDeadline(startedAt, "168")).toBe(deadline)
+    expect(resolveFeedbackDeadline(startedAt, "0.5") - startedAt).toBe(30 * 60 * 1_000)
+    expect(remainingFeedbackTimeoutSeconds(deadline, startedAt)).toBe(11 * 60 * 60 + 45 * 60)
+  })
 
   it("generates draft, notifies, finalizes on approval", async () => {
     const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]

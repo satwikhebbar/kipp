@@ -18,6 +18,13 @@ import { resolvePrompt } from "./prompts/resolver"
 const DEFAULT_WAIT_FOR_FEEDBACK_HOURS = 12
 const MAX_FEEDBACK_ROUNDS = 4
 const HOURS_TO_MS = 3_600_000 // ponytail: precomputed 60 * 60 * 1000
+const MINUTES_TO_MS = 60_000
+const SECONDS_TO_MS = 1_000
+const CLOUDFLARE_MAX_WORKFLOW_DURATION_HOURS = 12
+const WORKFLOW_TIMEOUT_SAFETY_MARGIN_MINUTES = 15
+const CLOUDFLARE_MAX_WORKFLOW_DURATION_MS = CLOUDFLARE_MAX_WORKFLOW_DURATION_HOURS * HOURS_TO_MS
+const WORKFLOW_TIMEOUT_SAFETY_MARGIN_MS = WORKFLOW_TIMEOUT_SAFETY_MARGIN_MINUTES * MINUTES_TO_MS
+const MAX_FEEDBACK_SESSION_DURATION_MS = CLOUDFLARE_MAX_WORKFLOW_DURATION_MS - WORKFLOW_TIMEOUT_SAFETY_MARGIN_MS
 const DEFAULT_LLM_RETRIES = 3
 
 type PipelineWorkflowOutcome =
@@ -26,6 +33,27 @@ type PipelineWorkflowOutcome =
   | { outcome: "not-configured" }
   | { outcome: "feedback-expired" }
   | { outcome: "feedback-limit-reached" }
+
+/**
+ * Keeps user-feedback waits within one Cloudflare Workflow execution.
+ *
+ * Cloudflare terminates an execution at 12 hours, so a feedback session must
+ * finish before then for the normal timeout path to persist its terminal state.
+ */
+export function resolveFeedbackDeadline(startedAtMs: number, configuredHours: string | undefined): number {
+  const requestedHours = Number(configuredHours || DEFAULT_WAIT_FOR_FEEDBACK_HOURS)
+  const requestedDurationMs = Number.isFinite(requestedHours) && requestedHours > 0 ? requestedHours * HOURS_TO_MS : 0
+  const sessionDurationMs = Math.min(
+    requestedDurationMs || MAX_FEEDBACK_SESSION_DURATION_MS,
+    MAX_FEEDBACK_SESSION_DURATION_MS,
+  )
+  return startedAtMs + sessionDurationMs
+}
+
+/** Returns a whole-second Workflow duration that does not extend past the deadline. */
+export function remainingFeedbackTimeoutSeconds(deadlineMs: number, nowMs = Date.now()): number {
+  return Math.max(0, Math.floor((deadlineMs - nowMs) / SECONDS_TO_MS))
+}
 
 /** Generates a unique interaction ID. */
 function interactionId(): string {
@@ -123,6 +151,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
   private async _run(event: WorkflowEvent<WorkflowParams>, step: WorkflowStep): Promise<PipelineWorkflowOutcome> {
     const { pageId, ideaId } = event.payload
+    const feedbackDeadlineMs = resolveFeedbackDeadline(event.timestamp.getTime(), this.env.WAIT_FOR_FEEDBACK_HOURS)
 
     const stepDo = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
       const wrapped: () => Promise<T> = async () => {
@@ -235,9 +264,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
       const notification = await stepDo("notify", async () => {
         const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-        const expiresAt =
-          Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * HOURS_TO_MS
-        const interactions = createDraftInteractions(0, event.instanceId, 1, expiresAt)
+        const interactions = createDraftInteractions(0, event.instanceId, 1, feedbackDeadlineMs)
         const result = await tg.sendMessage(
           state.chatId,
           `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nReply with feedback or tap below.${state.costLine}`,
@@ -257,17 +284,24 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let runningOutputTokens = state.costOutputTokens ?? 0
     let latestCostLine = state.costLine
     for (let i = 0; i < MAX_FEEDBACK_ROUNDS; i++) {
-      const timeoutHours = this.env.WAIT_FOR_FEEDBACK_HOURS || String(DEFAULT_WAIT_FOR_FEEDBACK_HOURS)
+      const timeoutSeconds = remainingFeedbackTimeoutSeconds(feedbackDeadlineMs)
+      if (timeoutSeconds === 0) {
+        await stepDo(`timeout-${i}`, async () => {
+          const manager = createIdeaManager(createNotionClient(this.env))
+          await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
+        })
+        return { outcome: "feedback-expired" }
+      }
       logRuntime(this.env, {
         workflow: event.instanceId,
         event: "linkedin-feedback-wait",
         outcome: "started",
-        details: { round: i, timeoutHours: Number(timeoutHours) },
+        details: { round: i, timeoutSeconds },
       })
       const reply = await step.waitForEvent<{ text?: string }>(`feedback-${i}`, {
         type: "telegram-reply",
         // biome-ignore lint/suspicious/noExplicitAny: WorkflowSleepDuration doesn't accept computed strings
-        timeout: `${timeoutHours} hours` as any,
+        timeout: `${timeoutSeconds} seconds` as any,
       })
       const text = (reply.payload?.text as string) ?? ((reply as Record<string, unknown>)?.text as string) ?? ""
       logRuntime(this.env, {
@@ -301,8 +335,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
               version: i + 1,
               workflowId: event.instanceId,
               kind: INTERACTION_KIND.REVISION_FEEDBACK,
-              expiresAt:
-                Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * HOURS_TO_MS,
+              expiresAt: feedbackDeadlineMs,
             }
           })
           await stepDo(`register-revision-feedback-${i}`, async () => {
@@ -440,9 +473,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
         const notification = await stepDo(`notify-revised-${i}`, async () => {
           const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-          const expiresAt =
-            Date.now() + Number(this.env.WAIT_FOR_FEEDBACK_HOURS || DEFAULT_WAIT_FOR_FEEDBACK_HOURS) * HOURS_TO_MS
-          const interactions = createDraftInteractions(0, event.instanceId, i + 2, expiresAt)
+          const interactions = createDraftInteractions(0, event.instanceId, i + 2, feedbackDeadlineMs)
           const result = await tg.sendMessage(
             state.chatId,
             `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nReply with feedback or tap below.${revised.costLine}`,
