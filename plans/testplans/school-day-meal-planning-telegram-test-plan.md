@@ -206,8 +206,10 @@ would have caught it, and the coverage needed.
 | T08 (no dairy this week) | no exclusion scenario |
 | T11 (preferred chef → recipe-link match; missing link leaves meal intact) | manually tested live against the real YouTube API (`valid-standard` week, trusted channels Hebbars Kitchen + Kunal Kapur); 9/12 lunch cells matched, bottle gourd dal/rajma/chole resolved to Hebbars, missing links left meals intact |
 | T12 (cross-week variety) | partial (`whole-day-replan`, `requested-repeat`) |
-| R01 / R04 (scoped meal feedback → targeted change, others stable) | partial (`unscoped_cell_changed` unit only) |
-| R05 (conflicting instructions) | no scenario |
+| R01 / R04 (scoped meal feedback → targeted change, others stable) | live contractIt (`R01/R04`) + `midweek-shortage` corpus (`unscoped_cell_changed`); passes |
+| R02 (two comments → one revised plan) | live contractIt (`R02`) + `batched-feedback` corpus (`unaddressed_feedback`); passes |
+| R03 (day-level feedback → replan the day, others stable) | live contractIt (`R03`) + `whole-day-replan` corpus; passes |
+| R05 (conflicting instructions) | live contractIt (`R05`) + mocked agent test; passes (model clarified instead of violating the exclusion) |
 | R06 (vague feedback → clarify what matters) | no scenario |
 | R07 (reopen / re-request current plan) | no coverage |
 | R09 (`Tomorrow is a holiday` → update state, no replan) | no scenario |
@@ -287,8 +289,8 @@ corpus scenario).
 Still open (model-quality behaviors that a mocked suite cannot pin; tracked in
 the live-LLM eval beads issue): T07 (short labelled easy-buy list), T12
 (cross-week variety), and run-to-run stability of B3 and the judge-graded T04.
-T11 now has live manual evidence (YouTube API, trusted channels), so it moves
-out of this list.
+T11 now has live manual evidence (YouTube API, trusted channels) and R02/R03/R05
+now have live contractIt coverage, so they move out of this list.
 
 ### Live-LLM eval (`src/__contract__/deepseek-meal-planning.contract.test.ts`)
 
@@ -308,6 +310,14 @@ Isolate one scenario with `vitest run -t "<scenario name>"`. Provider HTTP
 failures surface as a distinct message from behavioral failures (turn-limit /
 wrong terminal).
 
+**One-scenario runner:** `pnpm test:meal-contract:one` (bash
+`tools/meal-contract.sh`) wraps all the lessons above: it strips the quotes
+around `LLM_API_KEY` in `.dev.vars` (a quoted key otherwise causes a silent
+401), keeps `EVAL_DEBUG` ON by default, runs only the named scenario
+(`bash tools/meal-contract.sh "R03"`), and lists all live scenarios when given
+no argument. Do not hand-roll the `source .dev.vars` invocation — use the
+script.
+
 **Working loop (do NOT run the full contract suite per change):**
 
 1. The fast layer is the real test suite: 570 unit + 58 integration tests,
@@ -318,8 +328,7 @@ wrong terminal).
    non-determinism (isolate as flaky; do not fight it live).
 3. When a scenario needs a live run, add a `contractIt` case (build context by
    spreading a corpus scenario and overriding `request`/`profile` fields), then
-   run **only that one**: `source .dev.vars; DEEPSEEK_CONTRACT=1 pnpm exec
-   vitest run -t "<scenario name>" src/__contract__/deepseek-meal-planning.contract.test.ts`.
+   run **only that one**: `pnpm test:meal-contract:one "<scenario name>"`.
 4. Judge-graded outcomes (C2, T04) use a cheap one-shot LLM-as-a-judge
    (`judgePlan`), since exact-value assertions are wrong for a non-deterministic
    planner; everything else asserts deterministically.
@@ -339,7 +348,10 @@ morning budget with no night prep), T07 (scarce 7-item kitchen — accepts a
 sensible clarification or a judge-graded proposal; required `allowNewFoods:
 true` because only ~4 repertoire dishes are cookable from 7 items, which made
 the first setup unsatisfiable), and T08 (no-dairy week — deterministic
-dairy-token scan beyond the paneer/ghee hard exclusions).
+dairy-token scan beyond the paneer/ghee hard exclusions). Revision scenarios
+R02 (two comments in one plan), R03 (day-scoped replan, others stable) and R05
+(conflicting feedback clarifies instead of violating a hard exclusion) now
+have live `contractIt` coverage alongside the R01/R04 scoped-feedback case.
 
 **Findings it surfaced (iteration 1):**
 
@@ -380,8 +392,15 @@ dairy-token scan beyond the paneer/ghee hard exclusions).
 
 **Status (latest runs):**
 
-- Passing: B1/T01, C1, C2 (judge-graded), R01/R04, T02, T05, T07 (clarify or
-  judge-graded proposal), T08, T04-CL ×2.
+- Passing: B1/T01, C1, C2 (judge-graded), R01/R04, R02, R03, R05, T02, T05,
+  T07 (clarify or judge-graded proposal), T08, T04-CL ×2.
+- R03 (day-level replan): the model replanned Thursday only; Mon–Fri (other
+  days) stayed byte-identical to the recent plan.
+- R02 (batched): both comments landed in one revised plan, each addressed by a
+  cell change or outcome rationale.
+- R05 (conflict): the model refused to smuggle paneer past the dairy exclusion
+  and clarified instead: "Paneer is on your hard exclusion list — override for
+  this meal, or pick a different Tuesday lunch dish?"
 - Flaky: B3 (passed 2 of the last 3 runs — the turn-budget and opaque-id bugs
   are fixed; remaining variance is run-to-run plan stability).
 - Judge-graded T04: passes when the model either clarifies or builds a plan
