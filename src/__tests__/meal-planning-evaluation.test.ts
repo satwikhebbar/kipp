@@ -310,6 +310,44 @@ describe("meal-planning evaluator", () => {
     expect(evaluateMealPlan(candidate, overlappingExempt).pass).toBe(true)
   })
 
+  it("lets a snack-slot dish repeat from the recent plan but still flags cooked-meal repeats", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [
+        { id: "snack1", name: "Snack 1", packed: true, dry: true, maxCookMinutes: 0 },
+        { id: "home-lunch", name: "Home lunch", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    const profile = {
+      ...baseContext().profile,
+      dishRepertoire: ["banana", "roasted moong", "bottle gourd dal", "rice and beans"],
+      foodPreferences: { favourites: [], avoid: [] },
+    }
+    const context = baseContext({
+      schedule,
+      profile,
+      customPolicies: [],
+      weeklyExceptions: { items: [] },
+      recentPlan: {
+        Mon: { snack1: cellFor("snack1", "banana"), "home-lunch": cellFor("home-lunch", "rice and beans") },
+        Tue: { snack1: cellFor("snack1", "banana") },
+      },
+    })
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "snack1", "banana"],
+        ["Mon", "home-lunch", "rice and beans"],
+        ["Tue", "snack1", "roasted moong"],
+        ["Tue", "home-lunch", "bottle gourd dal"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(failureCodes(evaluation)).toEqual(["dish_repeated"])
+    expect(evaluation.measurements.dishRepeats).toEqual(["rice and beans"])
+  })
+
   it("keeps unchanged revision cells from repeating recent-plan dishes", () => {
     const schedule = {
       days: ["Mon", "Tue"],

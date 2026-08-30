@@ -242,8 +242,18 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   } else {
     for (const dish of candidateDishes) recentRepeatDishes.add(dish)
   }
+  // Escape hatch for cross-week variety: a fruit or dry snack that appears only in snack slots may
+  // repeat from the previous week. This is deliberately narrow (snack slots only, cross-week only):
+  // within-week distinctness and cooked-meal repeats are still enforced, so the model is not nudged
+  // toward leaning on fruit snacks over introducing new ones.
+  const snackSlotIds = new Set(schedule.slots.filter((slot) => slot.dry).map((slot) => slot.id))
+  const snackOnlyDishes = new Set<string>()
+  for (const ref of refs) {
+    if (!snackSlotIds.has(ref.slotId)) snackOnlyDishes.delete(ref.cell.dish)
+    else snackOnlyDishes.add(ref.cell.dish)
+  }
   for (const dish of recentDishes) {
-    if (recentRepeatDishes.has(dish)) repeatedDishes.add(dish)
+    if (recentRepeatDishes.has(dish) && !snackOnlyDishes.has(dish)) repeatedDishes.add(dish)
   }
   const dishRepeats = [...repeatedDishes].filter((dish) => !favourites.has(dish) && !requestedRepeats.has(dish)).sort()
   for (const dish of dishRepeats) {

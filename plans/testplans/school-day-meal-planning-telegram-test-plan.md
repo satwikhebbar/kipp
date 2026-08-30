@@ -204,7 +204,7 @@ would have caught it, and the coverage needed.
 | --- | --- |
 | T07 (short, labelled easy-buy list) | no corpus pin on easyBuys labelling |
 | T08 (no dairy this week) | no exclusion scenario |
-| T11 (preferred chef → recipe-link match; missing link leaves meal intact) | video unit tests only, no end-to-end |
+| T11 (preferred chef → recipe-link match; missing link leaves meal intact) | manually tested live against the real YouTube API (`valid-standard` week, trusted channels Hebbars Kitchen + Kunal Kapur); 9/12 lunch cells matched, bottle gourd dal/rajma/chole resolved to Hebbars, missing links left meals intact |
 | T12 (cross-week variety) | partial (`whole-day-replan`, `requested-repeat`) |
 | R01 / R04 (scoped meal feedback → targeted change, others stable) | partial (`unscoped_cell_changed` unit only) |
 | R05 (conflicting instructions) | no scenario |
@@ -287,6 +287,8 @@ corpus scenario).
 Still open (model-quality behaviors that a mocked suite cannot pin; tracked in
 the live-LLM eval beads issue): T07 (short labelled easy-buy list), T12
 (cross-week variety), and run-to-run stability of B3 and the judge-graded T04.
+T11 now has live manual evidence (YouTube API, trusted channels), so it moves
+out of this list.
 
 ### Live-LLM eval (`src/__contract__/deepseek-meal-planning.contract.test.ts`)
 
