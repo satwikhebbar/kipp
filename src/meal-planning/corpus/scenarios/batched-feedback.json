@@ -183,6 +183,10 @@
           "status": "available"
         },
         {
+          "name": "potato",
+          "status": "available"
+        },
+        {
           "name": "grapes",
           "status": "available"
         },
@@ -210,7 +214,7 @@
           "dish": "paratha",
           "vegetarian": true,
           "items": ["wheat flour"],
-          "cookMinutes": 15,
+          "cookMinutes": 20,
           "priorNightPrep": false
         },
         "snack1": {
@@ -247,7 +251,7 @@
           "dish": "poha",
           "vegetarian": true,
           "items": ["poha"],
-          "cookMinutes": 15,
+          "cookMinutes": 20,
           "priorNightPrep": false
         },
         "snack1": {
@@ -265,9 +269,9 @@
           "priorNightPrep": false
         },
         "school-lunch": {
-          "dish": "rajma",
+          "dish": "potato curry",
           "vegetarian": true,
-          "items": ["kidney beans"],
+          "items": ["potato"],
           "cookMinutes": 20,
           "priorNightPrep": false
         },
@@ -284,7 +288,7 @@
           "dish": "idli",
           "vegetarian": true,
           "items": ["idli batter"],
-          "cookMinutes": 15,
+          "cookMinutes": 20,
           "priorNightPrep": false
         },
         "snack1": {
@@ -321,7 +325,7 @@
           "dish": "upma",
           "vegetarian": true,
           "items": ["upma rava"],
-          "cookMinutes": 15,
+          "cookMinutes": 20,
           "priorNightPrep": false
         },
         "snack1": {
@@ -358,7 +362,7 @@
           "dish": "dosa",
           "vegetarian": true,
           "items": ["dosa batter"],
-          "cookMinutes": 15,
+          "cookMinutes": 20,
           "priorNightPrep": false
         },
         "snack1": {
@@ -424,7 +428,7 @@
               "dish": "paratha",
               "vegetarian": true,
               "items": ["wheat flour"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -461,7 +465,7 @@
               "dish": "poha",
               "vegetarian": true,
               "items": ["poha"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -479,9 +483,9 @@
               "priorNightPrep": false
             },
             "school-lunch": {
-              "dish": "rajma",
+              "dish": "potato curry",
               "vegetarian": true,
-              "items": ["kidney beans"],
+              "items": ["potato"],
               "cookMinutes": 20,
               "priorNightPrep": false
             },
@@ -498,7 +502,7 @@
               "dish": "idli",
               "vegetarian": true,
               "items": ["idli batter"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -535,7 +539,7 @@
               "dish": "upma",
               "vegetarian": true,
               "items": ["upma rava"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -572,7 +576,7 @@
               "dish": "dosa",
               "vegetarian": true,
               "items": ["dosa batter"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -626,7 +630,7 @@
               "dish": "paratha",
               "vegetarian": true,
               "items": ["wheat flour"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -663,7 +667,7 @@
               "dish": "poha",
               "vegetarian": true,
               "items": ["poha"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -681,9 +685,9 @@
               "priorNightPrep": false
             },
             "school-lunch": {
-              "dish": "rajma",
+              "dish": "potato curry",
               "vegetarian": true,
-              "items": ["kidney beans"],
+              "items": ["potato"],
               "cookMinutes": 20,
               "priorNightPrep": false
             },
@@ -700,7 +704,7 @@
               "dish": "idli",
               "vegetarian": true,
               "items": ["idli batter"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -737,7 +741,7 @@
               "dish": "upma",
               "vegetarian": true,
               "items": ["upma rava"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -774,7 +778,7 @@
               "dish": "dosa",
               "vegetarian": true,
               "items": ["dosa batter"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -828,7 +832,7 @@
               "dish": "paratha",
               "vegetarian": true,
               "items": ["wheat flour"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -865,7 +869,7 @@
               "dish": "poha",
               "vegetarian": true,
               "items": ["poha"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -883,9 +887,9 @@
               "priorNightPrep": false
             },
             "school-lunch": {
-              "dish": "rajma",
+              "dish": "potato curry",
               "vegetarian": true,
-              "items": ["kidney beans"],
+              "items": ["potato"],
               "cookMinutes": 20,
               "priorNightPrep": false
             },
@@ -902,7 +906,7 @@
               "dish": "idli",
               "vegetarian": true,
               "items": ["idli batter"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -939,7 +943,7 @@
               "dish": "upma",
               "vegetarian": true,
               "items": ["upma rava"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
@@ -976,7 +980,7 @@
               "dish": "dosa",
               "vegetarian": true,
               "items": ["dosa batter"],
-              "cookMinutes": 15,
+              "cookMinutes": 20,
               "priorNightPrep": false
             },
             "snack1": {
