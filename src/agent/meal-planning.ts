@@ -167,12 +167,9 @@ export const PROPOSE_JUSTIFICATION_MAX_CHARACTERS = 500
 export const proposePlanInputSchema = z
   .object({
     candidate: mealPlanSelectionCandidateSchema,
-    // Optional: the authoritative week state already exists in the workflow
-    // context. The model only supplies these to add items (request-listed
-    // ingredients) or adjust exceptions; the plan is still validated against
-    // the authoritative state plus the candidate's easy-buys.
-    weeklyInventory: weeklyInventorySchema.optional(),
-    weeklyExceptions: weeklyExceptionsSchema.optional(),
+    // The model may only attach a scope interpretation to unscoped feedback;
+    // inventory, exceptions, and the feedback source itself stay authoritative
+    // in the workflow context and are never echoed by the terminal call.
     feedbackItems: z.array(feedbackItemSchema).optional(),
     // Debug aid only. The session truncates this before retaining it, so a
     // verbose explanation never costs the model another terminal turn.

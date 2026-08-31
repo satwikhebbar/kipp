@@ -152,15 +152,9 @@ function clarifyResponse(input: unknown) {
   return { toolCalls: [call("clarify", "needs_clarification", input)], usage: { inputTokens: 0, outputTokens: 0 } }
 }
 
-function proposeInput(
-  candidate: unknown,
-  feedbackItems?: unknown,
-  overrides?: { weeklyInventory?: unknown; weeklyExceptions?: unknown },
-) {
+function proposeInput(candidate: unknown, feedbackItems?: unknown) {
   return {
     candidate: selectionCandidate(candidate as MealPlanCandidate),
-    weeklyInventory: overrides?.weeklyInventory ?? { items: [], notes: [] },
-    weeklyExceptions: overrides?.weeklyExceptions ?? { items: [] },
     ...(feedbackItems ? { feedbackItems } : {}),
   }
 }
@@ -356,21 +350,24 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal).toMatchObject({ kind: "needs_clarification" })
   })
 
-  it("keeps evaluate_meal_plan available after a successful evaluation so the model can revise before proposing", async () => {
+  it("requires a terminal tool after a successful evaluation", async () => {
     const provider = providerWith(
-      evaluateResponse(passingCandidate()),
       evaluateResponse(passingCandidate()),
       proposeResponse(proposeInput(passingCandidate())),
     )
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], { context: context() })
     expect(result.completed).toBe(true)
-    expect(result.providerTurns).toBe(3)
+    expect(result.providerTurns).toBe(2)
     expect(result.toolExecutions).toEqual([
-      { tool: "evaluate_meal_plan", outcome: "succeeded" },
       { tool: "evaluate_meal_plan", outcome: "succeeded" },
       { tool: "propose_plan", outcome: "succeeded" },
     ])
     expect(result.terminal).toMatchObject({ kind: "propose_plan" })
+    const generate = vi.mocked(provider.generate)
+    expect(generate.mock.calls[1]?.[0].tools.map((tool) => tool.name)).toEqual(["propose_plan", "needs_clarification"])
+    expect(generate.mock.calls[1]?.[0].messages).toContainEqual(
+      expect.objectContaining({ role: "user", text: expect.stringContaining("Evaluation passed") }),
+    )
   })
 
   it("keeps the planning prompt policy-agnostic (no hardcoded custom-policy ids)", () => {
@@ -388,9 +385,16 @@ describe("bounded meal-planning agent session", () => {
     expect(MEAL_PLANNING_AGENT_PROMPT).toContain("Plans default to healthy, nutritious meals")
   })
 
-  it("accepts a plan whose ingredients come from inventory supplied at propose time, even when the context inventory is empty", async () => {
+  it("uses the authoritative context inventory rather than a terminal echo", async () => {
+    const supplied = {
+      items: [
+        { name: "beans", status: "available" as const },
+        { name: "carrots", status: "available" as const },
+      ],
+      notes: [],
+    }
     const ctx = context({
-      weeklyInventory: { items: [], notes: [] },
+      weeklyInventory: supplied,
       profile: { ...context().profile, dishRepertoire: ["paratha", "rice and beans"] },
       request: { kind: "initial_plan", text: "I have beans, carrots, bottle gourd, peas, bananas and apples." },
     })
@@ -399,18 +403,9 @@ describe("bounded meal-planning agent session", () => {
       grid: gridWith("Mon", "home-lunch", cell("rice and beans", ["rice", "beans"], "home-lunch")),
       easyBuys: ["beans", "carrots"],
     }
-    const supplied = {
-      items: [
-        { name: "beans", status: "available" as const },
-        { name: "carrots", status: "available" as const },
-      ],
-      notes: [],
-    }
     const provider = providerWith(
       evaluateResponse(candidate),
-      proposeResponse(
-        proposeInput(candidate, undefined, { weeklyInventory: supplied, weeklyExceptions: ctx.weeklyExceptions }),
-      ),
+      proposeResponse(proposeInput(candidate)),
     )
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
       context: ctx,
@@ -439,12 +434,7 @@ describe("bounded meal-planning agent session", () => {
     }
     const provider = providerWith(
       evaluateResponse(candidate),
-      proposeResponse(
-        proposeInput(candidate, ctx.feedbackItems, {
-          weeklyInventory: ctx.weeklyInventory,
-          weeklyExceptions: ctx.weeklyExceptions,
-        }),
-      ),
+      proposeResponse(proposeInput(candidate, ctx.feedbackItems)),
       clarifyResponse({
         message: "Paneer is excluded this week — should lunch stay dairy-free?",
         reasonCodes: ["hard_exclusion"],
@@ -481,12 +471,7 @@ describe("bounded meal-planning agent session", () => {
     const candidate = { grid, easyBuys: [], policyOutcomes: {} }
     const provider = providerWith(
       evaluateResponse(candidate),
-      proposeResponse(
-        proposeInput(candidate, undefined, {
-          weeklyInventory: ctx.weeklyInventory,
-          weeklyExceptions: ctx.weeklyExceptions,
-        }),
-      ),
+      proposeResponse(proposeInput(candidate)),
     )
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
       context: ctx,
@@ -506,12 +491,7 @@ describe("corpus-driven planning loop", () => {
     for (const candidate of scenario.candidates.filter((entry) => entry.expect.pass)) {
       const provider = providerWith(
         evaluateResponse(candidate.plan),
-        proposeResponse(
-          proposeInput(candidate.plan, scenario.context.feedbackItems, {
-            weeklyInventory: scenario.context.weeklyInventory,
-            weeklyExceptions: scenario.context.weeklyExceptions,
-          }),
-        ),
+        proposeResponse(proposeInput(candidate.plan, scenario.context.feedbackItems)),
       )
       const result = await runMealPlanningAgentSession(
         provider,
