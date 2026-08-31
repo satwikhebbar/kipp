@@ -2,7 +2,11 @@ import { appendFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { expandMealCatalog } from "../agent/meal-catalog-expansion"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
-import { renderHouseholdContext, renderRevisionFeedback } from "../meal-planning/agent-workflow"
+import {
+  renderHouseholdContext,
+  renderPlanningTimeContext,
+  renderRevisionFeedback,
+} from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type {
@@ -67,6 +71,19 @@ const MORNING_BUDGET_MINUTES = 35
 const BREAKFAST_COOK_MIN = 15
 const MAIN_COOK_MIN = 20
 const SNACK_COOK_MIN = 0
+interface LivePlanningTime {
+  currentInstant: string
+  timezone: string
+  weekStart: string
+  weekEnd: string
+}
+
+const DEFAULT_LIVE_PLANNING_TIME: LivePlanningTime = {
+  currentInstant: "2026-09-01T03:30:00.000Z",
+  timezone: "Asia/Kolkata",
+  weekStart: "2026-08-30T18:30:00.000Z",
+  weekEnd: "2026-09-05T18:29:59.999Z",
+}
 
 const HOLIDAY_HALF_DAY_PANCAKE: MealDefinition = {
   id: "meal_01j1f104r8p5k3v7",
@@ -175,6 +192,21 @@ const POTATO_CURRY_MEAL: MealDefinition = {
   typicalCookMinutes: 20,
   priorNightPrep: "none",
   requiredIngredients: ["potato"],
+  optionalIngredients: [],
+  status: "established",
+}
+
+const PEAS_PULAO_MEAL: MealDefinition = {
+  id: "meal_01j1f10ia2r6w9k3",
+  name: "peas pulao",
+  aliases: ["peas pulao"],
+  principalIngredients: ["peas", "rice"],
+  vegetarian: true,
+  suitableSlots: ["school-lunch", "home-lunch"],
+  packedFood: { suitable: true, dry: false },
+  typicalCookMinutes: 20,
+  priorNightPrep: "none",
+  requiredIngredients: ["peas", "rice"],
   optionalIngredients: [],
   status: "established",
 }
@@ -322,6 +354,49 @@ function midweekShortageContext(): MealPlanContext {
       ...base.profile,
       mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), MIDWEEK_SHORTAGE_MEAL, POTATO_CURRY_MEAL],
     },
+  }
+}
+
+function r08MidweekPeasShortageContext(): MealPlanContext {
+  const base = scenario("midweek-shortage").context
+  const recentPlan = base.recentPlan
+  if (!recentPlan) throw new Error("midweek-shortage needs recentPlan")
+  return {
+    ...base,
+    profile: {
+      ...base.profile,
+      mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), PEAS_PULAO_MEAL, POTATO_CURRY_MEAL],
+    },
+    weeklyInventory: {
+      ...base.weeklyInventory,
+      items: [
+        ...base.weeklyInventory.items.map((item) =>
+          item.name === "paneer" ? { ...item, status: "available" as const } : item,
+        ),
+        { name: "peas", status: "unavailable" },
+      ],
+    },
+    recentPlan: {
+      ...recentPlan,
+      Thu: {
+        ...recentPlan.Thu,
+        "school-lunch": {
+          dish: PEAS_PULAO_MEAL.name,
+          vegetarian: true,
+          items: PEAS_PULAO_MEAL.requiredIngredients,
+          cookMinutes: PEAS_PULAO_MEAL.typicalCookMinutes,
+          priorNightPrep: false,
+        },
+      },
+    },
+    request: { kind: "revision", text: "We ran out of peas; change Thursday lunch." },
+    feedbackItems: [
+      {
+        id: "fb-peas",
+        text: "We ran out of peas; change Thursday lunch.",
+        scope: { day: "Thu", slot: "school-lunch" },
+      },
+    ],
   }
 }
 
@@ -519,7 +594,10 @@ function assertRequestedRepresented(requested: string[], candidate: MealPlanCand
 }
 
 /** Drives one real-provider session as the workflow does (context injected into the user message). */
-async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessionResult> {
+async function runLive(
+  context: MealPlanContext,
+  planningTime: LivePlanningTime = DEFAULT_LIVE_PLANNING_TIME,
+): Promise<MealPlanningAgentSessionResult> {
   // Corpus fixtures intentionally retain hydrated MealCells as evaluator
   // examples. Live agent runs must instead receive the real established
   // catalog that production's initial profile provides.
@@ -535,13 +613,30 @@ async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessi
       requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
     }),
   )
+  // Corpus revisions retain only the rendered prior grid. Production has the
+  // full active candidate, so reconstruct the otherwise opaque retained state
+  // here only to exercise the same patch boundary as the workflow.
+  const revisionBaseCandidate: MealPlanCandidate | undefined =
+    catalogContext.request.kind === "revision" && catalogContext.recentPlan
+      ? {
+          grid: catalogContext.recentPlan,
+          easyBuys: [],
+          policyOutcomes: Object.fromEntries(
+            catalogContext.customPolicies.map((policy) => [
+              policy.id,
+              { outcome: "satisfied" as const, rationale: "Retained from the active plan." },
+            ]),
+          ),
+        }
+      : undefined
   const userText =
     catalogContext.request.kind === "revision"
-      ? `Revision feedback:\n${renderRevisionFeedback(catalogContext.feedbackItems ?? [])}\n\n${renderHouseholdContext(catalogContext)}`
-      : `Request: ${catalogContext.request.text}\n\n${renderHouseholdContext(catalogContext)}`
+      ? `${renderPlanningTimeContext(new Date(planningTime.currentInstant), planningTime.timezone, planningTime.weekStart, planningTime.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(catalogContext.feedbackItems ?? [])}\n\n${renderHouseholdContext(catalogContext)}`
+      : `${renderPlanningTimeContext(new Date(planningTime.currentInstant), planningTime.timezone, planningTime.weekStart, planningTime.weekEnd)}\nRequest: ${catalogContext.request.text}\n\n${renderHouseholdContext(catalogContext)}`
   try {
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], {
       context: catalogContext,
+      ...(revisionBaseCandidate ? { revisionBaseCandidate } : {}),
       ...(evalDebug ? { retainReasoning: true } : {}),
     })
     if (evalDebug) dumpResult(result)
@@ -1141,6 +1236,25 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     for (const day of Object.keys(recent)) {
       if (day === scope.day) continue
       expect(dishesBySlot(terminal.candidate.grid, day), `${day} must stay stable`).toEqual(dishesBySlot(recent, day))
+    }
+  })
+
+  contractIt("R08: a midweek unavailable ingredient changes only the affected future lunch", async () => {
+    const ctx = r08MidweekPeasShortageContext()
+    const recent = ctx.recentPlan
+    if (!recent) throw new Error("R08 needs recentPlan")
+    const terminal = requireProposal(await runLive(ctx, DEFAULT_LIVE_PLANNING_TIME))
+
+    expect(terminal.candidate.grid.Thu["school-lunch"].dish).not.toBe(PEAS_PULAO_MEAL.name)
+    expect(terminal.candidate.grid.Thu["school-lunch"].items).not.toContain("peas")
+    for (const day of Object.keys(recent)) {
+      const proposedDishes = dishesBySlot(terminal.candidate.grid, day)
+      const existingDishes = dishesBySlot(recent, day)
+      if (day === "Thu") {
+        delete proposedDishes["school-lunch"]
+        delete existingDishes["school-lunch"]
+      }
+      expect(proposedDishes, `${day} must stay stable outside the scoped lunch`).toEqual(existingDishes)
     }
   })
 

@@ -4,6 +4,7 @@ import type { Env } from "../core/types"
 import {
   type MealPlanningLiveEvent,
   renderHouseholdContext,
+  renderPlanningTimeContext,
   renderRevisionFeedback,
   runAgentCenteredMealPlanningWorkflow,
 } from "../meal-planning/agent-workflow"
@@ -65,6 +66,22 @@ it("renders scoped and unbound revision feedback without storage ids", () => {
   )
 })
 
+it("renders neutral current-time and planning-week facts for relative-date requests", () => {
+  expect(
+    renderPlanningTimeContext(
+      new Date("2026-09-01T03:30:00.000Z"),
+      "Asia/Kolkata",
+      "2026-08-30T18:30:00.000Z",
+      "2026-09-05T18:29:59.999Z",
+    ),
+  ).toBe(
+    "Current instant: 2026-09-01T03:30:00.000Z\n" +
+      "Time zone: Asia/Kolkata\n" +
+      "Planning-week start: 2026-08-30T18:30:00.000Z\n" +
+      "Planning-week end: 2026-09-05T18:29:59.999Z",
+  )
+})
+
 // Workflow fixtures intentionally reuse paratha in every slot. Keep that
 // legacy fixture compact while giving its fixture definition stable metadata
 // that makes those placements valid under the selection contract.
@@ -78,10 +95,6 @@ SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definit
       }
     : definition,
 )
-
-function cell(dish: string, items: string[], slot: string): MealCell {
-  return { dish, vegetarian: true, items, cookMinutes: SLOT_COOK[slot], priorNightPrep: false }
-}
 
 function seedCandidate(override?: { day: string; slot: string; cell: MealCell }): MealPlanSelectionCandidate {
   const selectionBySlot: Record<string, string> = {
@@ -97,12 +110,24 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
       Object.keys(SLOT_COOK).map((slot) => [slot, { mealDefinitionId: selectionBySlot[slot] }]),
     )
   }
-  if (override) grid[override.day][override.slot] = { mealDefinitionId: SEED_MEAL_IDS[override.cell.dish]! }
+  if (override) {
+    const mealDefinitionId = SEED_MEAL_IDS[override.cell.dish]
+    if (!mealDefinitionId) throw new Error(`missing fixture meal definition for ${override.cell.dish}`)
+    grid[override.day][override.slot] = { mealDefinitionId }
+  }
   return {
     grid,
     easyBuys: ["pomegranate", "apple"],
     policyOutcomes: Object.fromEntries(POLICY_IDS.map((id) => [id, { outcome: "satisfied", rationale: "ok" }])),
   }
+}
+
+function revisionPatch(
+  day: string,
+  slot: string,
+  mealDefinitionId: string,
+): { grid: MealPlanSelectionCandidate["grid"] } {
+  return { grid: { [day]: { [slot]: { mealDefinitionId } } } }
 }
 
 function proposeInput(candidate: unknown, feedbackItems?: unknown) {
@@ -329,7 +354,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
-    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("pomegranate", ["pomegranate"], "snack1") })
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS.pomegranate)
     const step = createFakeStep(
       [
         {
@@ -363,6 +388,12 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.version.version).toBe(2)
     expect(active?.version.requestKind).toBe("revision")
     expect(active?.version.feedbackBatchId).toBe(`${active?.plan.planId}:v2`)
+    const v1 = db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as {
+      candidate_json: string
+    }
+    const persistedBase = JSON.parse(v1.candidate_json) as { grid: Record<string, Record<string, MealCell>> }
+    expect(active?.version.candidate.grid.Mon.breakfast).toEqual(persistedBase.grid.Mon.breakfast)
+    expect(active?.version.candidate.grid.Tue).toEqual(persistedBase.grid.Tue)
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
     expect(telegramMessages.filter((message) => message.text.includes("School week of")).length).toBe(2)
@@ -379,12 +410,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
-    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("pomegranate", ["pomegranate"], "snack1") })
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS.pomegranate)
     // The v3 candidate keeps the v2 Mon change and adds a Tue change.
-    const revisedAgain = {
-      ...revised,
-      grid: { ...revised.grid, Tue: { ...revised.grid.Tue, snack1: { mealDefinitionId: SEED_MEAL_IDS.apple } } },
-    }
+    const revisedAgain = revisionPatch("Tue", "snack1", SEED_MEAL_IDS.apple)
     // Every revision runs through distinct per-occurrence step names, so the
     // memoized runtime cannot return the initial plan's send/register/promote
     // results for v2/v3.

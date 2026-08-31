@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { loadScenarios } from "../meal-planning/corpus/load"
-import { evaluateMealPlan, evaluateMealPlanSelection } from "../meal-planning/evaluation"
-import { hydrateMealPlan } from "../meal-planning/hydration"
+import {
+  evaluateMealPlan,
+  evaluateMealPlanSelection,
+  evaluateMealPlanSelectionPatch,
+} from "../meal-planning/evaluation"
+import { hydrateMealPlan, hydrateMealPlanPatch } from "../meal-planning/hydration"
 import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
 
@@ -943,5 +947,113 @@ describe("structured meal hydration", () => {
     expect(result.failures).toEqual([])
     expect(result.provisionalMealDefinitions).toEqual([provisional])
     expect(result.candidate?.grid.Mon.breakfast.dish).toBe("Old rice")
+  })
+
+  it("hydrates only revision-patch cells and retains all untouched hydrated cells exactly", () => {
+    const potato = {
+      ...definition,
+      id: "meal-potato",
+      name: "Potato curry",
+      suitableSlots: ["school-lunch"],
+      requiredIngredients: ["potato"],
+      principalIngredients: ["potato"],
+      priorNightPrep: "none" as const,
+    }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition, potato], pantryBaseline: ["wheat flour", "potato"] },
+    })
+    const base = {
+      grid: {
+        Mon: {
+          breakfast: {
+            dish: "Saved breakfast",
+            vegetarian: true,
+            items: ["saved"],
+            cookMinutes: 7,
+            priorNightPrep: true,
+          },
+          "school-lunch": {
+            dish: "Saved lunch",
+            vegetarian: true,
+            items: ["saved lunch"],
+            cookMinutes: 11,
+            priorNightPrep: false,
+          },
+        },
+      },
+      easyBuys: ["apple"],
+      policyOutcomes: { policy: { outcome: "satisfied" as const, rationale: "saved" } },
+    }
+    const patch = { grid: { Mon: { "school-lunch": { mealDefinitionId: potato.id } } } }
+    const result = hydrateMealPlanPatch(patch, base, context)
+    expect(result.failures).toEqual([])
+    expect(result.candidate?.grid.Mon.breakfast).toBe(base.grid.Mon.breakfast)
+    expect(result.candidate?.grid.Mon["school-lunch"]).toMatchObject({
+      dish: "Potato curry",
+      items: ["potato"],
+      cookMinutes: 15,
+    })
+    expect(result.candidate?.easyBuys).toEqual(["apple"])
+    expect(result.candidate?.policyOutcomes).toEqual(base.policyOutcomes)
+  })
+
+  it("rejects an invalid changed selection before evaluating the merged revision candidate", () => {
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour"] },
+    })
+    const base = {
+      grid: {
+        Mon: {
+          breakfast: {
+            dish: "Saved breakfast",
+            vegetarian: true,
+            items: ["saved"],
+            cookMinutes: 7,
+            priorNightPrep: false,
+          },
+        },
+      },
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const result = evaluateMealPlanSelectionPatch(
+      { grid: { Mon: { breakfast: { mealDefinitionId: "unknown" } } } },
+      base,
+      context,
+    )
+    expect(result.candidate).toBeUndefined()
+    expect(result.evaluation.failures).toMatchObject([
+      { code: "unknown_meal_definition", day: "Mon", slot: "breakfast" },
+    ])
+  })
+
+  it("retains inherited provisional snapshots when a revision patch changes a different cell", () => {
+    const provisional = { ...definition, id: "provisional-saved", status: "provisional" as const, name: "Saved rice" }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour"] },
+      provisionalMealDefinitions: [provisional],
+    })
+    const base = {
+      grid: {
+        Mon: {
+          breakfast: {
+            dish: "Saved breakfast",
+            vegetarian: true,
+            items: ["saved"],
+            cookMinutes: 7,
+            priorNightPrep: false,
+          },
+        },
+      },
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const result = hydrateMealPlanPatch(
+      { grid: { Mon: { breakfast: { mealDefinitionId: definition.id } } } },
+      base,
+      context,
+    )
+    expect(result.failures).toEqual([])
+    expect(result.provisionalMealDefinitions).toEqual([provisional])
   })
 })

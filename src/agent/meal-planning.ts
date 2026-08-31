@@ -1,6 +1,6 @@
 import { z } from "zod"
-import { evaluateMealPlanSelection } from "../meal-planning/evaluation"
-import type { MealPlanContext } from "../meal-planning/types"
+import { evaluateMealPlanSelection, evaluateMealPlanSelectionPatch } from "../meal-planning/evaluation"
+import type { MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
 import { EXCEPTION_KINDS, FAILURE_CODES, INVENTORY_STATUSES, POLICY_OUTCOMES } from "../meal-planning/types"
 import type { ToolDefinition } from "../runtime/tools"
 
@@ -100,6 +100,18 @@ export const mealPlanSelectionCandidateSchema = z
   })
   .strict()
 
+/** A revision supplies selections for changed cells only; omitted state is retained server-side. */
+export const mealPlanSelectionPatchSchema = z
+  .object({
+    grid: selectionGridSchema.describe("only changed cells, keyed by day then slot id; omit every untouched cell"),
+    easyBuys: z.array(z.string()).optional().describe("replacement shopping list only when it changes"),
+    policyOutcomes: z
+      .record(z.string(), policyOutcomeSchema)
+      .optional()
+      .describe("replacement outcomes only when they change"),
+  })
+  .strict()
+
 const failureSchema = z
   .object({
     code: z.enum(FAILURE_CODES),
@@ -196,6 +208,14 @@ export const proposePlanInputSchema = z
   })
   .strict()
 
+export const proposePlanRevisionInputSchema = z
+  .object({
+    candidate: mealPlanSelectionPatchSchema,
+    feedbackItems: z.array(feedbackItemSchema).optional(),
+    justification: z.string().trim().min(1).optional(),
+  })
+  .strict()
+
 export const needsClarificationInputSchema = z
   .object({
     message: z.string().trim().min(1),
@@ -210,17 +230,21 @@ export const needsClarificationInputSchema = z
 const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).strict()
 
 /** Creates the deterministic candidate-evaluation tool for one bounded meal-planning session. */
-export function createEvaluateMealPlanTool(context: MealPlanContext): ToolDefinition {
+export function createEvaluateMealPlanTool(context: MealPlanContext, revisionBase?: MealPlanCandidate): ToolDefinition {
+  const isRevision = revisionBase !== undefined
   return {
     name: MEAL_PLANNING_TOOL.EVALUATE,
-    description:
-      "Validate exactly one complete Mon–Sat meal-plan candidate against the household context. Returns typed failures and measurements; it never persists a plan.",
-    input: mealPlanSelectionCandidateSchema,
+    description: isRevision
+      ? "Validate one revision patch against the active plan and household context. Omitted cells remain unchanged. Returns typed failures and measurements; it never persists a plan."
+      : "Validate exactly one complete Mon–Sat meal-plan candidate against the household context. Returns typed failures and measurements; it never persists a plan.",
+    input: isRevision ? mealPlanSelectionPatchSchema : mealPlanSelectionCandidateSchema,
     output: mealPlanEvaluationSchema,
     privacy: "private",
     batching: "isolated",
     handler: async (candidate) => {
-      return evaluateMealPlanSelection(candidate, context).evaluation
+      return revisionBase
+        ? evaluateMealPlanSelectionPatch(candidate, revisionBase, context).evaluation
+        : evaluateMealPlanSelection(candidate, context).evaluation
     },
   }
 }

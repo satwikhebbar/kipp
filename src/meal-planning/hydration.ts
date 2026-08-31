@@ -1,10 +1,12 @@
 import type {
   MealCell,
   MealDefinition,
+  MealPlanCandidate,
   MealPlanContext,
   MealPlanFailure,
   MealPlanHydrationResult,
   MealPlanSelectionCandidate,
+  MealPlanSelectionPatch,
   MealSelection,
   NewMealProposal,
 } from "./types"
@@ -175,10 +177,11 @@ export function hydrateMealPlan(
       for (const [source, target] of Object.entries(aliases)) {
         const sourceKey = normalized(source)
         const targetKey = normalized(target)
+        const availableSource = availableIngredients.get(sourceKey)
         if (
           !sourceKey ||
           !targetKey ||
-          !availableIngredients.has(sourceKey) ||
+          !availableSource ||
           !ingredients.some((ingredient) => normalized(ingredient) === targetKey) ||
           aliasByTarget.has(targetKey) ||
           usedSources.has(sourceKey)
@@ -191,7 +194,7 @@ export function hydrateMealPlan(
           })
           continue
         }
-        aliasByTarget.set(targetKey, availableIngredients.get(sourceKey)!)
+        aliasByTarget.set(targetKey, availableSource)
         usedSources.add(sourceKey)
       }
       const resolvedIngredients = ingredients.map((ingredient) => {
@@ -251,5 +254,39 @@ export function hydrateMealPlan(
         : undefined,
     provisionalMealDefinitions: [...inherited, ...generated],
     failures,
+  }
+}
+
+/**
+ * Hydrates only a revision's changed selections, then overlays them on the
+ * authoritative active candidate. Omitted cells remain byte-for-byte the
+ * existing hydrated MealCells; the model never has to reverse-map them to
+ * opaque catalog IDs.
+ */
+export function hydrateMealPlanPatch(
+  patch: MealPlanSelectionPatch,
+  base: MealPlanCandidate,
+  context: MealPlanContext,
+  createId: () => string = () => `provisional_${crypto.randomUUID()}`,
+): MealPlanHydrationResult {
+  const hydrated = hydrateMealPlan(
+    {
+      grid: patch.grid,
+      easyBuys: patch.easyBuys ?? base.easyBuys,
+      policyOutcomes: patch.policyOutcomes ?? base.policyOutcomes,
+    },
+    context,
+    createId,
+  )
+  if (!hydrated.candidate) return hydrated
+
+  const grid: Record<string, Record<string, MealCell>> = {}
+  for (const [day, cells] of Object.entries(base.grid)) grid[day] = { ...cells }
+  for (const [day, cells] of Object.entries(hydrated.candidate.grid)) {
+    grid[day] = { ...(grid[day] ?? {}), ...cells }
+  }
+  return {
+    ...hydrated,
+    candidate: { ...hydrated.candidate, grid },
   }
 }

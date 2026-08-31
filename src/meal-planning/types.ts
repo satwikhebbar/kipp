@@ -272,6 +272,18 @@ export interface MealPlanSelectionCandidate {
   policyOutcomes: Record<string, PolicyOutcome>
 }
 
+/**
+ * LLM-facing revision input. Its grid contains only cells the model intends to
+ * change; deterministic code retains every omitted cell from the active plan.
+ */
+export interface MealPlanSelectionPatch {
+  grid: MealSelectionGrid
+  /** Omit to retain the active plan's shopping list. */
+  easyBuys?: string[]
+  /** Omit to retain the active plan's recorded policy outcomes. */
+  policyOutcomes?: Record<string, PolicyOutcome>
+}
+
 export interface MealPlanHydrationResult {
   candidate?: MealPlanCandidate
   provisionalMealDefinitions: MealDefinition[]

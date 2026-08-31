@@ -1,5 +1,5 @@
 import { computeCoverageSet } from "./coverage"
-import { hydrateMealPlan } from "./hydration"
+import { hydrateMealPlan, hydrateMealPlanPatch } from "./hydration"
 import type {
   MealCell,
   MealGrid,
@@ -10,6 +10,7 @@ import type {
   MealPlanMeasurements,
   MealPlanSelectionCandidate,
   MealPlanSelectionEvaluation,
+  MealPlanSelectionPatch,
   MealSlot,
 } from "./types"
 
@@ -48,6 +49,35 @@ export function evaluateMealPlanSelection(
           dishRepeats: [],
           inventoryUsed: [],
           easyBuyCount: selectionCandidate.easyBuys.length,
+        },
+      },
+    }
+  }
+  return { ...hydration, evaluation: evaluateMealPlan(hydration.candidate, context) }
+}
+
+/** Evaluates a revision patch after hydrating and merging it into the active plan. */
+export function evaluateMealPlanSelectionPatch(
+  patch: MealPlanSelectionPatch,
+  base: MealPlanCandidate,
+  context: MealPlanContext,
+): MealPlanSelectionEvaluation {
+  const hydration = hydrateMealPlanPatch(patch, base, context)
+  if (!hydration.candidate) {
+    return {
+      ...hydration,
+      evaluation: {
+        pass: false,
+        failures: hydration.failures,
+        measurements: {
+          morningCookByDay: {},
+          morningCookMax: 0,
+          priorNightPrepByDay: {},
+          priorNightPrepMax: 0,
+          dishRepeatCount: 0,
+          dishRepeats: [],
+          inventoryUsed: [],
+          easyBuyCount: patch.easyBuys?.length ?? base.easyBuys.length,
         },
       },
     }

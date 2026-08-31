@@ -90,6 +90,21 @@ export function renderRevisionFeedback(items: FeedbackItem[]): string {
     .join("\n")
 }
 
+/** Renders neutral temporal facts so the planner can resolve relative dates against its active school week. */
+export function renderPlanningTimeContext(
+  currentInstant: Date,
+  timezone: string,
+  weekStart: string,
+  weekEnd: string,
+): string {
+  return [
+    `Current instant: ${currentInstant.toISOString()}`,
+    `Time zone: ${timezone}`,
+    `Planning-week start: ${weekStart}`,
+    `Planning-week end: ${weekEnd}`,
+  ].join("\n")
+}
+
 /** Renders the household operating context the planning model must see (profile, schedule, policies, week state). */
 export function renderHouseholdContext(context: MealPlanContext): string {
   const p = context.profile
@@ -185,7 +200,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${timezone}\nRequest: ${event.payload.requestText || "/mealplan"}\n\n${renderHouseholdContext(context)}`,
+      text: `${renderPlanningTimeContext(new Date(), timezone, week.weekStart, week.weekEnd)}\nRequest: ${event.payload.requestText || "/mealplan"}\n\n${renderHouseholdContext(context)}`,
     },
   ]
   const outcome = await runPlanningSession(env, step, event, {
@@ -256,7 +271,14 @@ async function runPlanningSession(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
-  options: { context: MealPlanContext; messages: ToolConversationMessage[]; isRevision: boolean; occurrence: string },
+  options: {
+    context: MealPlanContext
+    messages: ToolConversationMessage[]
+    isRevision: boolean
+    /** Retained only for revision patch hydration; never supplied to the model as ids. */
+    revisionBaseCandidate?: MealPlanCandidate
+    occurrence: string
+  },
 ): Promise<PlanningOutcome | null> {
   const notifyPrefix = `meal-planning-notify-${options.occurrence}`
   const sessionDeadline = Date.now() + MEAL_PLANNING_TTL_MS
@@ -273,8 +295,11 @@ async function runPlanningSession(
           env.LLM_MODEL,
           Number(env.LLM_MAX_RETRIES || "3"),
         )
-        return await runMealPlanningAgentSession(provider, options.messages, { context: options.context })
-      } catch (error) {
+        return await runMealPlanningAgentSession(provider, options.messages, {
+          context: options.context,
+          revisionBaseCandidate: options.revisionBaseCandidate,
+        })
+      } catch (_error) {
         // Upstream provider failure becomes an intelligible notice, not a crashed instance.
         logRuntime(env, {
           workflow: event.instanceId,
@@ -515,10 +540,16 @@ async function runRevision(
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${active.plan.timezone}\nRevision feedback:\n${renderRevisionFeedback(submission.items)}\n\n${renderHouseholdContext(context)}`,
+      text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(submission.items)}\n\n${renderHouseholdContext(context)}`,
     },
   ]
-  const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true, occurrence })
+  const outcome = await runPlanningSession(env, step, event, {
+    context,
+    messages,
+    isRevision: true,
+    revisionBaseCandidate: active.version.candidate,
+    occurrence,
+  })
   if (outcome?.kind !== "proposed") return null
   const propose = outcome.propose
   if (isNoChangeCandidate(propose.candidate, active.version.candidate)) {
