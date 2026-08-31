@@ -26,7 +26,7 @@ function selectionUsesPrep(selection: MealSelection): boolean {
 }
 
 function selectionAliases(selection: MealSelection): Record<string, string> {
-  return "ingredientAliasesUsed" in selection ? selection.ingredientAliasesUsed ?? {} : {}
+  return "ingredientAliasesUsed" in selection ? (selection.ingredientAliasesUsed ?? {}) : {}
 }
 
 function validateProposal(proposal: NewMealProposal): string | undefined {
@@ -36,7 +36,7 @@ function validateProposal(proposal: NewMealProposal): string | undefined {
   if (!proposal.suitableSlots.length) return "suitableSlots is required"
   if (!proposal.ingredients.length) return "ingredients is required"
   if (!Number.isFinite(proposal.cookMinutes) || proposal.cookMinutes < 0) return "cookMinutes must be non-negative"
-  if (!['none', 'optional', 'required'].includes(proposal.priorNightPrep)) return "invalid priorNightPrep"
+  if (!["none", "optional", "required"].includes(proposal.priorNightPrep)) return "invalid priorNightPrep"
   return undefined
 }
 
@@ -75,7 +75,9 @@ export function hydrateMealPlan(
   createId: () => string = () => `provisional_${crypto.randomUUID()}`,
 ): MealPlanHydrationResult {
   const failures: MealPlanFailure[] = []
-  const established = (context.profile.mealDefinitions ?? []).filter((definition) => definition.status === "established")
+  const established = (context.profile.mealDefinitions ?? []).filter(
+    (definition) => definition.status === "established",
+  )
   const inherited = context.provisionalMealDefinitions ?? []
   const definitionById = new Map([...established, ...inherited].map((definition) => [definition.id, definition]))
   const allNames = new Set([...established, ...inherited].flatMap(definitionNames))
@@ -100,18 +102,33 @@ export function hydrateMealPlan(
       if (isKnown(selection)) {
         definition = definitionById.get(selection.mealDefinitionId)
         if (!definition || definition.status !== "established") {
-          failures.push({ code: "unknown_meal_definition", day, slot: slotId, detail: `unknown established meal definition "${selection.mealDefinitionId}"` })
+          failures.push({
+            code: "unknown_meal_definition",
+            day,
+            slot: slotId,
+            detail: `unknown established meal definition "${selection.mealDefinitionId}"`,
+          })
           continue
         }
       } else if (isProvisional(selection)) {
         definition = definitionById.get(selection.provisionalMealId)
         if (!definition || definition.status !== "provisional") {
-          failures.push({ code: "unknown_meal_definition", day, slot: slotId, detail: `unknown provisional meal definition "${selection.provisionalMealId}"` })
+          failures.push({
+            code: "unknown_meal_definition",
+            day,
+            slot: slotId,
+            detail: `unknown provisional meal definition "${selection.provisionalMealId}"`,
+          })
           continue
         }
       } else {
         if (!context.profile.allowNewFoods) {
-          failures.push({ code: "new_meal_not_allowed", day, slot: slotId, detail: "new meals are disabled for this household" })
+          failures.push({
+            code: "new_meal_not_allowed",
+            day,
+            slot: slotId,
+            detail: "new meals are disabled for this household",
+          })
           continue
         }
         const invalid = validateProposal(selection.proposedMeal)
@@ -121,7 +138,12 @@ export function hydrateMealPlan(
           continue
         }
         if (allNames.has(name) || generatedNames.has(name)) {
-          failures.push({ code: "duplicate_meal_selection", day, slot: slotId, detail: `new meal "${selection.proposedMeal.name}" duplicates an existing meal` })
+          failures.push({
+            code: "duplicate_meal_selection",
+            day,
+            slot: slotId,
+            detail: `new meal "${selection.proposedMeal.name}" duplicates an existing meal`,
+          })
           continue
         }
         definition = definitionFromProposal(selection.proposedMeal, createId())
@@ -129,13 +151,18 @@ export function hydrateMealPlan(
         generatedNames.add(name)
       }
 
-      const choices = "ingredientChoices" in selection ? selection.ingredientChoices ?? [] : []
+      const choices = "ingredientChoices" in selection ? (selection.ingredientChoices ?? []) : []
       const allowed = allowedChoices(definition)
       const seenChoices = new Set<string>()
       const validChoices: string[] = []
       for (const choice of choices) {
         if (seenChoices.has(choice) || !allowed.has(choice)) {
-          failures.push({ code: "invalid_ingredient_choice", day, slot: slotId, detail: `ingredient choice "${choice}" is not permitted by ${definition.id}` })
+          failures.push({
+            code: "invalid_ingredient_choice",
+            day,
+            slot: slotId,
+            detail: `ingredient choice "${choice}" is not permitted by ${definition.id}`,
+          })
         } else {
           validChoices.push(choice)
         }
@@ -149,13 +176,19 @@ export function hydrateMealPlan(
         const sourceKey = normalized(source)
         const targetKey = normalized(target)
         if (
-          !sourceKey || !targetKey ||
+          !sourceKey ||
+          !targetKey ||
           !availableIngredients.has(sourceKey) ||
           !ingredients.some((ingredient) => normalized(ingredient) === targetKey) ||
           aliasByTarget.has(targetKey) ||
           usedSources.has(sourceKey)
         ) {
-          failures.push({ code: "invalid_ingredient_alias", day, slot: slotId, detail: `ingredient alias "${source}" → "${target}" cannot resolve this meal` })
+          failures.push({
+            code: "invalid_ingredient_alias",
+            day,
+            slot: slotId,
+            detail: `ingredient alias "${source}" → "${target}" cannot resolve this meal`,
+          })
           continue
         }
         aliasByTarget.set(targetKey, availableIngredients.get(sourceKey)!)
@@ -168,22 +201,38 @@ export function hydrateMealPlan(
         const aliased = aliasByTarget.get(key)
         if (aliased) return aliased
         if (unavailableIngredients.has(key) || !availableIngredients.has(key)) {
-          failures.push({ code: "required_ingredient_unavailable", day, slot: slotId, detail: `required ingredient "${ingredient}" is unavailable` })
+          failures.push({
+            code: "required_ingredient_unavailable",
+            day,
+            slot: slotId,
+            detail: `required ingredient "${ingredient}" is unavailable`,
+          })
         }
         return ingredient
       })
 
       const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
       if (!definition.suitableSlots.includes(slotId)) {
-        failures.push({ code: "slot_unsuitable", day, slot: slotId, detail: `${definition.name} is not suitable for ${slotId}` })
+        failures.push({
+          code: "slot_unsuitable",
+          day,
+          slot: slotId,
+          detail: `${definition.name} is not suitable for ${slotId}`,
+        })
       }
       if (slot?.packed) {
         if (!definition.packedFood?.suitable || (slot.dry && !definition.packedFood.dry)) {
-          failures.push({ code: "packed_slot_unsuitable", day, slot: slotId, detail: `${definition.name} is not suitable for this packed slot` })
+          failures.push({
+            code: "packed_slot_unsuitable",
+            day,
+            slot: slotId,
+            detail: `${definition.name} is not suitable for this packed slot`,
+          })
         }
       }
 
-      const priorNightPrep = definition.priorNightPrep === "required" ||
+      const priorNightPrep =
+        definition.priorNightPrep === "required" ||
         (definition.priorNightPrep === "optional" && selectionUsesPrep(selection))
       cells[slotId] = {
         dish: definition.name,
@@ -196,9 +245,10 @@ export function hydrateMealPlan(
   }
 
   return {
-    candidate: failures.length === 0
-      ? { grid, easyBuys: selectionCandidate.easyBuys, policyOutcomes: selectionCandidate.policyOutcomes }
-      : undefined,
+    candidate:
+      failures.length === 0
+        ? { grid, easyBuys: selectionCandidate.easyBuys, policyOutcomes: selectionCandidate.policyOutcomes }
+        : undefined,
     provisionalMealDefinitions: [...inherited, ...generated],
     failures,
   }

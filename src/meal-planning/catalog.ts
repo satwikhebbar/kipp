@@ -25,7 +25,8 @@ function validateNames(
   for (const value of values) {
     const key = normalized(value)
     if (!key) failures.push(invalid(dishName, "blank_value", `${field} cannot contain a blank value`))
-    else if (seen.has(key)) failures.push(invalid(dishName, "duplicate_value", `${field} cannot contain duplicate values`))
+    else if (seen.has(key))
+      failures.push(invalid(dishName, "duplicate_value", `${field} cannot contain duplicate values`))
     seen.add(key)
   }
   return failures
@@ -40,18 +41,27 @@ export function validateMealDefinitionProposal(
   if (!proposal) return [invalid(expectedDishName, "missing_definition", "no definition was returned for this dish")]
   const failures: MealDefinitionValidationFailure[] = []
   if (proposal.sourceDishName !== expectedDishName)
-    failures.push(invalid(expectedDishName, "source_name_mismatch", "sourceDishName must match the supplied parent dish name"))
+    failures.push(
+      invalid(expectedDishName, "source_name_mismatch", "sourceDishName must match the supplied parent dish name"),
+    )
   if (!proposal.name.trim()) failures.push(invalid(expectedDishName, "missing_field", "name is required"))
-  if (!proposal.vegetarian) failures.push(invalid(expectedDishName, "invalid_vegetarian", "school meal definitions must be vegetarian"))
+  if (!proposal.vegetarian)
+    failures.push(invalid(expectedDishName, "invalid_vegetarian", "school meal definitions must be vegetarian"))
   if (!Number.isInteger(proposal.typicalCookMinutes) || proposal.typicalCookMinutes < 0)
-    failures.push(invalid(expectedDishName, "invalid_cook_minutes", "typicalCookMinutes must be a non-negative integer"))
+    failures.push(
+      invalid(expectedDishName, "invalid_cook_minutes", "typicalCookMinutes must be a non-negative integer"),
+    )
   if (!["none", "optional", "required"].includes(proposal.priorNightPrep))
-    failures.push(invalid(expectedDishName, "invalid_prior_night_prep", "priorNightPrep must be none, optional, or required"))
+    failures.push(
+      invalid(expectedDishName, "invalid_prior_night_prep", "priorNightPrep must be none, optional, or required"),
+    )
   failures.push(...validateNames(expectedDishName, "principalIngredients", proposal.principalIngredients, true))
   failures.push(...validateNames(expectedDishName, "suitableSlots", proposal.suitableSlots, true))
   failures.push(...validateNames(expectedDishName, "requiredIngredients", proposal.requiredIngredients, true))
   failures.push(...validateNames(expectedDishName, "optionalIngredients", proposal.optionalIngredients, false))
-  failures.push(...validateNames(expectedDishName, "allowedIngredientChoices", proposal.allowedIngredientChoices ?? [], false))
+  failures.push(
+    ...validateNames(expectedDishName, "allowedIngredientChoices", proposal.allowedIngredientChoices ?? [], false),
+  )
   const slotById = new Map(input.schedule.slots.map((slot) => [slot.id, slot]))
   for (const slot of proposal.suitableSlots) {
     const scheduleSlot = slotById.get(slot)
@@ -63,23 +73,31 @@ export function validateMealDefinitionProposal(
       scheduleSlot.maxCookMinutes !== null &&
       proposal.typicalCookMinutes > scheduleSlot.maxCookMinutes
     ) {
-      failures.push(invalid(
-        expectedDishName,
-        "slot_cook_time_exceeded",
-        `${proposal.typicalCookMinutes} cook minutes exceeds ${slot}'s ${scheduleSlot.maxCookMinutes}-minute limit`,
-      ))
+      failures.push(
+        invalid(
+          expectedDishName,
+          "slot_cook_time_exceeded",
+          `${proposal.typicalCookMinutes} cook minutes exceeds ${slot}'s ${scheduleSlot.maxCookMinutes}-minute limit`,
+        ),
+      )
     }
   }
   const required = new Set(proposal.requiredIngredients.map(normalized))
   for (const ingredient of [...proposal.optionalIngredients, ...(proposal.allowedIngredientChoices ?? [])]) {
     if (required.has(normalized(ingredient)))
-      failures.push(invalid(expectedDishName, "ingredient_overlap", "required ingredients cannot also be optional choices"))
+      failures.push(
+        invalid(expectedDishName, "ingredient_overlap", "required ingredients cannot also be optional choices"),
+      )
   }
   return failures
 }
 
 /** Adds server-owned identity, status, alias, and trusted packing suitability to a validated proposal. */
-export function establishMealDefinition(proposal: MealDefinitionProposal, parentDishName: string, id: string): MealDefinition {
+export function establishMealDefinition(
+  proposal: MealDefinitionProposal,
+  parentDishName: string,
+  id: string,
+): MealDefinition {
   return {
     id,
     name: proposal.name.trim(),
@@ -92,7 +110,9 @@ export function establishMealDefinition(proposal: MealDefinitionProposal, parent
     priorNightPrep: proposal.priorNightPrep,
     requiredIngredients: proposal.requiredIngredients.map((value) => value.trim()),
     optionalIngredients: proposal.optionalIngredients.map((value) => value.trim()),
-    ...(proposal.allowedIngredientChoices ? { allowedIngredientChoices: proposal.allowedIngredientChoices.map((value) => value.trim()) } : {}),
+    ...(proposal.allowedIngredientChoices
+      ? { allowedIngredientChoices: proposal.allowedIngredientChoices.map((value) => value.trim()) }
+      : {}),
     status: "established",
   }
 }

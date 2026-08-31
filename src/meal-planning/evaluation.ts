@@ -40,8 +40,14 @@ export function evaluateMealPlanSelection(
         pass: false,
         failures: hydration.failures,
         measurements: {
-          morningCookByDay: {}, morningCookMax: 0, priorNightPrepByDay: {}, priorNightPrepMax: 0,
-          dishRepeatCount: 0, dishRepeats: [], inventoryUsed: [], easyBuyCount: selectionCandidate.easyBuys.length,
+          morningCookByDay: {},
+          morningCookMax: 0,
+          priorNightPrepByDay: {},
+          priorNightPrepMax: 0,
+          dishRepeatCount: 0,
+          dishRepeats: [],
+          inventoryUsed: [],
+          easyBuyCount: selectionCandidate.easyBuys.length,
         },
       },
     }

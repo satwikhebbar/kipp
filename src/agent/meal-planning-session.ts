@@ -2,10 +2,10 @@ import { evaluateMealPlanSelection } from "../meal-planning/evaluation"
 import type {
   FailureCode,
   FeedbackItem,
+  MealDefinition,
   MealPlanCandidate,
   MealPlanContext,
   MealPlanEvaluation,
-  MealDefinition,
   WeeklyExceptions,
   WeeklyInventory,
 } from "../meal-planning/types"
@@ -28,7 +28,7 @@ Build one complete school-week plan covering exactly the schedule days listed in
 
 The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole. If unbound feedback does not identify what should improve — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat it as satisfied by a rationale.
 
-Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Include a short justification in propose_plan explaining the plan in plain language. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation when there is one, otherwise use an empty reasonCodes list, and keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
+Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Include a short justification in propose_plan explaining the plan in plain language. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation when there is one. Before evaluation, use an empty reasonCodes list unless the clarification is caused directly by a known hard constraint; then include its applicable failure code, such as hard_exclusion. Keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
 
 Build the candidate grid from meal selections. The context provides complete structured catalog records: use their listed slots, packing facts, cook minutes, prep requirement, and required ingredients rather than inferring them. Established meals use their mealDefinitionId; ingredientChoices may contain only the permitted choices listed for that definition, and usesPriorNightPrep is meaningful only when prep is optional. If a catalog ingredient and the parent inventory use different names for the same ingredient, explicitly map the inventory spelling to the catalog spelling in ingredientAliasesUsed. Use this only for a genuine semantic match, for example { "Rajma": "Kidney Beans" }; both names must be present in the context. A plan-local provisional meal is reused by its provisionalMealId exactly as listed in the context.
 
@@ -80,7 +80,8 @@ export async function runMealPlanningAgentSession(
     },
     [MEAL_PLANNING_TOOL.PROPOSE]: {
       name: MEAL_PLANNING_TOOL.PROPOSE,
-      description: "Terminal action after a passing evaluation. Submit the candidate, optional feedback scope interpretations, and optional short justification; the workflow supplies inventory and exceptions.",
+      description:
+        "Terminal action after a passing evaluation. Submit the candidate, optional feedback scope interpretations, and optional short justification; the workflow supplies inventory and exceptions.",
       input: proposePlanInputSchema,
       output: acceptedOutputSchema,
       privacy: "private",
@@ -131,7 +132,9 @@ export async function runMealPlanningAgentSession(
           weeklyInventory: options.context.weeklyInventory,
           weeklyExceptions: options.context.weeklyExceptions,
           ...(evaluationFeedback.length ? { feedbackItems: evaluationFeedback } : {}),
-          ...(input.justification ? { justification: input.justification.slice(0, PROPOSE_JUSTIFICATION_MAX_CHARACTERS) } : {}),
+          ...(input.justification
+            ? { justification: input.justification.slice(0, PROPOSE_JUSTIFICATION_MAX_CHARACTERS) }
+            : {}),
           evaluation,
         }
         return { accepted: true as const }

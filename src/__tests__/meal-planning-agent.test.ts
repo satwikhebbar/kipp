@@ -2,7 +2,14 @@ import { describe, expect, it, vi } from "vitest"
 import { MEAL_PLANNING_AGENT_PROMPT, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import { evaluateMealPlan } from "../meal-planning/evaluation"
-import type { MealCell, MealDefinition, MealGrid, MealPlanCandidate, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
+import type {
+  MealCell,
+  MealDefinition,
+  MealGrid,
+  MealPlanCandidate,
+  MealPlanContext,
+  MealPlanSelectionCandidate,
+} from "../meal-planning/types"
 import type { ToolProviderClient } from "../providers"
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -16,7 +23,12 @@ function fixtureIngredients(dish: string, slot: string): string[] {
   return ["rice"]
 }
 
-function fixtureDefinition(dish: string, slot: string, items = fixtureIngredients(dish, slot), cookMinutes = SLOT_COOK[slot]): MealDefinition {
+function fixtureDefinition(
+  dish: string,
+  slot: string,
+  items = fixtureIngredients(dish, slot),
+  cookMinutes = SLOT_COOK[slot],
+): MealDefinition {
   return {
     id: `fixture_${dish.replaceAll(" ", "_")}_${slot}`,
     name: dish,
@@ -32,15 +44,30 @@ function fixtureDefinition(dish: string, slot: string, items = fixtureIngredient
   }
 }
 
-const FIXTURE_DEFINITIONS = ["paratha", "poha", "banana", "rice and beans", "paneer paratha", "khichdi", "idli"]
-  .flatMap((dish) => Object.keys(SLOT_COOK).map((slot) => fixtureDefinition(dish, slot)))
+const FIXTURE_DEFINITIONS = [
+  "paratha",
+  "poha",
+  "banana",
+  "rice and beans",
+  "paneer paratha",
+  "khichdi",
+  "idli",
+].flatMap((dish) => Object.keys(SLOT_COOK).map((slot) => fixtureDefinition(dish, slot)))
 
 function selectionCandidate(candidate: MealPlanCandidate): MealPlanSelectionCandidate {
   return {
     ...candidate,
-    grid: Object.fromEntries(Object.entries(candidate.grid).map(([day, slots]) => [day, Object.fromEntries(
-      Object.entries(slots).map(([slot, cell]) => [slot, { mealDefinitionId: `fixture_${cell.dish.replaceAll(" ", "_")}_${slot}` }]),
-    )])),
+    grid: Object.fromEntries(
+      Object.entries(candidate.grid).map(([day, slots]) => [
+        day,
+        Object.fromEntries(
+          Object.entries(slots).map(([slot, cell]) => [
+            slot,
+            { mealDefinitionId: `fixture_${cell.dish.replaceAll(" ", "_")}_${slot}` },
+          ]),
+        ),
+      ]),
+    ),
   }
 }
 
@@ -141,7 +168,10 @@ function call(id: string, name: string, input: unknown) {
 }
 
 function evaluateResponse(candidate: unknown) {
-  return { toolCalls: [call("evaluate", "evaluate_meal_plan", selectionCandidate(candidate as MealPlanCandidate))], usage: { inputTokens: 0, outputTokens: 0 } }
+  return {
+    toolCalls: [call("evaluate", "evaluate_meal_plan", selectionCandidate(candidate as MealPlanCandidate))],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }
 }
 
 function proposeResponse(input: unknown) {
@@ -403,10 +433,7 @@ describe("bounded meal-planning agent session", () => {
       grid: gridWith("Mon", "home-lunch", cell("rice and beans", ["rice", "beans"], "home-lunch")),
       easyBuys: ["beans", "carrots"],
     }
-    const provider = providerWith(
-      evaluateResponse(candidate),
-      proposeResponse(proposeInput(candidate)),
-    )
+    const provider = providerWith(evaluateResponse(candidate), proposeResponse(proposeInput(candidate)))
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
       context: ctx,
     })
@@ -469,10 +496,7 @@ describe("bounded meal-planning agent session", () => {
       }
     }
     const candidate = { grid, easyBuys: [], policyOutcomes: {} }
-    const provider = providerWith(
-      evaluateResponse(candidate),
-      proposeResponse(proposeInput(candidate)),
-    )
+    const provider = providerWith(evaluateResponse(candidate), proposeResponse(proposeInput(candidate)))
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
       context: ctx,
     })
@@ -527,7 +551,7 @@ describe("corpus-driven planning loop", () => {
     const result = await runMealPlanningAgentSession(
       provider,
       [{ role: "user", text: scenario.context.request.text }],
-        { context: contextWithCandidateDefinitions(scenario.context, driving.plan) },
+      { context: contextWithCandidateDefinitions(scenario.context, driving.plan) },
     )
     expect(result.terminal?.kind, scenario.id).toBe("needs_clarification")
     if (result.terminal?.kind === "needs_clarification")

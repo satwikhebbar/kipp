@@ -27,7 +27,7 @@ import {
   type StoredMealProfile,
 } from "./store"
 import { coerceSubmission, type Submission } from "./submissions"
-import type { MealDefinition, MealPlanCandidate, MealPlanContext } from "./types"
+import type { FeedbackItem, MealDefinition, MealPlanCandidate, MealPlanContext } from "./types"
 import { enrichLunchVideos } from "./video"
 import { resolvePlanningWeek } from "./week"
 import type { MealPlanningWorkflowParams } from "./workflow"
@@ -70,12 +70,24 @@ function renderMealDefinition(meal: MealDefinition): string {
 }
 
 function renderInventoryItem(item: MealPlanContext["weeklyInventory"]["items"][number]): string {
-  const annotations = [
-    item.status === "available" ? undefined : item.status,
-    item.quantityNote,
-    item.useNote,
-  ].filter((value): value is string => Boolean(value))
+  const annotations = [item.status === "available" ? undefined : item.status, item.quantityNote, item.useNote].filter(
+    (value): value is string => Boolean(value),
+  )
   return annotations.length ? `${item.name} (${annotations.join("; ")})` : item.name
+}
+
+/** Renders revision feedback without exposing its opaque storage identifier. */
+export function renderRevisionFeedback(items: FeedbackItem[]): string {
+  if (items.length === 0) return "- No submitted feedback."
+  return items
+    .map((item) => {
+      const scope = item.scope
+      if (scope?.day && scope.slot) return `- Feedback for ${scope.day} ${scope.slot}: ${item.text}`
+      if (scope?.day) return `- Feedback for every meal on ${scope.day}: ${item.text}`
+      if (scope?.slot) return `- Feedback for every ${scope.slot}: ${item.text}`
+      return `- Unbound feedback: ${item.text}`
+    })
+    .join("\n")
 }
 
 /** Renders the household operating context the planning model must see (profile, schedule, policies, week state). */
@@ -91,7 +103,12 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       )
       .join(", ")}`,
     `- Dietary exclusions (hard): ${p.dietaryExclusions.join(", ") || "none"}`,
-    `- Established meal definitions (one JSON record per available catalog meal; select only by id):\n${(p.mealDefinitions ?? []).filter((meal) => meal.status === "established").map((meal) => `    ${renderMealDefinition(meal)}`).join("\n") || "    none"}`,
+    `- Established meal definitions (one JSON record per available catalog meal; select only by id):\n${
+      (p.mealDefinitions ?? [])
+        .filter((meal) => meal.status === "established")
+        .map((meal) => `    ${renderMealDefinition(meal)}`)
+        .join("\n") || "    none"
+    }`,
     `- Plan-local provisional definitions (one JSON record per reusable meal):\n${(context.provisionalMealDefinitions ?? []).map((meal) => `    ${renderMealDefinition(meal)}`).join("\n") || "    none"}`,
     `- Food preferences: favourites = ${p.foodPreferences.favourites.join(", ") || "none"}, avoid = ${p.foodPreferences.avoid.join(", ") || "none"}`,
     `- New foods allowed: ${p.allowNewFoods ? "yes" : "no"}`,
@@ -106,11 +123,7 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       lines.push(`    [${policy.id}] ${policy.label}: "${policy.value}"`)
     }
   }
-  lines.push(
-    `- Weekly inventory: ${
-      context.weeklyInventory.items.map(renderInventoryItem).join(", ") || "none"
-    }`,
-  )
+  lines.push(`- Weekly inventory: ${context.weeklyInventory.items.map(renderInventoryItem).join(", ") || "none"}`)
   if (context.weeklyInventory.notes.length) lines.push(`  inventory notes: ${context.weeklyInventory.notes.join("; ")}`)
   if (context.weeklyExceptions.items.length) {
     lines.push(`- Weekly exceptions:`)
@@ -502,7 +515,7 @@ async function runRevision(
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${active.plan.timezone}\nRevision feedback: ${submission.items.map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(context)}`,
+      text: `Current instant: ${new Date().toISOString()}\nTime zone: ${active.plan.timezone}\nRevision feedback:\n${renderRevisionFeedback(submission.items)}\n\n${renderHouseholdContext(context)}`,
     },
   ]
   const outcome = await runPlanningSession(env, step, event, { context, messages, isRevision: true, occurrence })

@@ -17,14 +17,18 @@ describe("meal definition catalog validation", () => {
   }
 
   it("rejects malformed meal facts before a definition can be established", () => {
-    const failures = validateMealDefinitionProposal({
-      ...proposal,
-      sourceDishName: "paratha",
-      suitableSlots: ["breakfast", "unknown-slot"],
-      requiredIngredients: ["wheat flour", "wheat flour"],
-      optionalIngredients: ["wheat flour"],
-      typicalCookMinutes: 12.5,
-    }, "Paratha", { schedule: SEED_SCHEDULE })
+    const failures = validateMealDefinitionProposal(
+      {
+        ...proposal,
+        sourceDishName: "paratha",
+        suitableSlots: ["breakfast", "unknown-slot"],
+        requiredIngredients: ["wheat flour", "wheat flour"],
+        optionalIngredients: ["wheat flour"],
+        typicalCookMinutes: 12.5,
+      },
+      "Paratha",
+      { schedule: SEED_SCHEDULE },
+    )
     expect(failures.map((failure) => failure.code)).toEqual([
       "source_name_mismatch",
       "invalid_cook_minutes",
@@ -45,10 +49,14 @@ describe("meal definition catalog validation", () => {
   })
 
   it("rejects a cooked meal advertising a no-cook snack slot", () => {
-    const failures = validateMealDefinitionProposal({
-      ...proposal,
-      suitableSlots: ["snack1"],
-    }, "Paratha", { schedule: SEED_SCHEDULE })
+    const failures = validateMealDefinitionProposal(
+      {
+        ...proposal,
+        suitableSlots: ["snack1"],
+      },
+      "Paratha",
+      { schedule: SEED_SCHEDULE },
+    )
     expect(failures).toMatchObject([{ code: "slot_cook_time_exceeded", dishName: "Paratha" }])
   })
 })
