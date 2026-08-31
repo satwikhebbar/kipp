@@ -627,7 +627,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
         "home-lunch": cell("quinoa bowl", ["quinoa"], MAIN_COOK_MIN),
       },
       Wed: {
-        breakfast: cell("idli", ["idli rice"], BREAKFAST_COOK_MIN),
+        breakfast: cell("idli", ["idli batter"], BREAKFAST_COOK_MIN),
         snack1: cell("orange", ["orange"], SNACK_COOK_MIN),
         snack2: cell("mixed seeds", ["mixed seeds"], SNACK_COOK_MIN),
         "school-lunch": cell("khichdi", ["rice", "moong dal"], MAIN_COOK_MIN),

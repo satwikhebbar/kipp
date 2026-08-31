@@ -69,6 +69,15 @@ function renderMealDefinition(meal: MealDefinition): string {
   })
 }
 
+function renderInventoryItem(item: MealPlanContext["weeklyInventory"]["items"][number]): string {
+  const annotations = [
+    item.status === "available" ? undefined : item.status,
+    item.quantityNote,
+    item.useNote,
+  ].filter((value): value is string => Boolean(value))
+  return annotations.length ? `${item.name} (${annotations.join("; ")})` : item.name
+}
+
 /** Renders the household operating context the planning model must see (profile, schedule, policies, week state). */
 export function renderHouseholdContext(context: MealPlanContext): string {
   const p = context.profile
@@ -99,7 +108,7 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   }
   lines.push(
     `- Weekly inventory: ${
-      context.weeklyInventory.items.map((item) => `${item.name} (${item.status})`).join(", ") || "none"
+      context.weeklyInventory.items.map(renderInventoryItem).join(", ") || "none"
     }`,
   )
   if (context.weeklyInventory.notes.length) lines.push(`  inventory notes: ${context.weeklyInventory.notes.join("; ")}`)

@@ -93,7 +93,7 @@
           "status": "available"
         },
         {
-          "name": "idli rice",
+          "name": "idli batter",
           "status": "available"
         },
         {
@@ -344,7 +344,7 @@
             "home-lunch": {
               "dish": "idli",
               "vegetarian": true,
-              "items": ["idli rice"],
+              "items": ["idli batter"],
               "cookMinutes": 20,
               "priorNightPrep": false
             }

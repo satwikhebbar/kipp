@@ -90,7 +90,7 @@
           "status": "available"
         },
         {
-          "name": "idli rice",
+          "name": "idli batter",
           "status": "available"
         },
         {
@@ -296,7 +296,7 @@
             "breakfast": {
               "dish": "idli",
               "vegetarian": true,
-              "items": ["idli rice"],
+              "items": ["idli batter"],
               "cookMinutes": 15,
               "priorNightPrep": false
             },
@@ -493,7 +493,7 @@
             "breakfast": {
               "dish": "idli",
               "vegetarian": true,
-              "items": ["idli rice"],
+              "items": ["idli batter"],
               "cookMinutes": 15,
               "priorNightPrep": false
             },
@@ -690,7 +690,7 @@
             "breakfast": {
               "dish": "idli",
               "vegetarian": true,
-              "items": ["idli rice"],
+              "items": ["idli batter"],
               "cookMinutes": 15,
               "priorNightPrep": false
             },
