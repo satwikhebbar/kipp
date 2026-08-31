@@ -1,7 +1,12 @@
 import type { WorkflowEvent } from "cloudflare:workers"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
-import { type MealPlanningLiveEvent, renderHouseholdContext, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
+import {
+  type MealPlanningLiveEvent,
+  renderHouseholdContext,
+  renderRevisionFeedback,
+  runAgentCenteredMealPlanningWorkflow,
+} from "../meal-planning/agent-workflow"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
@@ -48,12 +53,29 @@ it("renders complete structured catalog facts for the planning agent", () => {
   expect(rendered).not.toContain("Rajma (available)")
 })
 
+it("renders scoped and unbound revision feedback without storage ids", () => {
+  expect(
+    renderRevisionFeedback([
+      { id: "fb-cell", text: "Use a simpler dish.", scope: { day: "Tue", slot: "school-lunch" } },
+      { id: "fb-day", text: "Make the day lighter.", scope: { day: "Thu" } },
+      { id: "fb-unbound", text: "Use less oil." },
+    ]),
+  ).toBe(
+    "- Feedback for Tue school-lunch: Use a simpler dish.\n- Feedback for every meal on Thu: Make the day lighter.\n- Unbound feedback: Use less oil.",
+  )
+})
+
 // Workflow fixtures intentionally reuse paratha in every slot. Keep that
 // legacy fixture compact while giving its fixture definition stable metadata
 // that makes those placements valid under the selection contract.
 SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) =>
   definition.id === SEED_MEAL_IDS.paratha
-    ? { ...definition, suitableSlots: Object.keys(SLOT_COOK), packedFood: { suitable: true, dry: true }, typicalCookMinutes: 0 }
+    ? {
+        ...definition,
+        suitableSlots: Object.keys(SLOT_COOK),
+        packedFood: { suitable: true, dry: true },
+        typicalCookMinutes: 0,
+      }
     : definition,
 )
 
@@ -71,7 +93,9 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
   }
   const grid: MealPlanSelectionCandidate["grid"] = {}
   for (const day of DAYS) {
-    grid[day] = Object.fromEntries(Object.keys(SLOT_COOK).map((slot) => [slot, { mealDefinitionId: selectionBySlot[slot] }]))
+    grid[day] = Object.fromEntries(
+      Object.keys(SLOT_COOK).map((slot) => [slot, { mealDefinitionId: selectionBySlot[slot] }]),
+    )
   }
   if (override) grid[override.day][override.slot] = { mealDefinitionId: SEED_MEAL_IDS[override.cell.dish]! }
   return {
@@ -84,8 +108,6 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
 function proposeInput(candidate: unknown, feedbackItems?: unknown) {
   return {
     candidate,
-    weeklyInventory: { items: [], notes: [] },
-    weeklyExceptions: { items: [] },
     ...(feedbackItems ? { feedbackItems } : {}),
   }
 }

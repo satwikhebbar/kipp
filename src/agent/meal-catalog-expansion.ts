@@ -15,19 +15,21 @@ const MAX_REPAIR_ATTEMPTS = 2
 const SUBMIT_DEFINITIONS = "submit_meal_definitions"
 
 const priorNightPrepSchema = z.enum(["none", "optional", "required"])
-const proposalSchema = z.object({
-  sourceDishName: z.string(),
-  name: z.string(),
-  principalIngredients: z.array(z.string()),
-  vegetarian: z.literal(true),
-  suitableSlots: z.array(z.string()),
-  packedFood: z.object({ dry: z.boolean() }).strict(),
-  typicalCookMinutes: z.number(),
-  priorNightPrep: priorNightPrepSchema,
-  requiredIngredients: z.array(z.string()),
-  optionalIngredients: z.array(z.string()),
-  allowedIngredientChoices: z.array(z.string()).optional(),
-}).strict()
+const proposalSchema = z
+  .object({
+    sourceDishName: z.string(),
+    name: z.string(),
+    principalIngredients: z.array(z.string()),
+    vegetarian: z.literal(true),
+    suitableSlots: z.array(z.string()),
+    packedFood: z.object({ dry: z.boolean() }).strict(),
+    typicalCookMinutes: z.number(),
+    priorNightPrep: priorNightPrepSchema,
+    requiredIngredients: z.array(z.string()),
+    optionalIngredients: z.array(z.string()),
+    allowedIngredientChoices: z.array(z.string()).optional(),
+  })
+  .strict()
 
 const submitDefinitionsInputSchema = z.object({ definitions: z.array(proposalSchema) }).strict()
 const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).strict()

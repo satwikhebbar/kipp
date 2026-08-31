@@ -14,7 +14,10 @@ function queueResponse(label: string, response: unknown): void {
 }
 
 function queueInitialPlan(base: MealPlanCandidate): void {
-  queueResponse("evaluate", { toolCalls: [{ id: "evaluate", name: "evaluate_meal_plan", input: selectionCandidate(base) }], usage: {} })
+  queueResponse("evaluate", {
+    toolCalls: [{ id: "evaluate", name: "evaluate_meal_plan", input: selectionCandidate(base) }],
+    usage: {},
+  })
   queueResponse("propose", {
     toolCalls: [{ id: "propose", name: "propose_plan", input: proposeInput(base) }],
     usage: {},
@@ -101,14 +104,18 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
 function selectionCandidate(candidate: MealPlanCandidate): MealPlanSelectionCandidate {
   return {
     ...candidate,
-    grid: Object.fromEntries(Object.entries(candidate.grid).map(([day, slots]) => [
-      day,
-      Object.fromEntries(Object.entries(slots).map(([slot, cell]) => {
-        const mealDefinitionId = SEED_MEAL_IDS[cell.dish]
-        if (!mealDefinitionId) throw new Error(`missing integration fixture definition for ${cell.dish}`)
-        return [slot, { mealDefinitionId }]
-      })),
-    ])),
+    grid: Object.fromEntries(
+      Object.entries(candidate.grid).map(([day, slots]) => [
+        day,
+        Object.fromEntries(
+          Object.entries(slots).map(([slot, cell]) => {
+            const mealDefinitionId = SEED_MEAL_IDS[cell.dish]
+            if (!mealDefinitionId) throw new Error(`missing integration fixture definition for ${cell.dish}`)
+            return [slot, { mealDefinitionId }]
+          }),
+        ),
+      ]),
+    ),
   }
 }
 
@@ -118,8 +125,6 @@ function proposeInput(
 ) {
   return {
     candidate: selectionCandidate(candidate),
-    weeklyInventory: { items: [], notes: [] },
-    weeklyExceptions: { items: [] },
     ...(feedbackItems ? { feedbackItems } : {}),
   }
 }

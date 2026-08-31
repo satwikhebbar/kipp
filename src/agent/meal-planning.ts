@@ -55,30 +55,49 @@ const packedFoodSchema = z.object({ suitable: z.boolean(), dry: z.boolean() }).s
 const ingredientChoicesSchema = z.array(z.string()).optional()
 const ingredientAliasesUsedSchema = z.record(z.string(), z.string()).optional()
 const knownMealSelectionSchema = z
-  .object({ mealDefinitionId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, ingredientAliasesUsed: ingredientAliasesUsedSchema, usesPriorNightPrep: z.boolean().optional() })
-  .strict()
-const provisionalMealSelectionSchema = z
-  .object({ provisionalMealId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, ingredientAliasesUsed: ingredientAliasesUsedSchema, usesPriorNightPrep: z.boolean().optional() })
-  .strict()
-const newMealSelectionSchema = z
   .object({
-    proposedMeal: z.object({
-      name: z.string().min(1),
-      principalIngredients: z.array(z.string()).min(1),
-      vegetarian: z.literal(true),
-      suitableSlots: z.array(z.string()).min(1),
-      packedFood: packedFoodSchema.optional(),
-      cookMinutes: z.number().int().min(0),
-      priorNightPrep: priorNightPrepSchema,
-      ingredients: z.array(z.string()).min(1),
-    }).strict(),
+    mealDefinitionId: z.string().min(1),
+    ingredientChoices: ingredientChoicesSchema,
     ingredientAliasesUsed: ingredientAliasesUsedSchema,
     usesPriorNightPrep: z.boolean().optional(),
   })
   .strict()
-const selectionGridSchema = z.record(z.string(), z.record(z.string(), z.union([knownMealSelectionSchema, provisionalMealSelectionSchema, newMealSelectionSchema])))
+const provisionalMealSelectionSchema = z
+  .object({
+    provisionalMealId: z.string().min(1),
+    ingredientChoices: ingredientChoicesSchema,
+    ingredientAliasesUsed: ingredientAliasesUsedSchema,
+    usesPriorNightPrep: z.boolean().optional(),
+  })
+  .strict()
+const newMealSelectionSchema = z
+  .object({
+    proposedMeal: z
+      .object({
+        name: z.string().min(1),
+        principalIngredients: z.array(z.string()).min(1),
+        vegetarian: z.literal(true),
+        suitableSlots: z.array(z.string()).min(1),
+        packedFood: packedFoodSchema.optional(),
+        cookMinutes: z.number().int().min(0),
+        priorNightPrep: priorNightPrepSchema,
+        ingredients: z.array(z.string()).min(1),
+      })
+      .strict(),
+    ingredientAliasesUsed: ingredientAliasesUsedSchema,
+    usesPriorNightPrep: z.boolean().optional(),
+  })
+  .strict()
+const selectionGridSchema = z.record(
+  z.string(),
+  z.record(z.string(), z.union([knownMealSelectionSchema, provisionalMealSelectionSchema, newMealSelectionSchema])),
+)
 export const mealPlanSelectionCandidateSchema = z
-  .object({ grid: selectionGridSchema, easyBuys: z.array(z.string()), policyOutcomes: z.record(z.string(), policyOutcomeSchema) })
+  .object({
+    grid: selectionGridSchema,
+    easyBuys: z.array(z.string()),
+    policyOutcomes: z.record(z.string(), policyOutcomeSchema),
+  })
   .strict()
 
 const failureSchema = z

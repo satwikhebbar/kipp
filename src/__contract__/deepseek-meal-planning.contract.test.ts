@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { expandMealCatalog } from "../agent/meal-catalog-expansion"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
-import { renderHouseholdContext } from "../meal-planning/agent-workflow"
+import { renderHouseholdContext, renderRevisionFeedback } from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type {
@@ -256,6 +256,40 @@ const WHOLE_DAY_REPLAN_MEALS: MealDefinition[] = [
   },
 ]
 
+// R05 can either clarify the contradictory request or safely replace Tuesday
+// lunch. These definitions make both paths real: they preserve its dairy-free
+// recent plan and provide one unused, dairy-free lunch alternative.
+const NO_DAIRY_CONFLICT_MEALS: MealDefinition[] = [
+  {
+    id: "meal_01j1f10gz4p7u3h8",
+    name: "dal fry",
+    aliases: ["dal fry"],
+    principalIngredients: ["toor dal"],
+    vegetarian: true,
+    suitableSlots: ["home-lunch"],
+    packedFood: { suitable: false, dry: false },
+    typicalCookMinutes: 20,
+    priorNightPrep: "none",
+    requiredIngredients: ["toor dal"],
+    optionalIngredients: [],
+    status: "established",
+  },
+  {
+    id: "meal_01j1f10ha8q5v2j9",
+    name: "vegetable poha",
+    aliases: ["vegetable poha"],
+    principalIngredients: ["poha", "carrot"],
+    vegetarian: true,
+    suitableSlots: ["breakfast", "school-lunch", "home-lunch"],
+    packedFood: { suitable: true, dry: false },
+    typicalCookMinutes: 20,
+    priorNightPrep: "none",
+    requiredIngredients: ["poha", "carrot"],
+    optionalIngredients: [],
+    status: "established",
+  },
+]
+
 function holidayHalfDayContext(): MealPlanContext {
   const base = scenario("holiday-half-day").context
   return {
@@ -503,7 +537,7 @@ async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessi
   )
   const userText =
     catalogContext.request.kind === "revision"
-      ? `Revision feedback: ${(catalogContext.feedbackItems ?? []).map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(catalogContext)}`
+      ? `Revision feedback:\n${renderRevisionFeedback(catalogContext.feedbackItems ?? [])}\n\n${renderHouseholdContext(catalogContext)}`
       : `Request: ${catalogContext.request.text}\n\n${renderHouseholdContext(catalogContext)}`
   try {
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], {
@@ -866,6 +900,19 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     }
     const ctx: MealPlanContext = {
       ...base,
+      weeklyInventory: {
+        ...base.weeklyInventory,
+        items: [
+          ...base.weeklyInventory.items,
+          { name: "carrot", status: "available" },
+          { name: "toor dal", status: "available" },
+          { name: "potato", status: "available" },
+        ],
+      },
+      profile: {
+        ...base.profile,
+        mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), ...NO_DAIRY_CONFLICT_MEALS, POTATO_CURRY_MEAL],
+      },
       recentPlan,
       request: {
         kind: "revision",
@@ -889,9 +936,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     }
     expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
     expect(result.terminal?.kind, "conflict must resolve as a clarification").toBe("needs_clarification")
-    // The conflict is detected before evaluating a candidate, so the terminal
-    // explanation carries no evaluator failure codes.
-    expect(result.terminal?.reasonCodes).toEqual([])
+    expect(result.terminal?.reasonCodes).toEqual(["hard_exclusion"])
   })
 
   contractIt("R06: vague feedback asks which improvement matters before changing the plan", async () => {

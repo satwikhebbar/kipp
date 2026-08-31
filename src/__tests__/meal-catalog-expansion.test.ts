@@ -8,7 +8,10 @@ function providerWith(...responses: Awaited<ReturnType<ToolProviderClient["gener
   return { generate: vi.fn().mockImplementation(async () => responses.shift()) }
 }
 
-function catalogProposal(sourceDishName: string, overrides: Partial<MealDefinitionProposal> = {}): MealDefinitionProposal {
+function catalogProposal(
+  sourceDishName: string,
+  overrides: Partial<MealDefinitionProposal> = {},
+): MealDefinitionProposal {
   return {
     sourceDishName,
     name: sourceDishName,
@@ -36,12 +39,18 @@ describe("meal catalog expansion session", () => {
     const names = ["paratha", "poha", "idli", "upma", "dosa", "banana"]
     const provider = providerWith(
       catalogResponse(names.slice(0, 5).map((name) => catalogProposal(name))),
-      catalogResponse([catalogProposal("banana", { packedFood: { dry: true }, suitableSlots: ["snack1"], typicalCookMinutes: 0 })]),
+      catalogResponse([
+        catalogProposal("banana", { packedFood: { dry: true }, suitableSlots: ["snack1"], typicalCookMinutes: 0 }),
+      ]),
     )
     let sequence = 0
-    const result = await expandMealCatalog(provider, { parentDishNames: names, schedule: SEED_SCHEDULE }, {
-      createId: () => `meal_generated_${++sequence}`,
-    })
+    const result = await expandMealCatalog(
+      provider,
+      { parentDishNames: names, schedule: SEED_SCHEDULE },
+      {
+        createId: () => `meal_generated_${++sequence}`,
+      },
+    )
 
     expect(result.failures).toEqual([])
     expect(result.definitions).toHaveLength(6)
@@ -53,23 +62,27 @@ describe("meal catalog expansion session", () => {
     })
     expect(result.definitions?.[5]?.packedFood).toEqual({ suitable: true, dry: true })
     expect(provider.generate).toHaveBeenCalledTimes(2)
-    expect(vi.mocked(provider.generate).mock.calls[0]?.[0].messages[1]).toMatchObject({ role: "user", text: expect.stringContaining("paratha | poha | idli | upma | dosa") })
+    expect(vi.mocked(provider.generate).mock.calls[0]?.[0].messages[1]).toMatchObject({
+      role: "user",
+      text: expect.stringContaining("paratha | poha | idli | upma | dosa"),
+    })
   })
 
   it("repairs only failed dishes with deterministic validation feedback", async () => {
     const provider = providerWith(
-      catalogResponse([
-        catalogProposal("paratha"),
-        catalogProposal("poha", { typicalCookMinutes: -1 }),
-      ]),
+      catalogResponse([catalogProposal("paratha"), catalogProposal("poha", { typicalCookMinutes: -1 })]),
       catalogResponse([catalogProposal("poha", { name: "Flattened rice" })]),
     )
-    const result = await expandMealCatalog(provider, { parentDishNames: ["paratha", "poha"], schedule: SEED_SCHEDULE }, {
-      createId: (() => {
-        let index = 0
-        return () => `meal_repaired_${++index}`
-      })(),
-    })
+    const result = await expandMealCatalog(
+      provider,
+      { parentDishNames: ["paratha", "poha"], schedule: SEED_SCHEDULE },
+      {
+        createId: (() => {
+          let index = 0
+          return () => `meal_repaired_${++index}`
+        })(),
+      },
+    )
 
     expect(result.failures).toEqual([])
     expect(result.definitions?.map((definition) => definition.name)).toEqual(["paratha", "Flattened rice"])
