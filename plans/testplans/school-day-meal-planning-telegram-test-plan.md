@@ -210,8 +210,8 @@ would have caught it, and the coverage needed.
 | R02 (two comments → one revised plan) | live contractIt (`R02`) + `batched-feedback` corpus (`unaddressed_feedback`); passes |
 | R03 (day-level feedback → replan the day, others stable) | live contractIt (`R03`) + `whole-day-replan` corpus; passes |
 | R05 (conflicting instructions) | live contractIt (`R05`) + mocked agent test; passes (model clarified instead of violating the exclusion) |
-| R06 (vague feedback → clarify what matters) | no scenario |
-| R07 (reopen / re-request current plan) | no coverage |
+| R06 (vague feedback → clarify what matters) | live contractIt (`R06`); passes |
+| R07 (reopen / re-request current plan) | existing `mid-week /mealplan supersedes` integration test; passes |
 | R09 (`Tomorrow is a holiday` → update state, no replan) | no scenario |
 | S03 (durable state across restart) | no coverage |
 | S04 (weekly inventory/exceptions expiry) | partial (week-bound units only) |

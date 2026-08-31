@@ -1,4 +1,4 @@
-import { evaluateMealPlanSelection } from "../meal-planning/evaluation"
+import { evaluateMealPlanSelection, evaluateMealPlanSelectionPatch } from "../meal-planning/evaluation"
 import type {
   FailureCode,
   FeedbackItem,
@@ -6,6 +6,8 @@ import type {
   MealPlanCandidate,
   MealPlanContext,
   MealPlanEvaluation,
+  MealPlanSelectionCandidate,
+  MealPlanSelectionPatch,
   WeeklyExceptions,
   WeeklyInventory,
 } from "../meal-planning/types"
@@ -20,17 +22,18 @@ import {
   needsClarificationInputSchema,
   PROPOSE_JUSTIFICATION_MAX_CHARACTERS,
   proposePlanInputSchema,
+  proposePlanRevisionInputSchema,
 } from "./meal-planning"
 
 export const MEAL_PLANNING_AGENT_PROMPT = `You are a parent's meal-planning agent for school days. Interpret the parent's request and use only the provided actions.
 
-Build one complete school-week plan covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. For a school_closed exception, omit that day key from the candidate grid entirely. On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. The plan must contain a cell for every remaining slot on every open schedule day — never fewer, never a day outside the schedule. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
+For an initial plan, build one complete school-week grid covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. For a school_closed exception, omit that day key from the grid entirely. For a revision, the active plan is authoritative: submit a patch containing only the cells you are changing. Never repeat an unchanged cell or reconstruct it from a catalog id. Omit easyBuys and policyOutcomes unless you are replacing either whole value. On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
 
 The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole. If unbound feedback does not identify what should improve — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat it as satisfied by a rationale.
 
 Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Include a short justification in propose_plan explaining the plan in plain language. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation when there is one. Before evaluation, use an empty reasonCodes list unless the clarification is caused directly by a known hard constraint; then include its applicable failure code, such as hard_exclusion. Keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
 
-Build the candidate grid from meal selections. The context provides complete structured catalog records: use their listed slots, packing facts, cook minutes, prep requirement, and required ingredients rather than inferring them. Established meals use their mealDefinitionId; ingredientChoices may contain only the permitted choices listed for that definition, and usesPriorNightPrep is meaningful only when prep is optional. If a catalog ingredient and the parent inventory use different names for the same ingredient, explicitly map the inventory spelling to the catalog spelling in ingredientAliasesUsed. Use this only for a genuine semantic match, for example { "Rajma": "Kidney Beans" }; both names must be present in the context. A plan-local provisional meal is reused by its provisionalMealId exactly as listed in the context.
+Build the initial grid or revision patch from meal selections. The context provides complete structured catalog records: use their listed slots, packing facts, cook minutes, prep requirement, and required ingredients rather than inferring them. Established meals use their mealDefinitionId; ingredientChoices may contain only the permitted choices listed for that definition, and usesPriorNightPrep is meaningful only when prep is optional. If a catalog ingredient and the parent inventory use different names for the same ingredient, explicitly map the inventory spelling to the catalog spelling in ingredientAliasesUsed. Use this only for a genuine semantic match, for example { "Rajma": "Kidney Beans" }; both names must be present in the context. A plan-local provisional meal is reused by its provisionalMealId exactly as listed in the context.
 
 Known selection example: { "mealDefinitionId": "meal_opaque_paratha", "ingredientChoices": ["spinach"], "ingredientAliasesUsed": { "whole-wheat atta": "wheat flour" }, "usesPriorNightPrep": true }.
 
@@ -40,6 +43,8 @@ easyBuys is the short list of ordinary ingredients you are adding this week: sta
 
 export interface MealPlanningAgentSessionOptions {
   context: MealPlanContext
+  /** Active hydrated candidate retained by server while a revision is patched. */
+  revisionBaseCandidate?: MealPlanCandidate
   /** Debug aid: keep provider reasoning in the returned transcript. */
   retainReasoning?: boolean
 }
@@ -68,7 +73,11 @@ export async function runMealPlanningAgentSession(
 ): Promise<MealPlanningAgentSessionResult> {
   let terminal: MealPlanningTerminalOutcome | null = null
   let latestEvaluation: MealPlanEvaluation | null = null
-  const evaluationTool = createEvaluateMealPlanTool(options.context)
+  // The workflow always supplies this for revisions. Keeping the session's
+  // low-level test harness usable without persisted state preserves existing
+  // full-candidate callers, while production revisions always use patches.
+  const isRevisionPatch = options.context.request.kind === "revision" && options.revisionBaseCandidate !== undefined
+  const evaluationTool = createEvaluateMealPlanTool(options.context, options.revisionBaseCandidate)
   const registry: ToolRegistry = {
     [MEAL_PLANNING_TOOL.EVALUATE]: {
       ...evaluationTool,
@@ -82,7 +91,7 @@ export async function runMealPlanningAgentSession(
       name: MEAL_PLANNING_TOOL.PROPOSE,
       description:
         "Terminal action after a passing evaluation. Submit the candidate, optional feedback scope interpretations, and optional short justification; the workflow supplies inventory and exceptions.",
-      input: proposePlanInputSchema,
+      input: isRevisionPatch ? proposePlanRevisionInputSchema : proposePlanInputSchema,
       output: acceptedOutputSchema,
       privacy: "private",
       batching: "isolated",
@@ -106,10 +115,15 @@ export async function runMealPlanningAgentSession(
         // Every authoritative item is in the evaluation set, so the evaluator's
         // `unaddressed_feedback` check is the coverage gate (with codes the
         // model can act on), replacing any session-side echo requirement.
-        const selectionEvaluation = evaluateMealPlanSelection(input.candidate, {
-          ...options.context,
-          feedbackItems: evaluationFeedback,
-        })
+        const evaluationContext = { ...options.context, feedbackItems: evaluationFeedback }
+        const selectionEvaluation =
+          isRevisionPatch && options.revisionBaseCandidate
+            ? evaluateMealPlanSelectionPatch(
+                input.candidate as MealPlanSelectionPatch,
+                options.revisionBaseCandidate,
+                evaluationContext,
+              )
+            : evaluateMealPlanSelection(input.candidate as MealPlanSelectionCandidate, evaluationContext)
         if (!selectionEvaluation.candidate)
           throw new ToolHandlerError(
             "proposed plan could not be hydrated",

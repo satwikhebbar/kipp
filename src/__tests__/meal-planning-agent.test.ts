@@ -174,6 +174,10 @@ function evaluateResponse(candidate: unknown) {
   }
 }
 
+function evaluatePatchResponse(patch: unknown) {
+  return { toolCalls: [call("evaluate", "evaluate_meal_plan", patch)], usage: { inputTokens: 0, outputTokens: 0 } }
+}
+
 function proposeResponse(input: unknown) {
   return { toolCalls: [call("propose", "propose_plan", input)], usage: { inputTokens: 0, outputTokens: 0 } }
 }
@@ -319,6 +323,23 @@ describe("bounded meal-planning agent session", () => {
     expect(result.completed).toBe(true)
     expect(result.terminal).toMatchObject({ kind: "propose_plan" })
     if (result.terminal?.kind === "propose_plan") expect(result.terminal.feedbackItems).toEqual(raw)
+  })
+
+  it("accepts a one-cell revision patch without asking the model to reconstruct untouched catalog ids", async () => {
+    const base = passingCandidate()
+    const raw = [{ id: "tg-1", text: "Use poha on Monday", scope: { day: "Mon", slot: "breakfast" } }]
+    const patch = { grid: { Mon: { breakfast: { mealDefinitionId: "fixture_poha_breakfast" } } } }
+    const provider = providerWith(evaluatePatchResponse(patch), proposeResponse({ candidate: patch }))
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: raw[0].text }], {
+      context: context({ request: { kind: "revision", text: raw[0].text }, feedbackItems: raw, recentPlan: base.grid }),
+      revisionBaseCandidate: base,
+    })
+    expect(result.terminal).toMatchObject({ kind: "propose_plan" })
+    if (result.terminal?.kind === "propose_plan") {
+      expect(result.terminal.candidate.grid.Mon.breakfast.dish).toBe("poha")
+      expect(result.terminal.candidate.grid.Tue.breakfast).toBe(base.grid.Tue.breakfast)
+      expect(result.terminal.candidate.easyBuys).toEqual(base.easyBuys)
+    }
   })
 
   it("evaluates a scoped authoritative feedback item even when the model omits it from the submission", async () => {
