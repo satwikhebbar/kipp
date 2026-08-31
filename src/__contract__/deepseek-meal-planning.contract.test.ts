@@ -49,7 +49,9 @@ const scenario = (id: string): MealPlanScenario => {
 
 const MAX_PROVIDER_TURNS = 8
 const PROVIDER_MAX_RETRIES = 3
-const PROVIDER_REQUEST_TIMEOUT_MS = 90_000
+// Deep reasoning turns can exceed 90 seconds; keep each request bounded while
+// the enclosing live-contract timeout still limits the whole scenario to 10m.
+const PROVIDER_REQUEST_TIMEOUT_MS = 180_000
 // Mirror of the agent-facing prompt policy: at most 10 easy buys a week,
 // more only when the inventory cannot support a plausible plan. The judge
 // (C2/T07) decides "easy to buy", the cap guards the "not the whole shopping
@@ -80,6 +82,39 @@ const HOLIDAY_HALF_DAY_PANCAKE: MealDefinition = {
   optionalIngredients: [],
   status: "established",
 }
+
+// A small established quick-meal set makes the tight-morning scenario
+// feasible without requiring the model to invent every low-time option.
+const TIGHT_MORNING_MEALS: MealDefinition[] = [
+  {
+    id: "meal_01j1f105c2n8q4v6",
+    name: "Besan chilla",
+    aliases: ["besan chilla"],
+    principalIngredients: ["besan"],
+    vegetarian: true,
+    suitableSlots: ["breakfast", "school-lunch", "home-lunch"],
+    packedFood: { suitable: true, dry: false },
+    typicalCookMinutes: 15,
+    priorNightPrep: "none",
+    requiredIngredients: ["besan"],
+    optionalIngredients: [],
+    status: "established",
+  },
+  {
+    id: "meal_01j1f106m7r3x9p2",
+    name: "Vegetable sandwich",
+    aliases: ["vegetable sandwich"],
+    principalIngredients: ["bread", "vegetables"],
+    vegetarian: true,
+    suitableSlots: ["breakfast", "school-lunch", "home-lunch"],
+    packedFood: { suitable: true, dry: false },
+    typicalCookMinutes: 10,
+    priorNightPrep: "none",
+    requiredIngredients: ["bread", "vegetables"],
+    optionalIngredients: [],
+    status: "established",
+  },
+]
 
 function holidayHalfDayContext(): MealPlanContext {
   const base = scenario("holiday-half-day").context
@@ -544,7 +579,12 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     const base = scenario("no-prior-night-prep").context
     const ctx: MealPlanContext = {
       ...base,
-      profile: { ...base.profile, morningCookingBudgetMinutes: MORNING_BUDGET_MINUTES },
+      profile: {
+        ...base.profile,
+        allowNewFoods: true,
+        mealDefinitions: [...(base.profile.mealDefinitions ?? SEED_PROFILE.mealDefinitions ?? []), ...TIGHT_MORNING_MEALS],
+        morningCookingBudgetMinutes: MORNING_BUDGET_MINUTES,
+      },
       request: {
         kind: "initial_plan",
         text: "No night prep this week. I have only 35 minutes before school, including getting him ready.",
@@ -774,6 +814,9 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     const base = scenario("no-dairy-week").context
     const ctx: MealPlanContext = {
       ...base,
+      // This scenario exercises dairy exclusion, not a constrained morning.
+      // The corpus fixture predates the focused T05 time-budget scenario.
+      profile: { ...base.profile, morningCookingBudgetMinutes: 40 },
       request: { kind: "initial_plan", text: "No dairy products this week." },
     }
     const result = await runLive(ctx)
@@ -815,7 +858,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     ).toBe(true)
   })
 
-  contractIt("T04-CL: an underspecified dish name produces one targeted clarification", async () => {
+  contractIt("T04a: an underspecified dish name produces one targeted clarification", async () => {
     const base = scenario("baseline-week").context
     const ctx: MealPlanContext = {
       ...base,
@@ -830,7 +873,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     expect(result.terminal.message).not.toMatch(/fb-[a-z0-9]+|tg-\d+/)
   })
 
-  contractIt("T04-CL: a contrarian snack request produces one targeted clarification", async () => {
+  contractIt("T04b: a contrarian snack request produces one targeted clarification", async () => {
     const base = scenario("baseline-week").context
     const ctx: MealPlanContext = {
       ...base,

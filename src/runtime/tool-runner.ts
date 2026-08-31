@@ -48,6 +48,8 @@ export interface ToolRunOptions {
   reasoning?: ToolReasoningMode
   /** Chooses the allowlist for the next provider turn after a successful tool batch. */
   nextAllowedTools?: (executedTools: readonly string[]) => readonly string[]
+  /** Adds concise state-specific guidance before the next provider turn after a successful tool batch. */
+  nextInstruction?: (executedTools: readonly string[]) => string | undefined
   /** Provider-turn budget for this session; defaults to the global MAX_TOOL_PROVIDER_TURNS. */
   maxProviderTurns?: number
   /** Aggregate tool-call budget for this session; defaults to the global MAX_TOOL_CALLS. */
@@ -190,6 +192,8 @@ export async function runTools(
         usage,
       }
     allowedTools = options.nextAllowedTools?.(successfulTools) ?? allowedTools
+    const instruction = options.nextInstruction?.(successfulTools)
+    if (instruction) messages.push({ role: "user", text: instruction })
   }
   return {
     messages,

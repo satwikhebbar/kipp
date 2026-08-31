@@ -24,7 +24,7 @@ import {
 
 export const MEAL_PLANNING_AGENT_PROMPT = `You are a parent's meal-planning agent for school days. Interpret the parent's request and use only the provided actions.
 
-Build one complete school-week plan covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. For a school_closed exception, omit that day key from the candidate grid entirely. On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns. On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. The plan must contain a cell for every remaining slot on every open schedule day — never fewer, never a day outside the schedule. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
+Build one complete school-week plan covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. For a school_closed exception, omit that day key from the candidate grid entirely. On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. The plan must contain a cell for every remaining slot on every open schedule day — never fewer, never a day outside the schedule. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
 
 The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole. If unbound feedback does not identify what should improve — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat it as satisfied by a rationale.
 
@@ -80,7 +80,7 @@ export async function runMealPlanningAgentSession(
     },
     [MEAL_PLANNING_TOOL.PROPOSE]: {
       name: MEAL_PLANNING_TOOL.PROPOSE,
-      description: "Hand the evaluated candidate to the workflow for deterministic re-validation and persistence.",
+      description: "Terminal action after a passing evaluation. Submit the candidate, optional feedback scope interpretations, and optional short justification; the workflow supplies inventory and exceptions.",
       input: proposePlanInputSchema,
       output: acceptedOutputSchema,
       privacy: "private",
@@ -128,8 +128,8 @@ export async function runMealPlanningAgentSession(
           kind: "propose_plan",
           candidate: selectionEvaluation.candidate,
           provisionalMealDefinitions: selectionEvaluation.provisionalMealDefinitions,
-          weeklyInventory: input.weeklyInventory ?? options.context.weeklyInventory,
-          weeklyExceptions: input.weeklyExceptions ?? options.context.weeklyExceptions,
+          weeklyInventory: options.context.weeklyInventory,
+          weeklyExceptions: options.context.weeklyExceptions,
           ...(evaluationFeedback.length ? { feedbackItems: evaluationFeedback } : {}),
           ...(input.justification ? { justification: input.justification.slice(0, PROPOSE_JUSTIFICATION_MAX_CHARACTERS) } : {}),
           evaluation,
@@ -160,12 +160,21 @@ export async function runMealPlanningAgentSession(
       allowedTools: initialAllowedTools,
       handoffTools: terminalTools,
       requireHandoff: true,
+      // DeepSeek rejects required tool choice when thinking mode is enabled.
+      // The terminal-only allowlist and explicit post-evaluation instruction
+      // still make the handoff unambiguous while preserving reasoning mode.
       toolChoice: "auto",
       reasoning: "high",
       nextAllowedTools: (executedTools) =>
         executedTools.includes(MEAL_PLANNING_TOOL.EVALUATE)
-          ? [MEAL_PLANNING_TOOL.EVALUATE, ...terminalTools]
+          ? latestEvaluation?.pass
+            ? terminalTools
+            : [MEAL_PLANNING_TOOL.EVALUATE, ...terminalTools]
           : initialAllowedTools,
+      nextInstruction: (executedTools) =>
+        executedTools.includes(MEAL_PLANNING_TOOL.EVALUATE) && latestEvaluation?.pass
+          ? "Evaluation passed. Call exactly one terminal tool now: propose_plan to submit the evaluated candidate, or needs_clarification only if a real unresolved decision remains. Do not answer with prose. propose_plan receives candidate, optional feedback scope interpretations, and an optional short justification; inventory and exceptions are already held by the workflow."
+          : undefined,
       // A full Mon–Sat candidate is a large nested schema; the model often needs
       // an extra evaluate-revise turn, so grant more turns than the default
       // shared budget without changing other workflows.
