@@ -116,6 +116,146 @@ const TIGHT_MORNING_MEALS: MealDefinition[] = [
   },
 ]
 
+// R02's feedback explicitly asks for these two established repertoire meals.
+// They are added to this fixture's catalog rather than treated as new foods.
+const BATCHED_FEEDBACK_MEALS: MealDefinition[] = [
+  {
+    id: "meal_01j1f107q4h8v2s5",
+    name: "grapes",
+    aliases: ["grapes"],
+    principalIngredients: ["grapes"],
+    vegetarian: true,
+    suitableSlots: ["snack1", "snack2"],
+    packedFood: { suitable: true, dry: true },
+    typicalCookMinutes: 0,
+    priorNightPrep: "none",
+    requiredIngredients: ["grapes"],
+    optionalIngredients: [],
+    status: "established",
+  },
+  {
+    id: "meal_01j1f108k6m3x9r4",
+    name: "stir-fried noodles",
+    aliases: ["stir-fried noodles", "noodle stir-fry"],
+    principalIngredients: ["noodles"],
+    vegetarian: true,
+    suitableSlots: ["home-lunch"],
+    packedFood: { suitable: false, dry: false },
+    typicalCookMinutes: 20,
+    priorNightPrep: "none",
+    requiredIngredients: ["noodles"],
+    optionalIngredients: [],
+    status: "established",
+  },
+]
+
+const MIDWEEK_SHORTAGE_MEAL: MealDefinition = {
+  id: "meal_01j1f109n5q8w2h6",
+  name: "aloo sabzi",
+  aliases: ["aloo sabzi"],
+  principalIngredients: ["potato"],
+  vegetarian: true,
+  suitableSlots: ["school-lunch", "home-lunch"],
+  packedFood: { suitable: true, dry: false },
+  typicalCookMinutes: 20,
+  priorNightPrep: "none",
+  requiredIngredients: ["potato"],
+  optionalIngredients: [],
+  status: "established",
+}
+
+const POTATO_CURRY_MEAL: MealDefinition = {
+  id: "meal_01j1f10aq7v2m6x8",
+  name: "potato curry",
+  aliases: ["potato curry"],
+  principalIngredients: ["potato"],
+  vegetarian: true,
+  suitableSlots: ["school-lunch", "home-lunch"],
+  packedFood: { suitable: true, dry: false },
+  typicalCookMinutes: 20,
+  priorNightPrep: "none",
+  requiredIngredients: ["potato"],
+  optionalIngredients: [],
+  status: "established",
+}
+
+// This scenario asks for every Thursday cell to change while retaining the
+// other four school days. Its base week already uses the seed repertoire, so
+// these established, in-stock alternatives make the day-level revision
+// satisfiable without weakening the no-repeat rule or allowing new foods.
+const WHOLE_DAY_REPLAN_MEALS: MealDefinition[] = [
+  {
+    id: "meal_01j1f10br6y4n8c2",
+    name: "carrot paratha",
+    aliases: ["carrot paratha"],
+    principalIngredients: ["carrot", "wheat flour"],
+    vegetarian: true,
+    suitableSlots: ["breakfast", "school-lunch"],
+    packedFood: { suitable: true, dry: false },
+    typicalCookMinutes: 15,
+    priorNightPrep: "none",
+    requiredIngredients: ["carrot", "wheat flour"],
+    optionalIngredients: [],
+    status: "established",
+  },
+  {
+    id: "meal_01j1f10cv9k2p5d7",
+    name: "grapes",
+    aliases: ["grapes"],
+    principalIngredients: ["grapes"],
+    vegetarian: true,
+    suitableSlots: ["snack1", "snack2"],
+    packedFood: { suitable: true, dry: true },
+    typicalCookMinutes: 0,
+    priorNightPrep: "none",
+    requiredIngredients: ["grapes"],
+    optionalIngredients: [],
+    status: "established",
+  },
+  {
+    id: "meal_01j1f10dw3q6r9e4",
+    name: "figs",
+    aliases: ["figs"],
+    principalIngredients: ["figs"],
+    vegetarian: true,
+    suitableSlots: ["snack1", "snack2"],
+    packedFood: { suitable: true, dry: true },
+    typicalCookMinutes: 0,
+    priorNightPrep: "none",
+    requiredIngredients: ["figs"],
+    optionalIngredients: [],
+    status: "established",
+  },
+  {
+    id: "meal_01j1f10ex8m3s7f5",
+    name: "corn pulao",
+    aliases: ["corn pulao"],
+    principalIngredients: ["corn", "rice"],
+    vegetarian: true,
+    suitableSlots: ["school-lunch", "home-lunch"],
+    packedFood: { suitable: true, dry: false },
+    typicalCookMinutes: 20,
+    priorNightPrep: "none",
+    requiredIngredients: ["corn", "rice"],
+    optionalIngredients: [],
+    status: "established",
+  },
+  {
+    id: "meal_01j1f10fy5n8t2g6",
+    name: "mushroom curry",
+    aliases: ["mushroom curry"],
+    principalIngredients: ["mushroom"],
+    vegetarian: true,
+    suitableSlots: ["home-lunch"],
+    packedFood: { suitable: false, dry: false },
+    typicalCookMinutes: 20,
+    priorNightPrep: "none",
+    requiredIngredients: ["mushroom"],
+    optionalIngredients: [],
+    status: "established",
+  },
+]
+
 function holidayHalfDayContext(): MealPlanContext {
   const base = scenario("holiday-half-day").context
   return {
@@ -125,6 +265,39 @@ function holidayHalfDayContext(): MealPlanContext {
       // Corpus fixtures retain hydrated MealCells. The live session sees this
       // household's full established catalog, including Weekend pancake.
       mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), HOLIDAY_HALF_DAY_PANCAKE],
+    },
+  }
+}
+
+function batchedFeedbackContext(): MealPlanContext {
+  const base = scenario("batched-feedback").context
+  return {
+    ...base,
+    profile: {
+      ...base.profile,
+      mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), ...BATCHED_FEEDBACK_MEALS, POTATO_CURRY_MEAL],
+    },
+  }
+}
+
+function midweekShortageContext(): MealPlanContext {
+  const base = scenario("midweek-shortage").context
+  return {
+    ...base,
+    profile: {
+      ...base.profile,
+      mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), MIDWEEK_SHORTAGE_MEAL, POTATO_CURRY_MEAL],
+    },
+  }
+}
+
+function wholeDayReplanContext(): MealPlanContext {
+  const base = scenario("whole-day-replan").context
+  return {
+    ...base,
+    profile: {
+      ...base.profile,
+      mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), POTATO_CURRY_MEAL, ...WHOLE_DAY_REPLAN_MEALS],
     },
   }
 }
@@ -582,7 +755,10 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
       profile: {
         ...base.profile,
         allowNewFoods: true,
-        mealDefinitions: [...(base.profile.mealDefinitions ?? SEED_PROFILE.mealDefinitions ?? []), ...TIGHT_MORNING_MEALS],
+        mealDefinitions: [
+          ...(base.profile.mealDefinitions ?? SEED_PROFILE.mealDefinitions ?? []),
+          ...TIGHT_MORNING_MEALS,
+        ],
         morningCookingBudgetMinutes: MORNING_BUDGET_MINUTES,
       },
       request: {
@@ -606,7 +782,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
   })
 
   contractIt("B3/B4: a two-item batched revision completes with both feedback items represented", async () => {
-    const ctx = scenario("batched-feedback").context
+    const ctx = batchedFeedbackContext()
     const result = await runLive(ctx)
     const terminal = requireProposal(result)
     const submittedIds = new Set((terminal.feedbackItems ?? []).map((item) => item.id))
@@ -616,7 +792,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
   })
 
   contractIt("R02: two independent comments both land in one complete revised plan", async () => {
-    const ctx = scenario("batched-feedback").context
+    const ctx = batchedFeedbackContext()
     const recent = ctx.recentPlan
     if (!recent) throw new Error("batched-feedback needs recentPlan")
     const terminal = requireProposal(await runLive(ctx))
@@ -889,7 +1065,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
   })
 
   contractIt("R01/R04: scoped meal feedback changes the targeted cell and leaves untouched days stable", async () => {
-    const ctx = scenario("midweek-shortage").context
+    const ctx = midweekShortageContext()
     const recent = ctx.recentPlan
     if (!recent) throw new Error("midweek-shortage needs recentPlan")
     const terminal = requireProposal(await runLive(ctx))
@@ -903,7 +1079,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
   })
 
   contractIt("R03: day-level feedback replans the targeted day and leaves other days stable", async () => {
-    const ctx = scenario("whole-day-replan").context
+    const ctx = wholeDayReplanContext()
     const recent = ctx.recentPlan
     if (!recent) throw new Error("whole-day-replan needs recentPlan")
     const scope = ctx.feedbackItems?.[0]?.scope
