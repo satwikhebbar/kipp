@@ -27,7 +27,14 @@ it("renders complete structured catalog facts for the planning agent", () => {
     schedule: SEED_SCHEDULE,
     profile: SEED_PROFILE,
     customPolicies: [],
-    weeklyInventory: { items: [{ name: "Rajma", status: "available" }], notes: [] },
+    weeklyInventory: {
+      items: [
+        { name: "Rajma", status: "available" },
+        { name: "carrot", status: "available", quantityNote: "two carrots" },
+        { name: "paneer", status: "unavailable" },
+      ],
+      notes: [],
+    },
     weeklyExceptions: { items: [] },
     request: { kind: "initial_plan", text: "Plan this week." },
   }
@@ -37,6 +44,8 @@ it("renders complete structured catalog facts for the planning agent", () => {
   expect(rendered).toContain('"priorNightPrep"')
   expect(rendered).toContain('"requiredIngredients"')
   expect(rendered).not.toContain(" | ")
+  expect(rendered).toContain("Rajma, carrot (two carrots), paneer (unavailable)")
+  expect(rendered).not.toContain("Rajma (available)")
 })
 
 // Workflow fixtures intentionally reuse paratha in every slot. Keep that

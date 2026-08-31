@@ -93,7 +93,7 @@
           "status": "available"
         },
         {
-          "name": "idli rice",
+          "name": "idli batter",
           "status": "available"
         },
         {
@@ -389,7 +389,7 @@
             "snack1": {
               "dish": "idli",
               "vegetarian": true,
-              "items": ["idli rice"],
+              "items": ["idli batter"],
               "cookMinutes": 0,
               "priorNightPrep": false
             },
@@ -627,7 +627,7 @@
             "snack1": {
               "dish": "idli",
               "vegetarian": true,
-              "items": ["idli rice"],
+              "items": ["idli batter"],
               "cookMinutes": 0,
               "priorNightPrep": false
             },

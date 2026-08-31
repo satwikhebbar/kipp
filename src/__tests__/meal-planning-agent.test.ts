@@ -177,6 +177,16 @@ describe("bounded meal-planning agent session", () => {
     if (result.terminal?.kind === "propose_plan") expect(result.terminal.evaluation.pass).toBe(true)
   })
 
+  it("truncates an overlong debug justification without rejecting the terminal proposal", async () => {
+    const provider = providerWith(
+      evaluateResponse(passingCandidate()),
+      proposeResponse({ ...proposeInput(passingCandidate()), justification: "x".repeat(700) }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], { context: context() })
+    expect(result.completed).toBe(true)
+    if (result.terminal?.kind === "propose_plan") expect(result.terminal.justification).toHaveLength(500)
+  })
+
   it("rejects propose_plan when the candidate fails evaluation", async () => {
     const provider = providerWith(
       evaluateResponse(passingCandidate()),
