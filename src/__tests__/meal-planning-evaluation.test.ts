@@ -773,6 +773,42 @@ describe("structured meal hydration", () => {
     expect(result.candidate).toBeUndefined()
   })
 
+  it("hydrates explicit inventory-to-definition ingredient aliases", () => {
+    const rajma = {
+      ...definition,
+      id: "meal-rajma-chawal",
+      name: "Rajma Chawal",
+      principalIngredients: ["Kidney Beans", "rice"],
+      requiredIngredients: ["Kidney Beans", "rice"],
+      suitableSlots: ["home-lunch"],
+      priorNightPrep: "required" as const,
+    }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [rajma], pantryBaseline: ["rice"] },
+      weeklyInventory: { items: [{ name: "Rajma", status: "available" }], notes: [] },
+    })
+    const selection = {
+      grid: { Mon: { "home-lunch": { mealDefinitionId: rajma.id, ingredientAliasesUsed: { Rajma: "Kidney Beans" } } } },
+      easyBuys: [], policyOutcomes: {},
+    }
+    const result = hydrateMealPlan(selection, context)
+    expect(result.failures).toEqual([])
+    expect(result.candidate?.grid.Mon["home-lunch"].items).toEqual(["Rajma", "rice"])
+  })
+
+  it("rejects aliases that do not connect available inventory to a selected definition ingredient", () => {
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour"] },
+      weeklyInventory: { items: [{ name: "banana", status: "available" }], notes: [] },
+    })
+    const result = hydrateMealPlan({
+      grid: { Mon: { breakfast: { mealDefinitionId: definition.id, ingredientAliasesUsed: { banana: "paneer" } } } },
+      easyBuys: [], policyOutcomes: {},
+    }, context)
+    expect(result.candidate).toBeUndefined()
+    expect(result.failures.map((failure) => failure.code)).toEqual(["invalid_ingredient_alias"])
+  })
+
   it("enforces definition slots, packed and dry-slot suitability during hydration", () => {
     const context = baseContext({
       profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour"] },

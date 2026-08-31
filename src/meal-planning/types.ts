@@ -16,6 +16,7 @@ export const FAILURE_CODES = [
   "unaddressed_feedback",
   "unknown_meal_definition",
   "invalid_ingredient_choice",
+  "invalid_ingredient_alias",
   "required_ingredient_unavailable",
   "new_meal_not_allowed",
   "invalid_new_meal",
@@ -231,6 +232,8 @@ export interface MealPlanCandidate {
 export interface KnownMealSelection {
   mealDefinitionId: string
   ingredientChoices?: string[]
+  /** Maps an available inventory spelling to the selected definition's ingredient spelling. */
+  ingredientAliasesUsed?: Record<string, string>
   usesPriorNightPrep?: boolean
 }
 
@@ -247,6 +250,7 @@ export interface NewMealProposal {
 
 export interface NewMealSelection {
   proposedMeal: NewMealProposal
+  ingredientAliasesUsed?: Record<string, string>
   usesPriorNightPrep?: boolean
 }
 
@@ -254,6 +258,7 @@ export interface NewMealSelection {
 export interface ProvisionalMealSelection {
   provisionalMealId: string
   ingredientChoices?: string[]
+  ingredientAliasesUsed?: Record<string, string>
   usesPriorNightPrep?: boolean
 }
 

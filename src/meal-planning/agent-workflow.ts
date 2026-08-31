@@ -27,7 +27,7 @@ import {
   type StoredMealProfile,
 } from "./store"
 import { coerceSubmission, type Submission } from "./submissions"
-import type { MealPlanCandidate, MealPlanContext } from "./types"
+import type { MealDefinition, MealPlanCandidate, MealPlanContext } from "./types"
 import { enrichLunchVideos } from "./video"
 import { resolvePlanningWeek } from "./week"
 import type { MealPlanningWorkflowParams } from "./workflow"
@@ -56,6 +56,19 @@ type PlanningOutcome =
   | { kind: "proposed"; propose: Extract<MealPlanningTerminalOutcome, { kind: "propose_plan" }> }
   | { kind: "abandoned" }
 
+function renderMealDefinition(meal: MealDefinition): string {
+  return JSON.stringify({
+    id: meal.id,
+    name: meal.name,
+    suitableSlots: meal.suitableSlots,
+    packedFood: meal.packedFood ?? null,
+    typicalCookMinutes: meal.typicalCookMinutes,
+    priorNightPrep: meal.priorNightPrep,
+    requiredIngredients: meal.requiredIngredients,
+    permittedIngredientChoices: [...meal.optionalIngredients, ...(meal.allowedIngredientChoices ?? [])],
+  })
+}
+
 /** Renders the household operating context the planning model must see (profile, schedule, policies, week state). */
 export function renderHouseholdContext(context: MealPlanContext): string {
   const p = context.profile
@@ -69,8 +82,8 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       )
       .join(", ")}`,
     `- Dietary exclusions (hard): ${p.dietaryExclusions.join(", ") || "none"}`,
-    `- Established meal definitions (select only by opaque id): ${(p.mealDefinitions ?? []).filter((meal) => meal.status === "established").map((meal) => `${meal.id}: ${meal.name}; slots=${meal.suitableSlots.join("/")}; optional choices=${[...meal.optionalIngredients, ...(meal.allowedIngredientChoices ?? [])].join("/") || "none"}`).join(" | ") || "none"}`,
-    `- Plan-local provisional definitions: ${(context.provisionalMealDefinitions ?? []).map((meal) => `${meal.id}: ${meal.name}`).join(" | ") || "none"}`,
+    `- Established meal definitions (one JSON record per available catalog meal; select only by id):\n${(p.mealDefinitions ?? []).filter((meal) => meal.status === "established").map((meal) => `    ${renderMealDefinition(meal)}`).join("\n") || "    none"}`,
+    `- Plan-local provisional definitions (one JSON record per reusable meal):\n${(context.provisionalMealDefinitions ?? []).map((meal) => `    ${renderMealDefinition(meal)}`).join("\n") || "    none"}`,
     `- Food preferences: favourites = ${p.foodPreferences.favourites.join(", ") || "none"}, avoid = ${p.foodPreferences.avoid.join(", ") || "none"}`,
     `- New foods allowed: ${p.allowNewFoods ? "yes" : "no"}`,
     `- Sensory guidelines: ${p.sensoryGuidelines.join(", ") || "none"}`,

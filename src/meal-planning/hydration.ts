@@ -25,6 +25,10 @@ function selectionUsesPrep(selection: MealSelection): boolean {
   return "usesPriorNightPrep" in selection && selection.usesPriorNightPrep === true
 }
 
+function selectionAliases(selection: MealSelection): Record<string, string> {
+  return "ingredientAliasesUsed" in selection ? selection.ingredientAliasesUsed ?? {} : {}
+}
+
 function validateProposal(proposal: NewMealProposal): string | undefined {
   if (!proposal.name.trim()) return "name is required"
   if (!proposal.vegetarian) return "new meals must be vegetarian"
@@ -78,13 +82,14 @@ export function hydrateMealPlan(
   const generated: MealDefinition[] = []
   const generatedNames = new Set<string>()
   const grid: Record<string, Record<string, MealCell>> = {}
-  const availableIngredients = new Set([
+  const availableIngredientNames = [
     ...context.weeklyInventory.items.filter((item) => item.status !== "unavailable").map((item) => item.name),
     ...context.profile.pantryBaseline,
     ...selectionCandidate.easyBuys,
-  ])
+  ]
+  const availableIngredients = new Map(availableIngredientNames.map((name) => [normalized(name), name]))
   const unavailableIngredients = new Set(
-    context.weeklyInventory.items.filter((item) => item.status === "unavailable").map((item) => item.name),
+    context.weeklyInventory.items.filter((item) => item.status === "unavailable").map((item) => normalized(item.name)),
   )
 
   for (const [day, selections] of Object.entries(selectionCandidate.grid)) {
@@ -127,17 +132,46 @@ export function hydrateMealPlan(
       const choices = "ingredientChoices" in selection ? selection.ingredientChoices ?? [] : []
       const allowed = allowedChoices(definition)
       const seenChoices = new Set<string>()
+      const validChoices: string[] = []
       for (const choice of choices) {
         if (seenChoices.has(choice) || !allowed.has(choice)) {
           failures.push({ code: "invalid_ingredient_choice", day, slot: slotId, detail: `ingredient choice "${choice}" is not permitted by ${definition.id}` })
+        } else {
+          validChoices.push(choice)
         }
         seenChoices.add(choice)
       }
-      for (const ingredient of definition.requiredIngredients) {
-        if (unavailableIngredients.has(ingredient) || !availableIngredients.has(ingredient)) {
+      const ingredients = [...definition.requiredIngredients, ...validChoices]
+      const aliases = selectionAliases(selection)
+      const aliasByTarget = new Map<string, string>()
+      const usedSources = new Set<string>()
+      for (const [source, target] of Object.entries(aliases)) {
+        const sourceKey = normalized(source)
+        const targetKey = normalized(target)
+        if (
+          !sourceKey || !targetKey ||
+          !availableIngredients.has(sourceKey) ||
+          !ingredients.some((ingredient) => normalized(ingredient) === targetKey) ||
+          aliasByTarget.has(targetKey) ||
+          usedSources.has(sourceKey)
+        ) {
+          failures.push({ code: "invalid_ingredient_alias", day, slot: slotId, detail: `ingredient alias "${source}" → "${target}" cannot resolve this meal` })
+          continue
+        }
+        aliasByTarget.set(targetKey, availableIngredients.get(sourceKey)!)
+        usedSources.add(sourceKey)
+      }
+      const resolvedIngredients = ingredients.map((ingredient) => {
+        const key = normalized(ingredient)
+        const direct = availableIngredients.get(key)
+        if (direct) return direct
+        const aliased = aliasByTarget.get(key)
+        if (aliased) return aliased
+        if (unavailableIngredients.has(key) || !availableIngredients.has(key)) {
           failures.push({ code: "required_ingredient_unavailable", day, slot: slotId, detail: `required ingredient "${ingredient}" is unavailable` })
         }
-      }
+        return ingredient
+      })
 
       const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
       if (!definition.suitableSlots.includes(slotId)) {
@@ -154,7 +188,7 @@ export function hydrateMealPlan(
       cells[slotId] = {
         dish: definition.name,
         vegetarian: true,
-        items: [...definition.requiredIngredients, ...choices],
+        items: resolvedIngredients,
         cookMinutes: definition.typicalCookMinutes,
         priorNightPrep,
       }

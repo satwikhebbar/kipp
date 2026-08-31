@@ -1,6 +1,12 @@
 import { createDeepseekGenerator, createDeepseekToolClient } from "./deepseek"
 import { createGeminiGenerator, createGeminiToolClient } from "./gemini"
-import { type GenerateFn, type ToolProviderClient, ToolProviderProtocolError } from "./llm"
+import {
+  type GenerateFn,
+  type ToolProviderClient,
+  type ToolProviderOptions,
+  ToolProviderProtocolError,
+  ToolProviderTimeoutError,
+} from "./llm"
 
 export {
   type GenerateFn,
@@ -52,25 +58,31 @@ export function createToolProvider(
   provider: string,
   modelName?: string,
   maxRetries = DEFAULT_RETRIES,
+  options: ToolProviderOptions = {},
 ): ToolProviderClient {
   const retries = Number.isFinite(maxRetries) && maxRetries >= 0 ? Math.floor(maxRetries) : DEFAULT_RETRIES
-  const inner = createInnerToolProvider(apiKey, provider, modelName)
+  const inner = createInnerToolProvider(apiKey, provider, modelName, options)
   return {
     generate: withRetry(
       (input) => inner.generate(input),
       retries,
-      (error) => !(error instanceof ToolProviderProtocolError),
+      (error) => !(error instanceof ToolProviderProtocolError || error instanceof ToolProviderTimeoutError),
     ),
   }
 }
 
 /** Dispatches to the provider-specific tool client factory. */
-function createInnerToolProvider(apiKey: string, provider: string, modelName?: string): ToolProviderClient {
+function createInnerToolProvider(
+  apiKey: string,
+  provider: string,
+  modelName: string | undefined,
+  options: ToolProviderOptions,
+): ToolProviderClient {
   switch (provider) {
     case "gemini":
       return createGeminiToolClient(apiKey, modelName)
     case "deepseek":
-      return createDeepseekToolClient(apiKey, modelName)
+      return createDeepseekToolClient(apiKey, modelName, options)
     default:
       throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek"`)
   }

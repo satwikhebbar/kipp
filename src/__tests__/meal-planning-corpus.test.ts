@@ -31,6 +31,7 @@ const REQUIRED_IDS = [
 const HYDRATION_ONLY_FAILURE_CODES = new Set([
   "unknown_meal_definition",
   "invalid_ingredient_choice",
+  "invalid_ingredient_alias",
   "required_ingredient_unavailable",
   "new_meal_not_allowed",
   "invalid_new_meal",

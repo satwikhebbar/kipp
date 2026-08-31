@@ -40,7 +40,12 @@ if [ -z "$FILTER" ]; then
 fi
 
 mkdir -p logs
+RUN_ID="$(date +%Y%m%d-%H%M%S)"
+LOG_FILE="logs/meal-contract-${RUN_ID}.log"
+TRACE_FILE="logs/meal-contract-${RUN_ID}.provider-trace.ndjson"
 
-DEEPSEEK_CONTRACT=1 LLM_API_KEY="$LLM_API_KEY" pnpm exec vitest run \
+DEEPSEEK_CONTRACT=1 LLM_API_KEY="$LLM_API_KEY" EVAL_TRACE_PATH="$TRACE_FILE" pnpm exec vitest run \
   -t "$FILTER" "$@" src/__contract__/deepseek-meal-planning.contract.test.ts 2>&1 |
-  tee "logs/meal-contract-$(date +%Y%m%d-%H%M%S).log"
+  tee "$LOG_FILE"
+
+echo "Provider turn trace: $TRACE_FILE"

@@ -1,9 +1,9 @@
 import type { WorkflowEvent } from "cloudflare:workers"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
-import { type MealPlanningLiveEvent, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
-import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE } from "../meal-planning/store"
-import type { MealCell, MealPlanSelectionCandidate } from "../meal-planning/types"
+import { type MealPlanningLiveEvent, renderHouseholdContext, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
+import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
+import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 import { createD1TestDb, d1Count } from "./d1-test-db"
@@ -22,12 +22,29 @@ const POLICY_IDS = [
 const CHAT = "chat-1"
 const TZ = "Asia/Kolkata"
 
+it("renders complete structured catalog facts for the planning agent", () => {
+  const context: MealPlanContext = {
+    schedule: SEED_SCHEDULE,
+    profile: SEED_PROFILE,
+    customPolicies: [],
+    weeklyInventory: { items: [{ name: "Rajma", status: "available" }], notes: [] },
+    weeklyExceptions: { items: [] },
+    request: { kind: "initial_plan", text: "Plan this week." },
+  }
+  const rendered = renderHouseholdContext(context)
+  expect(rendered).toContain("one JSON record per available catalog meal")
+  expect(rendered).toContain('"typicalCookMinutes"')
+  expect(rendered).toContain('"priorNightPrep"')
+  expect(rendered).toContain('"requiredIngredients"')
+  expect(rendered).not.toContain(" | ")
+})
+
 // Workflow fixtures intentionally reuse paratha in every slot. Keep that
 // legacy fixture compact while giving its fixture definition stable metadata
 // that makes those placements valid under the selection contract.
 SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) =>
   definition.id === SEED_MEAL_IDS.paratha
-    ? { ...definition, packedFood: { suitable: true, dry: true }, typicalCookMinutes: 0 }
+    ? { ...definition, suitableSlots: Object.keys(SLOT_COOK), packedFood: { suitable: true, dry: true }, typicalCookMinutes: 0 }
     : definition,
 )
 
