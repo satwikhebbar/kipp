@@ -4,7 +4,9 @@ import {
   type GenerateOptions,
   type ToolProviderClient,
   ToolProviderHttpError,
+  type ToolProviderOptions,
   ToolProviderProtocolError,
+  ToolProviderTimeoutError,
   toolDeclaration,
 } from "./llm"
 
@@ -61,7 +63,11 @@ export function createDeepseekGenerator(apiKey: string, modelName = DEEPSEEK_DEF
 }
 
 /** Creates a DeepSeek tool-calling client. */
-export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DEFAULT_MODEL): ToolProviderClient {
+export function createDeepseekToolClient(
+  apiKey: string,
+  modelName = DEEPSEEK_DEFAULT_MODEL,
+  options: ToolProviderOptions = {},
+): ToolProviderClient {
   return {
     async generate({ messages, tools, toolChoice, reasoning }) {
       const wireMessages: DeepseekToolWireMessage[] = messages.map((message) => {
@@ -85,18 +91,27 @@ export function createDeepseekToolClient(apiKey: string, modelName = DEEPSEEK_DE
       })
       const thinkingEnabled = reasoning !== undefined && reasoning !== "disabled"
       const effort = reasoning === "enabled" ? undefined : thinkingEnabled ? reasoning : undefined
-      const response = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model: modelName,
-          messages: wireMessages,
-          tools: tools.map((tool) => ({ type: FUNCTION_TOOL_TYPE, function: toolDeclaration(tool) })),
-          ...(toolChoice ? { tool_choice: toolChoice } : {}),
-          ...(reasoning ? { thinking: { type: thinkingEnabled ? "enabled" : "disabled" } } : {}),
-          ...(effort ? { reasoning_effort: effort } : {}),
-        }),
-      })
+      const timeoutMs = options.requestTimeoutMs
+      const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
+      let response: Response
+      try {
+        response = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify({
+            model: modelName,
+            messages: wireMessages,
+            tools: tools.map((tool) => ({ type: FUNCTION_TOOL_TYPE, function: toolDeclaration(tool) })),
+            ...(toolChoice ? { tool_choice: toolChoice } : {}),
+            ...(reasoning ? { thinking: { type: thinkingEnabled ? "enabled" : "disabled" } } : {}),
+            ...(effort ? { reasoning_effort: effort } : {}),
+          }),
+          ...(signal ? { signal } : {}),
+        })
+      } catch (error) {
+        if (signal?.aborted && timeoutMs !== undefined) throw new ToolProviderTimeoutError("DeepSeek", timeoutMs)
+        throw error
+      }
       if (!response.ok) {
         const providerMessage = await readProviderErrorMessage(response)
         throw new ToolProviderHttpError("DeepSeek", response.status, providerMessage)

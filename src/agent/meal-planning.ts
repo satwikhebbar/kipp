@@ -53,11 +53,12 @@ export const mealPlanCandidateSchema = z
 const priorNightPrepSchema = z.enum(["none", "optional", "required"])
 const packedFoodSchema = z.object({ suitable: z.boolean(), dry: z.boolean() }).strict()
 const ingredientChoicesSchema = z.array(z.string()).optional()
+const ingredientAliasesUsedSchema = z.record(z.string(), z.string()).optional()
 const knownMealSelectionSchema = z
-  .object({ mealDefinitionId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, usesPriorNightPrep: z.boolean().optional() })
+  .object({ mealDefinitionId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, ingredientAliasesUsed: ingredientAliasesUsedSchema, usesPriorNightPrep: z.boolean().optional() })
   .strict()
 const provisionalMealSelectionSchema = z
-  .object({ provisionalMealId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, usesPriorNightPrep: z.boolean().optional() })
+  .object({ provisionalMealId: z.string().min(1), ingredientChoices: ingredientChoicesSchema, ingredientAliasesUsed: ingredientAliasesUsedSchema, usesPriorNightPrep: z.boolean().optional() })
   .strict()
 const newMealSelectionSchema = z
   .object({
@@ -71,6 +72,7 @@ const newMealSelectionSchema = z
       priorNightPrep: priorNightPrepSchema,
       ingredients: z.array(z.string()).min(1),
     }).strict(),
+    ingredientAliasesUsed: ingredientAliasesUsedSchema,
     usesPriorNightPrep: z.boolean().optional(),
   })
   .strict()

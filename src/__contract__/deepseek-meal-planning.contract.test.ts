@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { expandMealCatalog } from "../agent/meal-catalog-expansion"
 import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
@@ -7,6 +8,7 @@ import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type {
   FeedbackItem,
   MealCell,
+  MealDefinition,
   MealGrid,
   MealPlanCandidate,
   MealPlanContext,
@@ -19,9 +21,9 @@ import {
   type ToolConversationMessage,
   type ToolProviderClient,
 } from "../providers"
-import { messages, parseLLMJson, ToolProviderHttpError } from "../providers/llm"
+import { messages, parseLLMJson, ToolProviderHttpError, toolDeclaration } from "../providers/llm"
 
-declare const process: { env: Record<string, string | undefined> }
+declare const process: { env: Record<string, string | undefined>; pid: number }
 
 const providerName = process.env.LIVE_PROVIDER ?? "deepseek"
 const model = process.env.LIVE_MODEL ?? (providerName === "gemini" ? "gemini-3.7-flash" : "deepseek-v4-flash")
@@ -47,6 +49,7 @@ const scenario = (id: string): MealPlanScenario => {
 
 const MAX_PROVIDER_TURNS = 8
 const PROVIDER_MAX_RETRIES = 3
+const PROVIDER_REQUEST_TIMEOUT_MS = 90_000
 // Mirror of the agent-facing prompt policy: at most 10 easy buys a week,
 // more only when the inventory cannot support a plausible plan. The judge
 // (C2/T07) decides "easy to buy", the cap guards the "not the whole shopping
@@ -62,6 +65,34 @@ const MORNING_BUDGET_MINUTES = 35
 const BREAKFAST_COOK_MIN = 15
 const MAIN_COOK_MIN = 20
 const SNACK_COOK_MIN = 0
+
+const HOLIDAY_HALF_DAY_PANCAKE: MealDefinition = {
+  id: "meal_01j1f104r8p5k3v7",
+  name: "Weekend pancake",
+  aliases: ["weekend pancake"],
+  principalIngredients: ["pancake mix"],
+  vegetarian: true,
+  suitableSlots: ["breakfast", "school-lunch", "home-lunch"],
+  packedFood: { suitable: true, dry: false },
+  typicalCookMinutes: 20,
+  priorNightPrep: "none",
+  requiredIngredients: ["pancake mix"],
+  optionalIngredients: [],
+  status: "established",
+}
+
+function holidayHalfDayContext(): MealPlanContext {
+  const base = scenario("holiday-half-day").context
+  return {
+    ...base,
+    profile: {
+      ...base.profile,
+      // Corpus fixtures retain hydrated MealCells. The live session sees this
+      // household's full established catalog, including Weekend pancake.
+      mealDefinitions: [...(SEED_PROFILE.mealDefinitions ?? []), HOLIDAY_HALF_DAY_PANCAKE],
+    },
+  }
+}
 
 // Eval debugging is a first-class feature and ON BY DEFAULT for contract runs:
 // every test dumps a full transcript (with provider reasoning) plus the
@@ -257,7 +288,11 @@ async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessi
       mealDefinitions: context.profile.mealDefinitions ?? SEED_PROFILE.mealDefinitions,
     },
   }
-  const provider = createToolProvider(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
+  const provider = traceProvider(
+    createToolProvider(apiKey, providerName, model, PROVIDER_MAX_RETRIES, {
+      requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+    }),
+  )
   const userText =
     catalogContext.request.kind === "revision"
       ? `Revision feedback: ${(catalogContext.feedbackItems ?? []).map((item) => item.text).join(" ")}\n\n${renderHouseholdContext(catalogContext)}`
@@ -274,6 +309,56 @@ async function runLive(context: MealPlanContext): Promise<MealPlanningAgentSessi
       throw new Error(`${error.message}: ${error.providerMessage}`)
     throw error
   }
+}
+
+/** Persists turn timing and size metadata immediately; never writes prompts, credentials, or model reasoning. */
+function traceProvider(inner: ToolProviderClient): ToolProviderClient {
+  let turn = 0
+  return {
+    async generate(input) {
+      const index = ++turn
+      const startedAt = Date.now()
+      const base = {
+        pid: process.pid,
+        turn: index,
+        messages: input.messages.length,
+        messageCharacters: input.messages.reduce((sum, message) => sum + JSON.stringify(message).length, 0),
+        toolSchemaCharacters: JSON.stringify(input.tools.map(toolDeclaration)).length,
+        reasoning: input.reasoning ?? "unspecified",
+        toolChoice: input.toolChoice ?? "auto",
+      }
+      writeProviderTrace({ event: "started", at: new Date(startedAt).toISOString(), ...base })
+      try {
+        const response = await inner.generate(input)
+        writeProviderTrace({
+          event: "completed",
+          at: new Date().toISOString(),
+          elapsedMs: Date.now() - startedAt,
+          toolCalls: response.toolCalls?.map((call) => call.name) ?? [],
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          ...base,
+        })
+        return response
+      } catch (error) {
+        writeProviderTrace({
+          event: "failed",
+          at: new Date().toISOString(),
+          elapsedMs: Date.now() - startedAt,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+          ...base,
+        })
+        throw error
+      }
+    },
+  }
+}
+
+function writeProviderTrace(record: Record<string, unknown>): void {
+  appendFileSync(
+    process.env.EVAL_TRACE_PATH ?? "logs/meal-contract-provider-trace.ndjson",
+    `${JSON.stringify(record)}\n`,
+  )
 }
 
 interface CatalogExpansionExchange {
@@ -295,7 +380,8 @@ async function runLiveCatalogExpansion(parentDishNames: string[]) {
         exchange.toolCalls = response.toolCalls ?? []
         return response
       } catch (error) {
-        exchange.error = error instanceof ToolProviderHttpError ? error.providerMessage ?? error.message : String(error)
+        exchange.error =
+          error instanceof ToolProviderHttpError ? (error.providerMessage ?? error.message) : String(error)
         throw error
       }
     },
@@ -303,23 +389,25 @@ async function runLiveCatalogExpansion(parentDishNames: string[]) {
   let result: Awaited<ReturnType<typeof expandMealCatalog>> | undefined
   let failure: unknown
   try {
-    result = await expandMealCatalog(provider, { parentDishNames, schedule: SEED_SCHEDULE })
-    return result
+    const expansion = await expandMealCatalog(provider, { parentDishNames, schedule: SEED_SCHEDULE })
+    result = expansion
+    return expansion
   } catch (error) {
     failure = error
     throw error
   } finally {
-    if (!evalDebug) return
-    console.log("=== MEAL CATALOG EXPANSION ===")
-    console.log(JSON.stringify({ parentDishNames, schedule: SEED_SCHEDULE.slots }, null, 2))
-    for (const [index, exchange] of exchanges.entries()) {
-      console.log(`--- catalog provider exchange ${index + 1} ---`)
-      for (const message of exchange.messages) console.log(renderMessage(message))
-      console.log(`TOOL CALLS: ${JSON.stringify(exchange.toolCalls, null, 2)}`)
-      if (exchange.error) console.log(`PROVIDER ERROR: ${exchange.error}`)
+    if (evalDebug) {
+      console.log("=== MEAL CATALOG EXPANSION ===")
+      console.log(JSON.stringify({ parentDishNames, schedule: SEED_SCHEDULE.slots }, null, 2))
+      for (const [index, exchange] of exchanges.entries()) {
+        console.log(`--- catalog provider exchange ${index + 1} ---`)
+        for (const message of exchange.messages) console.log(renderMessage(message))
+        console.log(`TOOL CALLS: ${JSON.stringify(exchange.toolCalls, null, 2)}`)
+        if (exchange.error) console.log(`PROVIDER ERROR: ${exchange.error}`)
+      }
+      console.log("=== CATALOG EXPANSION RESULT ===")
+      console.log(JSON.stringify(result ?? { failure: String(failure) }, null, 2))
     }
-    console.log("=== CATALOG EXPANSION RESULT ===")
-    console.log(JSON.stringify(result ?? { failure: String(failure) }, null, 2))
   }
 }
 
@@ -469,7 +557,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
   })
 
   contractIt("T02: a half day and a holiday produce a plan that omits the dropped slots", async () => {
-    const ctx = scenario("holiday-half-day").context
+    const ctx = holidayHalfDayContext()
     const terminal = requireProposal(await runLive(ctx))
     expect(Object.keys(terminal.candidate.grid.Sat ?? {}), "Sat is a school holiday; no cells allowed").toHaveLength(0)
     const wed = terminal.candidate.grid.Wed ?? {}

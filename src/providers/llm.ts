@@ -47,6 +47,12 @@ export interface ToolProviderClient {
   }): Promise<ToolProviderResponse>
 }
 
+/** Optional transport controls for tool-provider callers such as live evals. */
+export interface ToolProviderOptions {
+  /** Abort an individual provider request after this many milliseconds. */
+  requestTimeoutMs?: number
+}
+
 /** Non-sensitive provider failure metadata for runtime observability. */
 export class ToolProviderHttpError extends Error {
   constructor(
@@ -72,6 +78,14 @@ export type DeepseekToolWireMessage =
 
 /** Non-retriable malformed provider response. */
 export class ToolProviderProtocolError extends Error {}
+
+/** A caller-configured request deadline elapsed before the provider responded. */
+export class ToolProviderTimeoutError extends Error {
+  constructor(provider: string, timeoutMs: number) {
+    super(`${provider} tool request timed out after ${timeoutMs}ms`)
+    this.name = "ToolProviderTimeoutError"
+  }
+}
 
 /** Small JSON-schema projection used by providers; schemas remain enforced by ToolGuard. */
 export function toolDeclaration(tool: ToolDefinition): {

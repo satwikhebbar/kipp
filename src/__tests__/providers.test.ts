@@ -192,6 +192,21 @@ describe("DeepSeek provider", () => {
     expect(JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string).tools[0].function.name).toBe("echo")
   })
 
+  it("passes an opt-in request deadline to DeepSeek tool calls", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+    })
+
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    await createDeepseekToolClient("key", undefined, { requestTimeoutMs: 1_000 }).generate({
+      messages: TOOL_TEST_MESSAGES,
+      tools: [TOOL_TEST_REGISTRY.echo],
+    })
+
+    expect((mockFetch.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal)
+  })
+
   it("uses DeepSeek's non-thinking required-tool mode and preserves native reasoning across tool turns", async () => {
     mockFetch
       .mockResolvedValueOnce({
