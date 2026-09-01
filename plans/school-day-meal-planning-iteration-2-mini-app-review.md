@@ -77,9 +77,12 @@ as a conversational fallback.
   the current planning week; otherwise return a data-free `empty` response
   with the current week label. An absent plan is an expected state, not a
   not-found error and not permission to create a synthetic blank plan.
-- Render a compact Monday–Saturday, phone-first board using Telegram theme,
-  safe-area, viewport, main-button/back-button, and closing-confirmation APIs.
-  Each meal cell has a glanceable dish/state summary; a sheet/detail view
+- Use the supplied screenshot as the directional visual baseline: a dark,
+  Telegram-native rounded plan card with a compact Kipp/week header, six-day
+  date selector, selected-day preparation summary, and stacked glanceable meal
+  cells. Keep the phone-first board aligned with Telegram theme, safe-area,
+  viewport, main-button/back-button, and closing-confirmation APIs. Each meal
+  cell has a **Change** action and dish/state summary; a sheet/detail view
   exposes ingredients, prior-night prep, cook time, substitutions/easy buys,
   policy/trade-off context, and opt-in external recipe links. Escape all
   server-provided text before insertion; build DOM nodes rather than injecting
@@ -94,6 +97,10 @@ as a conversational fallback.
   week's plan as a whole (for example, “too many new dishes”). Keep the chosen
   target visible in the draft summary and send both kinds only in the same
   deliberate batch; neither kind directly edits a cell or changes the plan.
+- Place the plan-level **Change plan** action in the top header panel, aligned
+  right of the week title/instruction. It opens a plan-target feedback draft;
+  the existing **Change** action in each meal cell opens that cell-target
+  draft. This makes the scope explicit before the parent enters feedback.
 - For the `empty` response, show a first-use/missed-week empty state: explain
   that no plan exists for this week and direct the parent back to Telegram to
   send `/mealplan` (using a Telegram deep link where it is supported, with a
@@ -256,11 +263,14 @@ version back to the exact accepted batch.
   successful path records exactly one consumed batch associated with one
   revision. Document that Worker termination outside those catchable paths has
   no automatic recovery in this iteration.
-- Client-focused tests verify week rendering, detail disclosure, creation and
-  clear/restoration of both cell- and plan-level drafts, their visible target
-  summaries, the first-use and missed-Monday no-plan state with its `/mealplan`
-  handback and no feedback controls, explicit batch state, conflict UI, and no
-  client-controlled identity, plan selector, or forged feedback target.
+- Client-focused tests verify the screenshot-baseline hierarchy (header,
+  six-day selector, day summary, and stacked cells); detail disclosure;
+  top-panel **Change plan** and per-cell **Change** actions create the correct
+  target; clear/restoration of both cell- and plan-level drafts and their
+  visible target summaries; the first-use and missed-Monday no-plan state with
+  its `/mealplan` handback and no feedback controls; explicit batch state,
+  conflict UI, and no client-controlled identity, plan selector, or forged
+  feedback target.
   Manually verify the
   production-like HTTPS flow in Telegram on Android and iOS, both themes,
   keyboard open/close, safe-area/viewport changes, and close/reopen recovery.
