@@ -92,8 +92,9 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
   server-generated submission ID; the authoritative `chat_id`, `plan_id`,
   `workflow_instance_id`, and `week_end` copied from the active plan at
   acceptance; `base_version`; normalized scoped `items_json`; client
-  idempotency key; dispatch/processing lease fields; attempt count and next
-  attempt; terminal reason; status timestamps; and a unique
+  idempotency key; dispatch/processing lease fields; a monotonic
+  `processing_claim_generation` fencing value; attempt count and next attempt;
+  terminal reason; status timestamps; and a unique
   `(plan_id, idempotency_key)` constraint. The store is its only database
   caller. The ledger stores no transcript, browser/session credential, or raw
   provider failure text.
@@ -127,21 +128,35 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
   the active persisted plan unchanged.
 - `claimMiniAppSubmissionForWorkflow(submissionId, instanceId, now)` is an
   atomic store operation at the first workflow step. It accepts only the
-  stored instance and a `delivered` row whose base version still equals the
-  active version, changing it to `processing` with a lease long enough for the
-  bounded agent/clarification session. Duplicate or delayed events observe
-  `processing`/`consumed` and are ignored. A mismatched/replaced/advanced plan
-  atomically becomes `stale` and produces the one-time stale Telegram notice.
-  The workflow renews the processing lease at its durable step boundaries; the
-  cron may return a genuinely expired processing lease to `pending`, allowing
-  recovery after a workflow crash but not a second simultaneous revision.
-- On successful CAS promotion, atomically associate the accepted submission
-  with the existing immutable `feedback_batch`/new version and mark it
-  `consumed`. On no-change, abandoned, evaluator failure, or unrecoverable
-  processing paths, record the truthful terminal/retryable state before the
-  existing Telegram status message. This keeps accepted feedback distinct from
-  a persisted new plan and provides eventual delivery without duplicate
-  revisions.
+  stored instance, moves a `delivered` row to `processing`, increments and
+  returns `processing_claim_generation`, and grants a lease long enough for
+  the bounded agent plus its clarification wait. It validates the active base
+  version in that same claim transaction; a mismatch records `stale` with the
+  minted generation. Duplicate/delayed events observe `processing`/`consumed`
+  and are ignored.
+- Treat the returned generation as a fencing token. The workflow carries it in
+  its in-memory/durable event state and calls `renewMiniAppSubmissionClaim`
+  before every durable step that can start agent/video work and immediately
+  before any plan persistence or Telegram status action. Renewal requires
+  `status = processing`, the exact generation, and an unexpired lease. The
+  processing lease exceeds the maximum bounded agent and clarification window;
+  this makes an active session renewable rather than recoverable. A failed
+  renew means ownership is lost: that execution stops without further planning,
+  persistence, or user notification.
+- The cron returns only a genuinely expired `processing` lease to `pending`;
+  the next delivery receives a newly incremented claim generation. Every
+  workflow-owned terminal transition (`stale`, no-change, abandoned, evaluator
+  failure, and retryable/failed processing), terminal-notification claim, and
+  processing-lease renewal is conditional on that exact generation. The
+  promotion transaction additionally requires `processing`, matching
+  generation, and unexpired lease while it performs the plan-version CAS,
+  feedback-batch association, and `consumed` transition. A preempted worker
+  can therefore neither promote nor emit a duplicate status after a reclaim;
+  only the new generation may do so.
+- This keeps accepted feedback distinct from a persisted new plan and provides
+  eventual delivery without duplicate revisions. It also fences a workflow
+  that resumes after a transient pause: its first renewal fails before it
+  initiates more work, while the recovery event owns the next generation.
 
 ## 3. Implementation sequence
 
@@ -152,7 +167,8 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
      for structural bindings; values remain out of version control.
    - Add the append-only D1 migration and typed store/in-memory fake support
      for Mini App sessions, consumed-init-data/replay retention, submission
-     ledger, atomic dispatch/processing leases, and terminal notifications.
+     ledger, atomic dispatch/processing leases, claim-generation fencing, and
+     terminal notifications.
      Add the five-minute recovery cron to `wrangler.prod.toml` and its handler
      to `src/index.ts`; retain the existing cron entries. Keep
      active-plan/version and existing feedback-batch invariants intact.
@@ -163,9 +179,10 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
      bounded-body, authorization, cache-control, and error handling.
    - Extend the workflow event/submission contracts with server-owned
      submission ID and base version. Add the immediate dispatcher plus cron
-     recovery handler, and claim/renew/complete the ledger through store
-     operations before/during/after the existing revision path, preserving its
-     evaluator gate and CAS stale rejection.
+     recovery handler, and claim/renew/complete the fenced ledger through store
+     operations before/during/after the existing revision path. Require the
+     claim generation in promotion and all workflow-owned notifications while
+     preserving the evaluator gate and CAS stale rejection.
 3. **Telegram launch integration**
    - Extend the Telegram plan keyboard to include the contextual Web App URL
      only when `MINI_APP_ORIGIN` is configured, keeping the review action on
@@ -191,7 +208,7 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
 - Store tests cover plan-scoped session authorization, exact schedule/grid
   scope validation, valid acceptance, identical retry, idempotency-key payload
   mismatch, stale version, cross-chat isolation, delivery leases/backoff,
-  workflow claim/renewal, terminal notification claim, and promotion
+  workflow claim/renewal/fencing, terminal notification claim, and promotion
   association. Assert that stale or unauthorized calls create no version,
   feedback batch, or submission mutation beyond allowed expiry cleanup.
 - Worker-route tests cover unauthenticated plan/batch requests, valid session
@@ -209,6 +226,12 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
   `feedback_batch`) or one truthful terminal Telegram outcome when the
   instance remains unavailable or the week expires. Also prove that a delayed
   first event plus the recovery event cannot pass the workflow claim twice.
+- Simulate a first workflow pausing until its processing lease is reclaimed,
+  then resuming after the recovery workflow receives the next claim generation.
+  Assert that the old generation cannot renew, invoke more planning work,
+  promote, consume the submission, or claim/send a Telegram status; only the
+  current token can produce the one revision/`feedback_batch` or truthful
+  terminal outcome.
 - Client-focused tests verify week rendering, detail disclosure, draft
   restoration/invalidation/clear behavior, explicit batch state, conflict UI,
   and no client-controlled identity or plan selector. Manually verify the
