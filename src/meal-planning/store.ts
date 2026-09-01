@@ -171,6 +171,8 @@ export interface CreateActivePlanResult {
 export interface FeedbackBatchInput {
   batchId: string
   items: FeedbackItem[]
+  /** The Mini App path can consume only the batch the workflow claimed. */
+  consumeExisting?: boolean
 }
 
 /** Input to `promotePlanVersion`: `baseVersion` is the CAS base; the new version is always `baseVersion + 1`. */
@@ -231,6 +233,8 @@ export interface MealPlanningStore {
   feedbackBatch(batchId: string): Promise<FeedbackBatchRecord | null>
   markFeedbackBatchDelivered(batchId: string): Promise<boolean>
   claimFeedbackBatchForWorkflow(batchId: string, instanceId: string, now: string): Promise<FeedbackBatchRecord | null>
+  markFeedbackBatchStale(batchId: string, now: string): Promise<boolean>
+  markFeedbackBatchConsumed(batchId: string, now: string): Promise<boolean>
   markFeedbackBatchFailed(batchId: string, category: FeedbackBatchFailureCategory, now: string): Promise<boolean>
   /** Claims the one safe Telegram failure notification for a terminal batch. */
   claimFeedbackBatchFailureNotification(batchId: string, now: string): Promise<boolean>
@@ -561,7 +565,14 @@ function normalizeMiniAppFeedbackItems(
     const slot = target.slot.trim()
     if (!schedule.days.includes(day) || !schedule.slots.some((scheduleSlot) => scheduleSlot.id === slot)) return null
     if (!candidate.grid[day]?.[slot]) return null
-    normalized.push({ id: `mini-${index + 1}`, text, target: { kind: "cell", day, slot } })
+    normalized.push({
+      id: `mini-${index + 1}`,
+      text,
+      target: { kind: "cell", day, slot },
+      // Existing planning/evaluation contracts use scope. Preserve it as the
+      // internal projection of the Mini App's explicit cell target.
+      scope: { day, slot },
+    })
   }
   return normalized
 }
@@ -755,6 +766,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const now = nowIso()
       const newVersion = input.baseVersion + 1
       const batchId = input.feedbackBatch?.batchId ?? null
+      const consumeExistingBatch = input.feedbackBatch?.consumeExisting === true
       // The missing-profile precondition is checked before the batch commits:
       // a missing profile throws with nothing written rather than surfacing as
       // a misleading "stale" (the profile row is never deleted, so the check
@@ -772,7 +784,11 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
                                             base_version, feedback_batch_id, video_json, provisional_meals_json, created_at)
              SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ? FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+               AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
+                                     WHERE batch_id = ? AND plan_id = meal_plan.plan_id
+                                       AND chat_id = meal_plan.chat_id AND base_version = meal_plan.current_version
+                                       AND status = 'processing'))`,
           )
           .bind(
             input.planId,
@@ -788,6 +804,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.chatId,
             input.baseVersion,
             input.chatId,
+            consumeExistingBatch ? 1 : 0,
+            batchId,
           ),
         db
           .prepare(
@@ -843,6 +861,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             batchId,
             input.chatId,
           ),
+        db
+          .prepare(
+            `UPDATE feedback_batch SET status = 'consumed', consumed_at = ?
+             WHERE batch_id = ? AND status = 'processing' AND ? = 1
+               AND EXISTS (SELECT 1 FROM meal_plan_version
+                           WHERE plan_id = ? AND version = ? AND feedback_batch_id = ?)`,
+          )
+          .bind(now, batchId, consumeExistingBatch ? 1 : 0, input.planId, newVersion, batchId),
       )
       const results = await db.batch(statements)
       const promoted = Number((results[0] as { meta: { changes?: number } }).meta.changes) === 1
@@ -1145,6 +1171,26 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       return row ? feedbackBatchFromRow(row) : null
     },
 
+    async markFeedbackBatchStale(batchId, now) {
+      const result = await db
+        .prepare(
+          "UPDATE feedback_batch SET status = 'stale', stale_at = ? WHERE batch_id = ? AND status = 'processing'",
+        )
+        .bind(now, batchId)
+        .run()
+      return Number(result.meta.changes) === 1
+    },
+
+    async markFeedbackBatchConsumed(batchId, now) {
+      const result = await db
+        .prepare(
+          "UPDATE feedback_batch SET status = 'consumed', consumed_at = ? WHERE batch_id = ? AND status = 'processing'",
+        )
+        .bind(now, batchId)
+        .run()
+      return Number(result.meta.changes) === 1
+    },
+
     async markFeedbackBatchFailed(batchId, category, now) {
       const result = await db
         .prepare(
@@ -1159,7 +1205,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     async claimFeedbackBatchFailureNotification(batchId, now) {
       const result = await db
         .prepare(
-          "UPDATE feedback_batch SET failure_notified_at = ? WHERE batch_id = ? AND status = 'failed' AND failure_notified_at IS NULL",
+          "UPDATE feedback_batch SET failure_notified_at = ? WHERE batch_id = ? AND status IN ('failed', 'stale') AND failure_notified_at IS NULL",
         )
         .bind(now, batchId)
         .run()
@@ -1265,6 +1311,18 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       if (stale) return { ok: false as const, reason: "stale" as const }
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      const existingBatch = input.feedbackBatch?.consumeExisting
+        ? backing.batches.get(input.feedbackBatch.batchId)
+        : undefined
+      if (
+        input.feedbackBatch?.consumeExisting &&
+        (existingBatch?.status !== "processing" ||
+          existingBatch.planId !== input.planId ||
+          existingBatch.baseVersion !== input.baseVersion ||
+          existingBatch.chatId !== input.chatId)
+      ) {
+        return { ok: false as const, reason: "stale" as const }
+      }
       const now = nowIso()
       const newVersion = input.baseVersion + 1
       const version = makeVersionRecord(
@@ -1310,6 +1368,10 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
             failedAt: null,
             createdAt: now,
           })
+        }
+        if (existingBatch) {
+          existingBatch.status = "consumed"
+          existingBatch.consumedAt = now
         }
       }
       profile.interactionGeneration += 1
@@ -1456,6 +1518,22 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       return batch
     },
 
+    async markFeedbackBatchStale(batchId, now) {
+      const batch = backing.batches.get(batchId)
+      if (batch?.status !== "processing") return false
+      batch.status = "stale"
+      batch.staleAt = now
+      return true
+    },
+
+    async markFeedbackBatchConsumed(batchId, now) {
+      const batch = backing.batches.get(batchId)
+      if (batch?.status !== "processing") return false
+      batch.status = "consumed"
+      batch.consumedAt = now
+      return true
+    },
+
     async markFeedbackBatchFailed(batchId, category, now) {
       const batch = backing.batches.get(batchId)
       if (!batch || !["accepted", "delivered", "processing"].includes(batch.status)) return false
@@ -1467,7 +1545,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
 
     async claimFeedbackBatchFailureNotification(batchId, now) {
       const batch = backing.batches.get(batchId)
-      if (batch?.status !== "failed" || batch.failureNotifiedAt) return false
+      if (!batch || !["failed", "stale"].includes(batch.status) || batch.failureNotifiedAt) return false
       batch.failureNotifiedAt = now
       return true
     },

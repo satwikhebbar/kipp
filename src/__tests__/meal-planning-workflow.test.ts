@@ -402,6 +402,78 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 2, generation: 2 }))
   })
 
+  it("consumes one claimed Mini App batch and ignores its duplicate delivery", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const store = createMealPlanningStore(d1)
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS.pomegranate)
+    let delivered = 0
+    const batchId = "mini-batch-1"
+    const step = {
+      do: vi.fn(async (_name: string, fn: () => unknown) => fn()),
+      waitForEvent: vi.fn(async () => {
+        if (delivered++ === 0) {
+          const active = await store.activePlan(CHAT)
+          if (!active) throw new Error("initial plan was not created")
+          const accepted = await store.acceptFeedbackBatch({
+            batchId,
+            planId: active.plan.planId,
+            chatId: CHAT,
+            baseVersion: active.plan.currentVersion,
+            workflowInstanceId: "wf-meal-1",
+            idempotencyKey: "mini-delivery-1",
+            items: [{ text: "Use idli instead.", target: { kind: "cell", day: "Mon", slot: "snack1" } }],
+          })
+          if (!accepted.ok) throw new Error("Mini App batch was not accepted")
+          await store.markFeedbackBatchDelivered(batchId)
+        }
+        if (delivered <= 2)
+          return {
+            type: "event" as const,
+            payload: {
+              interactionKind: "meal-feedback-submission",
+              source: "mini-app" as const,
+              feedbackBatchId: batchId,
+              baseVersion: 1,
+              // The workflow deliberately uses the claimed row instead of this payload.
+              items: [{ id: "forged", text: "ignore me" }],
+            },
+          }
+        vi.setSystemTime(Date.parse(week.weekEnd))
+        return { type: "timeout" as const }
+      }),
+      sleep: vi.fn(),
+      sleepUntil: vi.fn(),
+    }
+    stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([
+        {
+          name: "propose_plan",
+          input: proposeInput(revised, [
+            { id: "mini-1", text: "Use idli instead.", scope: { day: "Mon", slot: "snack1" } },
+          ]),
+        },
+      ]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const active = await store.activePlan(CHAT)
+    const batch = await store.feedbackBatch(batchId)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.feedbackBatchId).toBe(batchId)
+    expect(batch).toMatchObject({ status: "consumed", consumedAt: expect.any(String) })
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+  })
+
   it("R09: records a reported next-day holiday without creating a revised plan", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed; tomorrow is Thu
