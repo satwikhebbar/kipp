@@ -130,6 +130,16 @@ export interface PromotePlanVersionInput {
   feedbackBatch?: FeedbackBatchInput | null
 }
 
+export interface UpdateWeeklyContextInput {
+  planId: string
+  chatId: string
+  baseVersion: number
+  weeklyInventory: WeeklyInventory
+  weeklyExceptions: WeeklyExceptions
+}
+
+export type UpdateWeeklyContextResult = { ok: true } | { ok: false; reason: "stale" }
+
 /** A stale call changes nothing; the only defined failure reason is `stale`. */
 export type PromotePlanVersionResult =
   | { ok: true; version: MealPlanVersionRecord; generation: number }
@@ -146,6 +156,8 @@ export interface MealPlanningStore {
   loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
   createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
   promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
+  /** Updates only week-scoped inventory/calendar facts; it never creates a plan version. */
+  updateWeeklyContext(input: UpdateWeeklyContextInput): Promise<UpdateWeeklyContextResult>
   activePlan(chatId: string): Promise<ActivePlanRecord | null>
   /** Reads the active plan's live instance pointer (whether or not its week has ended). */
   activePlanPointer(chatId: string): Promise<ActivePlanPointer | null>
@@ -718,6 +730,27 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       }
     },
 
+    async updateWeeklyContext(input) {
+      const now = nowIso()
+      const result = await db
+        .prepare(
+          `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
+           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'`,
+        )
+        .bind(
+          JSON.stringify(input.weeklyInventory),
+          JSON.stringify(input.weeklyExceptions),
+          now,
+          input.planId,
+          input.chatId,
+          input.baseVersion,
+        )
+        .run()
+      return Number(result.meta.changes) === 1
+        ? { ok: true as const }
+        : { ok: false as const, reason: "stale" as const }
+    },
+
     async activePlan(chatId) {
       const row = await db
         .prepare(
@@ -912,6 +945,17 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       profile.interactionGeneration += 1
       profile.updatedAt = now
       return { ok: true as const, version, generation: profile.interactionGeneration }
+    },
+
+    async updateWeeklyContext(input) {
+      const plan = backing.plans.get(input.planId)
+      const stale =
+        plan?.status !== "active" || plan.chatId !== input.chatId || plan.currentVersion !== input.baseVersion
+      if (stale) return { ok: false as const, reason: "stale" as const }
+      plan.weeklyInventory = input.weeklyInventory
+      plan.weeklyExceptions = input.weeklyExceptions
+      plan.updatedAt = nowIso()
+      return { ok: true as const }
     },
 
     async activePlan(chatId) {

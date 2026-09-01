@@ -402,6 +402,106 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 2, generation: 2 }))
   })
 
+  it("R09: records a reported next-day holiday without creating a revised plan", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed; tomorrow is Thu
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "Tomorrow is a holiday.",
+          messageId: 209,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: {
+            inventoryChanges: [],
+            exceptionAdds: [
+              { kind: "school_closed", instruction: "Tomorrow is a holiday.", appliesTo: { day: "Thu" } },
+            ],
+            replan: false,
+          },
+        },
+      ]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(1)
+    expect(active?.plan.weeklyExceptions.items).toEqual([
+      { kind: "school_closed", instruction: "Tomorrow is a holiday.", appliesTo: { day: "Thu" } },
+    ])
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+    expect(telegramMessages.some((message) => message.text === "Updated this week's meal-planning context.")).toBe(true)
+  })
+
+  it("R10: applies a next-day holiday then revises the remaining plan against that updated week", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed; tomorrow is Thu
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const emptyPatch = { grid: {} }
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "Tomorrow is a holiday—recreate the remaining week using unused prep.",
+          messageId: 210,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: {
+            inventoryChanges: [],
+            exceptionAdds: [
+              {
+                kind: "school_closed",
+                instruction: "Tomorrow is a holiday—recreate the remaining week using unused prep.",
+                appliesTo: { day: "Thu" },
+              },
+            ],
+            replan: true,
+          },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: emptyPatch }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(emptyPatch) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.candidate.grid.Thu).toBeUndefined()
+    expect(active?.version.candidate.grid.Wed.breakfast.dish).toBe("paratha")
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(telegramMessages.filter((message) => message.text.includes("School week of")).length).toBe(2)
+  })
+
   it("completes two revisions under name-memoized steps, persisting v2 and v3 with fresh plan messages and registrations", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")

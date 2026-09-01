@@ -9,6 +9,7 @@ import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../cor
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage } from "../providers"
 import { logRuntime } from "../runtime/logging"
+import { computeCoverageSet } from "./coverage"
 import {
   MEAL_AGENT_UNAVAILABLE,
   MEAL_FEEDBACK_NOT_APPLIED,
@@ -54,6 +55,10 @@ export interface MealPlanningLiveEvent {
 
 type PlanningOutcome =
   | { kind: "proposed"; propose: Extract<MealPlanningTerminalOutcome, { kind: "propose_plan" }> }
+  | {
+      kind: "week_context_updated"
+      update: Extract<MealPlanningTerminalOutcome, { kind: "update_week_context" }>["update"]
+    }
   | { kind: "abandoned" }
 
 function renderMealDefinition(meal: MealDefinition): string {
@@ -277,6 +282,7 @@ async function runPlanningSession(
     isRevision: boolean
     /** Retained only for revision patch hydration; never supplied to the model as ids. */
     revisionBaseCandidate?: MealPlanCandidate
+    allowWeekContextUpdate?: boolean
     occurrence: string
   },
 ): Promise<PlanningOutcome | null> {
@@ -298,6 +304,7 @@ async function runPlanningSession(
         return await runMealPlanningAgentSession(provider, options.messages, {
           context: options.context,
           revisionBaseCandidate: options.revisionBaseCandidate,
+          allowWeekContextUpdate: options.allowWeekContextUpdate,
         })
       } catch (_error) {
         // Upstream provider failure becomes an intelligible notice, not a crashed instance.
@@ -336,6 +343,7 @@ async function runPlanningSession(
       options.messages.push({ role: "user", text: reply })
       continue
     }
+    if (terminal.kind === "update_week_context") return { kind: "week_context_updated", update: terminal.update }
     return { kind: "proposed", propose: terminal }
   }
   await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-exhausted`)
@@ -523,36 +531,98 @@ async function runRevision(
   active: ActivePlanRecord,
   submission: Submission,
   iteration: number,
+  contextAlreadyUpdated = false,
 ): Promise<number | null> {
   const occurrence = `revision-${iteration}`
   const notifyPrefix = `meal-planning-notify-${occurrence}`
+  // The calendar update itself is already persisted.  Its original message is
+  // still useful context for the follow-up replan, but it must not become a
+  // normal cell-scope requirement: the deterministic removal of a closed day
+  // is the requested change.
+  const feedbackItems = contextAlreadyUpdated ? [] : submission.items
+  const revisionBaseCandidate = contextAlreadyUpdated
+    ? withoutClosedDays(
+        active.version.candidate,
+        { ...active.plan, weeklyExceptions: active.plan.weeklyExceptions },
+        profile,
+      )
+    : active.version.candidate
   const context: MealPlanContext = {
     schedule: profile.schedule,
     profile: profile.profile,
     customPolicies: profile.customPolicies,
     weeklyInventory: active.plan.weeklyInventory,
     weeklyExceptions: active.plan.weeklyExceptions,
-    recentPlan: active.version.candidate.grid,
+    recentPlan: revisionBaseCandidate.grid,
     request: { kind: "revision", text: submission.items.map((item) => item.text).join(" ") },
-    feedbackItems: submission.items,
+    feedbackItems,
     provisionalMealDefinitions: active.version.provisionalMealDefinitions,
   }
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(submission.items)}\n\n${renderHouseholdContext(context)}`,
+      text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(feedbackItems)}${contextAlreadyUpdated ? `\nWeek-context updates from this message are already applied. Carry out the requested replan: ${submission.items.map((item) => item.text).join(" ")}` : ""}\n\n${renderHouseholdContext(context)}`,
     },
   ]
   const outcome = await runPlanningSession(env, step, event, {
     context,
     messages,
     isRevision: true,
-    revisionBaseCandidate: active.version.candidate,
+    revisionBaseCandidate,
+    allowWeekContextUpdate: !contextAlreadyUpdated,
     occurrence,
   })
+  if (outcome?.kind === "week_context_updated") {
+    const updatedContext = outcome.update
+    const persisted = await stepDo(step, `meal-planning-update-week-context-${occurrence}`, () =>
+      store.updateWeeklyContext({
+        planId: active.plan.planId,
+        chatId: event.payload.chatId,
+        baseVersion: active.plan.currentVersion,
+        weeklyInventory: updatedContext.weeklyInventory,
+        weeklyExceptions: updatedContext.weeklyExceptions,
+      }),
+    )
+    if (!persisted.ok) {
+      await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-context`)
+      return null
+    }
+    if (!updatedContext.replan) {
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        "Updated this week's meal-planning context.",
+        `${notifyPrefix}-context-updated`,
+      )
+      return null
+    }
+    return runRevision(
+      env,
+      step,
+      event,
+      store,
+      profile,
+      {
+        ...active,
+        plan: {
+          ...active.plan,
+          weeklyInventory: updatedContext.weeklyInventory,
+          weeklyExceptions: updatedContext.weeklyExceptions,
+        },
+      },
+      submission,
+      iteration,
+      true,
+    )
+  }
   if (outcome?.kind !== "proposed") return null
   const propose = outcome.propose
-  if (isNoChangeCandidate(propose.candidate, active.version.candidate)) {
+  // A replan that closes a school day is materially different from the active
+  // version even when no remaining-day cell needs changing.
+  if (
+    isNoChangeCandidate(propose.candidate, contextAlreadyUpdated ? active.version.candidate : revisionBaseCandidate)
+  ) {
     await notify(env, step, event.payload.chatId, MEAL_NO_CHANGES, `${notifyPrefix}-no-change`)
     return null
   }
@@ -594,6 +664,27 @@ async function runRevision(
   if (!updated) return null
   await sendPlanAndRegister(env, step, event, profile, updated.plan, result.version, result.generation, occurrence)
   return result.generation
+}
+
+/** A newly closed school day is removed deterministically before a revision patch is merged. */
+function withoutClosedDays(
+  candidate: MealPlanCandidate,
+  plan: MealPlanRecord,
+  profile: StoredMealProfile,
+): MealPlanCandidate {
+  const closedDays = computeCoverageSet({
+    schedule: profile.schedule,
+    profile: profile.profile,
+    customPolicies: profile.customPolicies,
+    weeklyInventory: plan.weeklyInventory,
+    weeklyExceptions: plan.weeklyExceptions,
+    recentPlan: candidate.grid,
+    request: { kind: "revision", text: "week context update" },
+  }).closedDays
+  return {
+    ...candidate,
+    grid: Object.fromEntries(Object.entries(candidate.grid).filter(([day]) => !closedDays.includes(day))),
+  }
 }
 
 /** Sends the 15-min force-reply feedback prompt and registers the meal-feedback-reply interaction (live-loop iteration scopes the step names). */

@@ -170,6 +170,17 @@ export interface WeeklyExceptions {
   items: WeeklyException[]
 }
 
+/**
+ * The resolved week-scoped state produced by a typed post-plan context update.
+ * It is deliberately separate from a meal-plan version: a parent can report
+ * inventory or calendar facts without implicitly requesting a new plan.
+ */
+export interface ResolvedWeekContextUpdate {
+  weeklyInventory: WeeklyInventory
+  weeklyExceptions: WeeklyExceptions
+  replan: boolean
+}
+
 export interface PlanRequest {
   kind: RequestKind
   text: string

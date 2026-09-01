@@ -8,6 +8,7 @@ import type {
   MealPlanEvaluation,
   MealPlanSelectionCandidate,
   MealPlanSelectionPatch,
+  ResolvedWeekContextUpdate,
   WeeklyExceptions,
   WeeklyInventory,
 } from "../meal-planning/types"
@@ -23,13 +24,15 @@ import {
   PROPOSE_JUSTIFICATION_MAX_CHARACTERS,
   proposePlanInputSchema,
   proposePlanRevisionInputSchema,
+  type WeekContextUpdateInput,
+  weekContextUpdateInputSchema,
 } from "./meal-planning"
 
 export const MEAL_PLANNING_AGENT_PROMPT = `You are a parent's meal-planning agent for school days. Interpret the parent's request and use only the provided actions.
 
 For an initial plan, build one complete school-week grid covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. For a school_closed exception, omit that day key from the grid entirely. For a revision, the active plan is authoritative: submit a patch containing only the cells you are changing. Never repeat an unchanged cell or reconstruct it from a catalog id. Omit easyBuys and policyOutcomes unless you are replacing either whole value. On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
 
-The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole. If unbound feedback does not identify what should improve — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat it as satisfied by a rationale.
+The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. If a parent reports a concrete week-state fact such as an ingredient running out, a holiday, a half day, or a schedule change, call update_week_context first. It accepts only the affected inventory items and exception additions. Set replan false unless the parent explicitly asks to change the plan too. If replan is true, the workflow will apply the update and start a fresh revision with that context; do not submit a candidate in the same action. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole. If unbound feedback does not identify what should improve — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat it as satisfied by a rationale.
 
 Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Include a short justification in propose_plan explaining the plan in plain language. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation when there is one. Before evaluation, use an empty reasonCodes list unless the clarification is caused directly by a known hard constraint; then include its applicable failure code, such as hard_exclusion. Keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
 
@@ -45,6 +48,8 @@ export interface MealPlanningAgentSessionOptions {
   context: MealPlanContext
   /** Active hydrated candidate retained by server while a revision is patched. */
   revisionBaseCandidate?: MealPlanCandidate
+  /** Disabled after a context update is persisted before the follow-up replan session. */
+  allowWeekContextUpdate?: boolean
   /** Debug aid: keep provider reasoning in the returned transcript. */
   retainReasoning?: boolean
 }
@@ -61,6 +66,7 @@ export type MealPlanningTerminalOutcome =
       /** Debug aid: the model's own explanation of the proposed plan. */
       justification?: string
     }
+  | { kind: "update_week_context"; update: ResolvedWeekContextUpdate }
   | { kind: "needs_clarification"; message: string; reasonCodes: FailureCode[] }
 
 export type MealPlanningAgentSessionResult = AgentSessionResult<MealPlanningTerminalOutcome>
@@ -77,6 +83,7 @@ export async function runMealPlanningAgentSession(
   // low-level test harness usable without persisted state preserves existing
   // full-candidate callers, while production revisions always use patches.
   const isRevisionPatch = options.context.request.kind === "revision" && options.revisionBaseCandidate !== undefined
+  const canUpdateWeekContext = options.context.request.kind === "revision" && options.allowWeekContextUpdate !== false
   const evaluationTool = createEvaluateMealPlanTool(options.context, options.revisionBaseCandidate)
   const registry: ToolRegistry = {
     [MEAL_PLANNING_TOOL.EVALUATE]: {
@@ -154,6 +161,21 @@ export async function runMealPlanningAgentSession(
         return { accepted: true as const }
       },
     },
+    [MEAL_PLANNING_TOOL.UPDATE_WEEK_CONTEXT]: {
+      name: MEAL_PLANNING_TOOL.UPDATE_WEEK_CONTEXT,
+      description:
+        "Terminal action for a parent-reported inventory or calendar fact. It updates only the active week's context; set replan true only when the parent explicitly requests a plan revision too.",
+      input: weekContextUpdateInputSchema,
+      output: acceptedOutputSchema,
+      privacy: "private",
+      batching: "isolated",
+      handler: async (input) => {
+        if (!canUpdateWeekContext)
+          throw new ToolHandlerError("week context can only be updated from an active-plan revision", "invalid-state")
+        terminal = { kind: "update_week_context", update: resolveWeekContextUpdate(options.context, input) }
+        return { accepted: true as const }
+      },
+    },
     [MEAL_PLANNING_TOOL.CLARIFY]: {
       name: MEAL_PLANNING_TOOL.CLARIFY,
       description: "Return one concise human-facing question when more information is needed to plan confidently.",
@@ -168,14 +190,19 @@ export async function runMealPlanningAgentSession(
       },
     },
   }
-  const initialAllowedTools = [MEAL_PLANNING_TOOL.EVALUATE, MEAL_PLANNING_TOOL.CLARIFY]
+  const initialAllowedTools = [
+    MEAL_PLANNING_TOOL.EVALUATE,
+    ...(canUpdateWeekContext ? [MEAL_PLANNING_TOOL.UPDATE_WEEK_CONTEXT] : []),
+    MEAL_PLANNING_TOOL.CLARIFY,
+  ]
   const terminalTools = [MEAL_PLANNING_TOOL.PROPOSE, MEAL_PLANNING_TOOL.CLARIFY]
+  const handoffTools = [...terminalTools, ...(canUpdateWeekContext ? [MEAL_PLANNING_TOOL.UPDATE_WEEK_CONTEXT] : [])]
   const result = await runTools(
     provider,
     registry,
     {
       allowedTools: initialAllowedTools,
-      handoffTools: terminalTools,
+      handoffTools,
       requireHandoff: true,
       // DeepSeek rejects required tool choice when thinking mode is enabled.
       // The terminal-only allowlist and explicit post-evaluation instruction
@@ -240,6 +267,52 @@ function assertInterpretationsOnly(authoritative: FeedbackItem[], submitted: Fee
 function scopeEqual(a: FeedbackItem["scope"], b: FeedbackItem["scope"]): boolean {
   if (a === undefined || b === undefined) return a === b
   return a.day === b.day && a.slot === b.slot
+}
+
+/** Applies restricted, parent-reported week-state facts without allowing a model to replace the whole context. */
+function resolveWeekContextUpdate(context: MealPlanContext, input: WeekContextUpdateInput): ResolvedWeekContextUpdate {
+  if (input.inventoryChanges.length === 0 && input.exceptionAdds.length === 0)
+    throw new ToolHandlerError("week context update must contain at least one change", "invalid-state")
+
+  const normalized = (value: string) => value.trim().toLocaleLowerCase()
+  const inventory = new Map(context.weeklyInventory.items.map((item) => [normalized(item.name), item]))
+  const changedNames = new Set<string>()
+  for (const item of input.inventoryChanges) {
+    const key = normalized(item.name)
+    if (!key || changedNames.has(key))
+      throw new ToolHandlerError("inventory changes must have distinct non-empty names", "invalid-state")
+    changedNames.add(key)
+    inventory.set(key, { ...item, name: item.name.trim() })
+  }
+
+  const days = new Set(context.schedule.days)
+  const slots = new Set(context.schedule.slots.map((slot) => slot.id))
+  const exceptionKey = (exception: (typeof context.weeklyExceptions.items)[number]) =>
+    JSON.stringify({
+      kind: exception.kind,
+      day: exception.appliesTo?.day,
+      mealSlots: [...(exception.appliesTo?.mealSlots ?? [])].sort(),
+    })
+  const existingExceptions = new Set(context.weeklyExceptions.items.map(exceptionKey))
+  const addedExceptions = new Set<string>()
+  for (const exception of input.exceptionAdds) {
+    const day = exception.appliesTo?.day
+    if (day && !days.has(day)) throw new ToolHandlerError(`unknown exception day ${day}`, "invalid-state")
+    if (exception.appliesTo?.mealSlots?.some((slot) => !slots.has(slot)))
+      throw new ToolHandlerError("exception references an unknown meal slot", "invalid-state")
+    if (exception.kind === "school_closed" && !day)
+      throw new ToolHandlerError("school_closed requires an applicable day", "invalid-state")
+    const key = exceptionKey(exception)
+    if (existingExceptions.has(key) || addedExceptions.has(key))
+      throw new ToolHandlerError("week context update duplicates an existing exception", "invalid-state")
+    addedExceptions.add(key)
+  }
+
+  return {
+    weeklyInventory: { ...context.weeklyInventory, items: [...inventory.values()] },
+    weeklyExceptions: { items: [...context.weeklyExceptions.items, ...input.exceptionAdds] },
+    replan: input.replan,
+  }
 }
 
 /** Ensures the clarification surfaces every evaluator failure and never exposes opaque feedback ids. */
