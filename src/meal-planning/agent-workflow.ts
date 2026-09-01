@@ -73,6 +73,11 @@ const IPV4_MULTICAST_PREFIX = 224
 const IPV6_GROUP_COUNT = 8
 const IPV6_FIRST_GROUP_INDEX = 0
 const IPV6_LAST_GROUP_INDEX = IPV6_GROUP_COUNT - 1
+const IPV6_EMBEDDED_IPV4_PREFIX_GROUPS = 6
+const IPV6_MAPPED_IPV4_MARKER_INDEX = IPV6_EMBEDDED_IPV4_PREFIX_GROUPS - 1
+const IPV6_MAPPED_IPV4_MARKER = 0xffff
+const IPV6_EMBEDDED_IPV4_FIRST_GROUP_INDEX = IPV6_GROUP_COUNT - 2
+const IPV6_OCTET_SHIFT = 8
 const IPV6_LINK_LOCAL_MASK = 0xffc0
 const IPV6_LINK_LOCAL_PREFIX = 0xfe80
 const IPV6_PRIVATE_MASK = 0xfe00
@@ -500,6 +505,19 @@ function isPublicIpv6(host: string): boolean {
   const isLinkLocal = (first & IPV6_LINK_LOCAL_MASK) === IPV6_LINK_LOCAL_PREFIX
   const isPrivate = (first & IPV6_PRIVATE_MASK) === IPV6_PRIVATE_PREFIX
   const isSiteLocal = (first & IPV6_SITE_LOCAL_MASK) === IPV6_SITE_LOCAL_PREFIX
+  const embeddedIpv4 =
+    (groups.slice(IPV6_FIRST_GROUP_INDEX, IPV6_MAPPED_IPV4_MARKER_INDEX).every((group) => group === 0) &&
+      groups[IPV6_MAPPED_IPV4_MARKER_INDEX] === IPV6_MAPPED_IPV4_MARKER) ||
+    groups.slice(IPV6_FIRST_GROUP_INDEX, IPV6_EMBEDDED_IPV4_PREFIX_GROUPS).every((group) => group === 0)
+  if (embeddedIpv4) {
+    const [high, low] = groups.slice(IPV6_EMBEDDED_IPV4_FIRST_GROUP_INDEX)
+    return isPublicIpv4([
+      high >> IPV6_OCTET_SHIFT,
+      high & IPV4_MAX_OCTET,
+      low >> IPV6_OCTET_SHIFT,
+      low & IPV4_MAX_OCTET,
+    ])
+  }
   return !(isUnspecified || isLoopback || isLinkLocal || isPrivate || isSiteLocal)
 }
 
