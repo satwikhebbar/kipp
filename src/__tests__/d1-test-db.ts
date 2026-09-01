@@ -60,13 +60,15 @@ function createD1Adapter(db: DatabaseSync): D1Database {
 }
 
 /**
- * Creates an in-memory SQLite database with `migrations/0001_init.sql` applied,
+ * Creates an in-memory SQLite database with every ordered migration applied,
  * exposed through a D1-shaped adapter — so tests exercise the store's real SQL.
  */
 export function createD1TestDb(): { db: DatabaseSync; d1: D1Database } {
   const db = new DatabaseSync(":memory:")
-  const migration = join(dirname(fileURLToPath(import.meta.url)), "../../migrations/0001_init.sql")
-  db.exec(readFileSync(migration, "utf8"))
+  const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../../migrations")
+  for (const migration of ["0001_init.sql", "0002_mini_app_review.sql"]) {
+    db.exec(readFileSync(join(migrationsDir, migration), "utf8"))
+  }
   return { db, d1: createD1Adapter(db) }
 }
 

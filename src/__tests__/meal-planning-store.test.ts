@@ -530,3 +530,82 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(migration).toMatch(/CHECK\s*\(\s*request_kind\s+IN\s*\(\s*'initial_plan'\s*,\s*'revision'\s*\)\s*\)/i)
   })
 })
+
+describe.each([
+  ["in-memory", async () => newStore()],
+  [
+    "D1",
+    async () => {
+      const { store } = createD1Store()
+      await store.loadOrCreateProfile(CHAT)
+      return store
+    },
+  ],
+] as const)("Mini App durable contracts (%s)", (_name, makeStore) => {
+  it("keeps private chat scope, expires opaque sessions, and rejects replayed init data", async () => {
+    const store = await makeStore()
+    await store.createActivePlan(createInput())
+    const context = await store.upsertMiniAppReviewContext({
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      planId: "plan-1",
+      weekEnd: WEEKS.weekEnd,
+    })
+    expect((await store.resolveMiniAppReviewContext("parent-1"))?.chatId).toBe(CHAT)
+    expect(context.planId).toBe("plan-1")
+
+    await store.createMiniAppSession({
+      sessionId: "session-1",
+      tokenHash: "digest",
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      planId: "plan-1",
+      expiresAt: "2026-09-07T00:10:00.000Z",
+      createdAt: "2026-09-07T00:00:00.000Z",
+    })
+    expect(await store.readMiniAppSession("digest", "2026-09-07T00:05:00.000Z")).toMatchObject({ chatId: CHAT })
+    expect(await store.readMiniAppSession("digest", "2026-09-07T00:10:00.000Z")).toBeNull()
+    expect(
+      await store.consumeMiniAppInitDataFingerprint(
+        "launch-digest",
+        "2026-09-07T00:10:00.000Z",
+        "2026-09-07T00:00:00.000Z",
+      ),
+    ).toBe(true)
+    expect(
+      await store.consumeMiniAppInitDataFingerprint(
+        "launch-digest",
+        "2026-09-07T00:10:00.000Z",
+        "2026-09-07T00:01:00.000Z",
+      ),
+    ).toBe(false)
+  })
+
+  it("accepts one version-bound batch idempotently and advances its dispatch lifecycle", async () => {
+    const store = await makeStore()
+    await store.createActivePlan(createInput())
+    const input = {
+      batchId: "batch-1",
+      planId: "plan-1",
+      chatId: CHAT,
+      baseVersion: 1,
+      workflowInstanceId: "instance-1",
+      weekEnd: WEEKS.weekEnd,
+      idempotencyKey: "request-1",
+      items: [{ id: "item-1", text: "Too many new dishes", target: { kind: "plan" as const } }],
+    }
+    const accepted = await store.acceptFeedbackBatch(input)
+    expect(accepted).toMatchObject({ ok: true, duplicate: false, batch: { status: "accepted", chatId: CHAT } })
+    expect(await store.acceptFeedbackBatch({ ...input, batchId: "batch-other" })).toMatchObject({
+      ok: true,
+      duplicate: true,
+    })
+    expect(await store.markFeedbackBatchDelivered("batch-1")).toBe(true)
+    expect(
+      await store.claimFeedbackBatchForWorkflow("batch-1", "instance-1", "2026-09-07T00:01:00.000Z"),
+    ).toMatchObject({ status: "processing" })
+    expect(await store.markFeedbackBatchFailed("batch-1", "workflow", "2026-09-07T00:02:00.000Z")).toBe(true)
+    expect(await store.claimFeedbackBatchFailureNotification("batch-1", "2026-09-07T00:03:00.000Z")).toBe(true)
+    expect(await store.claimFeedbackBatchFailureNotification("batch-1", "2026-09-07T00:04:00.000Z")).toBe(false)
+  })
+})

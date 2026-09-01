@@ -189,8 +189,16 @@ export interface PlanRequest {
 export interface FeedbackItem {
   id: string
   text: string
+  /**
+   * The Mini App's explicit review target. Telegram's existing text feedback
+   * remains unbound while the workflow is migrated to this discriminated form.
+   */
+  target?: FeedbackTarget
   scope?: { day?: string; slot?: string }
 }
+
+/** A whole-plan instruction or an exact persisted day/meal cell request. */
+export type FeedbackTarget = { kind: "plan" } | { kind: "cell"; day: string; slot: string }
 
 /** Optional per-cell recipe-video result (lunch slots only). A missing video never gates or alters a plan. */
 export interface RecipeVideo {

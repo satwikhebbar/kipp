@@ -3,6 +3,8 @@ export interface Env {
   CALENDAR_WORKFLOW?: Workflow
   MEAL_PLANNING_WORKFLOW?: Workflow
   MEAL_PLANNING_DB?: D1Database
+  /** Public HTTPS origin for the authenticated Telegram meal-plan Mini App. */
+  MINI_APP_ORIGIN?: string
   RECIPE_VIDEO_CACHE?: KVNamespace
   YOUTUBE_API_KEY?: string
   TOKEN_VAULT: DurableObjectNamespace
