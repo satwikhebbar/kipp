@@ -89,10 +89,12 @@ as a conversational fallback.
   dynamic HTML.
 - Keep every Monday–Saturday date visible in the selector. A holiday with no
   associated persisted meals is visibly unavailable and not clickable/focusable
-  (with an accessible “No meals planned” label); it does not render an empty
-  day board or feedback action. A half-day is an ordinary selectable date with
-  no special date state: render whatever subset of meals and preparation cues
-  its persisted schedule supplies.
+  with a compact `🏖 Holiday` badge and accessible “Holiday — no meals planned”
+  label; it does not render an empty day board or feedback action. A half-day
+  is an ordinary selectable date with no special date state: mark it with a
+  compact `◐ Half day` badge, then render whatever subset of meals and
+  preparation cues its persisted schedule supplies. The text labels remain
+  visible so the icons do not carry meaning alone.
 - Visibly separate three states: the persisted active version (including its
   version/week), unsent **Feedback ready** drafts, and a submitted
   **Feedback sent — continue in Telegram** handoff. For expired sessions,
@@ -271,8 +273,9 @@ version back to the exact accepted batch.
   no automatic recovery in this iteration.
 - Client-focused tests verify the screenshot-baseline hierarchy (header,
   six-day selector, day summary, and stacked cells); a no-meal holiday remains
-  visible but cannot be selected or receive feedback; a half-day is selectable
-  and renders its schedule-defined meal subset without a distinct date state;
+  visible with its `🏖 Holiday` badge but cannot be selected or receive
+  feedback; a half-day has its `◐ Half day` badge, is selectable, and renders
+  its schedule-defined meal subset without a distinct date state;
   detail disclosure;
   top-panel **Change plan** and per-cell **Change** actions create the correct
   target; clear/restoration of both cell- and plan-level drafts and their
