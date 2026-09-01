@@ -1,6 +1,7 @@
 import type {
   CustomPolicy,
   FeedbackItem,
+  FeedbackTarget,
   MealDefinition,
   MealPlanCandidate,
   MealPlanEvaluation,
@@ -80,8 +81,65 @@ export interface FeedbackBatchRecord {
   planId: string
   baseVersion: number
   items: FeedbackItem[]
+  /** Server-owned reply and workflow scope copied at Mini App acceptance. */
+  chatId: string | null
+  workflowInstanceId: string | null
+  weekEnd: string | null
+  idempotencyKey: string | null
+  status: FeedbackBatchStatus
+  failureCategory: FeedbackBatchFailureCategory | null
+  failureNotifiedAt: string | null
+  acceptedAt: string | null
+  deliveredAt: string | null
+  processingAt: string | null
+  consumedAt: string | null
+  staleAt: string | null
+  failedAt: string | null
   createdAt: string
 }
+
+export type FeedbackBatchStatus = "accepted" | "delivered" | "processing" | "consumed" | "stale" | "failed"
+export type FeedbackBatchFailureCategory = "dispatch" | "workflow" | "unknown"
+
+/** Durable private-chat scope written when a persisted plan gets a Mini App button. */
+export interface MiniAppReviewContext {
+  telegramUserId: string
+  chatId: string
+  planId: string
+  weekEnd: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** A stored opaque-session digest; raw browser bearers are never persisted. */
+export interface MiniAppSessionRecord {
+  sessionId: string
+  tokenHash: string
+  telegramUserId: string
+  chatId: string
+  planId: string
+  expiresAt: string
+  createdAt: string
+}
+
+export interface CreateMiniAppSessionInput extends Omit<MiniAppSessionRecord, "createdAt"> {
+  createdAt?: string
+}
+
+export interface AcceptFeedbackBatchInput {
+  batchId: string
+  planId: string
+  chatId: string
+  baseVersion: number
+  workflowInstanceId: string
+  weekEnd: string
+  idempotencyKey: string
+  items: Array<FeedbackItem & { target: FeedbackTarget }>
+}
+
+export type AcceptFeedbackBatchResult =
+  | { ok: true; batch: FeedbackBatchRecord; duplicate: boolean }
+  | { ok: false; reason: "stale" | "idempotency_mismatch" }
 
 /** Input to `createActivePlan`: everything the atomic initial-plan batch needs. */
 export interface CreateActivePlanInput {
@@ -161,6 +219,21 @@ export interface MealPlanningStore {
   activePlan(chatId: string): Promise<ActivePlanRecord | null>
   /** Reads the active plan's live instance pointer (whether or not its week has ended). */
   activePlanPointer(chatId: string): Promise<ActivePlanPointer | null>
+  upsertMiniAppReviewContext(
+    input: Omit<MiniAppReviewContext, "createdAt" | "updatedAt">,
+  ): Promise<MiniAppReviewContext>
+  resolveMiniAppReviewContext(telegramUserId: string): Promise<MiniAppReviewContext | null>
+  createMiniAppSession(input: CreateMiniAppSessionInput): Promise<MiniAppSessionRecord>
+  readMiniAppSession(tokenHash: string, now: string): Promise<MiniAppSessionRecord | null>
+  /** Atomically consumes a replay fingerprint until its supplied expiry. */
+  consumeMiniAppInitDataFingerprint(fingerprintHash: string, expiresAt: string, now: string): Promise<boolean>
+  acceptFeedbackBatch(input: AcceptFeedbackBatchInput): Promise<AcceptFeedbackBatchResult>
+  feedbackBatch(batchId: string): Promise<FeedbackBatchRecord | null>
+  markFeedbackBatchDelivered(batchId: string): Promise<boolean>
+  claimFeedbackBatchForWorkflow(batchId: string, instanceId: string, now: string): Promise<FeedbackBatchRecord | null>
+  markFeedbackBatchFailed(batchId: string, category: FeedbackBatchFailureCategory, now: string): Promise<boolean>
+  /** Claims the one safe Telegram failure notification for a terminal batch. */
+  claimFeedbackBatchFailureNotification(batchId: string, now: string): Promise<boolean>
 }
 
 /**
@@ -173,6 +246,9 @@ export interface InMemoryMealPlanningBacking {
   plans: Map<string, MealPlanRecord>
   versions: Map<string, MealPlanVersionRecord>
   batches: Map<string, FeedbackBatchRecord>
+  reviewContexts?: Map<string, MiniAppReviewContext>
+  sessions?: Map<string, MiniAppSessionRecord>
+  initDataFingerprints?: Map<string, string>
 }
 
 /** Options for the in-memory store; `failNextOn` is a single-shot test hook that simulates a mid-batch statement failure. */
@@ -425,6 +501,31 @@ function parseJson<T>(raw: string | null, fallback: T): T {
     return JSON.parse(raw) as T
   } catch {
     return fallback
+  }
+}
+
+/** Hydrates a feedback row while retaining the null scope of legacy Telegram revisions. */
+function feedbackBatchFromRow(row: Record<string, unknown>): FeedbackBatchRecord {
+  return {
+    batchId: String(row.batch_id),
+    planId: String(row.plan_id),
+    baseVersion: Number(row.base_version),
+    items: parseJson<FeedbackItem[]>(String(row.items_json), []),
+    chatId: row.chat_id === null ? null : String(row.chat_id),
+    workflowInstanceId: row.workflow_instance_id === null ? null : String(row.workflow_instance_id),
+    weekEnd: row.week_end === null ? null : String(row.week_end),
+    idempotencyKey: row.idempotency_key === null ? null : String(row.idempotency_key),
+    status: String(row.status) as FeedbackBatchStatus,
+    failureCategory:
+      row.failure_category === null ? null : (String(row.failure_category) as FeedbackBatchFailureCategory),
+    failureNotifiedAt: row.failure_notified_at === null ? null : String(row.failure_notified_at),
+    acceptedAt: row.accepted_at === null ? null : String(row.accepted_at),
+    deliveredAt: row.delivered_at === null ? null : String(row.delivered_at),
+    processingAt: row.processing_at === null ? null : String(row.processing_at),
+    consumedAt: row.consumed_at === null ? null : String(row.consumed_at),
+    staleAt: row.stale_at === null ? null : String(row.stale_at),
+    failedAt: row.failed_at === null ? null : String(row.failed_at),
+    createdAt: String(row.created_at),
   }
 }
 
@@ -819,6 +920,196 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       if (!row) return null
       return { instanceId: String(row.instance_id), weekEnd: String(row.week_end) }
     },
+
+    async upsertMiniAppReviewContext(input) {
+      const now = nowIso()
+      await db
+        .prepare(
+          `INSERT INTO mini_app_review_context (telegram_user_id, chat_id, plan_id, week_end, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(telegram_user_id, chat_id) DO UPDATE SET
+             plan_id = excluded.plan_id, week_end = excluded.week_end, updated_at = excluded.updated_at`,
+        )
+        .bind(input.telegramUserId, input.chatId, input.planId, input.weekEnd, now, now)
+        .run()
+      return { ...input, createdAt: now, updatedAt: now }
+    },
+
+    async resolveMiniAppReviewContext(telegramUserId) {
+      const row = await db
+        .prepare(
+          `SELECT telegram_user_id, chat_id, plan_id, week_end, created_at, updated_at
+           FROM mini_app_review_context WHERE telegram_user_id = ? ORDER BY updated_at DESC LIMIT 1`,
+        )
+        .bind(telegramUserId)
+        .first()
+      if (!row) return null
+      return {
+        telegramUserId: String(row.telegram_user_id),
+        chatId: String(row.chat_id),
+        planId: String(row.plan_id),
+        weekEnd: String(row.week_end),
+        createdAt: String(row.created_at),
+        updatedAt: String(row.updated_at),
+      }
+    },
+
+    async createMiniAppSession(input) {
+      const createdAt = input.createdAt ?? nowIso()
+      await db
+        .prepare(
+          `INSERT INTO mini_app_session (session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          input.sessionId,
+          input.tokenHash,
+          input.telegramUserId,
+          input.chatId,
+          input.planId,
+          input.expiresAt,
+          createdAt,
+        )
+        .run()
+      return { ...input, createdAt }
+    },
+
+    async readMiniAppSession(tokenHash, now) {
+      await db.prepare("DELETE FROM mini_app_session WHERE expires_at <= ?").bind(now).run()
+      const row = await db
+        .prepare(
+          `SELECT session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at
+           FROM mini_app_session WHERE token_hash = ? AND expires_at > ?`,
+        )
+        .bind(tokenHash, now)
+        .first()
+      if (!row) return null
+      return {
+        sessionId: String(row.session_id),
+        tokenHash: String(row.token_hash),
+        telegramUserId: String(row.telegram_user_id),
+        chatId: String(row.chat_id),
+        planId: String(row.plan_id),
+        expiresAt: String(row.expires_at),
+        createdAt: String(row.created_at),
+      }
+    },
+
+    async consumeMiniAppInitDataFingerprint(fingerprintHash, expiresAt, now) {
+      const results = await db.batch([
+        db.prepare("DELETE FROM mini_app_init_data_replay WHERE expires_at <= ?").bind(now),
+        db
+          .prepare(
+            "INSERT OR IGNORE INTO mini_app_init_data_replay (fingerprint_hash, expires_at, created_at) VALUES (?, ?, ?)",
+          )
+          .bind(fingerprintHash, expiresAt, now),
+      ])
+      return Number((results[1] as { meta: { changes?: number } }).meta.changes) === 1
+    },
+
+    async acceptFeedbackBatch(input) {
+      const now = nowIso()
+      const itemsJson = JSON.stringify(input.items)
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO feedback_batch
+             (batch_id, plan_id, base_version, items_json, chat_id, workflow_instance_id, week_end, idempotency_key,
+              status, accepted_at, created_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ? FROM meal_plan
+           WHERE plan_id = ? AND chat_id = ? AND instance_id = ? AND current_version = ? AND status = 'active'`,
+        )
+        .bind(
+          input.batchId,
+          input.planId,
+          input.baseVersion,
+          itemsJson,
+          input.chatId,
+          input.workflowInstanceId,
+          input.weekEnd,
+          input.idempotencyKey,
+          now,
+          now,
+          input.planId,
+          input.chatId,
+          input.workflowInstanceId,
+          input.baseVersion,
+        )
+        .run()
+      const row = await db
+        .prepare("SELECT * FROM feedback_batch WHERE plan_id = ? AND idempotency_key = ?")
+        .bind(input.planId, input.idempotencyKey)
+        .first()
+      if (!row) return { ok: false as const, reason: "stale" as const }
+      const batch = feedbackBatchFromRow(row)
+      if (batch.baseVersion !== input.baseVersion || JSON.stringify(batch.items) !== itemsJson) {
+        return { ok: false as const, reason: "idempotency_mismatch" as const }
+      }
+      return { ok: true as const, batch, duplicate: batch.batchId !== input.batchId }
+    },
+
+    async feedbackBatch(batchId) {
+      const row = await db.prepare("SELECT * FROM feedback_batch WHERE batch_id = ?").bind(batchId).first()
+      return row ? feedbackBatchFromRow(row) : null
+    },
+
+    async markFeedbackBatchDelivered(batchId) {
+      const result = await db
+        .prepare(
+          "UPDATE feedback_batch SET status = 'delivered', delivered_at = ? WHERE batch_id = ? AND status = 'accepted'",
+        )
+        .bind(nowIso(), batchId)
+        .run()
+      return Number(result.meta.changes) === 1
+    },
+
+    async claimFeedbackBatchForWorkflow(batchId, instanceId, now) {
+      await db.batch([
+        db
+          .prepare(
+            `UPDATE feedback_batch SET status = 'processing', processing_at = ?
+             WHERE batch_id = ? AND workflow_instance_id = ? AND status = 'delivered'
+               AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = feedback_batch.plan_id
+                           AND chat_id = feedback_batch.chat_id AND instance_id = feedback_batch.workflow_instance_id
+                           AND current_version = feedback_batch.base_version AND status = 'active')`,
+          )
+          .bind(now, batchId, instanceId),
+        db
+          .prepare(
+            `UPDATE feedback_batch SET status = 'stale', stale_at = ?
+             WHERE batch_id = ? AND workflow_instance_id = ? AND status = 'delivered'
+               AND NOT EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = feedback_batch.plan_id
+                               AND chat_id = feedback_batch.chat_id AND instance_id = feedback_batch.workflow_instance_id
+                               AND current_version = feedback_batch.base_version AND status = 'active')`,
+          )
+          .bind(now, batchId, instanceId),
+      ])
+      const row = await db
+        .prepare("SELECT * FROM feedback_batch WHERE batch_id = ? AND status = 'processing'")
+        .bind(batchId)
+        .first()
+      return row ? feedbackBatchFromRow(row) : null
+    },
+
+    async markFeedbackBatchFailed(batchId, category, now) {
+      const result = await db
+        .prepare(
+          `UPDATE feedback_batch SET status = 'failed', failure_category = ?, failed_at = ?
+           WHERE batch_id = ? AND status IN ('accepted', 'delivered', 'processing')`,
+        )
+        .bind(category, now, batchId)
+        .run()
+      return Number(result.meta.changes) === 1
+    },
+
+    async claimFeedbackBatchFailureNotification(batchId, now) {
+      const result = await db
+        .prepare(
+          "UPDATE feedback_batch SET failure_notified_at = ? WHERE batch_id = ? AND status = 'failed' AND failure_notified_at IS NULL",
+        )
+        .bind(now, batchId)
+        .run()
+      return Number(result.meta.changes) === 1
+    },
   }
 }
 
@@ -835,7 +1126,18 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     plans: new Map(),
     versions: new Map(),
     batches: new Map(),
+    reviewContexts: new Map(),
+    sessions: new Map(),
+    initDataFingerprints: new Map(),
   }
+  // Older test backings predate Mini App state. Initializing their absent maps
+  // here preserves the restart-simulation contract without weakening it.
+  if (!backing.reviewContexts) backing.reviewContexts = new Map()
+  if (!backing.sessions) backing.sessions = new Map()
+  if (!backing.initDataFingerprints) backing.initDataFingerprints = new Map()
+  const reviewContexts = backing.reviewContexts
+  const sessions = backing.sessions
+  const initDataFingerprints = backing.initDataFingerprints
 
   function throwIfFailing(operation: "createActivePlan" | "promotePlanVersion"): void {
     if (options.failNextOn === operation) {
@@ -938,6 +1240,19 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
             planId: input.planId,
             baseVersion: input.baseVersion,
             items: input.feedbackBatch.items,
+            chatId: null,
+            workflowInstanceId: null,
+            weekEnd: null,
+            idempotencyKey: null,
+            status: "consumed",
+            failureCategory: null,
+            failureNotifiedAt: null,
+            acceptedAt: null,
+            deliveredAt: null,
+            processingAt: null,
+            consumedAt: now,
+            staleAt: null,
+            failedAt: null,
             createdAt: now,
           })
         }
@@ -970,6 +1285,134 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const plan = activePlanForChat(chatId)
       if (!plan) return null
       return { instanceId: plan.instanceId, weekEnd: plan.weekEnd }
+    },
+
+    async upsertMiniAppReviewContext(input) {
+      const now = nowIso()
+      const key = `${input.telegramUserId}:${input.chatId}`
+      const existing = reviewContexts.get(key)
+      const context: MiniAppReviewContext = { ...input, createdAt: existing?.createdAt ?? now, updatedAt: now }
+      reviewContexts.set(key, context)
+      return context
+    },
+
+    async resolveMiniAppReviewContext(telegramUserId) {
+      const matches = [...reviewContexts.values()]
+        .filter((context) => context.telegramUserId === telegramUserId)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      return matches[0] ?? null
+    },
+
+    async createMiniAppSession(input) {
+      const session: MiniAppSessionRecord = { ...input, createdAt: input.createdAt ?? nowIso() }
+      sessions.set(session.tokenHash, session)
+      return session
+    },
+
+    async readMiniAppSession(tokenHash, now) {
+      for (const [key, session] of sessions) if (session.expiresAt <= now) sessions.delete(key)
+      return sessions.get(tokenHash) ?? null
+    },
+
+    async consumeMiniAppInitDataFingerprint(fingerprintHash, expiresAt, now) {
+      for (const [key, expiry] of initDataFingerprints) if (expiry <= now) initDataFingerprints.delete(key)
+      if (initDataFingerprints.has(fingerprintHash)) return false
+      initDataFingerprints.set(fingerprintHash, expiresAt)
+      return true
+    },
+
+    async acceptFeedbackBatch(input) {
+      const plan = backing.plans.get(input.planId)
+      if (
+        plan?.status !== "active" ||
+        plan.chatId !== input.chatId ||
+        plan.instanceId !== input.workflowInstanceId ||
+        plan.currentVersion !== input.baseVersion
+      ) {
+        return { ok: false as const, reason: "stale" as const }
+      }
+      const existing = [...backing.batches.values()].find(
+        (batch) => batch.planId === input.planId && batch.idempotencyKey === input.idempotencyKey,
+      )
+      if (existing) {
+        if (
+          existing.baseVersion !== input.baseVersion ||
+          JSON.stringify(existing.items) !== JSON.stringify(input.items)
+        ) {
+          return { ok: false as const, reason: "idempotency_mismatch" as const }
+        }
+        return { ok: true as const, batch: existing, duplicate: true }
+      }
+      const now = nowIso()
+      const batch: FeedbackBatchRecord = {
+        batchId: input.batchId,
+        planId: input.planId,
+        baseVersion: input.baseVersion,
+        items: input.items,
+        chatId: input.chatId,
+        workflowInstanceId: input.workflowInstanceId,
+        weekEnd: input.weekEnd,
+        idempotencyKey: input.idempotencyKey,
+        status: "accepted",
+        failureCategory: null,
+        failureNotifiedAt: null,
+        acceptedAt: now,
+        deliveredAt: null,
+        processingAt: null,
+        consumedAt: null,
+        staleAt: null,
+        failedAt: null,
+        createdAt: now,
+      }
+      backing.batches.set(batch.batchId, batch)
+      return { ok: true as const, batch, duplicate: false }
+    },
+
+    async feedbackBatch(batchId) {
+      return backing.batches.get(batchId) ?? null
+    },
+
+    async markFeedbackBatchDelivered(batchId) {
+      const batch = backing.batches.get(batchId)
+      if (batch?.status !== "accepted") return false
+      batch.status = "delivered"
+      batch.deliveredAt = nowIso()
+      return true
+    },
+
+    async claimFeedbackBatchForWorkflow(batchId, instanceId, now) {
+      const batch = backing.batches.get(batchId)
+      if (!batch || batch.workflowInstanceId !== instanceId || batch.status !== "delivered") return null
+      const plan = backing.plans.get(batch.planId)
+      if (
+        plan?.status !== "active" ||
+        plan.chatId !== batch.chatId ||
+        plan.instanceId !== instanceId ||
+        plan.currentVersion !== batch.baseVersion
+      ) {
+        batch.status = "stale"
+        batch.staleAt = now
+        return null
+      }
+      batch.status = "processing"
+      batch.processingAt = now
+      return batch
+    },
+
+    async markFeedbackBatchFailed(batchId, category, now) {
+      const batch = backing.batches.get(batchId)
+      if (!batch || !["accepted", "delivered", "processing"].includes(batch.status)) return false
+      batch.status = "failed"
+      batch.failureCategory = category
+      batch.failedAt = now
+      return true
+    },
+
+    async claimFeedbackBatchFailureNotification(batchId, now) {
+      const batch = backing.batches.get(batchId)
+      if (batch?.status !== "failed" || batch.failureNotifiedAt) return false
+      batch.failureNotifiedAt = now
+      return true
     },
   }
 }

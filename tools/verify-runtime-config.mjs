@@ -2,14 +2,23 @@ import { readFileSync } from "node:fs"
 
 const ENV_TYPE_PATH = "src/core/types.ts"
 const MANIFEST_PATH = "config/runtime-variables.json"
-const BINDING_NAMES = new Set(["PIPELINE_WORKFLOW", "CALENDAR_WORKFLOW", "TOKEN_VAULT", "INTERACTION_ROUTER", "IDEA_INGEST"])
+const BINDING_NAMES = new Set([
+  "PIPELINE_WORKFLOW",
+  "CALENDAR_WORKFLOW",
+  "MEAL_PLANNING_WORKFLOW",
+  "MEAL_PLANNING_DB",
+  "RECIPE_VIDEO_CACHE",
+  "TOKEN_VAULT",
+  "INTERACTION_ROUTER",
+  "IDEA_INGEST",
+])
 
 const envSource = readFileSync(ENV_TYPE_PATH, "utf8")
 const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8"))
 const envBlock = envSource.match(/export interface Env \{([\s\S]*?)\n\}/)?.[1]
 if (!envBlock) throw new Error(`Could not read Env from ${ENV_TYPE_PATH}`)
 
-const envVariables = [...envBlock.matchAll(/^  ([A-Z][A-Z0-9_]*)(?:\?)?:/gm)]
+const envVariables = [...envBlock.matchAll(/^ {2}([A-Z][A-Z0-9_]*)(?:\?)?:/gm)]
   .map((match) => match[1])
   .filter((name) => !BINDING_NAMES.has(name))
 const additionalVariables = manifest.additionalVariables ?? []

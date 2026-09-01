@@ -21,6 +21,7 @@
     "LLM_MAX_RETRIES": { "kind": "text", "production": "optional", "development": "optional" },
     "LLM_MODEL": { "kind": "text", "production": "optional", "development": "optional" },
     "LLM_PROVIDER": { "kind": "text", "production": "required", "development": "required" },
+    "MINI_APP_ORIGIN": { "kind": "text", "production": "optional", "development": "optional" },
     "LOG_LEVEL": { "kind": "text", "production": "optional", "development": "optional" },
     "NOTION_API_KEY": { "kind": "secret", "production": "required", "development": "required" },
     "NOTION_FREE_TIER": { "kind": "text", "production": "optional", "development": "optional" },
@@ -33,7 +34,8 @@
     "TELEGRAM_WEBHOOK_SECRET": { "kind": "secret", "production": "required", "development": "required" },
     "TIMEZONE": { "kind": "text", "production": "optional", "development": "optional" },
     "TOKEN_ENCRYPTION_KEY_IDS": { "kind": "text", "production": "required", "development": "required" },
-    "WAIT_FOR_FEEDBACK_HOURS": { "kind": "text", "production": "required", "development": "required" }
+    "WAIT_FOR_FEEDBACK_HOURS": { "kind": "text", "production": "required", "development": "required" },
+    "YOUTUBE_API_KEY": { "kind": "secret", "production": "optional", "development": "optional" }
   },
   "additionalVariables": ["DATA_REPO_BRANCH"],
   "dynamicSecrets": ["TOKEN_ENCRYPTION_KEY_<key-id>"]
