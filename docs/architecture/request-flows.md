@@ -177,7 +177,8 @@ sequenceDiagram
     M->>M: cache results for 24 h (KV)
   end
   M->>D: atomic createActivePlan (supersede + version 1 + generation)
-  M->>T: rendered plan with [Give feedback]
+  M->>D: write private Mini App review context
+  M->>T: rendered plan with [Give feedback] and [Review this week's plan]
   M->>M: park until week_end
   opt feedback submission
     U->>T: tap [Give feedback] then reply with feedback
@@ -194,6 +195,14 @@ sequenceDiagram
 No transcripts or raw provider text are stored in D1. The active plan is the
 canonical store contract the iteration-2 Mini App reads; video enrichment is
 optional and never gates a plan.
+
+The Mini App posts only signed Telegram launch data to establish a short-lived
+server session. Its plan read is `ready` only for the active current-week plan
+in that session's private chat; otherwise it is an `empty` response that sends
+the parent back to `/mealplan`. An explicit batch is accepted into the sole
+`feedback_batch` ledger before the workflow is signalled. The Mini App then
+returns the parent to Telegram, which reports progress and the fresh review
+link after a new version persists.
 
 ## OAuth setup
 
