@@ -41,6 +41,32 @@ function requestTooLarge(request: Request): boolean {
   return length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_REQUEST_BYTES)
 }
 
+/** Reads request text without trusting Content-Length (chunked bodies have none). */
+async function readBoundedText(request: Request): Promise<string | null> {
+  if (requestTooLarge(request)) return null
+  const reader = request.body?.getReader()
+  if (!reader) return ""
+  const chunks: Uint8Array[] = []
+  let totalBytes = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    totalBytes += value.byteLength
+    if (totalBytes > MAX_REQUEST_BYTES) {
+      await reader.cancel().catch(() => undefined)
+      return null
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(bytes)
+}
+
 async function getContext(request: Request, env: Env): Promise<MiniAppContext> {
   if (!env.MEAL_PLANNING_DB) throw new MiniAppAuthError("unavailable")
   const session = await readMiniAppSession(request.headers.get("authorization") ?? undefined, env)
@@ -76,8 +102,11 @@ function errorResponse(error: unknown): Response {
 
 /** Dispatches an accepted batch to the server-owned workflow pointer. */
 export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): Promise<boolean> {
-  if (!env.MEAL_PLANNING_WORKFLOW || !batch.workflowInstanceId) return false
   const store = env.MEAL_PLANNING_DB ? createMealPlanningStore(env.MEAL_PLANNING_DB) : null
+  if (!store || !env.MEAL_PLANNING_WORKFLOW || !batch.workflowInstanceId) {
+    if (store) await failFeedbackBatchDispatch(batch, env, store)
+    return false
+  }
   // The Workflow claims only delivered batches. Persist the transition before
   // the event is visible so a fast Workflow cannot observe an accepted batch.
   if (!store || !(await store.markFeedbackBatchDelivered(batch.batchId))) return false
@@ -97,27 +126,31 @@ export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): 
     })
     return true
   } catch {
-    const now = new Date().toISOString()
-    await store.markFeedbackBatchFailed(batch.batchId, "dispatch", now).catch(() => false)
-    if (batch.chatId && (await store.claimFeedbackBatchFailureNotification(batch.batchId, now))) {
-      await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-        .sendMessage(
-          batch.chatId,
-          "Your feedback was received but could not be sent for processing. Please try again.",
-          {
-            signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
-          },
-        )
-        .catch(() => {})
-    }
-    logRuntime(env, {
-      workflow: batch.workflowInstanceId ?? undefined,
-      event: "mini-app-feedback-dispatch",
-      outcome: "failed",
-      failureCategory: "workflow-unreachable",
-    })
+    await failFeedbackBatchDispatch(batch, env, store)
     return false
   }
+}
+
+async function failFeedbackBatchDispatch(
+  batch: FeedbackBatchRecord,
+  env: Env,
+  store: MealPlanningStore,
+): Promise<void> {
+  const now = new Date().toISOString()
+  await store.markFeedbackBatchFailed(batch.batchId, "dispatch", now).catch(() => false)
+  if (batch.chatId && (await store.claimFeedbackBatchFailureNotification(batch.batchId, now))) {
+    await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+      .sendMessage(batch.chatId, "Your feedback was received but could not be sent for processing. Please try again.", {
+        signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
+      })
+      .catch(() => {})
+  }
+  logRuntime(env, {
+    workflow: batch.workflowInstanceId ?? undefined,
+    event: "mini-app-feedback-dispatch",
+    outcome: "failed",
+    failureCategory: "workflow-unreachable",
+  })
 }
 
 export const miniAppRoutes = new Hono<{ Bindings: Env }>()
@@ -126,10 +159,11 @@ miniAppRoutes.get("/mini-app", (_c) => new Response(MINI_APP_SHELL, { headers: n
 
 miniAppRoutes.post("/mini-app/api/session", async (c) => {
   try {
-    if (requestTooLarge(c.req.raw) || c.req.header("content-type")?.split(";", 1)[0] !== "text/plain") {
+    if (c.req.header("content-type")?.split(";", 1)[0] !== "text/plain") {
       return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
     }
-    const raw = await c.req.text()
+    const raw = await readBoundedText(c.req.raw)
+    if (raw === null) return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
     const result = await authenticateMiniApp(raw, c.env)
     return jsonResponse({ token: result.token, expiresAt: result.session.expiresAt }, HTTP_CREATED)
   } catch (error) {
@@ -154,13 +188,15 @@ miniAppRoutes.get("/mini-app/api/plan", async (c) => {
 
 miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
   try {
-    if (requestTooLarge(c.req.raw) || c.req.header("content-type")?.split(";", 1)[0] !== "application/json") {
+    if (c.req.header("content-type")?.split(";", 1)[0] !== "application/json") {
       return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
     }
     const { store, session } = await getContext(c.req.raw, c.env)
     let body: Record<string, unknown>
     try {
-      body = (await c.req.json()) as Record<string, unknown>
+      const raw = await readBoundedText(c.req.raw)
+      if (raw === null) return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
+      body = JSON.parse(raw) as Record<string, unknown>
     } catch {
       return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
     }
