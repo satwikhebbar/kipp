@@ -4,6 +4,7 @@ import { INTERACTION_KIND } from "../core/types"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { HTTP_STATUS } from "../runtime/http"
 import { logRuntime } from "../runtime/logging"
+import { MINI_APP_SHELL } from "./mini-app/client"
 import { authenticateMiniApp, MiniAppAuthError, readMiniAppSession } from "./mini-app-auth"
 import { createMealPlanningStore, type FeedbackBatchRecord, type MealPlanningStore } from "./store"
 import { resolvePlanningWeek } from "./week"
@@ -15,10 +16,7 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128
 const HTTP_ACCEPTED = 202
 const HTTP_CREATED = 201
 
-export const MINI_APP_SHELL = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Kipp meal plan</title></head><body><main><h1>Kipp meal plan</h1>
-<p>Open this page from Telegram to review an authenticated meal plan.</p></main></body></html>`
+export { MINI_APP_SHELL } from "./mini-app/client"
 
 type MiniAppContext = { store: MealPlanningStore; session: Awaited<ReturnType<typeof readMiniAppSession>> }
 
