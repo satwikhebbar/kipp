@@ -71,46 +71,44 @@
       </ul>
 
       <h2>Durable feedback acceptance and recovery</h2>
-      <p>The existing immutable <code>feedback_batch</code> is written only when a revision succeeds. A separate durable submission ledger is required to make HTTP acceptance idempotent while planning or clarification is still in progress.</p>
+      <p>Evolve the existing <code>feedback_batch</code> into the <strong>sole</strong> durable feedback record. It is inserted atomically when HTTP accepts feedback, then tracks its lifecycle until a revision uses it. This replaces the current “created only with a successful revision” behavior without adding a second feedback ledger.</p>
 
-      <h3>Ledger</h3>
-      <p>An append-only migration adds <code>meal_feedback_submission</code>. Each row stores a server-generated ID; authoritative <code>chat_id</code>, <code>plan_id</code>, <code>workflow_instance_id</code>, and <code>week_end</code> copied from the active plan; base version; normalized scoped items; the client idempotency key; lease/retry fields; terminal metadata; and monotonic <code>processing_claim_generation</code>. It has a unique <code>(plan_id, idempotency_key)</code> constraint and stores neither browser credentials, transcripts, nor raw provider failures. The same typed store also owns bounded expiring replay fingerprints and review-context mappings.</p>
+      <h3>Single feedback record</h3>
+      <p>A forward-only migration extends <code>feedback_batch</code> with authoritative <code>chat_id</code>, <code>workflow_instance_id</code>, and <code>week_end</code>; client idempotency key; <code>status</code>; safe failure category; one-time failure-notification timestamp; and status timestamps. It uses a server-generated batch ID and unique <code>(plan_id, idempotency_key)</code>. The same typed store owns bounded replay fingerprints and review contexts; it stores no browser credentials, transcripts, or raw provider failures.</p>
 
       <h3>Acceptance</h3>
-      <p><code>acceptMiniAppFeedback</code> derives the chat from the server session, atomically verifies that the exact plan/version is active, and validates each discriminated target: a plan target needs no cell, while a cell target must exist in the persisted schedule/grid. It bounds text/items, normalizes target/item IDs server-side, and persists target kind so the workflow can distinguish whole-plan guidance from cell-specific feedback. It inserts or returns the same submission for an identical retry; key reuse with a different payload fails. A stale base returns <code>409</code> with a safe current-plan summary and changes neither plan nor feedback state.</p>
+      <p><code>acceptMiniAppFeedback</code> derives the chat from the server session, atomically verifies that the exact plan/version is active, and validates each discriminated target: a plan target needs no cell, while a cell target must exist in the persisted schedule/grid. It bounds text/items, normalizes target/item IDs server-side, and persists target kind so the workflow can distinguish whole-plan guidance from cell-specific feedback. It inserts or returns the same accepted <code>feedback_batch</code> for an identical retry; key reuse with a different payload fails. A stale base returns <code>409</code> with a safe current-plan summary and changes neither plan nor feedback state.</p>
 
-      <h3>Dispatch state machine</h3>
+      <h3>Feedback-batch state machine</h3>
       <table>
         <thead><tr><th>State</th><th>Meaning</th></tr></thead>
         <tbody>
-          <tr><td><code>pending</code></td><td>Accepted, awaiting a dispatch lease.</td></tr>
-          <tr><td><code>dispatching</code></td><td>A single immediate or cron dispatcher owns a short dispatch lease.</td></tr>
+          <tr><td><code>accepted</code></td><td>Persisted and ready for its immediate workflow handoff.</td></tr>
           <tr><td><code>delivered</code></td><td><code>sendEvent</code> accepted; awaiting an atomic workflow claim.</td></tr>
-          <tr><td><code>processing</code></td><td>A fenced workflow generation owns the bounded revision.</td></tr>
+          <tr><td><code>processing</code></td><td>The one atomic workflow claim owns the revision.</td></tr>
           <tr><td><code>consumed</code></td><td>The plan promotion and immutable feedback batch committed.</td></tr>
-          <tr><td><code>stale</code>, <code>expired</code>, <code>failed</code></td><td>Truthful terminal states; one guarded Telegram notification may be sent.</td></tr>
+          <tr><td><code>stale</code>, <code>failed</code></td><td>Truthful terminal states; one guarded Telegram notification may be sent.</td></tr>
         </tbody>
       </table>
       <ul>
-        <li><code>claimFeedbackDispatch(now)</code> atomically leases an eligible row, increments attempts, and returns its <em>stored</em> workflow pointer and expected base. Dispatch never uses browser input or a fresh active-plan lookup.</li>
-        <li>The HTTP route dispatches immediately for latency. A five-minute Worker cron is the durable recovery owner and uses the same lease operation, preventing concurrent route/cron/restart dispatch.</li>
-        <li>Failed <code>get/sendEvent</code> returns a row to <code>pending</code> with capped exponential backoff (1, 5, 15, 30, then 60 minutes) and metadata-only logs. Reaching the stored week end marks <code>expired</code>; bounded retry/deadline exhaustion marks <code>failed</code>. A one-time guarded Telegram outcome explains that the plan ended, is stale, or that accepted feedback was not applied.</li>
+        <li><code>startFeedbackBatch(batchId)</code> reads its <em>stored</em> workflow pointer and immediately calls <code>get(instanceId)</code>/<code>sendEvent</code>; it never uses browser input or a fresh active-plan lookup. Success records <code>delivered</code>.</li>
+        <li>A catchable dispatch exception records <code>failed</code> with a safe category and sends one guarded Telegram outcome that feedback was received but could not be applied. The HTTP response is equally truthful.</li>
       </ul>
 
-      <h3>Workflow fencing</h3>
-      <div class="callout"><strong>Key invariant:</strong> an execution that has lost its processing generation cannot persist a revision or notify the parent.</div>
+      <h3>Workflow exception handling</h3>
+      <div class="callout"><strong>Key invariant:</strong> a duplicate event cannot create a second revision, and every catchable failure produces one safe parent-facing outcome.</div>
       <ul>
-        <li><code>claimMiniAppSubmissionForWorkflow(submissionId, instanceId, now)</code> atomically moves a delivered row to processing, increments and returns the claim generation, grants a lease covering the bounded agent plus clarification wait, and validates the active base in the same transaction.</li>
-        <li>The workflow renews its exact generation before work-producing durable steps and immediately before persistence or Telegram status. Failed renewal means it stops without more planning, persistence, or notification.</li>
-        <li>Only a genuinely expired processing lease can be returned to pending. Recovery receives the next generation. Every workflow-owned renewal, terminal transition, terminal-notification claim, and promotion transaction requires matching <code>processing</code> state, generation, and unexpired lease.</li>
-        <li>The promotion transaction fences the plan-version CAS, feedback-batch association, and transition to <code>consumed</code> together. A preempted execution cannot promote or send duplicate status; only the current generation can do either.</li>
+        <li><code>claimFeedbackBatchForWorkflow(batchId, instanceId, now)</code> atomically moves a delivered batch to processing and validates the active base. A duplicate/delayed event sees an already-claimed or terminal batch and does nothing.</li>
+        <li>Catch workflow agent, evaluator, persistence, and status errors. Atomically mark a non-terminal batch <code>failed</code>, claim the one notification marker, and send a safe Telegram outcome without provider internals.</li>
+        <li>The promotion transaction keeps the plan-version CAS, feedback-batch association, and transition to <code>consumed</code> together.</li>
+        <li>There is no cron or automatic retry in this iteration. A process termination outside catchable code may leave a batch in delivered/processing; recovery of that case is explicitly deferred.</li>
       </ul>
 
       <h2>Implementation sequence</h2>
       <ol>
-        <li><strong>Contracts and runtime:</strong> add <code>MINI_APP_ORIGIN</code> to <code>Env</code>, runtime-variable contract, local/prod provisioning, D1 migration/store/fake, private-chat review contexts, replay-fingerprint expiry, fenced leases, and the five-minute cron in <code>wrangler.prod.toml</code>.</li>
-        <li><strong>Server boundary:</strong> add Mini App auth, DTO, schemas, memory-only session/read/batch routes (including the current-week ready-or-empty response), <code>no-store</code> headers, metadata-only logging, immediate dispatcher, cron recovery, and workflow claim/renew/complete contracts.</li>
-        <li><strong>Telegram/workflow:</strong> extend the event/submission contract with a discriminated plan-or-cell feedback target, integrate fenced claim/promotion/notifications, and add the post-persist contextual Web App keyboard action plus its server-side review context.</li>
+        <li><strong>Contracts and runtime:</strong> add <code>MINI_APP_ORIGIN</code> to <code>Env</code>, runtime-variable contract, local/prod provisioning, D1 migration/store/fake, the evolved sole <code>feedback_batch</code> lifecycle, private-chat review contexts, and replay-fingerprint expiry. Do not add a Mini App cron.</li>
+        <li><strong>Server boundary:</strong> add Mini App auth, DTO, schemas, memory-only session/read/batch routes (including the current-week ready-or-empty response), <code>no-store</code> headers, metadata-only logging, immediate start, atomic workflow claim, and catchable-error handling.</li>
+        <li><strong>Telegram/workflow:</strong> extend the event contract with the server-owned <code>feedback_batch</code> ID and a discriminated plan-or-cell feedback target, integrate claim/promotion/failure notification, and add the post-persist contextual Web App keyboard action plus its server-side review context.</li>
         <li><strong>Client:</strong> add a small dependency-free phone-first Mini App with the no-plan <code>/mealplan</code> handback, version-keyed drafts only for ready plans, explicit batch submit, conflict handling, handoff confirmation, and close.</li>
         <li><strong>Evidence:</strong> complete automated coverage, manual Android/iOS Telegram checks, documentation, and repository quality gates.</li>
       </ol>
@@ -118,9 +116,9 @@
       <h2>Acceptance evidence</h2>
       <ul>
         <li>Auth tests cover Telegram’s canonical HMAC, valid/tampered/malformed/expired/future/replayed launch data, replay expiry, unauthorized user, session expiry, constant-time comparison behavior, and no sensitive launch/token/feedback logging.</li>
-        <li>Store tests cover review-context authorization (including user-to-wrong-chat denial), valid plan-level feedback, exact cell-target validation, malformed/nonexistent target rejection, idempotency mismatch, stale/cross-chat isolation, leases/backoff, fenced claim/renewal, terminal notifications, and promotion association.</li>
+        <li>Store tests cover review-context authorization (including user-to-wrong-chat denial), valid plan-level feedback, exact cell-target validation, malformed/nonexistent target rejection, idempotency mismatch, stale/cross-chat isolation, atomic workflow claim, one-time failure notification, and promotion association.</li>
         <li>Route/workflow/integration tests cover unauthenticated requests, memory-only session token transport, <code>no-store</code> responses, safe ready and current-week empty DTOs, <code>202</code>/<code>409</code>, review keyboard, duplicate delivery, clarification, and a fresh review link only after persistence.</li>
-        <li>Explicitly simulate: accepted row committed → dispatch failure → restart/cron recovery → exactly one workflow claim/revision and feedback batch, or one truthful terminal message. Also reclaim a first workflow's processing lease and resume it: only the newer fencing generation may work, promote, or notify.</li>
+        <li>Explicitly simulate immediate <code>get/sendEvent</code>, agent/evaluator, and persistence exceptions after batch acceptance: each must mark the batch failed, create no revision, and send exactly one truthful Telegram outcome. Prove duplicate/delayed events cannot claim a batch twice, and document that a Worker termination outside catchable code has no automatic recovery in this iteration.</li>
         <li>Client checks cover grid/details; cell- and plan-level draft creation, visible summaries, restoration/invalidation; first-use and missed-Monday no-plan handback with no feedback controls; batch state; conflict UI; and no client-controlled authority or forged target. Manually verify public HTTPS launches in Telegram on Android and iOS, both themes, keyboard/safe-area changes, and close/reopen recovery.</li>
         <li>Run <code>pnpm lint</code>, <code>pnpm run docs</code>, <code>pnpm typecheck</code>, <code>pnpm test</code>, and <code>pnpm deploy:check</code> once runtime values are provisioned.</li>
       </ul>
