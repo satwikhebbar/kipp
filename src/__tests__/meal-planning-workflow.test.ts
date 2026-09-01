@@ -99,6 +99,9 @@ it("builds Mini App launch URLs only from configured public HTTPS origins", () =
     "[::1]",
     "[fe80::1]",
     "[fd00::1]",
+    "[::ffff:127.0.0.1]",
+    "[::ffff:10.0.0.1]",
+    "[::ffff:169.254.1.1]",
   ]) {
     expect(miniAppLaunchUrl(`https://${host}`)).toBeNull()
   }
