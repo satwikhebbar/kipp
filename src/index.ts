@@ -3,6 +3,7 @@ import { CalendarWorkflow } from "./calendar/workflow"
 import { createTokenVault } from "./core/token-vault-client"
 import type { Env } from "./core/types"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "./integrations/telegram"
+import { miniAppRoutes } from "./meal-planning/mini-app-routes"
 import { MealPlanningWorkflow } from "./meal-planning/workflow"
 import { HTTP_STATUS } from "./runtime/http"
 import { logRuntime } from "./runtime/logging"
@@ -22,6 +23,8 @@ export { PipelineWorkflow } from "./linkedin/workflow"
 export { CalendarWorkflow, MealPlanningWorkflow }
 
 const app = new Hono<{ Bindings: Env }>()
+
+app.route("/", miniAppRoutes)
 
 app.get("/", (c) => c.text("linkedin-pipeline"))
 

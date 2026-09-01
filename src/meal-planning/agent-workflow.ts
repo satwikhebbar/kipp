@@ -28,7 +28,7 @@ import {
   type StoredMealProfile,
 } from "./store"
 import { coerceSubmission, type Submission } from "./submissions"
-import type { FeedbackItem, MealDefinition, MealPlanCandidate, MealPlanContext } from "./types"
+import type { FeedbackItem, FeedbackTarget, MealDefinition, MealPlanCandidate, MealPlanContext } from "./types"
 import { enrichLunchVideos } from "./video"
 import { resolvePlanningWeek } from "./week"
 import type { MealPlanningWorkflowParams } from "./workflow"
@@ -50,7 +50,7 @@ export interface MealPlanningLiveEvent {
   interactionId?: string
   version?: number
   /** Structured per-cell submissions delivered by the iteration-2 mini-app. */
-  items?: Array<{ id: string; text: string; scope?: { day?: string; slot?: string } }>
+  items?: Array<{ id: string; text: string; target?: FeedbackTarget; scope?: { day?: string; slot?: string } }>
 }
 
 type PlanningOutcome =
@@ -86,6 +86,8 @@ export function renderRevisionFeedback(items: FeedbackItem[]): string {
   if (items.length === 0) return "- No submitted feedback."
   return items
     .map((item) => {
+      if (item.target?.kind === "plan") return `- Feedback for the whole plan: ${item.text}`
+      if (item.target?.kind === "cell") return `- Feedback for ${item.target.day} ${item.target.slot}: ${item.text}`
       const scope = item.scope
       if (scope?.day && scope.slot) return `- Feedback for ${scope.day} ${scope.slot}: ${item.text}`
       if (scope?.day) return `- Feedback for every meal on ${scope.day}: ${item.text}`
