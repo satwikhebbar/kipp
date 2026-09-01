@@ -90,6 +90,19 @@ it("builds Mini App launch URLs only from configured public HTTPS origins", () =
   expect(miniAppLaunchUrl("http://mini-app.example.test")).toBeNull()
   expect(miniAppLaunchUrl("not a URL")).toBeNull()
   expect(miniAppLaunchUrl(undefined)).toBeNull()
+  for (const host of [
+    "localhost",
+    "127.0.0.1",
+    "10.0.0.1",
+    "169.254.1.1",
+    "192.168.1.1",
+    "[::1]",
+    "[fe80::1]",
+    "[fd00::1]",
+  ]) {
+    expect(miniAppLaunchUrl(`https://${host}`)).toBeNull()
+  }
+  expect(miniAppLaunchUrl("https://[2606:4700:4700::1111]")).toBe("https://[2606:4700:4700::1111]/mini-app")
 })
 
 // Workflow fixtures intentionally reuse paratha in every slot. Keep that
