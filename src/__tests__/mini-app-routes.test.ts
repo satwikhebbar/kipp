@@ -14,11 +14,16 @@ function env(): Env {
 }
 
 describe("Mini App HTTP boundary", () => {
-  it("serves a data-free no-store shell and rejects unauthenticated plan reads", async () => {
+  it("serves a data-free Mini App shell with ready, empty, and feedback affordances", async () => {
     const shell = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app"), env())
     expect(shell.status).toBe(200)
     expect(shell.headers.get("cache-control")).toBe("no-store")
-    expect(await shell.text()).not.toContain("planId")
+    const html = await shell.text()
+    expect(html).toContain("Change plan")
+    expect(html).toContain("Feedback ready")
+    expect(html).toContain("Holiday")
+    expect(html).toContain("/mealplan")
+    expect(html).not.toContain("mealplan-")
 
     const plan = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app/api/plan"), env())
     expect(plan.status).toBe(403)
