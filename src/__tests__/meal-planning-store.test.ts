@@ -590,12 +590,15 @@ describe.each([
       chatId: CHAT,
       baseVersion: 1,
       workflowInstanceId: "instance-1",
-      weekEnd: WEEKS.weekEnd,
       idempotencyKey: "request-1",
       items: [{ id: "item-1", text: "Too many new dishes", target: { kind: "plan" as const } }],
     }
     const accepted = await store.acceptFeedbackBatch(input)
-    expect(accepted).toMatchObject({ ok: true, duplicate: false, batch: { status: "accepted", chatId: CHAT } })
+    expect(accepted).toMatchObject({
+      ok: true,
+      duplicate: false,
+      batch: { status: "accepted", chatId: CHAT, weekEnd: WEEKS.weekEnd, items: [{ id: "mini-1" }] },
+    })
     expect(await store.acceptFeedbackBatch({ ...input, batchId: "batch-other" })).toMatchObject({
       ok: true,
       duplicate: true,
@@ -607,5 +610,42 @@ describe.each([
     expect(await store.markFeedbackBatchFailed("batch-1", "workflow", "2026-09-07T00:02:00.000Z")).toBe(true)
     expect(await store.claimFeedbackBatchFailureNotification("batch-1", "2026-09-07T00:03:00.000Z")).toBe(true)
     expect(await store.claimFeedbackBatchFailureNotification("batch-1", "2026-09-07T00:04:00.000Z")).toBe(false)
+  })
+
+  it("normalizes valid cell targets and rejects malformed or nonexistent feedback", async () => {
+    const store = await makeStore()
+    await store.createActivePlan(
+      createInput({
+        candidate: candidate({
+          Mon: {
+            breakfast: { dish: "poha", vegetarian: true, items: ["poha"], cookMinutes: 10, priorNightPrep: false },
+          },
+        }),
+      }),
+    )
+    const base = { planId: "plan-1", chatId: CHAT, baseVersion: 1, workflowInstanceId: "instance-1" }
+    const cell = await store.acceptFeedbackBatch({
+      ...base,
+      batchId: "cell-batch",
+      idempotencyKey: "cell-request",
+      items: [{ text: "  Please change this  ", target: { kind: "cell", day: "Mon", slot: "breakfast" } }],
+    })
+    expect(cell).toMatchObject({
+      ok: true,
+      batch: {
+        items: [{ id: "mini-1", text: "Please change this", target: { kind: "cell", day: "Mon", slot: "breakfast" } }],
+      },
+    })
+    await expect(
+      store.acceptFeedbackBatch({ ...base, batchId: "bad-1", idempotencyKey: "bad-1", items: [] }),
+    ).resolves.toEqual({ ok: false, reason: "invalid_items" })
+    await expect(
+      store.acceptFeedbackBatch({
+        ...base,
+        batchId: "bad-2",
+        idempotencyKey: "bad-2",
+        items: [{ text: "missing cell", target: { kind: "cell", day: "Mon", slot: "school-lunch" } }],
+      }),
+    ).resolves.toEqual({ ok: false, reason: "invalid_items" })
   })
 })
