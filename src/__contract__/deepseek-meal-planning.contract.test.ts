@@ -400,6 +400,26 @@ function r08MidweekPeasShortageContext(): MealPlanContext {
   }
 }
 
+function holidayRevisionContext(replan: boolean): MealPlanContext {
+  const base = scenario("midweek-shortage").context
+  return {
+    ...base,
+    profile: { ...base.profile, mealDefinitions: SEED_PROFILE.mealDefinitions },
+    request: {
+      kind: "revision",
+      text: replan ? "Tomorrow is a holiday—recreate the remaining week using unused prep." : "Tomorrow is a holiday.",
+    },
+    feedbackItems: [
+      {
+        id: replan ? "holiday-replan" : "holiday-only",
+        text: replan
+          ? "Tomorrow is a holiday—recreate the remaining week using unused prep."
+          : "Tomorrow is a holiday.",
+      },
+    ],
+  }
+}
+
 function wholeDayReplanContext(): MealPlanContext {
   const base = scenario("whole-day-replan").context
   return {
@@ -1031,7 +1051,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     }
     expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
     expect(result.terminal?.kind, "conflict must resolve as a clarification").toBe("needs_clarification")
-    expect(result.terminal?.reasonCodes).toEqual(["hard_exclusion"])
+    if (result.terminal?.kind === "needs_clarification") expect(result.terminal.reasonCodes).toEqual(["hard_exclusion"])
   })
 
   contractIt("R06: vague feedback asks which improvement matters before changing the plan", async () => {
@@ -1256,6 +1276,28 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
       }
       expect(proposedDishes, `${day} must stay stable outside the scoped lunch`).toEqual(existingDishes)
     }
+  })
+
+  contractIt("R09: a reported tomorrow holiday updates week state without requesting a replan", async () => {
+    const result = await runLive(holidayRevisionContext(false), DEFAULT_LIVE_PLANNING_TIME)
+    expect(result.completed, JSON.stringify(result.failureReason ?? null)).toBe(true)
+    expect(result.terminal?.kind).toBe("update_week_context")
+    if (result.terminal?.kind !== "update_week_context") throw new Error("R09 must update week context")
+    expect(result.terminal.update.replan).toBe(false)
+    expect(result.terminal.update.weeklyExceptions.items).toContainEqual(
+      expect.objectContaining({ kind: "school_closed", appliesTo: { day: "Wed" } }),
+    )
+  })
+
+  contractIt("R10: a tomorrow holiday plus replan request starts an updated-week revision", async () => {
+    const updateResult = await runLive(holidayRevisionContext(true), DEFAULT_LIVE_PLANNING_TIME)
+    expect(updateResult.completed, JSON.stringify(updateResult.failureReason ?? null)).toBe(true)
+    expect(updateResult.terminal?.kind).toBe("update_week_context")
+    if (updateResult.terminal?.kind !== "update_week_context") throw new Error("R10 must update week context first")
+    expect(updateResult.terminal.update.replan).toBe(true)
+    expect(updateResult.terminal.update.weeklyExceptions.items).toContainEqual(
+      expect.objectContaining({ kind: "school_closed", appliesTo: { day: "Wed" } }),
+    )
   })
 
   contractIt(

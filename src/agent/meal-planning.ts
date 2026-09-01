@@ -7,6 +7,7 @@ import type { ToolDefinition } from "../runtime/tools"
 export const MEAL_PLANNING_TOOL = {
   EVALUATE: "evaluate_meal_plan",
   PROPOSE: "propose_plan",
+  UPDATE_WEEK_CONTEXT: "update_week_context",
   CLARIFY: "needs_clarification",
 } as const
 
@@ -178,6 +179,19 @@ export const weeklyExceptionsSchema = z
     items: z.array(weeklyExceptionSchema),
   })
   .strict()
+
+export const weekContextUpdateInputSchema = z
+  .object({
+    inventoryChanges: z.array(inventoryItemSchema).default([]),
+    exceptionAdds: z.array(weeklyExceptionSchema).default([]),
+    replan: z.boolean(),
+  })
+  .strict()
+  .describe(
+    "Apply only facts the parent supplied: inventoryChanges upsert named items, exceptionAdds add calendar/schedule exceptions, and replan is true only when the parent explicitly asks to revise the plan.",
+  )
+
+export type WeekContextUpdateInput = z.infer<typeof weekContextUpdateInputSchema>
 
 export const feedbackItemSchema = z
   .object({

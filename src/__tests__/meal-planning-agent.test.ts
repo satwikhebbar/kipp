@@ -186,6 +186,13 @@ function clarifyResponse(input: unknown) {
   return { toolCalls: [call("clarify", "needs_clarification", input)], usage: { inputTokens: 0, outputTokens: 0 } }
 }
 
+function updateWeekContextResponse(input: unknown) {
+  return {
+    toolCalls: [call("update-context", "update_week_context", input)],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }
+}
+
 function proposeInput(candidate: unknown, feedbackItems?: unknown) {
   return {
     candidate: selectionCandidate(candidate as MealPlanCandidate),
@@ -524,6 +531,27 @@ describe("bounded meal-planning agent session", () => {
     expect(result.completed).toBe(true)
     if (result.terminal?.kind === "propose_plan")
       expect(result.terminal.evaluation.failures.filter((failure) => failure.day === "Wed")).toEqual([])
+  })
+
+  it("accepts a holiday-only week-context update without requiring a meal candidate", async () => {
+    const ctx = context({ request: { kind: "revision", text: "Tomorrow is a holiday." } })
+    const provider = providerWith(
+      updateWeekContextResponse({
+        inventoryChanges: [],
+        exceptionAdds: [{ kind: "school_closed", appliesTo: { day: "Wed" }, instruction: "Tomorrow is a holiday." }],
+        replan: false,
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: ctx.request.text }], {
+      context: ctx,
+      revisionBaseCandidate: passingCandidate(),
+    })
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({
+      kind: "update_week_context",
+      update: { replan: false, weeklyExceptions: { items: [{ kind: "school_closed", appliesTo: { day: "Wed" } }] } },
+    })
+    expect(result.toolNames).toEqual(["update_week_context"])
   })
 })
 
