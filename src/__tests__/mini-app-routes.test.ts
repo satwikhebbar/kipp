@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
-import { miniAppRoutes } from "../meal-planning/mini-app-routes"
+import { miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
+import { createMealPlanningStore } from "../meal-planning/store"
 import { createD1TestDb } from "./d1-test-db"
 
 function env(): Env {
@@ -35,5 +36,65 @@ describe("Mini App HTTP boundary", () => {
     )
     expect(response.status).toBe(400)
     expect(response.headers.get("cache-control")).toBe("no-store")
+
+    const oversized = new Request("https://kipp.example/mini-app/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: "x".repeat(64 * 1_024 + 1),
+    })
+    expect(oversized.headers.get("content-length")).toBeNull()
+    const rejected = await miniAppRoutes.fetch(oversized, env())
+    expect(rejected.status).toBe(400)
+  })
+
+  it("terminalizes and notifies once when a batch has no workflow dispatch capability", async () => {
+    const { db, d1 } = createD1TestDb()
+    const batch = {
+      batchId: "mini-batch-1",
+      planId: "plan-1",
+      baseVersion: 1,
+      items: [{ id: "mini-1", text: "Less oily", target: { kind: "plan" as const } }],
+      chatId: "chat-1",
+      workflowInstanceId: "wf-1",
+      weekEnd: "2026-09-05T18:29:59.999Z",
+      idempotencyKey: "key-1",
+      status: "accepted" as const,
+      failureCategory: null,
+      failureNotifiedAt: null,
+      acceptedAt: "2026-09-01T00:00:00.000Z",
+      deliveredAt: null,
+      processingAt: null,
+      consumedAt: null,
+      staleAt: null,
+      failedAt: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+    }
+    db.prepare(
+      `INSERT INTO feedback_batch
+         (batch_id, plan_id, base_version, items_json, chat_id, workflow_instance_id, week_end, idempotency_key,
+          status, accepted_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)`,
+    ).run(
+      batch.batchId,
+      batch.planId,
+      batch.baseVersion,
+      JSON.stringify(batch.items),
+      batch.chatId,
+      batch.workflowInstanceId,
+      batch.weekEnd,
+      batch.idempotencyKey,
+      batch.acceptedAt,
+      batch.createdAt,
+    )
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } })))
+    vi.stubGlobal("fetch", fetchMock)
+    try {
+      expect(await startFeedbackBatch(batch, { ...env(), MEAL_PLANNING_DB: d1 })).toBe(false)
+      const persisted = await createMealPlanningStore(d1).feedbackBatch(batch.batchId)
+      expect(persisted).toMatchObject({ status: "failed", failureNotifiedAt: expect.any(String) })
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
