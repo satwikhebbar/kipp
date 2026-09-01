@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meal Planning Iteration 2 — Mini App Review and Feedback</title>
+    <style>
+      :root { color-scheme: light dark; --ink: #182016; --paper: #fbfcf8; --muted: #5f695d; --line: #d7ddd2; --accent: #1f6a43; --accent-bg: #eaf4ec; --code: #f0f3ee; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      main { max-width: 960px; margin: auto; padding: 48px 24px 72px; }
+      header { border-bottom: 1px solid var(--line); padding-bottom: 28px; margin-bottom: 36px; }
+      h1 { font-size: clamp(2rem, 5vw, 3rem); line-height: 1.12; margin: 0 0 12px; letter-spacing: -.03em; }
+      h2 { margin: 44px 0 14px; font-size: 1.5rem; }
+      h3 { margin: 30px 0 10px; font-size: 1.15rem; }
+      p, li { max-width: 76ch; }
+      .meta, .callout { border-radius: 10px; padding: 16px 18px; }
+      .meta { background: var(--accent-bg); border-left: 4px solid var(--accent); }
+      .callout { background: var(--code); border: 1px solid var(--line); }
+      .callout strong { color: var(--accent); }
+      ul, ol { padding-left: 1.4rem; }
+      li + li { margin-top: .55rem; }
+      code { background: var(--code); border-radius: 4px; padding: .1em .28em; font: .9em ui-monospace, SFMono-Regular, Menlo, monospace; }
+      table { width: 100%; border-collapse: collapse; margin: 18px 0; }
+      th, td { border: 1px solid var(--line); padding: 10px 12px; vertical-align: top; text-align: left; }
+      th { background: var(--code); }
+      .small { color: var(--muted); font-size: .92rem; }
+      @media (prefers-color-scheme: dark) { :root { --ink: #e6ede2; --paper: #121611; --muted: #a9b5a5; --line: #374035; --accent: #77c794; --accent-bg: #183020; --code: #20261f; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="small">Human review artifact · GitHub issue #66 · Parent #59</p>
+        <h1>School-Day Meal Planning — Iteration 2</h1>
+        <p><strong>Telegram Mini App plan review and feedback</strong></p>
+        <div class="meta">
+          <strong>Decision:</strong> The existing Kipp bot opens a same-origin Telegram Mini App as the phone-friendly visual review surface. Telegram remains the only conversation, clarification, progress, and new-plan-notification surface. The Mini App never runs the planner and never treats device storage as canonical state.
+        </div>
+      </header>
+
+      <h2>Goal and boundary</h2>
+      <p>An authorized parent opens the persisted active meal-plan version from a contextual <strong>Review this week's plan</strong> Telegram Web App button, scans it on a phone, collects several local drafts, and explicitly hands one version-bound batch to the live <code>MealPlanningWorkflow</code>. Acceptance is acknowledged, but the app never implies that a new plan already exists.</p>
+      <p>This extends the merged versioned Telegram-first workflow. It does not change evaluation/planning semantics, profile editing, multi-bot behavior, or the Telegram clarification loop. The existing <strong>Give feedback</strong> callback remains a conversational fallback.</p>
+
+      <h2>Authority and launch</h2>
+      <ul>
+        <li>Add <code>MINI_APP_ORIGIN</code> as a text runtime variable. It supplies the public HTTPS origin only; the launch URL contains no plan, chat, user, or version identifier.</li>
+        <li>After a plan version is successfully persisted, add a <code>web_app</code> button beside the existing feedback callback. Initial and revised plan messages therefore link only to immutable persisted versions.</li>
+        <li>The same-origin HTML shell may render in a normal browser, but it contains no plan data and explains that Telegram authentication is required.</li>
+        <li>The client sends only raw <code>Telegram.WebApp.initData</code> to create a session. The server verifies Telegram's data-check HMAC using <code>TELEGRAM_BOT_TOKEN</code>, rejects malformed, expired, future, replayed, or mismatched data, and authorizes the verified user against <code>TELEGRAM_ALLOWED_USER_ID</code>.</li>
+        <li>Short-lived opaque server sessions bind the verified user and configured chat. Every read/write derives authority from that record, never from <code>initDataUnsafe</code>, route parameters, browser claims, or client-supplied identifiers.</li>
+      </ul>
+
+      <h2>Review experience</h2>
+      <ul>
+        <li>Expose a client-safe DTO over the persisted active plan: schedule, week/version, meal grid, preparation state, policy/trade-off cues, and optional recipe-video metadata. Never expose workflow IDs, interaction tokens, raw provider material, or unrelated rows.</li>
+        <li>Render a compact Monday–Saturday board designed for Telegram phone viewports, themes, safe areas, main/back buttons, and closing confirmation. Each cell is glanceable; a detail sheet supplies ingredients, cook/prep information, substitutions/easy buys, trade-offs, and opt-in external recipe links.</li>
+        <li>Build DOM nodes from dynamic data instead of injecting HTML.</li>
+        <li>Visibly distinguish the persisted active version, unsent <strong>Feedback ready</strong> drafts, and <strong>Feedback sent — continue in Telegram</strong>. Session expiry, unavailable plan, and conflicts are recoverable without disclosure.</li>
+      </ul>
+
+      <h2>Local draft policy</h2>
+      <ul>
+        <li>Store only <code>{ day, slot, text }</code> drafts in Telegram DeviceStorage, keyed by the server-returned plan ID and exact version. A browser-storage fallback is for local development only.</li>
+        <li>Restore only the matching key and label restored drafts. Clear drafts after submit, explicit discard, conflict/newer version, or a different plan/version.</li>
+        <li>State clearly that drafts are device-local, non-canonical, and not cross-device.</li>
+      </ul>
+
+      <h2>Durable feedback acceptance and recovery</h2>
+      <p>The existing immutable <code>feedback_batch</code> is written only when a revision succeeds. A separate durable submission ledger is required to make HTTP acceptance idempotent while planning or clarification is still in progress.</p>
+
+      <h3>Ledger</h3>
+      <p>An append-only migration adds <code>meal_feedback_submission</code>. Each row stores a server-generated ID; authoritative <code>chat_id</code>, <code>plan_id</code>, <code>workflow_instance_id</code>, and <code>week_end</code> copied from the active plan; base version; normalized scoped items; the client idempotency key; lease/retry fields; terminal metadata; and monotonic <code>processing_claim_generation</code>. It has a unique <code>(plan_id, idempotency_key)</code> constraint and stores neither browser credentials, transcripts, nor raw provider failures.</p>
+
+      <h3>Acceptance</h3>
+      <p><code>acceptMiniAppFeedback</code> derives the chat from the server session, atomically verifies that the exact plan/version is active, validates all day/slot targets against the persisted schedule/grid, bounds text/items, and normalizes item IDs server-side. It inserts or returns the same submission for an identical retry; key reuse with a different payload fails. A stale base returns <code>409</code> with a safe current-plan summary and changes neither plan nor feedback state.</p>
+
+      <h3>Dispatch state machine</h3>
+      <table>
+        <thead><tr><th>State</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>pending</code></td><td>Accepted, awaiting a dispatch lease.</td></tr>
+          <tr><td><code>dispatching</code></td><td>A single immediate or cron dispatcher owns a short dispatch lease.</td></tr>
+          <tr><td><code>delivered</code></td><td><code>sendEvent</code> accepted; awaiting an atomic workflow claim.</td></tr>
+          <tr><td><code>processing</code></td><td>A fenced workflow generation owns the bounded revision.</td></tr>
+          <tr><td><code>consumed</code></td><td>The plan promotion and immutable feedback batch committed.</td></tr>
+          <tr><td><code>stale</code>, <code>expired</code>, <code>failed</code></td><td>Truthful terminal states; one guarded Telegram notification may be sent.</td></tr>
+        </tbody>
+      </table>
+      <ul>
+        <li><code>claimFeedbackDispatch(now)</code> atomically leases an eligible row, increments attempts, and returns its <em>stored</em> workflow pointer and expected base. Dispatch never uses browser input or a fresh active-plan lookup.</li>
+        <li>The HTTP route dispatches immediately for latency. A five-minute Worker cron is the durable recovery owner and uses the same lease operation, preventing concurrent route/cron/restart dispatch.</li>
+        <li>Failed <code>get/sendEvent</code> returns a row to <code>pending</code> with capped exponential backoff (1, 5, 15, 30, then 60 minutes) and metadata-only logs. Reaching the stored week end marks <code>expired</code>; bounded retry/deadline exhaustion marks <code>failed</code>. A one-time guarded Telegram outcome explains that the plan ended, is stale, or that accepted feedback was not applied.</li>
+      </ul>
+
+      <h3>Workflow fencing</h3>
+      <div class="callout"><strong>Key invariant:</strong> an execution that has lost its processing generation cannot persist a revision or notify the parent.</div>
+      <ul>
+        <li><code>claimMiniAppSubmissionForWorkflow(submissionId, instanceId, now)</code> atomically moves a delivered row to processing, increments and returns the claim generation, grants a lease covering the bounded agent plus clarification wait, and validates the active base in the same transaction.</li>
+        <li>The workflow renews its exact generation before work-producing durable steps and immediately before persistence or Telegram status. Failed renewal means it stops without more planning, persistence, or notification.</li>
+        <li>Only a genuinely expired processing lease can be returned to pending. Recovery receives the next generation. Every workflow-owned renewal, terminal transition, terminal-notification claim, and promotion transaction requires matching <code>processing</code> state, generation, and unexpired lease.</li>
+        <li>The promotion transaction fences the plan-version CAS, feedback-batch association, and transition to <code>consumed</code> together. A preempted execution cannot promote or send duplicate status; only the current generation can do either.</li>
+      </ul>
+
+      <h2>Implementation sequence</h2>
+      <ol>
+        <li><strong>Contracts and runtime:</strong> add <code>MINI_APP_ORIGIN</code> to <code>Env</code>, runtime-variable contract, local/prod provisioning, D1 migration/store/fake, fenced leases, and the five-minute cron in <code>wrangler.prod.toml</code>.</li>
+        <li><strong>Server boundary:</strong> add Mini App auth, DTO, schemas, session/read/batch routes, immediate dispatcher, cron recovery, and workflow claim/renew/complete contracts.</li>
+        <li><strong>Telegram/workflow:</strong> integrate fenced event claim/promotion/notifications and add the post-persist contextual Web App keyboard action.</li>
+        <li><strong>Client:</strong> add a small dependency-free phone-first Mini App with version-keyed drafts, explicit batch submit, conflict handling, handoff confirmation, and close.</li>
+        <li><strong>Evidence:</strong> complete automated coverage, manual Android/iOS Telegram checks, documentation, and repository quality gates.</li>
+      </ol>
+
+      <h2>Acceptance evidence</h2>
+      <ul>
+        <li>Auth tests cover valid/tampered/malformed/expired/future/replayed launch data, unauthorized user, session expiry, and constant-time comparison behavior.</li>
+        <li>Store tests cover authorization, target validation, idempotency mismatch, stale/cross-chat isolation, leases/backoff, fenced claim/renewal, terminal notifications, and promotion association.</li>
+        <li>Route/workflow/integration tests cover unauthenticated requests, safe DTOs, <code>202</code>/<code>409</code>, review keyboard, duplicate delivery, clarification, and a fresh review link only after persistence.</li>
+        <li>Explicitly simulate: accepted row committed → dispatch failure → restart/cron recovery → exactly one workflow claim/revision and feedback batch, or one truthful terminal message. Also reclaim a first workflow's processing lease and resume it: only the newer fencing generation may work, promote, or notify.</li>
+        <li>Client checks cover grid/details, draft restoration/invalidation, batch state, conflict UI, and no client-controlled authority. Manually verify public HTTPS launches in Telegram on Android and iOS, both themes, keyboard/safe-area changes, and close/reopen recovery.</li>
+        <li>Run <code>pnpm lint</code>, <code>pnpm run docs</code>, <code>pnpm typecheck</code>, <code>pnpm test</code>, and <code>pnpm deploy:check</code> once runtime values are provisioned.</li>
+      </ul>
+
+      <h2>Definition of done</h2>
+      <p>An authorized configured parent can inspect a persisted plan, submit one local version-scoped batch exactly once, and continue in Telegram until a new plan version is persisted. Server authentication and authorization govern every request; drafts never become canonical; stale/duplicate actions cannot overwrite a newer plan; and review links never refer to unpersisted plans.</p>
+    </main>
+  </body>
+</html>
