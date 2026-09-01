@@ -1137,8 +1137,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .bind(now, batchId, instanceId),
       ])
       const row = await db
-        .prepare("SELECT * FROM feedback_batch WHERE batch_id = ? AND status = 'processing'")
-        .bind(batchId)
+        .prepare(
+          "SELECT * FROM feedback_batch WHERE batch_id = ? AND workflow_instance_id = ? AND status = 'processing'",
+        )
+        .bind(batchId, instanceId)
         .first()
       return row ? feedbackBatchFromRow(row) : null
     },
