@@ -57,6 +57,11 @@ as a conversational fallback.
   cues, preparation state, optional recipe-video metadata, and active-week
   labels into a client-safe response. It exposes no workflow instance ID,
   interaction tokens, raw provider material, or unrelated D1 rows.
+- Make the authenticated active-plan read a discriminated response: return a
+  client-safe `ready` DTO only when the authorized chat has an active plan for
+  the current planning week; otherwise return a data-free `empty` response
+  with the current week label. An absent plan is an expected state, not a
+  not-found error and not permission to create a synthetic blank plan.
 - Render a compact Monday–Saturday, phone-first board using Telegram theme,
   safe-area, viewport, main-button/back-button, and closing-confirmation APIs.
   Each meal cell has a glanceable dish/state summary; a sheet/detail view
@@ -69,6 +74,12 @@ as a conversational fallback.
   **Feedback sent — continue in Telegram** handoff. For expired sessions,
   unavailable plans, and version conflict, show recoverable messages without
   exposing data.
+- For the `empty` response, show a first-use/missed-week empty state: explain
+  that no plan exists for this week and direct the parent back to Telegram to
+  send `/mealplan` (using a Telegram deep link where it is supported, with a
+  visible copyable command fallback). Do not show the meal board, feedback
+  drafts, or submit action. This covers a first Mini App launch, an old review
+  button, and a Monday launch before the parent creates that week's plan.
 
 ### 2.3 Local drafts
 
@@ -175,8 +186,10 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
 2. **Authenticated Mini App boundary**
    - Add `meal-planning/mini-app-auth.ts`, `mini-app-routes.ts`, and DTO/schema
      modules. Mount the HTML shell plus session, active-plan read, and batch
-     submission routes in `src/index.ts`; use explicit method/content-type,
-     bounded-body, authorization, cache-control, and error handling.
+     submission routes in `src/index.ts`; make the active-plan route return a
+     discriminated ready-or-empty response for the current week; use explicit
+     method/content-type, bounded-body, authorization, cache-control, and
+     error handling.
    - Extend the workflow event/submission contracts with server-owned
      submission ID and base version. Add the immediate dispatcher plus cron
      recovery handler, and claim/renew/complete the fenced ledger through store
@@ -191,8 +204,9 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
 4. **Client**
    - Add a deliberately small dependency-free Mini App page/script/style under
      `src/meal-planning/mini-app/`. Authenticate, fetch the DTO, render the
-     board/details accessibly, manage version-keyed DeviceStorage drafts, and
-     submit one explicit idempotency-keyed batch. After a 202 acceptance, clear
+     board/details or the no-plan `/mealplan` empty state accessibly, manage
+     version-keyed DeviceStorage drafts only for ready plans, and submit one
+     explicit idempotency-keyed batch. After a 202 acceptance, clear
      drafts, show handoff confirmation, and call `WebApp.close`; a 409 clears
      stale drafts and requires loading the newer review link.
 5. **Documentation and release readiness**
@@ -214,7 +228,9 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
 - Worker-route tests cover unauthenticated plan/batch requests, valid session
   creation, no data in the ordinary browser shell, security/cache headers,
   safe DTO shape, 202 acceptance, 409 conflict response, and safe response to
-  an expired session.
+  an expired session. Verify the authorized no-active-plan response is a safe
+  `empty` state for the current week, never a synthetic plan or an error that
+  leaks state.
 - Workflow/integration tests drive `/mealplan` through the review keyboard,
   authenticated Mini App submission, duplicate HTTP delivery, stale submission,
   clarification, and successful revision. Assert that Telegram reports
@@ -232,7 +248,9 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
   promote, consume the submission, or claim/send a Telegram status; only the
   current token can produce the one revision/`feedback_batch` or truthful
   terminal outcome.
-- Client-focused tests verify week rendering, detail disclosure, draft
+- Client-focused tests verify week rendering, detail disclosure, the first-use
+  and missed-Monday no-plan state with its `/mealplan` handback and no feedback
+  controls, draft
   restoration/invalidation/clear behavior, explicit batch state, conflict UI,
   and no client-controlled identity or plan selector. Manually verify the
   production-like HTTPS flow in Telegram on Android and iOS, both themes,
@@ -243,8 +261,9 @@ or clarification. Add a separate D1 submission ledger for the Mini App.
 ## 5. Done criteria
 
 Issue #66 is complete only when an authorized configured parent can inspect a
-persisted plan in the phone Mini App, submit one locally drafted version-scoped
-batch exactly once, and continue through Telegram until a new version is
+persisted plan in the phone Mini App, or receive a safe no-plan state that
+directs them to `/mealplan` in Telegram, then submit one locally drafted
+version-scoped batch exactly once, and continue through Telegram until a new version is
 persisted. Every request is authenticated and resource-authorized on the
 server; drafts cannot become canonical; stale/duplicate activity cannot
 overwrite a newer active version; and a review link never points to an

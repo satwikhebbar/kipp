@@ -55,9 +55,11 @@
       <h2>Review experience</h2>
       <ul>
         <li>Expose a client-safe DTO over the persisted active plan: schedule, week/version, meal grid, preparation state, policy/trade-off cues, and optional recipe-video metadata. Never expose workflow IDs, interaction tokens, raw provider material, or unrelated rows.</li>
+        <li>Make the authenticated active-plan read discriminated: return a <code>ready</code> DTO only for an active plan in the current planning week; otherwise return a data-free <code>empty</code> response with the current week label. No active plan is expected, not an error or a reason to invent a blank plan.</li>
         <li>Render a compact Monday–Saturday board designed for Telegram phone viewports, themes, safe areas, main/back buttons, and closing confirmation. Each cell is glanceable; a detail sheet supplies ingredients, cook/prep information, substitutions/easy buys, trade-offs, and opt-in external recipe links.</li>
         <li>Build DOM nodes from dynamic data instead of injecting HTML.</li>
         <li>Visibly distinguish the persisted active version, unsent <strong>Feedback ready</strong> drafts, and <strong>Feedback sent — continue in Telegram</strong>. Session expiry, unavailable plan, and conflicts are recoverable without disclosure.</li>
+        <li>For an <code>empty</code> response, show a first-use/missed-week state: “No plan for this week yet,” with a clear handback to Telegram to send <code>/mealplan</code> (a Telegram deep link where supported and a copyable command fallback). Do not render a board, drafts, or feedback submission controls. This covers first launch, an old review button, and a Monday launch before a weekly plan is created.</li>
       </ul>
 
       <h2>Local draft policy</h2>
@@ -106,9 +108,9 @@
       <h2>Implementation sequence</h2>
       <ol>
         <li><strong>Contracts and runtime:</strong> add <code>MINI_APP_ORIGIN</code> to <code>Env</code>, runtime-variable contract, local/prod provisioning, D1 migration/store/fake, fenced leases, and the five-minute cron in <code>wrangler.prod.toml</code>.</li>
-        <li><strong>Server boundary:</strong> add Mini App auth, DTO, schemas, session/read/batch routes, immediate dispatcher, cron recovery, and workflow claim/renew/complete contracts.</li>
+        <li><strong>Server boundary:</strong> add Mini App auth, DTO, schemas, session/read/batch routes (including the current-week ready-or-empty response), immediate dispatcher, cron recovery, and workflow claim/renew/complete contracts.</li>
         <li><strong>Telegram/workflow:</strong> integrate fenced event claim/promotion/notifications and add the post-persist contextual Web App keyboard action.</li>
-        <li><strong>Client:</strong> add a small dependency-free phone-first Mini App with version-keyed drafts, explicit batch submit, conflict handling, handoff confirmation, and close.</li>
+        <li><strong>Client:</strong> add a small dependency-free phone-first Mini App with the no-plan <code>/mealplan</code> handback, version-keyed drafts only for ready plans, explicit batch submit, conflict handling, handoff confirmation, and close.</li>
         <li><strong>Evidence:</strong> complete automated coverage, manual Android/iOS Telegram checks, documentation, and repository quality gates.</li>
       </ol>
 
@@ -116,9 +118,9 @@
       <ul>
         <li>Auth tests cover valid/tampered/malformed/expired/future/replayed launch data, unauthorized user, session expiry, and constant-time comparison behavior.</li>
         <li>Store tests cover authorization, target validation, idempotency mismatch, stale/cross-chat isolation, leases/backoff, fenced claim/renewal, terminal notifications, and promotion association.</li>
-        <li>Route/workflow/integration tests cover unauthenticated requests, safe DTOs, <code>202</code>/<code>409</code>, review keyboard, duplicate delivery, clarification, and a fresh review link only after persistence.</li>
+        <li>Route/workflow/integration tests cover unauthenticated requests, safe ready and current-week empty DTOs, <code>202</code>/<code>409</code>, review keyboard, duplicate delivery, clarification, and a fresh review link only after persistence.</li>
         <li>Explicitly simulate: accepted row committed → dispatch failure → restart/cron recovery → exactly one workflow claim/revision and feedback batch, or one truthful terminal message. Also reclaim a first workflow's processing lease and resume it: only the newer fencing generation may work, promote, or notify.</li>
-        <li>Client checks cover grid/details, draft restoration/invalidation, batch state, conflict UI, and no client-controlled authority. Manually verify public HTTPS launches in Telegram on Android and iOS, both themes, keyboard/safe-area changes, and close/reopen recovery.</li>
+        <li>Client checks cover grid/details; first-use and missed-Monday no-plan handback with no feedback controls; draft restoration/invalidation; batch state; conflict UI; and no client-controlled authority. Manually verify public HTTPS launches in Telegram on Android and iOS, both themes, keyboard/safe-area changes, and close/reopen recovery.</li>
         <li>Run <code>pnpm lint</code>, <code>pnpm run docs</code>, <code>pnpm typecheck</code>, <code>pnpm test</code>, and <code>pnpm deploy:check</code> once runtime values are provisioned.</li>
       </ul>
 
