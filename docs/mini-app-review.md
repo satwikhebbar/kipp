@@ -19,8 +19,10 @@ enabled as required by [production runtime configuration](production-runtime-con
 The WebView authenticates using raw Telegram `initData`; the Worker verifies
 its HMAC, timestamp, replay fingerprint, configured parent, and a server-owned
 private-chat review context. Browser requests use an opaque, memory-only bearer
-session. URLs, device storage, and logs never receive plan/chat identity,
-launch data, or bearer credentials.
+session. URLs and logs never receive plan/chat identity, launch data, or bearer
+credentials. Device storage contains only the local draft payload, its
+idempotency key, and the minimal plan/version key needed to isolate that draft
+batch; it never contains a chat ID, raw launch data, or bearer credential.
 
 Unsent feedback is local to the device and exact persisted plan version. It is
 stored with one idempotency key in Telegram DeviceStorage, with browser storage
