@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import {
   type MealPlanningLiveEvent,
+  miniAppLaunchUrl,
   renderHouseholdContext,
   renderPlanningTimeContext,
   renderRevisionFeedback,
@@ -80,6 +81,15 @@ it("renders neutral current-time and planning-week facts for relative-date reque
       "Planning-week start: 2026-08-30T18:30:00.000Z\n" +
       "Planning-week end: 2026-09-05T18:29:59.999Z",
   )
+})
+
+it("builds Mini App launch URLs only from configured public HTTPS origins", () => {
+  expect(miniAppLaunchUrl("https://mini-app.example.test/config-path?ignored=query")).toBe(
+    "https://mini-app.example.test/mini-app",
+  )
+  expect(miniAppLaunchUrl("http://mini-app.example.test")).toBeNull()
+  expect(miniAppLaunchUrl("not a URL")).toBeNull()
+  expect(miniAppLaunchUrl(undefined)).toBeNull()
 })
 
 // Workflow fixtures intentionally reuse paratha in every slot. Keep that
@@ -287,7 +297,7 @@ function mealEvent(invokedAtMs: number): WorkflowEvent<MealPlanningWorkflowParam
   } as unknown as WorkflowEvent<MealPlanningWorkflowParams>
 }
 
-function makeEnv(namespace: DurableObjectNamespace, d1: D1Database): Env {
+function makeEnv(namespace: DurableObjectNamespace, d1: D1Database, overrides: Partial<Env> = {}): Env {
   return {
     TELEGRAM_BOT_TOKEN: "bot:token",
     LLM_API_KEY: "key",
@@ -298,6 +308,7 @@ function makeEnv(namespace: DurableObjectNamespace, d1: D1Database): Env {
     MEAL_PLANNING_DB: d1,
     TIMEZONE: TZ,
     LOG_LEVEL: "info",
+    ...overrides,
   } as unknown as Env
 }
 
@@ -343,6 +354,44 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         workflowId: "wf-meal-1",
         interactionGroup: "meal-planning",
       }),
+    )
+  })
+
+  it("adds a Mini App review button only after persisting its private-chat context", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(
+      makeEnv(namespace, d1, {
+        MINI_APP_ORIGIN: "https://mini-app.example.test/ignored-path?ignored=query",
+        TELEGRAM_ALLOWED_USER_ID: "parent-123",
+      }),
+      mealEvent(invokedAtMs),
+      step as never,
+    )
+
+    const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))
+    expect(planMessage).toBeTruthy()
+    if (!planMessage) throw new Error("Expected persisted plan message")
+    const buttons = (planMessage.replyMarkup as { inline_keyboard: Array<Array<Record<string, unknown>>> })
+      .inline_keyboard[0]
+    expect(buttons).toEqual([
+      expect.objectContaining({ text: "Give feedback" }),
+      { text: "Review this week's plan", web_app: { url: "https://mini-app.example.test/mini-app" } },
+    ])
+    const context = await createMealPlanningStore(d1).resolveMiniAppReviewContext("parent-123")
+    expect(context).toEqual(
+      expect.objectContaining({ chatId: CHAT, planId: expect.any(String), weekEnd: week.weekEnd }),
     )
   })
 

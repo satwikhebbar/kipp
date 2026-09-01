@@ -414,7 +414,19 @@ async function promptForClarification(
   }
 }
 
-/** Sends the rendered plan message with a [Give feedback] button and registers the meal-feedback interaction. `occurrence` is a stable per-message key (`initial` or `revision-<live-loop-iteration>`). */
+/** Builds the same-origin Mini App launch URL from its configured public HTTPS origin. */
+export function miniAppLaunchUrl(origin: string | undefined): string | null {
+  if (!origin?.trim()) return null
+  try {
+    const configured = new URL(origin)
+    if (configured.protocol !== "https:" || configured.username || configured.password) return null
+    return new URL("/mini-app", configured.origin).toString()
+  } catch {
+    return null
+  }
+}
+
+/** Sends the rendered plan message with feedback and, when configured, Mini App review buttons. `occurrence` is a stable per-message key (`initial` or `revision-<live-loop-iteration>`). */
 async function sendPlanAndRegister(
   env: Env,
   step: WorkflowStep,
@@ -427,14 +439,43 @@ async function sendPlanAndRegister(
 ): Promise<void> {
   const chatId = event.payload.chatId
   const message = renderPlanMessage(plan, version, profile.schedule, profile.customPolicies)
+  const reviewUrl = miniAppLaunchUrl(env.MINI_APP_ORIGIN)
+  // The Mini App link is shown only after its server-owned private-chat scope
+  // has been persisted. Its authorization is still rechecked from signed
+  // Telegram initData at session creation; the button contains no identity.
+  const miniAppUrl = await step.do(`meal-planning-register-mini-app-context-${occurrence}`, async () => {
+    const telegramUserId = env.TELEGRAM_ALLOWED_USER_ID?.trim()
+    if (!reviewUrl || !telegramUserId || !env.MEAL_PLANNING_DB) return null
+    try {
+      await createMealPlanningStore(env.MEAL_PLANNING_DB).upsertMiniAppReviewContext({
+        telegramUserId,
+        chatId,
+        planId: plan.planId,
+        weekEnd: plan.weekEnd,
+      })
+      return reviewUrl
+    } catch {
+      // Review is additive: never present a link that lacks its durable scope,
+      // while retaining the established Telegram feedback path for this plan.
+      logRuntime(env, {
+        workflow: event.instanceId,
+        event: "meal-planning-mini-app-context",
+        outcome: "failed",
+        failureCategory: "store-error",
+      })
+      return null
+    }
+  })
   // The callback token and interaction id are minted inside the cached send step
   // and returned, so a replayed workflow registers the credentials the parent
   // actually sees on the (cached) plan message instead of a fresh pair.
   const sent = await step.do(`meal-planning-send-plan-${occurrence}`, async () => {
     const callbackToken = crypto.randomUUID()
     const interactionId = crypto.randomUUID()
+    const buttons: Array<Record<string, unknown>> = [{ text: "Give feedback", callback_data: callbackToken }]
+    if (miniAppUrl) buttons.push({ text: "Review this week's plan", web_app: { url: miniAppUrl } })
     const sentMessage = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
-      replyMarkup: { inline_keyboard: [[{ text: "Give feedback", callback_data: callbackToken }]] },
+      replyMarkup: { inline_keyboard: [buttons] },
     })
     return { interactionId, callbackToken, messageId: sentMessage.messageId }
   })
