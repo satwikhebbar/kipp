@@ -132,14 +132,14 @@ export interface AcceptFeedbackBatchInput {
   chatId: string
   baseVersion: number
   workflowInstanceId: string
-  weekEnd: string
   idempotencyKey: string
-  items: Array<FeedbackItem & { target: FeedbackTarget }>
+  /** Untrusted JSON at the HTTP boundary; this store normalizes it before persistence. */
+  items: unknown
 }
 
 export type AcceptFeedbackBatchResult =
   | { ok: true; batch: FeedbackBatchRecord; duplicate: boolean }
-  | { ok: false; reason: "stale" | "idempotency_mismatch" }
+  | { ok: false; reason: "stale" | "idempotency_mismatch" | "invalid_items" }
 
 /** Input to `createActivePlan`: everything the atomic initial-plan batch needs. */
 export interface CreateActivePlanInput {
@@ -527,6 +527,43 @@ function feedbackBatchFromRow(row: Record<string, unknown>): FeedbackBatchRecord
     failedAt: row.failed_at === null ? null : String(row.failed_at),
     createdAt: String(row.created_at),
   }
+}
+
+const MAX_MINI_APP_FEEDBACK_ITEMS = 20
+const MAX_MINI_APP_FEEDBACK_TEXT_LENGTH = 1_000
+
+/**
+ * Converts untrusted Mini App JSON to the sole persisted feedback shape. Cell
+ * targets must name both a configured schedule slot and an actual current-plan
+ * cell; closed holidays therefore cannot receive feedback.
+ */
+function normalizeMiniAppFeedbackItems(
+  rawItems: unknown,
+  candidate: MealPlanCandidate,
+  schedule: MealSchedule,
+): Array<FeedbackItem & { target: FeedbackTarget }> | null {
+  if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > MAX_MINI_APP_FEEDBACK_ITEMS) return null
+  const normalized: Array<FeedbackItem & { target: FeedbackTarget }> = []
+  for (const [index, rawItem] of rawItems.entries()) {
+    if (!rawItem || typeof rawItem !== "object") return null
+    const item = rawItem as Record<string, unknown>
+    if (typeof item.text !== "string") return null
+    const text = item.text.trim()
+    if (!text || text.length > MAX_MINI_APP_FEEDBACK_TEXT_LENGTH) return null
+    if (!item.target || typeof item.target !== "object") return null
+    const target = item.target as Record<string, unknown>
+    if (target.kind === "plan") {
+      normalized.push({ id: `mini-${index + 1}`, text, target: { kind: "plan" } })
+      continue
+    }
+    if (target.kind !== "cell" || typeof target.day !== "string" || typeof target.slot !== "string") return null
+    const day = target.day.trim()
+    const slot = target.slot.trim()
+    if (!schedule.days.includes(day) || !schedule.slots.some((scheduleSlot) => scheduleSlot.id === slot)) return null
+    if (!candidate.grid[day]?.[slot]) return null
+    normalized.push({ id: `mini-${index + 1}`, text, target: { kind: "cell", day, slot } })
+  }
+  return normalized
 }
 
 /** Stable map key for a (plan, version) pair. */
@@ -1008,14 +1045,31 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async acceptFeedbackBatch(input) {
+      const planRow = await db
+        .prepare(
+          `SELECT v.candidate_json, profile.schedule_json
+           FROM meal_plan p
+           JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
+           JOIN meal_profile profile ON profile.chat_id = p.chat_id
+           WHERE p.plan_id = ? AND p.chat_id = ? AND p.instance_id = ? AND p.current_version = ? AND p.status = 'active'`,
+        )
+        .bind(input.planId, input.chatId, input.workflowInstanceId, input.baseVersion)
+        .first()
+      if (!planRow) return { ok: false as const, reason: "stale" as const }
+      const items = normalizeMiniAppFeedbackItems(
+        input.items,
+        parseJson<MealPlanCandidate>(String(planRow.candidate_json), { grid: {}, easyBuys: [], policyOutcomes: {} }),
+        parseJson<MealSchedule>(String(planRow.schedule_json), SEED_SCHEDULE),
+      )
+      if (!items) return { ok: false as const, reason: "invalid_items" as const }
       const now = nowIso()
-      const itemsJson = JSON.stringify(input.items)
+      const itemsJson = JSON.stringify(items)
       await db
         .prepare(
           `INSERT OR IGNORE INTO feedback_batch
              (batch_id, plan_id, base_version, items_json, chat_id, workflow_instance_id, week_end, idempotency_key,
               status, accepted_at, created_at)
-           SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ? FROM meal_plan
+           SELECT ?, ?, ?, ?, ?, ?, week_end, ?, 'accepted', ?, ? FROM meal_plan
            WHERE plan_id = ? AND chat_id = ? AND instance_id = ? AND current_version = ? AND status = 'active'`,
         )
         .bind(
@@ -1025,7 +1079,6 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           itemsJson,
           input.chatId,
           input.workflowInstanceId,
-          input.weekEnd,
           input.idempotencyKey,
           now,
           now,
@@ -1331,14 +1384,16 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       ) {
         return { ok: false as const, reason: "stale" as const }
       }
+      const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
+      const profile = backing.profiles.get(plan.chatId)
+      if (!version || !profile) return { ok: false as const, reason: "stale" as const }
+      const items = normalizeMiniAppFeedbackItems(input.items, version.candidate, profile.schedule)
+      if (!items) return { ok: false as const, reason: "invalid_items" as const }
       const existing = [...backing.batches.values()].find(
         (batch) => batch.planId === input.planId && batch.idempotencyKey === input.idempotencyKey,
       )
       if (existing) {
-        if (
-          existing.baseVersion !== input.baseVersion ||
-          JSON.stringify(existing.items) !== JSON.stringify(input.items)
-        ) {
+        if (existing.baseVersion !== input.baseVersion || JSON.stringify(existing.items) !== JSON.stringify(items)) {
           return { ok: false as const, reason: "idempotency_mismatch" as const }
         }
         return { ok: true as const, batch: existing, duplicate: true }
@@ -1348,10 +1403,10 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         batchId: input.batchId,
         planId: input.planId,
         baseVersion: input.baseVersion,
-        items: input.items,
+        items,
         chatId: input.chatId,
         workflowInstanceId: input.workflowInstanceId,
-        weekEnd: input.weekEnd,
+        weekEnd: plan.weekEnd,
         idempotencyKey: input.idempotencyKey,
         status: "accepted",
         failureCategory: null,
