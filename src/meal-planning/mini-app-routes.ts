@@ -77,6 +77,10 @@ function errorResponse(error: unknown): Response {
 /** Dispatches an accepted batch to the server-owned workflow pointer. */
 export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): Promise<boolean> {
   if (!env.MEAL_PLANNING_WORKFLOW || !batch.workflowInstanceId) return false
+  const store = env.MEAL_PLANNING_DB ? createMealPlanningStore(env.MEAL_PLANNING_DB) : null
+  // The Workflow claims only delivered batches. Persist the transition before
+  // the event is visible so a fast Workflow cannot observe an accepted batch.
+  if (!store || !(await store.markFeedbackBatchDelivered(batch.batchId))) return false
   try {
     const instance = await env.MEAL_PLANNING_WORKFLOW.get(batch.workflowInstanceId)
     await instance.sendEvent({
@@ -86,28 +90,25 @@ export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): 
         text: "__mini_app_feedback__",
         interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
         source: "mini-app",
+        feedbackBatchId: batch.batchId,
+        baseVersion: batch.baseVersion,
         items: batch.items,
       },
     })
-    const store = env.MEAL_PLANNING_DB ? createMealPlanningStore(env.MEAL_PLANNING_DB) : null
-    if (!store || !(await store.markFeedbackBatchDelivered(batch.batchId))) return false
     return true
   } catch {
-    const store = env.MEAL_PLANNING_DB ? createMealPlanningStore(env.MEAL_PLANNING_DB) : null
-    if (store) {
-      const now = new Date().toISOString()
-      await store.markFeedbackBatchFailed(batch.batchId, "dispatch", now).catch(() => false)
-      if (batch.chatId && (await store.claimFeedbackBatchFailureNotification(batch.batchId, now))) {
-        await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-          .sendMessage(
-            batch.chatId,
-            "Your feedback was received but could not be sent for processing. Please try again.",
-            {
-              signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
-            },
-          )
-          .catch(() => {})
-      }
+    const now = new Date().toISOString()
+    await store.markFeedbackBatchFailed(batch.batchId, "dispatch", now).catch(() => false)
+    if (batch.chatId && (await store.claimFeedbackBatchFailureNotification(batch.batchId, now))) {
+      await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+        .sendMessage(
+          batch.chatId,
+          "Your feedback was received but could not be sent for processing. Please try again.",
+          {
+            signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
+          },
+        )
+        .catch(() => {})
     }
     logRuntime(env, {
       workflow: batch.workflowInstanceId ?? undefined,

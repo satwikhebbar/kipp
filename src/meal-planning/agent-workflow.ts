@@ -22,6 +22,7 @@ import {
 import {
   type ActivePlanRecord,
   createMealPlanningStore,
+  type FeedbackBatchRecord,
   type MealPlanningStore,
   type MealPlanRecord,
   type MealPlanVersionRecord,
@@ -49,6 +50,10 @@ export interface MealPlanningLiveEvent {
   messageId?: number
   interactionId?: string
   version?: number
+  /** Server-owned Mini App batch identity; never accepted from ordinary Telegram text. */
+  feedbackBatchId?: string
+  /** The version the Mini App saw when its server-side batch was accepted. */
+  baseVersion?: number
   /** Structured per-cell submissions delivered by the iteration-2 mini-app. */
   items?: Array<{ id: string; text: string; target?: FeedbackTarget; scope?: { day?: string; slot?: string } }>
 }
@@ -496,12 +501,43 @@ async function liveWeekLoop(
       continue
     }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
-      const submission = submissionFromPayload(payload)
+      let feedbackBatch: FeedbackBatchRecord | undefined
+      if (payload?.source === "mini-app") {
+        if (!payload.feedbackBatchId || !Number.isSafeInteger(payload.baseVersion)) continue
+        const claimed = await stepDo(step, `meal-planning-claim-mini-app-batch-${iteration}`, () =>
+          store.claimFeedbackBatchForWorkflow(
+            payload.feedbackBatchId as string,
+            event.instanceId,
+            new Date().toISOString(),
+          ),
+        )
+        if (!claimed) {
+          await notifyMiniAppBatchTerminal(env, step, store, chatId, payload.feedbackBatchId, iteration)
+          continue
+        }
+        feedbackBatch = claimed
+      }
+      const submission = feedbackBatch ? { items: feedbackBatch.items } : submissionFromPayload(payload)
       if (!submission) continue
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) continue
-      const promotedGeneration = await runRevision(env, step, event, store, profile, active, submission, iteration)
-      if (promotedGeneration !== null) generation = promotedGeneration
+      try {
+        const promotedGeneration = await runRevision(
+          env,
+          step,
+          event,
+          store,
+          profile,
+          active,
+          submission,
+          iteration,
+          false,
+          feedbackBatch,
+        )
+        if (promotedGeneration !== null) generation = promotedGeneration
+      } catch {
+        if (feedbackBatch) await failMiniAppBatch(env, step, store, chatId, feedbackBatch.batchId, iteration)
+      }
       continue
     }
     logRuntime(env, {
@@ -512,6 +548,40 @@ async function liveWeekLoop(
       details: { interactionKind: kind ?? "missing" },
     })
   }
+}
+
+async function notifyMiniAppBatchTerminal(
+  env: Env,
+  step: WorkflowStep,
+  store: MealPlanningStore,
+  chatId: string,
+  batchId: string,
+  iteration: number,
+): Promise<void> {
+  const batch = await stepDo(step, `meal-planning-read-mini-app-batch-${iteration}`, () => store.feedbackBatch(batchId))
+  if (batch?.status !== "stale") return
+  const claimed = await stepDo(step, `meal-planning-notify-mini-app-stale-claim-${iteration}`, () =>
+    store.claimFeedbackBatchFailureNotification(batchId, new Date().toISOString()),
+  )
+  if (claimed) await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-mini-app-stale-${iteration}`)
+}
+
+async function failMiniAppBatch(
+  env: Env,
+  step: WorkflowStep,
+  store: MealPlanningStore,
+  chatId: string,
+  batchId: string,
+  iteration: number,
+): Promise<void> {
+  await stepDo(step, `meal-planning-fail-mini-app-batch-${iteration}`, () =>
+    store.markFeedbackBatchFailed(batchId, "workflow", new Date().toISOString()),
+  )
+  const claimed = await stepDo(step, `meal-planning-notify-mini-app-failure-claim-${iteration}`, () =>
+    store.claimFeedbackBatchFailureNotification(batchId, new Date().toISOString()),
+  )
+  if (claimed)
+    await notify(env, step, chatId, MEAL_FEEDBACK_NOT_APPLIED, `meal-planning-notify-mini-app-failure-${iteration}`)
 }
 
 /** Builds the canonical submission payload from a live-loop event, or null when it carries nothing. */
@@ -534,6 +604,7 @@ async function runRevision(
   submission: Submission,
   iteration: number,
   contextAlreadyUpdated = false,
+  feedbackBatch?: FeedbackBatchRecord,
 ): Promise<number | null> {
   const occurrence = `revision-${iteration}`
   const notifyPrefix = `meal-planning-notify-${occurrence}`
@@ -590,6 +661,10 @@ async function runRevision(
       return null
     }
     if (!updatedContext.replan) {
+      if (feedbackBatch)
+        await stepDo(step, `meal-planning-consume-mini-app-batch-${occurrence}`, () =>
+          store.markFeedbackBatchConsumed(feedbackBatch.batchId, new Date().toISOString()),
+        )
       await notify(
         env,
         step,
@@ -616,15 +691,23 @@ async function runRevision(
       submission,
       iteration,
       true,
+      feedbackBatch,
     )
   }
-  if (outcome?.kind !== "proposed") return null
+  if (outcome?.kind !== "proposed") {
+    if (feedbackBatch) await failMiniAppBatch(env, step, store, event.payload.chatId, feedbackBatch.batchId, iteration)
+    return null
+  }
   const propose = outcome.propose
   // A replan that closes a school day is materially different from the active
   // version even when no remaining-day cell needs changing.
   if (
     isNoChangeCandidate(propose.candidate, contextAlreadyUpdated ? active.version.candidate : revisionBaseCandidate)
   ) {
+    if (feedbackBatch)
+      await stepDo(step, `meal-planning-consume-mini-app-batch-${occurrence}`, () =>
+        store.markFeedbackBatchConsumed(feedbackBatch.batchId, new Date().toISOString()),
+      )
     await notify(env, step, event.payload.chatId, MEAL_NO_CHANGES, `${notifyPrefix}-no-change`)
     return null
   }
@@ -645,12 +728,19 @@ async function runRevision(
         weeklyExceptions: propose.weeklyExceptions,
       },
       feedbackBatch: {
-        batchId: `${active.plan.planId}:v${active.plan.currentVersion + 1}`,
+        batchId: feedbackBatch?.batchId ?? `${active.plan.planId}:v${active.plan.currentVersion + 1}`,
         items: submission.items,
+        consumeExisting: Boolean(feedbackBatch),
       },
     }),
   )
   if (!result.ok) {
+    if (feedbackBatch) {
+      await stepDo(step, `meal-planning-stale-mini-app-batch-${occurrence}`, () =>
+        store.markFeedbackBatchStale(feedbackBatch.batchId, new Date().toISOString()),
+      )
+      await notifyMiniAppBatchTerminal(env, step, store, event.payload.chatId, feedbackBatch.batchId, iteration)
+    }
     logRuntime(env, {
       workflow: event.instanceId,
       event: "meal-plan-promotion",
