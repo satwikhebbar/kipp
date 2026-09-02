@@ -21,6 +21,7 @@ describe("Mini App HTTP boundary", () => {
     expect(shell.headers.get("content-type")).toBe("text/html; charset=utf-8")
     const html = await shell.text()
     expect(html).toContain("Change plan")
+    expect(html).toContain("https://telegram.org/js/telegram-web-app.js")
     expect(html).toContain("Feedback ready")
     expect(html).toContain("Holiday")
     expect(html).toContain("/mealplan")
