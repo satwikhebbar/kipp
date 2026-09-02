@@ -18,6 +18,7 @@ describe("Mini App HTTP boundary", () => {
     const shell = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app"), env())
     expect(shell.status).toBe(200)
     expect(shell.headers.get("cache-control")).toBe("no-store")
+    expect(shell.headers.get("content-type")).toBe("text/html; charset=utf-8")
     const html = await shell.text()
     expect(html).toContain("Change plan")
     expect(html).toContain("Feedback ready")
