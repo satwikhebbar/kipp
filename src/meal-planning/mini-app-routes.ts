@@ -153,7 +153,16 @@ async function failFeedbackBatchDispatch(
 
 export const miniAppRoutes = new Hono<{ Bindings: Env }>()
 
-miniAppRoutes.get("/mini-app", (_c) => new Response(MINI_APP_SHELL, { headers: noStoreHeaders() }))
+miniAppRoutes.get(
+  "/mini-app",
+  (_c) =>
+    new Response(MINI_APP_SHELL, {
+      headers: new Headers({
+        ...Object.fromEntries(noStoreHeaders()),
+        "Content-Type": "text/html; charset=utf-8",
+      }),
+    }),
+)
 
 miniAppRoutes.post("/mini-app/api/session", async (c) => {
   try {
