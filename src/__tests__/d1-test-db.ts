@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { DatabaseSync } from "node:sqlite"
 import { fileURLToPath } from "node:url"
@@ -66,7 +66,9 @@ function createD1Adapter(db: DatabaseSync): D1Database {
 export function createD1TestDb(): { db: DatabaseSync; d1: D1Database } {
   const db = new DatabaseSync(":memory:")
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../../migrations")
-  for (const migration of readdirSync(migrationsDir).filter((name) => name.endsWith(".sql")).sort()) {
+  for (const migration of readdirSync(migrationsDir)
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
     db.exec(readFileSync(join(migrationsDir, migration), "utf8"))
   }
   return { db, d1: createD1Adapter(db) }
