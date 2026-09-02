@@ -169,6 +169,7 @@ describe("DeepSeek provider", () => {
     expect(result.text).toBe("hello")
     expect(result.usage.inputTokens).toBe(0)
     expect(result.usage.outputTokens).toBe(0)
+    expect((mockFetch.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
   it("maps native tool declarations and calls", async () => {
@@ -192,7 +193,7 @@ describe("DeepSeek provider", () => {
     expect(JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string).tools[0].function.name).toBe("echo")
   })
 
-  it("passes an opt-in request deadline to DeepSeek tool calls", async () => {
+  it("uses a request deadline for DeepSeek tool calls", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),

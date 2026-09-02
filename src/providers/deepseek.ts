@@ -12,6 +12,7 @@ import {
 
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
 const DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+const DEEPSEEK_DEFAULT_REQUEST_TIMEOUT_MS = 180_000
 const FUNCTION_TOOL_TYPE = "function"
 const MAX_PROVIDER_ERROR_MESSAGE_CHARACTERS = 500
 
@@ -29,6 +30,7 @@ interface DeepseekToolResponse {
 /** Creates a DeepSeek chat completion generator (non-tool-calling). */
 export function createDeepseekGenerator(apiKey: string, modelName = DEEPSEEK_DEFAULT_MODEL) {
   return async ({ messages }: GenerateOptions): Promise<LLMResponse> => {
+    const signal = AbortSignal.timeout(DEEPSEEK_DEFAULT_REQUEST_TIMEOUT_MS)
     const res = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
       method: "POST",
       headers: {
@@ -36,6 +38,7 @@ export function createDeepseekGenerator(apiKey: string, modelName = DEEPSEEK_DEF
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({ model: modelName, messages }),
+      signal,
     })
 
     if (!res.ok) {
@@ -91,7 +94,7 @@ export function createDeepseekToolClient(
       })
       const thinkingEnabled = reasoning !== undefined && reasoning !== "disabled"
       const effort = reasoning === "enabled" ? undefined : thinkingEnabled ? reasoning : undefined
-      const timeoutMs = options.requestTimeoutMs
+      const timeoutMs = options.requestTimeoutMs ?? DEEPSEEK_DEFAULT_REQUEST_TIMEOUT_MS
       const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
       let response: Response
       try {
