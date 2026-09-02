@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "wrangler dev --config wrangler.local.toml",
     "webhook:dev": "bash tools/dev-webhook.sh",
-    "meal-catalog:expand-local": "tsx tools/expand-local-meal-catalog.mjs",
     "deploy:check": "bash tools/pre-deploy-check.sh && wrangler deploy --dry-run --config wrangler.prod.toml",
     "deploy": "pnpm run deploy:check && wrangler deploy --config wrangler.prod.toml && echo 'Verify Cloudflare Dashboard → Observability → Redact query string is enabled.'",
     "lint": "biome check src/",
