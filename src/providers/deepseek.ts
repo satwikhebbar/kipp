@@ -96,6 +96,8 @@ export function createDeepseekToolClient(
       const effort = reasoning === "enabled" ? undefined : thinkingEnabled ? reasoning : undefined
       const timeoutMs = options.requestTimeoutMs ?? DEEPSEEK_DEFAULT_REQUEST_TIMEOUT_MS
       const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
+      const requestStartedAt = Date.now()
+      options.onRequestEvent?.({ phase: "dispatched", durationMs: 0 })
       let response: Response
       try {
         response = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
@@ -112,22 +114,72 @@ export function createDeepseekToolClient(
           ...(signal ? { signal } : {}),
         })
       } catch (error) {
+        const failureCategory = signal?.aborted ? "timeout" : error instanceof Error ? error.name : "transport-error"
+        options.onRequestEvent?.({
+          phase: "failed",
+          durationMs: Date.now() - requestStartedAt,
+          failureCategory,
+        })
         if (signal?.aborted && timeoutMs !== undefined) throw new ToolProviderTimeoutError("DeepSeek", timeoutMs)
         throw error
       }
+      options.onRequestEvent?.({
+        phase: "http-response",
+        durationMs: Date.now() - requestStartedAt,
+        status: response.status,
+      })
       if (!response.ok) {
         const providerMessage = await readProviderErrorMessage(response)
+        options.onRequestEvent?.({
+          phase: "failed",
+          durationMs: Date.now() - requestStartedAt,
+          status: response.status,
+          failureCategory: "http-error",
+        })
         throw new ToolProviderHttpError("DeepSeek", response.status, providerMessage)
       }
-      const data = (await response.json()) as DeepseekToolResponse
+      let data: DeepseekToolResponse
+      try {
+        data = (await response.json()) as DeepseekToolResponse
+      } catch (error) {
+        options.onRequestEvent?.({
+          phase: "failed",
+          durationMs: Date.now() - requestStartedAt,
+          status: response.status,
+          failureCategory: error instanceof Error ? error.name : "response-parse-error",
+        })
+        throw error
+      }
       const message = data.choices?.[0]?.message
-      if (!message) throw new ToolProviderProtocolError("DeepSeek returned empty choices")
+      if (!message) {
+        options.onRequestEvent?.({
+          phase: "failed",
+          durationMs: Date.now() - requestStartedAt,
+          status: response.status,
+          failureCategory: "empty-choices",
+        })
+        throw new ToolProviderProtocolError("DeepSeek returned empty choices")
+      }
       const toolCalls = message.tool_calls?.map((call) => {
         try {
           return { id: call.id, name: call.function.name, input: JSON.parse(call.function.arguments) }
         } catch {
+          options.onRequestEvent?.({
+            phase: "failed",
+            durationMs: Date.now() - requestStartedAt,
+            status: response.status,
+            failureCategory: "malformed-tool-arguments",
+          })
           throw new ToolProviderProtocolError("DeepSeek returned malformed tool arguments")
         }
+      })
+      options.onRequestEvent?.({
+        phase: "parsed",
+        durationMs: Date.now() - requestStartedAt,
+        status: response.status,
+        toolCallCount: toolCalls?.length ?? 0,
+        inputTokens: data.usage?.prompt_tokens ?? 0,
+        outputTokens: data.usage?.completion_tokens ?? 0,
       })
       return {
         text: message.content ?? undefined,

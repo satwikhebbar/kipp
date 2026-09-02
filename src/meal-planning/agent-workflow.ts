@@ -7,7 +7,7 @@ import {
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
-import { createToolProvider, type ToolConversationMessage } from "../providers"
+import { createToolProvider, type ToolConversationMessage, type ToolProviderRequestEvent } from "../providers"
 import { logRuntime } from "../runtime/logging"
 import { computeCoverageSet } from "./coverage"
 import {
@@ -308,6 +308,7 @@ async function runPlanningSession(
           env.LLM_PROVIDER,
           env.LLM_MODEL,
           Number(env.LLM_MAX_RETRIES || "3"),
+          { onRequestEvent: (requestEvent) => logProviderRequestEvent(env, event.instanceId, requestEvent) },
         )
         return await runMealPlanningAgentSession(provider, options.messages, {
           context: options.context,
@@ -949,6 +950,24 @@ function logAgentTurnFailure(env: Env, workflow: string, turn: number, durationM
     durationMs,
     failureCategory: error instanceof Error ? error.name : "provider-error",
     metrics: { turn },
+  })
+}
+
+function logProviderRequestEvent(env: Env, workflow: string, requestEvent: ToolProviderRequestEvent): void {
+  logRuntime(env, {
+    workflow,
+    event: "meal-planning-provider-request",
+    outcome: requestEvent.phase === "failed" ? "failed" : requestEvent.phase === "parsed" ? "succeeded" : "started",
+    durationMs: requestEvent.durationMs,
+    ...(requestEvent.failureCategory ? { failureCategory: requestEvent.failureCategory } : {}),
+    ...(requestEvent.status === undefined
+      ? {}
+      : { details: { phase: requestEvent.phase, status: requestEvent.status } }),
+    metrics: {
+      ...(requestEvent.toolCallCount === undefined ? {} : { toolCallCount: requestEvent.toolCallCount }),
+      ...(requestEvent.inputTokens === undefined ? {} : { inputTokens: requestEvent.inputTokens }),
+      ...(requestEvent.outputTokens === undefined ? {} : { outputTokens: requestEvent.outputTokens }),
+    },
   })
 }
 
