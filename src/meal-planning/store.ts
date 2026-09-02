@@ -365,7 +365,7 @@ const SEED_MEAL_SLOTS: Record<string, string[]> = {
   paniyaram: ["breakfast", "school-lunch", "home-lunch"],
   uttappam: ["breakfast", "school-lunch", "home-lunch"],
   "sabudana khichdi": ["breakfast", "school-lunch", "home-lunch"],
-  "vegetable cutlet": ["school-lunch", "home-lunch"],
+  "vegetable cutlet": ["breakfast", "school-lunch"],
   "sabudana cutlet": ["school-lunch", "home-lunch"],
 }
 
