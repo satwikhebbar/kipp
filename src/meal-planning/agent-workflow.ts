@@ -42,6 +42,7 @@ const MEAL_PLANNING_GROUP = "meal-planning"
 const MEAL_LIVE_WAIT_CHUNK_MS = 86_400_000 // 24 hours: parked live-loop re-wait chunk
 const MEAL_MAX_SESSION_TURNS = 10
 const MILLISECONDS_PER_SECOND = 1_000
+const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 
 export interface MealPlanningLiveEvent {
   interactionKind?: WorkflowInteractionKind
@@ -909,6 +910,32 @@ function logAgentSession(env: Env, workflow: string, session: MealPlanningAgentS
     failureCategory: session.failureReason,
     metrics: { providerTurns: session.providerTurns, toolCallCount: session.toolCallCount },
   })
+  // Conversation bodies can contain household data, so transcript logging is
+  // an explicit development-only diagnostic. Reasoning content is omitted.
+  if (env.LLM_DEBUG_TRANSCRIPT?.trim().toLowerCase() === "true" && env.DEPLOYMENT_ENV === "development") {
+    const transcript = session.messages.map((message) => {
+      if (message.role === "assistant" && "toolCalls" in message)
+        return {
+          role: message.role,
+          text: message.text?.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS),
+          toolCalls: message.toolCalls.map((call) => ({ id: call.id, name: call.name, input: call.input })),
+        }
+      if (message.role === "tool")
+        return { role: message.role, toolCallId: message.toolCallId, name: message.name, output: message.output }
+      return { role: message.role, text: message.text.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS) }
+    })
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        component: "kipp-runtime",
+        workflow,
+        event: "meal-planning-agent-transcript",
+        outcome: session.completed ? "succeeded" : "failed",
+        details: { warning: "development diagnostic; may contain household data" },
+        transcript,
+      }),
+    )
+  }
 }
 
 /** Sends one deterministic workflow notification through a durable step named by its stable workflow context, so each notification is its own cached step. */
