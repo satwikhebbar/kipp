@@ -1,5 +1,6 @@
 import { base64urlEncode } from "../core/crypto"
 import type { Env } from "../core/types"
+import { HTTP_STATUS } from "../runtime/http"
 import { createMealPlanningStore, type MiniAppReviewContext, type MiniAppSessionRecord } from "./store"
 
 const AUTH_MAX_AGE_SECONDS = 600
@@ -10,9 +11,6 @@ const HEX_RADIX = 16
 const HEX_BYTE_WIDTH = 2
 const SECONDS_PER_MILLISECOND = 1_000
 const MAX_BEARER_LENGTH = 256
-const HTTP_UNAUTHORIZED = 401
-const HTTP_FORBIDDEN = 403
-const HTTP_SERVICE_UNAVAILABLE = 503
 const MAX_INIT_DATA_LENGTH = 16_384
 const SESSION_TOKEN_BYTES = 32
 
@@ -20,10 +18,10 @@ export class MiniAppAuthError extends Error {
   constructor(
     readonly reason: "invalid" | "expired" | "replayed" | "unauthorized" | "unavailable",
     readonly status: 401 | 403 | 503 = reason === "unavailable"
-      ? HTTP_SERVICE_UNAVAILABLE
+      ? HTTP_STATUS.SERVICE_UNAVAILABLE
       : reason === "unauthorized"
-        ? HTTP_FORBIDDEN
-        : HTTP_UNAUTHORIZED,
+        ? HTTP_STATUS.FORBIDDEN
+        : HTTP_STATUS.UNAUTHORIZED,
   ) {
     super(reason)
   }
@@ -61,7 +59,7 @@ export async function verifyTelegramInitData(
   raw: string,
   botToken: string,
   nowSeconds = Math.floor(Date.now() / SECONDS_PER_MILLISECOND),
-): Promise<{ userId: string; authDate: number }> {
+): Promise<{ userId: string; authDate: number; verifiedHash: string }> {
   if (!raw || raw.length > MAX_INIT_DATA_LENGTH) throw new MiniAppAuthError("invalid")
   const params = new URLSearchParams(raw)
   const hashValue = params.get("hash")
@@ -91,7 +89,7 @@ export async function verifyTelegramInitData(
   const expected = await hmac(secret, checkString)
   const supplied = fromHex(hashValue)
   if (!supplied || !equalBytes(expected, supplied)) throw new MiniAppAuthError("invalid")
-  return { userId: String(user.id), authDate }
+  return { userId: String(user.id), authDate, verifiedHash: hashValue.toLowerCase() }
 }
 
 async function sha256(value: string): Promise<string> {
@@ -113,7 +111,7 @@ export async function authenticateMiniApp(
   if (verified.userId !== env.TELEGRAM_ALLOWED_USER_ID.trim()) throw new MiniAppAuthError("unauthorized")
   const store = createMealPlanningStore(env.MEAL_PLANNING_DB)
   const replayed = await store.consumeMiniAppInitDataFingerprint(
-    await sha256(rawInitData),
+    await sha256(verified.verifiedHash),
     new Date((verified.authDate + AUTH_MAX_AGE_SECONDS) * SECONDS_PER_MILLISECOND).toISOString(),
     now.toISOString(),
   )

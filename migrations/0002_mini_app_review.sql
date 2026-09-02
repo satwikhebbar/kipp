@@ -1,23 +1,14 @@
--- Mini-App review and feedback durable contracts (issue #66, iteration 1).
+-- Mini-App review and feedback durable contracts.
 -- This migration is forward-only. Existing feedback rows describe revisions
 -- that already consumed their feedback, so they receive the terminal state.
 
-ALTER TABLE feedback_batch ADD COLUMN chat_id TEXT;
-ALTER TABLE feedback_batch ADD COLUMN workflow_instance_id TEXT;
-ALTER TABLE feedback_batch ADD COLUMN week_end TEXT;
 ALTER TABLE feedback_batch ADD COLUMN idempotency_key TEXT;
 ALTER TABLE feedback_batch ADD COLUMN status TEXT NOT NULL DEFAULT 'consumed'
   CHECK (status IN ('accepted', 'delivered', 'processing', 'consumed', 'stale', 'failed'));
 ALTER TABLE feedback_batch ADD COLUMN failure_category TEXT;
 ALTER TABLE feedback_batch ADD COLUMN failure_notified_at TEXT;
-ALTER TABLE feedback_batch ADD COLUMN accepted_at TEXT;
-ALTER TABLE feedback_batch ADD COLUMN delivered_at TEXT;
-ALTER TABLE feedback_batch ADD COLUMN processing_at TEXT;
-ALTER TABLE feedback_batch ADD COLUMN consumed_at TEXT;
-ALTER TABLE feedback_batch ADD COLUMN stale_at TEXT;
-ALTER TABLE feedback_batch ADD COLUMN failed_at TEXT;
-
-UPDATE feedback_batch SET consumed_at = created_at WHERE consumed_at IS NULL;
+ALTER TABLE feedback_batch ADD COLUMN updated_at TEXT;
+UPDATE feedback_batch SET updated_at = created_at WHERE updated_at IS NULL;
 
 -- Legacy batches have no idempotency key. The partial unique index leaves
 -- those immutable historical records intact while enforcing Mini-App retries.

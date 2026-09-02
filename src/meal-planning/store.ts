@@ -81,21 +81,23 @@ export interface FeedbackBatchRecord {
   planId: string
   baseVersion: number
   items: FeedbackItem[]
-  /** Server-owned reply and workflow scope copied at Mini App acceptance. */
-  chatId: string | null
-  workflowInstanceId: string | null
-  weekEnd: string | null
+  /** Derived from meal_plan for dispatch; not persisted on feedback_batch. */
+  chatId?: string | null
+  workflowInstanceId?: string | null
+  weekEnd?: string | null
   idempotencyKey: string | null
   status: FeedbackBatchStatus
   failureCategory: FeedbackBatchFailureCategory | null
   failureNotifiedAt: string | null
-  acceptedAt: string | null
-  deliveredAt: string | null
-  processingAt: string | null
-  consumedAt: string | null
-  staleAt: string | null
-  failedAt: string | null
   createdAt: string
+  updatedAt?: string
+  /** Transitional in-memory test projections; no longer persisted by D1. */
+  acceptedAt?: string | null
+  deliveredAt?: string | null
+  processingAt?: string | null
+  consumedAt?: string | null
+  staleAt?: string | null
+  failedAt?: string | null
 }
 
 export type FeedbackBatchStatus = "accepted" | "delivered" | "processing" | "consumed" | "stale" | "failed"
@@ -515,21 +517,13 @@ function feedbackBatchFromRow(row: Record<string, unknown>): FeedbackBatchRecord
     planId: String(row.plan_id),
     baseVersion: Number(row.base_version),
     items: parseJson<FeedbackItem[]>(String(row.items_json), []),
-    chatId: row.chat_id === null ? null : String(row.chat_id),
-    workflowInstanceId: row.workflow_instance_id === null ? null : String(row.workflow_instance_id),
-    weekEnd: row.week_end === null ? null : String(row.week_end),
     idempotencyKey: row.idempotency_key === null ? null : String(row.idempotency_key),
     status: String(row.status) as FeedbackBatchStatus,
     failureCategory:
       row.failure_category === null ? null : (String(row.failure_category) as FeedbackBatchFailureCategory),
     failureNotifiedAt: row.failure_notified_at === null ? null : String(row.failure_notified_at),
-    acceptedAt: row.accepted_at === null ? null : String(row.accepted_at),
-    deliveredAt: row.delivered_at === null ? null : String(row.delivered_at),
-    processingAt: row.processing_at === null ? null : String(row.processing_at),
-    consumedAt: row.consumed_at === null ? null : String(row.consumed_at),
-    staleAt: row.stale_at === null ? null : String(row.stale_at),
-    failedAt: row.failed_at === null ? null : String(row.failed_at),
     createdAt: String(row.created_at),
+    updatedAt: row.updated_at === null ? undefined : String(row.updated_at),
   }
 }
 
@@ -845,8 +839,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .bind(newVersion, now, input.planId, input.chatId, input.baseVersion, input.chatId),
         db
           .prepare(
-            `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, created_at)
-             SELECT ?, plan_id, ?, ?, ? FROM meal_plan
+            `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, status, created_at, updated_at)
+             SELECT ?, plan_id, ?, ?, 'consumed', ?, ? FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
@@ -854,6 +848,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             batchId,
             input.baseVersion,
             JSON.stringify(input.feedbackBatch?.items ?? []),
+            now,
             now,
             input.planId,
             input.chatId,
@@ -863,7 +858,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           ),
         db
           .prepare(
-            `UPDATE feedback_batch SET status = 'consumed', consumed_at = ?
+            `UPDATE feedback_batch SET status = 'consumed', updated_at = ?
              WHERE batch_id = ? AND status = 'processing' AND ? = 1
                AND EXISTS (SELECT 1 FROM meal_plan_version
                            WHERE plan_id = ? AND version = ? AND feedback_batch_id = ?)`,
@@ -1093,9 +1088,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       await db
         .prepare(
           `INSERT OR IGNORE INTO feedback_batch
-             (batch_id, plan_id, base_version, items_json, chat_id, workflow_instance_id, week_end, idempotency_key,
-              status, accepted_at, created_at)
-           SELECT ?, ?, ?, ?, ?, ?, week_end, ?, 'accepted', ?, ? FROM meal_plan
+             (batch_id, plan_id, base_version, items_json, idempotency_key, status, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, 'accepted', ?, ? FROM meal_plan
            WHERE plan_id = ? AND chat_id = ? AND instance_id = ? AND current_version = ? AND status = 'active'`,
         )
         .bind(
@@ -1103,8 +1097,6 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.planId,
           input.baseVersion,
           itemsJson,
-          input.chatId,
-          input.workflowInstanceId,
           input.idempotencyKey,
           now,
           now,
@@ -1134,7 +1126,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     async markFeedbackBatchDelivered(batchId) {
       const result = await db
         .prepare(
-          "UPDATE feedback_batch SET status = 'delivered', delivered_at = ? WHERE batch_id = ? AND status = 'accepted'",
+          "UPDATE feedback_batch SET status = 'delivered', updated_at = ? WHERE batch_id = ? AND status = 'accepted'",
         )
         .bind(nowIso(), batchId)
         .run()
@@ -1145,28 +1137,28 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       await db.batch([
         db
           .prepare(
-            `UPDATE feedback_batch SET status = 'processing', processing_at = ?
-             WHERE batch_id = ? AND workflow_instance_id = ? AND status = 'delivered'
+            `UPDATE feedback_batch SET status = 'processing', updated_at = ?
+             WHERE batch_id = ? AND status = 'delivered'
                AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = feedback_batch.plan_id
-                           AND chat_id = feedback_batch.chat_id AND instance_id = feedback_batch.workflow_instance_id
+                           AND instance_id = ?
                            AND current_version = feedback_batch.base_version AND status = 'active')`,
           )
           .bind(now, batchId, instanceId),
         db
           .prepare(
-            `UPDATE feedback_batch SET status = 'stale', stale_at = ?
-             WHERE batch_id = ? AND workflow_instance_id = ? AND status = 'delivered'
+            `UPDATE feedback_batch SET status = 'stale', updated_at = ?
+             WHERE batch_id = ? AND status = 'delivered'
+               AND EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = feedback_batch.plan_id AND instance_id = ?)
                AND NOT EXISTS (SELECT 1 FROM meal_plan WHERE plan_id = feedback_batch.plan_id
-                               AND chat_id = feedback_batch.chat_id AND instance_id = feedback_batch.workflow_instance_id
-                               AND current_version = feedback_batch.base_version AND status = 'active')`,
+                               AND instance_id = ? AND current_version = feedback_batch.base_version AND status = 'active')`,
           )
-          .bind(now, batchId, instanceId),
+          .bind(now, batchId, instanceId, instanceId),
       ])
       const row = await db
         .prepare(
-          "SELECT * FROM feedback_batch WHERE batch_id = ? AND workflow_instance_id = ? AND status = 'processing'",
+          "SELECT * FROM feedback_batch WHERE batch_id = ? AND status = 'processing'",
         )
-        .bind(batchId, instanceId)
+        .bind(batchId)
         .first()
       return row ? feedbackBatchFromRow(row) : null
     },
@@ -1174,7 +1166,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     async markFeedbackBatchStale(batchId, now) {
       const result = await db
         .prepare(
-          "UPDATE feedback_batch SET status = 'stale', stale_at = ? WHERE batch_id = ? AND status = 'processing'",
+          "UPDATE feedback_batch SET status = 'stale', updated_at = ? WHERE batch_id = ? AND status = 'processing'",
         )
         .bind(now, batchId)
         .run()
@@ -1184,7 +1176,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     async markFeedbackBatchConsumed(batchId, now) {
       const result = await db
         .prepare(
-          "UPDATE feedback_batch SET status = 'consumed', consumed_at = ? WHERE batch_id = ? AND status = 'processing'",
+          "UPDATE feedback_batch SET status = 'consumed', updated_at = ? WHERE batch_id = ? AND status = 'processing'",
         )
         .bind(now, batchId)
         .run()
@@ -1194,7 +1186,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     async markFeedbackBatchFailed(batchId, category, now) {
       const result = await db
         .prepare(
-          `UPDATE feedback_batch SET status = 'failed', failure_category = ?, failed_at = ?
+          `UPDATE feedback_batch SET status = 'failed', failure_category = ?, updated_at = ?
            WHERE batch_id = ? AND status IN ('accepted', 'delivered', 'processing')`,
         )
         .bind(category, now, batchId)
@@ -1462,6 +1454,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         }
         return { ok: true as const, batch: existing, duplicate: true }
       }
+      const existingBatchId = backing.batches.get(input.batchId)
+      if (existingBatchId) return { ok: false as const, reason: "stale" as const }
       const now = nowIso()
       const batch: FeedbackBatchRecord = {
         batchId: input.batchId,

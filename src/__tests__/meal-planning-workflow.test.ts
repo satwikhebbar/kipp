@@ -535,7 +535,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const batch = await store.feedbackBatch(batchId)
     expect(active?.plan.currentVersion).toBe(2)
     expect(active?.version.feedbackBatchId).toBe(batchId)
-    expect(batch).toMatchObject({ status: "consumed", consumedAt: expect.any(String) })
+    expect(batch).toMatchObject({ status: "consumed", updatedAt: expect.any(String) })
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
   })
 
