@@ -51,6 +51,18 @@ export interface ToolProviderClient {
 export interface ToolProviderOptions {
   /** Abort an individual provider request after this many milliseconds. */
   requestTimeoutMs?: number
+  /** Emits safe request-boundary metadata; callers must never log provider payloads. */
+  onRequestEvent?: (event: ToolProviderRequestEvent) => void
+}
+
+export type ToolProviderRequestEvent = {
+  phase: "dispatched" | "http-response" | "parsed" | "failed"
+  durationMs: number
+  status?: number
+  toolCallCount?: number
+  inputTokens?: number
+  outputTokens?: number
+  failureCategory?: string
 }
 
 /** Non-sensitive provider failure metadata for runtime observability. */

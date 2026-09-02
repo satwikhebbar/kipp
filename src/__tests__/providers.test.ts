@@ -208,6 +208,33 @@ describe("DeepSeek provider", () => {
     expect((mockFetch.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
+  it("emits safe request-boundary events without provider payloads", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          choices: [
+            { message: { tool_calls: [{ id: "call-1", function: { name: "echo", arguments: '{"value":"hi"}' } }] } },
+          ],
+          usage: { prompt_tokens: 2, completion_tokens: 3 },
+        }),
+    })
+    const events: Array<Record<string, unknown>> = []
+
+    const { createDeepseekToolClient } = await import("../providers/deepseek")
+    await createDeepseekToolClient("key", undefined, { onRequestEvent: (event) => events.push(event) }).generate({
+      messages: TOOL_TEST_MESSAGES,
+      tools: [TOOL_TEST_REGISTRY.echo],
+    })
+
+    expect(events).toMatchObject([
+      { phase: "dispatched", durationMs: 0 },
+      { phase: "http-response", status: 200 },
+      { phase: "parsed", status: 200, toolCallCount: 1, inputTokens: 2, outputTokens: 3 },
+    ])
+  })
+
   it("uses DeepSeek's non-thinking required-tool mode and preserves native reasoning across tool turns", async () => {
     mockFetch
       .mockResolvedValueOnce({

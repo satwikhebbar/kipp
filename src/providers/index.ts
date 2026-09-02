@@ -18,6 +18,7 @@ export {
   type ToolChoice,
   type ToolConversationMessage,
   type ToolProviderClient,
+  type ToolProviderRequestEvent,
   type ToolProviderResponse,
   type ToolReasoningMode,
 } from "./llm"
