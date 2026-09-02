@@ -45,6 +45,31 @@ describe("Mini App Telegram authentication", () => {
     const { d1 } = createD1TestDb()
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile("chat-42")
+    await store.createActivePlan({
+      planId: "plan-1",
+      chatId: "chat-42",
+      weekStart: "2026-08-31T00:00:00.000Z",
+      weekEnd: "2026-09-05T23:59:59.000Z",
+      timezone: "Asia/Kolkata",
+      instanceId: "instance-1",
+      candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
+      evaluation: {
+        pass: true,
+        failures: [],
+        measurements: {
+          morningCookByDay: {},
+          morningCookMax: 0,
+          priorNightPrepByDay: {},
+          priorNightPrepMax: 0,
+          dishRepeatCount: 0,
+          dishRepeats: [],
+          inventoryUsed: [],
+          easyBuyCount: 0,
+        },
+      },
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+    })
     await store.upsertMiniAppReviewContext({
       telegramUserId: "42",
       chatId: "chat-42",

@@ -42,48 +42,6 @@ const MEAL_PLANNING_GROUP = "meal-planning"
 const MEAL_LIVE_WAIT_CHUNK_MS = 86_400_000 // 24 hours: parked live-loop re-wait chunk
 const MEAL_MAX_SESSION_TURNS = 10
 const MILLISECONDS_PER_SECOND = 1_000
-const IPV4_PART_COUNT = 4
-const IPV4_MAX_OCTET = 255
-const IPV4_UNSPECIFIED_PREFIX = 0
-const IPV4_PRIVATE_10_PREFIX = 10
-const IPV4_SHARED_PREFIX = 100
-const IPV4_SHARED_SECOND_MIN = 64
-const IPV4_SHARED_SECOND_MAX = 127
-const IPV4_LOOPBACK_PREFIX = 127
-const IPV4_LINK_LOCAL_PREFIX = 169
-const IPV4_LINK_LOCAL_SECOND = 254
-const IPV4_PRIVATE_172_PREFIX = 172
-const IPV4_PRIVATE_172_SECOND_MIN = 16
-const IPV4_PRIVATE_172_SECOND_MAX = 31
-const IPV4_PRIVATE_192_PREFIX = 192
-const IPV4_PRIVATE_192_SECOND = 168
-const IPV4_BENCHMARK_PREFIX = 198
-const IPV4_BENCHMARK_SECOND_START = 18
-const IPV4_BENCHMARK_SECOND_END = 19
-const IPV4_DOCUMENTATION_SECOND = 2
-const IPV4_DOCUMENTATION_198_SECOND = 51
-const IPV4_DOCUMENTATION_203_PREFIX = 203
-const IPV4_BENCHMARK_SECONDS = new Set([IPV4_BENCHMARK_SECOND_START, IPV4_BENCHMARK_SECOND_END])
-const IPV4_DOCUMENTATION_PREFIXES = new Map([
-  [IPV4_PRIVATE_192_PREFIX, new Set([IPV4_UNSPECIFIED_PREFIX, IPV4_DOCUMENTATION_SECOND, IPV4_PRIVATE_192_SECOND])],
-  [IPV4_BENCHMARK_PREFIX, new Set([IPV4_DOCUMENTATION_198_SECOND])],
-  [IPV4_DOCUMENTATION_203_PREFIX, new Set([IPV4_UNSPECIFIED_PREFIX])],
-])
-const IPV4_MULTICAST_PREFIX = 224
-const IPV6_GROUP_COUNT = 8
-const IPV6_FIRST_GROUP_INDEX = 0
-const IPV6_LAST_GROUP_INDEX = IPV6_GROUP_COUNT - 1
-const IPV6_EMBEDDED_IPV4_PREFIX_GROUPS = 6
-const IPV6_MAPPED_IPV4_MARKER_INDEX = IPV6_EMBEDDED_IPV4_PREFIX_GROUPS - 1
-const IPV6_MAPPED_IPV4_MARKER = 0xffff
-const IPV6_EMBEDDED_IPV4_FIRST_GROUP_INDEX = IPV6_GROUP_COUNT - 2
-const IPV6_OCTET_SHIFT = 8
-const IPV6_LINK_LOCAL_MASK = 0xffc0
-const IPV6_LINK_LOCAL_PREFIX = 0xfe80
-const IPV6_PRIVATE_MASK = 0xfe00
-const IPV6_PRIVATE_PREFIX = 0xfc00
-const IPV6_SITE_LOCAL_MASK = 0xffc0
-const IPV6_SITE_LOCAL_PREFIX = 0xfec0
 
 export interface MealPlanningLiveEvent {
   interactionKind?: WorkflowInteractionKind
@@ -456,94 +414,12 @@ async function promptForClarification(
   }
 }
 
-function ipv4Bytes(host: string): number[] | null {
-  const parts = host.split(".")
-  if (parts.length !== IPV4_PART_COUNT || parts.some((part) => !/^\d{1,3}$/.test(part))) return null
-  const bytes = parts.map(Number)
-  return bytes.some((byte) => byte > IPV4_MAX_OCTET) ? null : bytes
-}
-
-function isPublicIpv4(bytes: number[]): boolean {
-  const [first, second] = bytes
-  const isDocumentation = IPV4_DOCUMENTATION_PREFIXES.get(first)?.has(second) ?? false
-  return !(
-    first === IPV4_UNSPECIFIED_PREFIX ||
-    first === IPV4_PRIVATE_10_PREFIX ||
-    first === IPV4_LOOPBACK_PREFIX ||
-    first >= IPV4_MULTICAST_PREFIX ||
-    (first === IPV4_SHARED_PREFIX && second >= IPV4_SHARED_SECOND_MIN && second <= IPV4_SHARED_SECOND_MAX) ||
-    (first === IPV4_LINK_LOCAL_PREFIX && second === IPV4_LINK_LOCAL_SECOND) ||
-    (first === IPV4_PRIVATE_172_PREFIX &&
-      second >= IPV4_PRIVATE_172_SECOND_MIN &&
-      second <= IPV4_PRIVATE_172_SECOND_MAX) ||
-    (first === IPV4_BENCHMARK_PREFIX && IPV4_BENCHMARK_SECONDS.has(second)) ||
-    isDocumentation
-  )
-}
-
-function ipv6Groups(host: string): number[] | null {
-  const value = host.replace(/^\[|\]$/g, "").toLowerCase()
-  if (!value || value.split("::").length > 2) return null
-  const [left = "", right] = value.split("::")
-  const leftGroups = left ? left.split(":") : []
-  const rightGroups = right ? right.split(":") : []
-  const groups = [...leftGroups, ...rightGroups]
-  if (groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group)) || groups.length > IPV6_GROUP_COUNT) return null
-  if (right === undefined && groups.length !== IPV6_GROUP_COUNT) return null
-  const zeroes = IPV6_GROUP_COUNT - groups.length
-  return [...leftGroups, ...Array(zeroes).fill("0"), ...rightGroups].map((group) => Number.parseInt(group, 16))
-}
-
-function isPublicIpv6(host: string): boolean {
-  const groups = ipv6Groups(host)
-  if (!groups) return false
-  const first = groups[IPV6_FIRST_GROUP_INDEX]
-  const isUnspecified = groups.every((group) => group === IPV4_UNSPECIFIED_PREFIX)
-  const isLoopback =
-    groups.slice(IPV6_FIRST_GROUP_INDEX, -1).every((group) => group === IPV4_UNSPECIFIED_PREFIX) &&
-    groups[IPV6_LAST_GROUP_INDEX] === 1
-  const isLinkLocal = (first & IPV6_LINK_LOCAL_MASK) === IPV6_LINK_LOCAL_PREFIX
-  const isPrivate = (first & IPV6_PRIVATE_MASK) === IPV6_PRIVATE_PREFIX
-  const isSiteLocal = (first & IPV6_SITE_LOCAL_MASK) === IPV6_SITE_LOCAL_PREFIX
-  const embeddedIpv4 =
-    (groups.slice(IPV6_FIRST_GROUP_INDEX, IPV6_MAPPED_IPV4_MARKER_INDEX).every((group) => group === 0) &&
-      groups[IPV6_MAPPED_IPV4_MARKER_INDEX] === IPV6_MAPPED_IPV4_MARKER) ||
-    groups.slice(IPV6_FIRST_GROUP_INDEX, IPV6_EMBEDDED_IPV4_PREFIX_GROUPS).every((group) => group === 0)
-  if (embeddedIpv4) {
-    const [high, low] = groups.slice(IPV6_EMBEDDED_IPV4_FIRST_GROUP_INDEX)
-    return isPublicIpv4([
-      high >> IPV6_OCTET_SHIFT,
-      high & IPV4_MAX_OCTET,
-      low >> IPV6_OCTET_SHIFT,
-      low & IPV4_MAX_OCTET,
-    ])
-  }
-  return !(isUnspecified || isLoopback || isLinkLocal || isPrivate || isSiteLocal)
-}
-
-/** Returns whether a literal IP address is globally routable; DNS is not resolved here. */
-function isPublicLiteralHost(host: string): boolean {
-  const ipv4 = ipv4Bytes(host)
-  if (ipv4) return isPublicIpv4(ipv4)
-  return !host.includes(":") || isPublicIpv6(host)
-}
-
 /** Builds the same-origin Mini App launch URL from its configured public HTTPS origin. */
 export function miniAppLaunchUrl(origin: string | undefined): string | null {
   if (!origin?.trim()) return null
   try {
     const configured = new URL(origin)
-    const hostname = configured.hostname.toLowerCase()
-    if (
-      configured.protocol !== "https:" ||
-      configured.username ||
-      configured.password ||
-      hostname === "localhost" ||
-      hostname.endsWith(".localhost") ||
-      !isPublicLiteralHost(hostname)
-    ) {
-      return null
-    }
+    if (configured.protocol !== "https:" || configured.username || configured.password) return null
     return new URL("/mini-app", configured.origin).toString()
   } catch {
     return null

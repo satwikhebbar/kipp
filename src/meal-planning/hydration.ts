@@ -103,7 +103,7 @@ export function hydrateMealPlan(
       let definition: MealDefinition | undefined
       if (isKnown(selection)) {
         definition = definitionById.get(selection.mealDefinitionId)
-        if (!definition || definition.status !== "established") {
+        if (definition?.status !== "established") {
           failures.push({
             code: "unknown_meal_definition",
             day,
@@ -114,7 +114,7 @@ export function hydrateMealPlan(
         }
       } else if (isProvisional(selection)) {
         definition = definitionById.get(selection.provisionalMealId)
-        if (!definition || definition.status !== "provisional") {
+        if (definition?.status !== "provisional") {
           failures.push({
             code: "unknown_meal_definition",
             day,

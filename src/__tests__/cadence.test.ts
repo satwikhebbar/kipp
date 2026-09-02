@@ -179,8 +179,8 @@ describe("handleCadenceCron", () => {
     expect(result.started).toBe(true)
     expect(result.ideaId).toBe("1")
     expect(result.workflowInstanceId).toBe("wf-1")
-    const claimMock = env.startMocks.get("claim:p1")!
-    expect(claimMock).toBeDefined()
+    const claimMock = env.startMocks.get("claim:p1")
+    if (!claimMock) throw new Error("expected claim workflow start")
     const [, init] = claimMock.mock.calls[0]
     const body = JSON.parse(init.body)
     expect(body).toMatchObject({ pageId: "p1", ideaId: "1", source: "manual" })

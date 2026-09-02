@@ -428,9 +428,11 @@ export const SEED_PROFILE: MealProfile = {
     "jaggery cubes",
     "paneer paratha",
     "masala oats",
-  ].map(
-    (name): MealDefinition => ({
-      id: SEED_MEAL_IDS[name]!,
+  ].map((name): MealDefinition => {
+    const id = SEED_MEAL_IDS[name]
+    if (!id) throw new Error(`missing seed meal id for ${name}`)
+    return {
+      id,
       name,
       aliases: [name],
       principalIngredients: SEED_MEAL_INGREDIENTS[name] ?? [name],
@@ -443,8 +445,8 @@ export const SEED_PROFILE: MealProfile = {
       requiredIngredients: SEED_MEAL_INGREDIENTS[name] ?? [name],
       optionalIngredients: [],
       status: "established",
-    }),
-  ),
+    }
+  }),
   foodPreferences: { favourites: ["paratha"], avoid: [] },
   allowNewFoods: false,
   sensoryGuidelines: [],
@@ -981,15 +983,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
 
     async upsertMiniAppReviewContext(input) {
       const now = nowIso()
-      await db
+      const result = await db
         .prepare(
-          `INSERT INTO mini_app_review_context (telegram_user_id, chat_id, plan_id, week_end, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(telegram_user_id, chat_id) DO UPDATE SET
-             plan_id = excluded.plan_id, week_end = excluded.week_end, updated_at = excluded.updated_at`,
+          `UPDATE meal_plan SET telegram_user_id = ?, updated_at = ?
+           WHERE plan_id = ? AND chat_id = ? AND week_end = ?`,
         )
-        .bind(input.telegramUserId, input.chatId, input.planId, input.weekEnd, now, now)
+        .bind(input.telegramUserId, now, input.planId, input.chatId, input.weekEnd)
         .run()
+      if (Number(result.meta.changes) !== 1) throw new Error("Mini App review context plan not found")
       return { ...input, createdAt: now, updatedAt: now }
     },
 
@@ -997,7 +998,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const row = await db
         .prepare(
           `SELECT telegram_user_id, chat_id, plan_id, week_end, created_at, updated_at
-           FROM mini_app_review_context WHERE telegram_user_id = ? ORDER BY updated_at DESC LIMIT 1`,
+           FROM meal_plan WHERE telegram_user_id = ? AND status = 'active'
+           ORDER BY updated_at DESC LIMIT 1`,
         )
         .bind(telegramUserId)
         .first()
@@ -1134,7 +1136,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async claimFeedbackBatchForWorkflow(batchId, instanceId, now) {
-      await db.batch([
+      const results = await db.batch([
         db
           .prepare(
             `UPDATE feedback_batch SET status = 'processing', updated_at = ?
@@ -1154,6 +1156,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           )
           .bind(now, batchId, instanceId, instanceId),
       ])
+      if (Number(results[0]?.meta.changes) !== 1) return null
       const row = await db
         .prepare("SELECT * FROM feedback_batch WHERE batch_id = ? AND status = 'processing'")
         .bind(batchId)

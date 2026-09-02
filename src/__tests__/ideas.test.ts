@@ -218,17 +218,19 @@ describe("createIdeaManager", () => {
     const { client, pages } = fakeClient([{ page: page("p1", 1, "raw", "telegram"), markdown: "old" }])
     const manager = createIdeaManager(client)
     await manager.updateIdea("p1", { status: "awaiting-feedback", body: "new" })
-    expect((pages.get("p1")!.page.properties.Status as { status: { name: string } }).status.name).toBe(
-      "awaiting-feedback",
-    )
-    expect(pages.get("p1")!.markdown).toBe("new")
+    const updated = pages.get("p1")
+    if (!updated) throw new Error("expected updated idea")
+    expect((updated.page.properties.Status as { status: { name: string } }).status.name).toBe("awaiting-feedback")
+    expect(updated.markdown).toBe("new")
   })
 
   it("moveToArchive sets status to finalized", async () => {
     const { client, pages } = fakeClient([{ page: page("p1", 1, "raw", "telegram"), markdown: "old" }])
     const manager = createIdeaManager(client)
     await manager.moveToArchive({ pageId: "p1", id: "1", status: "raw", created: "", source: "telegram", body: "old" })
-    expect((pages.get("p1")!.page.properties.Status as { status: { name: string } }).status.name).toBe("finalized")
+    const archived = pages.get("p1")
+    if (!archived) throw new Error("expected archived idea")
+    expect((archived.page.properties.Status as { status: { name: string } }).status.name).toBe("finalized")
   })
 
   it("findBySubstackUrl returns the matching idea", async () => {
