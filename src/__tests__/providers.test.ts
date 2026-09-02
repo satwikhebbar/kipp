@@ -450,7 +450,103 @@ describe("DeepSeek provider", () => {
   })
 })
 
+describe("OpenRouter provider", () => {
+  beforeEach(() => mockFetch.mockReset())
+
+  it("uses the Luna model, OpenRouter reasoning, and preserves native reasoning details across tool turns", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            choices: [
+              {
+                message: {
+                  content: "Calling echo.",
+                  reasoning: "private reasoning",
+                  reasoning_details: [{ type: "reasoning.summary", text: "opaque" }],
+                  tool_calls: [{ id: "call-1", function: { name: "echo", arguments: '{"value":"hi"}' } }],
+                },
+              },
+            ],
+            usage: { prompt_tokens: 2, completion_tokens: 3 },
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+      })
+
+    const { createOpenRouterToolClient } = await import("../providers/openrouter")
+    const client = createOpenRouterToolClient("key", "openai/gpt-5.6-luna")
+    const first = await client.generate({
+      messages: TOOL_TEST_MESSAGES,
+      tools: [TOOL_TEST_REGISTRY.echo],
+      toolChoice: "required",
+      reasoning: "high",
+    })
+    await client.generate({
+      messages: [
+        ...TOOL_TEST_MESSAGES,
+        {
+          role: "assistant",
+          toolCalls: first.toolCalls ?? [],
+          text: first.text,
+          reasoningContent: first.reasoningContent,
+          reasoningDetails: first.reasoningDetails,
+        },
+        { role: "tool", toolCallId: "call-1", name: "echo", output: { ok: true, output: { value: "hi" } } },
+      ],
+      tools: [TOOL_TEST_REGISTRY.echo],
+    })
+
+    const firstBody = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string)
+    const secondBody = JSON.parse((mockFetch.mock.calls[1][1] as RequestInit).body as string)
+    expect(firstBody).toMatchObject({ model: "openai/gpt-5.6-luna", reasoning: { effort: "high" } })
+    expect(firstBody.provider).toEqual({ require_parameters: true })
+    expect(firstBody.tools[0].function.strict).toBe(true)
+    expect(firstBody.tools[0].function.parameters.required).toEqual(["value"])
+    expect(secondBody.messages).toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        reasoning: "private reasoning",
+        reasoning_details: [{ type: "reasoning.summary", text: "opaque" }],
+      }),
+    )
+  })
+})
+
 describe("tool declaration projection", () => {
+  it("projects optional properties as required nullable fields for strict tools", async () => {
+    const { strictToolDeclaration } = await import("../providers/llm")
+    const declaration = strictToolDeclaration(SCHEDULING_TOOL)
+    expect(declaration.strict).toBe(true)
+    expect(declaration.parameters.required).toEqual([
+      "title",
+      "durationMinutes",
+      "description",
+      "location",
+      "reminderMinutes",
+    ])
+    expect(declaration.parameters.properties).toMatchObject({
+      description: { anyOf: [{ type: "string" }, { type: "null" }] },
+    })
+  })
+
+  it("leaves arbitrary-key records non-strict", async () => {
+    const { strictToolDeclaration } = await import("../providers/llm")
+    const declaration = strictToolDeclaration({
+      ...ECHO_TOOL,
+      input: z.object({ values: z.record(z.string()) }),
+    })
+    expect(declaration.strict).toBeUndefined()
+    expect(declaration.parameters.properties).toMatchObject({
+      values: { additionalProperties: { type: "string" } },
+    })
+  })
+
   it("preserves descriptions on nested union shapes", () => {
     const describedTool: ToolDefinition = {
       ...ECHO_TOOL,

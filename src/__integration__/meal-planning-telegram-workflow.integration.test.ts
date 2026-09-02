@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
+import { mealPlanSelectionCandidateToWire } from "../agent/meal-planning"
 import type { Env } from "../core/types"
 import type { MealCell, MealPlanCandidate, MealPlanSelectionCandidate } from "../meal-planning/types"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
@@ -14,12 +15,24 @@ function queueResponse(label: string, response: unknown): void {
 }
 
 function queueInitialPlan(base: MealPlanCandidate): void {
+  queueWeekContextExtraction()
   queueResponse("evaluate", {
-    toolCalls: [{ id: "evaluate", name: "evaluate_meal_plan", input: selectionCandidate(base) }],
+    toolCalls: [
+      { id: "evaluate", name: "evaluate_meal_plan", input: mealPlanSelectionCandidateToWire(selectionCandidate(base)) },
+    ],
     usage: {},
   })
   queueResponse("propose", {
     toolCalls: [{ id: "propose", name: "propose_plan", input: proposeInput(base) }],
+    usage: {},
+  })
+}
+
+function queueWeekContextExtraction(): void {
+  queueResponse("extract-week-context", {
+    toolCalls: [
+      { id: "extract-week-context", name: "extract_week_context", input: { inventoryChanges: [], exceptionAdds: [] } },
+    ],
     usage: {},
   })
 }
@@ -29,7 +42,13 @@ function queueRevision(
   feedback: { id: string; text: string; scope?: { day: string; slot: string } },
 ): void {
   queueResponse("evaluate-rev", {
-    toolCalls: [{ id: "evaluate-rev", name: "evaluate_meal_plan", input: selectionCandidate(revised) }],
+    toolCalls: [
+      {
+        id: "evaluate-rev",
+        name: "evaluate_meal_plan",
+        input: mealPlanSelectionCandidateToWire(selectionCandidate(revised)),
+      },
+    ],
     usage: {},
   })
   queueResponse("propose-rev", {
@@ -124,12 +143,13 @@ function proposeInput(
   feedbackItems?: Array<{ id: string; text: string; scope?: { day: string; slot: string } }>,
 ) {
   return {
-    candidate: selectionCandidate(candidate),
+    candidate: mealPlanSelectionCandidateToWire(selectionCandidate(candidate)),
     ...(feedbackItems ? { feedbackItems } : {}),
   }
 }
 
 function queueClarification(message = "How many people should the week serve?"): void {
+  queueWeekContextExtraction()
   queueResponse("clarify", {
     toolCalls: [
       {
@@ -362,7 +382,7 @@ describe("agent-centered meal-planning Telegram integration", () => {
 
     // The planning model must see the household context: profile, schedule,
     // policies, and week state are injected into its first turn's messages.
-    const firstGenerateMessages = mockGenerate.mock.calls[0][0].messages.map(
+    const firstGenerateMessages = mockGenerate.mock.calls[1][0].messages.map(
       (message: { role: string; text: string }) => message.text,
     )
     expect(firstGenerateMessages.join("\n")).toContain("Morning cook budget: 40")

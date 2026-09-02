@@ -30,11 +30,19 @@ import { messages, parseLLMJson, ToolProviderHttpError, toolDeclaration } from "
 declare const process: { env: Record<string, string | undefined>; pid: number }
 
 const providerName = process.env.LIVE_PROVIDER ?? "deepseek"
-const model = process.env.LIVE_MODEL ?? (providerName === "gemini" ? "gemini-3.7-flash" : "deepseek-v4-flash")
+const model =
+  process.env.LIVE_MODEL ??
+  (providerName === "gemini"
+    ? "gemini-3.7-flash"
+    : providerName === "openrouter"
+      ? "openai/gpt-5.6-luna"
+      : "deepseek-v4-flash")
 const apiKey =
   providerName === "gemini"
     ? (process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.LLM_API_KEY ?? "")
-    : (process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY ?? "")
+    : providerName === "openrouter"
+      ? (process.env.OPENROUTER_API_KEY ?? "")
+      : (process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY ?? "")
 const enabled = (process.env.LIVE_CONTRACT === "1" || process.env.DEEPSEEK_CONTRACT === "1") && Boolean(apiKey)
 // Each test is a real multi-turn session; thinking mode makes turns slower, so
 // give each scenario a generous ceiling well inside the workflow's 30-min TTL.

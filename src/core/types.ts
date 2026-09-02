@@ -32,6 +32,8 @@ export interface Env {
   LLM_API_KEY: string
   LLM_PROVIDER: string
   LLM_MODEL?: string
+  /** Dedicated key for the meal-planning OpenRouter client. */
+  OPENROUTER_API_KEY: string
   LLM_MAX_RETRIES?: string
   /** Local-only opt-in for logging redacted LLM conversation transcripts. */
   LLM_DEBUG_TRANSCRIPT?: string

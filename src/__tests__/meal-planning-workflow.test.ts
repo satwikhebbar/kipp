@@ -1,5 +1,6 @@
 import type { WorkflowEvent } from "cloudflare:workers"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { mealPlanSelectionCandidateToWire, mealPlanSelectionPatchToWire } from "../agent/meal-planning"
 import type { Env } from "../core/types"
 import {
   type MealPlanningLiveEvent,
@@ -158,10 +159,31 @@ function deepseekToolCall(name: string, input: unknown) {
 function deepseekResponse(toolCalls: Array<{ name: string; input: unknown }>) {
   return {
     choices: [
-      { message: { content: "", tool_calls: toolCalls.map((call) => deepseekToolCall(call.name, call.input)) } },
+      {
+        message: {
+          content: "",
+          tool_calls: toolCalls.map((call) => deepseekToolCall(call.name, plannerWireInput(call.name, call.input))),
+        },
+      },
     ],
     usage: { prompt_tokens: 1, completion_tokens: 1 },
   }
+}
+
+function plannerWireInput(name: string, input: unknown): unknown {
+  if (!input || typeof input !== "object") return input
+  if (name === "evaluate_meal_plan") return mealPlanWireCandidateOrPatch(input as MealPlanSelectionCandidate)
+  if (name === "propose_plan") {
+    const submission = input as { candidate?: MealPlanSelectionCandidate }
+    return submission.candidate
+      ? { ...submission, candidate: mealPlanWireCandidateOrPatch(submission.candidate) }
+      : input
+  }
+  return input
+}
+
+function mealPlanWireCandidateOrPatch(candidate: MealPlanSelectionCandidate): unknown {
+  return "easyBuys" in candidate ? mealPlanSelectionCandidateToWire(candidate) : mealPlanSelectionPatchToWire(candidate)
 }
 
 function clarifyResponse(message: string) {
@@ -213,7 +235,7 @@ function stubNetwork(deepseekResponses: unknown[]) {
       })
       return jsonResponse({ ok: true, result: { message_id: messageId++ } })
     }
-    if (urlStr.includes("api.deepseek.com")) {
+    if (urlStr.includes("api.deepseek.com") || urlStr.includes("openrouter.ai/api/v1")) {
       const body = JSON.parse((init?.body as string) ?? "{}") as {
         messages: Array<{
           role: string
@@ -307,6 +329,7 @@ function makeEnv(namespace: DurableObjectNamespace, d1: D1Database, overrides: P
     LLM_API_KEY: "key",
     LLM_PROVIDER: "deepseek",
     LLM_MODEL: "deepseek-chat",
+    OPENROUTER_API_KEY: "openrouter-key",
     LLM_MAX_RETRIES: "3",
     INTERACTION_ROUTER: namespace,
     MEAL_PLANNING_DB: d1,
@@ -749,7 +772,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const step = createFakeStep([], Date.parse(week.weekEnd))
     const telegramMessages: string[] = []
     const fetchMock = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
-      if (String(url).includes("api.deepseek.com")) throw new Error("upstream down")
+      if (String(url).includes("api.deepseek.com") || String(url).includes("openrouter.ai/api/v1"))
+        throw new Error("upstream down")
       const body = JSON.parse((init?.body as string) ?? "{}") as { text: string }
       telegramMessages.push(body.text)
       return jsonResponse({ ok: true, result: { message_id: 1 } })

@@ -20,17 +20,19 @@ import {
   acceptedOutputSchema,
   createEvaluateMealPlanTool,
   MEAL_PLANNING_TOOL,
+  mealPlanSelectionCandidateFromWire,
+  mealPlanSelectionPatchFromWire,
   needsClarificationInputSchema,
   PROPOSE_JUSTIFICATION_MAX_CHARACTERS,
-  proposePlanInputSchema,
-  proposePlanRevisionInputSchema,
+  proposePlanRevisionWireInputSchema,
+  proposePlanWireInputSchema,
   type WeekContextUpdateInput,
   weekContextUpdateInputSchema,
 } from "./meal-planning"
 
 export const MEAL_PLANNING_AGENT_PROMPT = `You are a parent's meal-planning agent for school days. Interpret the parent's request and use only the provided actions.
 
-For an initial plan, build one complete school-week grid covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. For a school_closed exception, omit that day key from the grid entirely. For a revision, the active plan is authoritative: submit a patch containing only the cells you are changing. Never repeat an unchanged cell or reconstruct it from a catalog id. Omit easyBuys and policyOutcomes unless you are replacing either whole value. On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise satisfied, trade-off, or needs-clarification outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
+For an initial plan, build one complete school-week grid covering exactly the schedule days listed in the household context, never a day a weekly exception marks as a school holiday. Represent the grid as days: [{ day, cells: [{ slot, selection }] }], not an object keyed by day or slot. For a school_closed exception, omit that day entry entirely. For a revision, the active plan is authoritative: submit a patch containing only the cells you are changing. Never repeat an unchanged cell or reconstruct it from a catalog id. Omit easyBuys and policyOutcomes unless you are replacing either whole value. policyOutcomes is an array of { policyId, outcome, rationale }; outcome is exactly satisfied, trade-off, or needs-clarification — never use a status field. On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. School meals are vegetarian (no meat); packed snacks are dry and not cooked that morning. Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules. Plans default to healthy, nutritious meals; the persistent custom policies define any scheduled exceptions. The context also lists the household's persistent custom policies; for every relevant one, record a concise outcome with a short rationale, and never claim certainty when a policy cannot be interpreted confidently.
 
 The context's request.kind tells you whether the request is an initial_plan or a revision. When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. If a parent reports a concrete week-state fact such as an ingredient running out, a holiday, a half day, or a schedule change, call update_week_context first. It accepts only the affected inventory items and exception additions. Set replan false unless the parent explicitly asks to change the plan too. If replan is true, the workflow will apply the update and start a fresh revision with that context; do not submit a candidate in the same action. Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole. If unbound feedback does not identify what should improve — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat it as satisfied by a rationale.
 
@@ -38,9 +40,9 @@ Validate the candidate with evaluate_meal_plan, revise objective failures, self-
 
 Build the initial grid or revision patch from meal selections. The context provides complete structured catalog records: use their listed slots, packing facts, cook minutes, prep requirement, and required ingredients rather than inferring them. Established meals use their mealDefinitionId; ingredientChoices may contain only the permitted choices listed for that definition, and usesPriorNightPrep is meaningful only when prep is optional. If a catalog ingredient and the parent inventory use different names for the same ingredient, explicitly map the inventory spelling to the catalog spelling in ingredientAliasesUsed. Use this only for a genuine semantic match, for example { "Rajma": "Kidney Beans" }; both names must be present in the context. A plan-local provisional meal is reused by its provisionalMealId exactly as listed in the context.
 
-Known selection example: { "mealDefinitionId": "meal_opaque_paratha", "ingredientChoices": ["spinach"], "ingredientAliasesUsed": { "whole-wheat atta": "wheat flour" }, "usesPriorNightPrep": true }.
+Known selection example: { "mealDefinitionId": "meal_opaque_paratha", "ingredientChoices": ["spinach"], "ingredientAliasesUsed": [{ "availableIngredient": "whole-wheat atta", "definitionIngredient": "wheat flour" }], "usesPriorNightPrep": true }.
 
-When new foods are allowed and no suitable known meal can be selected, submit a structured proposal, for example: { "proposedMeal": { "name": "Vegetable rice", "principalIngredients": ["rice", "vegetables"], "vegetarian": true, "suitableSlots": ["home-lunch"], "packedFood": { "suitable": false, "dry": false }, "cookMinutes": 20, "priorNightPrep": "optional", "ingredients": ["rice", "vegetables"] }, "usesPriorNightPrep": false }. A new packed meal must travel safely in an ordinary lunchbox, have no likely spill or leak, be independently edible by hand or ordinary spoon, and require no reheating, cooking, assembly, or special equipment; dry slots additionally require dry spill-resistant food.
+When new foods are allowed and no suitable known meal can be selected, submit a structured proposal, for example: { "proposedMeal": { "name": "Carrot rice", "principalIngredients": ["rice", "carrots"], "vegetarian": true, "suitableSlots": ["home-lunch"], "packedFood": { "suitable": false, "dry": false }, "cookMinutes": 20, "priorNightPrep": "optional", "ingredients": ["rice", "carrots"] }, "usesPriorNightPrep": false }. For every proposed meal, keep principalIngredients and ingredients limited to dense, primary, meal-defining ingredients: grains, pulses, flour, dairy, specifically named produce, or prepared components. Do not add vague aggregates such as "vegetables" or "mixed vegetables", and do not add routine pantry seasonings or cooking basics such as salt, oil, turmeric, chilli, cumin, mustard seeds, curry leaves, or generic spices. Those are covered by the pantry baseline and must not create ingredient-availability failures. A new packed meal must travel safely in an ordinary lunchbox, have no likely spill or leak, be independently edible by hand or ordinary spoon, and require no reheating, cooking, assembly, or special equipment; dry slots additionally require dry spill-resistant food.
 
 easyBuys is the short list of ordinary ingredients you are adding this week: staples, all-season vegetables and fruits, and everyday items from a neighborhood grocery. It is not the week's whole shopping list. Do not place a dish name in easyBuys. Unless an inventory entry says otherwise, treat a listed fresh fruit or vegetable as sufficient for one planned meal; do not repeat it in easyBuys just because you use it. Pantry-baseline items are ordinarily stocked staples and may support normal reuse. When a request lists ingredients, ensure they are represented in inventory, pantry baseline, or easyBuys. Favourites may repeat; keep other dishes distinct. A new week's plan should differ from the previous week's cooked mains while a fruit, dry fruit, or dry snack may repeat in a snack slot as a last resort.`
 
@@ -102,11 +104,15 @@ export async function runMealPlanningAgentSession(
       name: MEAL_PLANNING_TOOL.PROPOSE,
       description:
         "Terminal action after a passing evaluation. Submit the candidate, optional feedback scope interpretations, and optional short justification; the workflow supplies inventory and exceptions.",
-      input: isRevisionPatch ? proposePlanRevisionInputSchema : proposePlanInputSchema,
+      input: isRevisionPatch ? proposePlanRevisionWireInputSchema : proposePlanWireInputSchema,
       output: acceptedOutputSchema,
       privacy: "private",
       batching: "isolated",
       handler: async (input) => {
+        const policyIds = options.context.customPolicies.map((policy) => policy.id)
+        const candidate = isRevisionPatch
+          ? mealPlanSelectionPatchFromWire(input.candidate, policyIds)
+          : mealPlanSelectionCandidateFromWire(input.candidate, policyIds)
         const authoritative = options.context.feedbackItems ?? []
         const submitted: FeedbackItem[] = input.feedbackItems ?? []
         // The model never needs to echo feedback items back: scoped items are
@@ -130,11 +136,11 @@ export async function runMealPlanningAgentSession(
         const selectionEvaluation =
           isRevisionPatch && options.revisionBaseCandidate
             ? evaluateMealPlanSelectionPatch(
-                input.candidate as MealPlanSelectionPatch,
+                candidate as MealPlanSelectionPatch,
                 options.revisionBaseCandidate,
                 evaluationContext,
               )
-            : evaluateMealPlanSelection(input.candidate as MealPlanSelectionCandidate, evaluationContext)
+            : evaluateMealPlanSelection(candidate as MealPlanSelectionCandidate, evaluationContext)
         if (!selectionEvaluation.candidate)
           throw new ToolHandlerError(
             "proposed plan could not be hydrated",
@@ -277,7 +283,10 @@ function scopeEqual(a: FeedbackItem["scope"], b: FeedbackItem["scope"]): boolean
 }
 
 /** Applies restricted, parent-reported week-state facts without allowing a model to replace the whole context. */
-function resolveWeekContextUpdate(context: MealPlanContext, input: WeekContextUpdateInput): ResolvedWeekContextUpdate {
+export function resolveWeekContextUpdate(
+  context: MealPlanContext,
+  input: WeekContextUpdateInput,
+): ResolvedWeekContextUpdate {
   if (input.inventoryChanges.length === 0 && input.exceptionAdds.length === 0)
     throw new ToolHandlerError("week context update must contain at least one change", "invalid-state")
 

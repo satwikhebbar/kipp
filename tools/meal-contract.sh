@@ -18,14 +18,22 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [ ! -f ".dev.vars" ]; then
-  echo "Error: .dev.vars not found. Add LLM_API_KEY=... (may be quoted)." >&2
+  echo "Error: .dev.vars not found." >&2
   exit 1
 fi
 
-LLM_API_KEY=$(grep '^LLM_API_KEY' .dev.vars | cut -d '=' -f2- | tr -d ' "' | tr -d "\r")
+LIVE_PROVIDER="${LIVE_PROVIDER:-deepseek}"
+case "$LIVE_PROVIDER" in
+  openrouter) API_KEY_NAME="OPENROUTER_API_KEY" ;;
+  gemini) API_KEY_NAME="GEMINI_API_KEY" ;;
+  deepseek) API_KEY_NAME="DEEPSEEK_API_KEY" ;;
+  *) echo "Error: unsupported LIVE_PROVIDER: $LIVE_PROVIDER" >&2; exit 1 ;;
+esac
 
-if [ -z "$LLM_API_KEY" ]; then
-  echo "Error: LLM_API_KEY not found in .dev.vars" >&2
+API_KEY=$(grep "^${API_KEY_NAME}=" .dev.vars | cut -d '=' -f2- | tr -d ' "' | tr -d "\r")
+
+if [ -z "$API_KEY" ]; then
+  echo "Error: $API_KEY_NAME not found in .dev.vars" >&2
   exit 1
 fi
 
@@ -44,7 +52,7 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="logs/meal-contract-${RUN_ID}.log"
 TRACE_FILE="logs/meal-contract-${RUN_ID}.provider-trace.ndjson"
 
-DEEPSEEK_CONTRACT=1 LLM_API_KEY="$LLM_API_KEY" EVAL_TRACE_PATH="$TRACE_FILE" pnpm exec vitest run \
+env LIVE_CONTRACT=1 LIVE_PROVIDER="$LIVE_PROVIDER" "$API_KEY_NAME=$API_KEY" EVAL_TRACE_PATH="$TRACE_FILE" pnpm exec vitest run \
   -t "$FILTER" "$@" src/__contract__/deepseek-meal-planning.contract.test.ts 2>&1 |
   tee "$LOG_FILE"
 

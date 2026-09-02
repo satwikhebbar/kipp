@@ -156,7 +156,7 @@ before adding or changing a variable. Never commit credentials.
 | Category | Names |
 | --- | --- |
 | Telegram | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ALLOWED_USER_ID` |
-| LLM | `LLM_API_KEY`, `LLM_PROVIDER`, optional `LLM_MODEL`, `LLM_MAX_RETRIES` |
+| LLM | `LLM_API_KEY`, `LLM_PROVIDER`, optional `LLM_MODEL`, `LLM_MAX_RETRIES`; meal planning additionally requires `OPENROUTER_API_KEY` |
 | LinkedIn OAuth | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_AUTHOR_URN`, optional `LINKEDIN_REDIRECT_ORIGIN` |
 | Google OAuth | `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, optional `GOOGLE_CALENDAR_REDIRECT_ORIGIN` |
 | GitHub style prompt | `GITHUB_PAT`, `DATA_REPO_OWNER`, `DATA_REPO_NAME`, `DATA_REPO_BRANCH`, optional `PROMPT_STYLE_PATH` |
