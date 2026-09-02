@@ -54,7 +54,8 @@ export interface MealPlanningAgentSessionOptions {
   retainReasoning?: boolean
   /** Development-only diagnostics for provider turns. */
   onProviderTurnStart?: (turn: number, messages: readonly ToolConversationMessage[]) => void
-  onProviderTurn?: (turn: number, messages: readonly ToolConversationMessage[]) => void
+  onProviderTurn?: (turn: number, messages: readonly ToolConversationMessage[], durationMs: number) => void
+  onProviderTurnFailure?: (turn: number, durationMs: number, error: unknown) => void
 }
 
 export type MealPlanningTerminalOutcome =
@@ -229,6 +230,7 @@ export async function runMealPlanningAgentSession(
       maxToolCalls: 12,
       onProviderTurnStart: options.onProviderTurnStart,
       onProviderTurn: options.onProviderTurn,
+      onProviderTurnFailure: options.onProviderTurnFailure,
     },
     initialMessages[0]?.role === "system"
       ? initialMessages

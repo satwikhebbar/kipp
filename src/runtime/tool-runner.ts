@@ -56,7 +56,8 @@ export interface ToolRunOptions {
   maxToolCalls?: number
   /** Development-only hook invoked before and after each provider turn. */
   onProviderTurnStart?: (turn: number, messages: readonly ToolConversationMessage[]) => void
-  onProviderTurn?: (turn: number, messages: readonly ToolConversationMessage[]) => void
+  onProviderTurn?: (turn: number, messages: readonly ToolConversationMessage[], durationMs: number) => void
+  onProviderTurnFailure?: (turn: number, durationMs: number, error: unknown) => void
 }
 
 /**
@@ -84,18 +85,25 @@ export async function runTools(
   for (let turn = 0; turn < maxTurns; turn++) {
     options.onProviderTurnStart?.(turn + 1, messages)
     const guard = new ToolGuard(registry, allowedTools)
-    const response = await provider.generate({
-      messages,
-      tools: allowedTools.flatMap((name) => (registry[name] ? [registry[name]] : [])),
-      toolChoice: options.toolChoice,
-      reasoning: options.reasoning,
-    })
+    const providerStartedAt = Date.now()
+    let response: Awaited<ReturnType<ToolProviderClient["generate"]>>
+    try {
+      response = await provider.generate({
+        messages,
+        tools: allowedTools.flatMap((name) => (registry[name] ? [registry[name]] : [])),
+        toolChoice: options.toolChoice,
+        reasoning: options.reasoning,
+      })
+    } catch (error) {
+      options.onProviderTurnFailure?.(turn + 1, Date.now() - providerStartedAt, error)
+      throw error
+    }
     usage.inputTokens += response.usage.inputTokens ?? 0
     usage.outputTokens += response.usage.outputTokens ?? 0
     if (!response.toolCalls?.length) {
       if (options.requireHandoff) {
         if (response.text) messages.push({ role: "assistant", text: response.text })
-        options.onProviderTurn?.(turn + 1, messages)
+        options.onProviderTurn?.(turn + 1, messages, Date.now() - providerStartedAt)
         messages.push({ role: "user", text: REQUIRED_HANDOFF_REPAIR_MESSAGE })
         if (turn + 1 < maxTurns) continue
         return {
@@ -137,7 +145,7 @@ export async function runTools(
       text: response.text,
       reasoningContent: response.reasoningContent,
     })
-    options.onProviderTurn?.(turn + 1, messages)
+    options.onProviderTurn?.(turn + 1, messages, Date.now() - providerStartedAt)
     const isBatch = response.toolCalls.length > 1
     const allowedNonHandoffCalls = response.toolCalls.filter(
       (call) => allowedTools.includes(call.name) && !options.handoffTools?.includes(call.name),

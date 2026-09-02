@@ -314,7 +314,10 @@ async function runPlanningSession(
           revisionBaseCandidate: options.revisionBaseCandidate,
           allowWeekContextUpdate: options.allowWeekContextUpdate,
           onProviderTurnStart: (turn, messages) => logAgentTurnStart(env, event.instanceId, turn, messages),
-          onProviderTurn: (turn, messages) => logAgentTurn(env, event.instanceId, turn, messages),
+          onProviderTurn: (turn, messages, durationMs) =>
+            logAgentTurn(env, event.instanceId, turn, messages, durationMs),
+          onProviderTurnFailure: (turn, durationMs, error) =>
+            logAgentTurnFailure(env, event.instanceId, turn, durationMs, error),
         })
       } catch (_error) {
         // Upstream provider failure becomes an intelligible notice, not a crashed instance.
@@ -910,7 +913,20 @@ function logAgentTurnStart(
   })
 }
 
-function logAgentTurn(env: Env, workflow: string, turn: number, messages: readonly ToolConversationMessage[]): void {
+function logAgentTurn(
+  env: Env,
+  workflow: string,
+  turn: number,
+  messages: readonly ToolConversationMessage[],
+  durationMs: number,
+): void {
+  logRuntime(env, {
+    workflow,
+    event: "meal-planning-agent-turn",
+    outcome: "succeeded",
+    durationMs,
+    metrics: { turn, messageCount: messages.length },
+  })
   if (!transcriptEnabled(env)) return
   console.log(
     JSON.stringify({
@@ -923,6 +939,17 @@ function logAgentTurn(env: Env, workflow: string, turn: number, messages: readon
       transcript: serializeTranscript(messages),
     }),
   )
+}
+
+function logAgentTurnFailure(env: Env, workflow: string, turn: number, durationMs: number, error: unknown): void {
+  logRuntime(env, {
+    workflow,
+    event: "meal-planning-agent-turn",
+    outcome: "failed",
+    durationMs,
+    failureCategory: error instanceof Error ? error.name : "provider-error",
+    metrics: { turn },
+  })
 }
 
 function serializeTranscript(messages: readonly ToolConversationMessage[]): unknown[] {
