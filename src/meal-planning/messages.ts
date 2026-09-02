@@ -66,6 +66,13 @@ export function renderPlanMessage(
   return lines.join("\n")
 }
 
+/** Renders the compact Telegram notification used when the Mini App is available. */
+export function renderPlanLaunchMessage(plan: MealPlanRecord): string {
+  const weekStart = formatWeekDay(plan.weekStart, plan.timezone)
+  const weekEnd = formatWeekDay(plan.weekEnd, plan.timezone)
+  return `School week of ${weekStart} – ${weekEnd}\n\nOpen the review button below to view your meal plan and provide feedback.`
+}
+
 /** Returns dish markers: an easy-buy suffix and a prior-night-prep suffix. */
 function cellMarkers(version: MealPlanVersionRecord, dish: string, priorNightPrep: boolean): string {
   const markers: string[] = []

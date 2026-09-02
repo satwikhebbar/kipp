@@ -17,7 +17,7 @@ import {
   MEAL_OPEN_FEEDBACK_PROMPT,
   MEAL_PLANNING_CANCELED,
   MEAL_STALE_PLAN,
-  renderPlanMessage,
+  renderPlanLaunchMessage,
 } from "./messages"
 import {
   type ActivePlanRecord,
@@ -432,14 +432,14 @@ async function sendPlanAndRegister(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
-  profile: StoredMealProfile,
+  _profile: StoredMealProfile,
   plan: MealPlanRecord,
   version: MealPlanVersionRecord,
   generation: number,
   occurrence: string,
 ): Promise<void> {
   const chatId = event.payload.chatId
-  const message = renderPlanMessage(plan, version, profile.schedule, profile.customPolicies)
+  const message = renderPlanLaunchMessage(plan)
   const reviewUrl = miniAppLaunchUrl(env.MINI_APP_ORIGIN)
   // The Mini App link is shown only after its server-owned private-chat scope
   // has been persisted. Its authorization is still rechecked from signed
