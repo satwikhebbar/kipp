@@ -23,6 +23,8 @@ describe("Mini App HTTP boundary", () => {
     expect(html).toContain("Change plan")
     expect(html).toContain("https://telegram.org/js/telegram-web-app.js")
     expect(html).toContain("Feedback ready")
+    expect(html).toContain("Easy buys this week")
+    expect(html).toContain("No easy buys needed this week.")
     expect(html).toContain("Holiday")
     expect(html).toContain("/mealplan")
     expect(html).not.toContain("mealplan-")
