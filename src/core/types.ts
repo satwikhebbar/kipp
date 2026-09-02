@@ -33,6 +33,8 @@ export interface Env {
   LLM_PROVIDER: string
   LLM_MODEL?: string
   LLM_MAX_RETRIES?: string
+  /** Local-only opt-in for logging redacted LLM conversation transcripts. */
+  LLM_DEBUG_TRANSCRIPT?: string
   GITHUB_PAT: string
   DATA_REPO_OWNER: string
   DATA_REPO_NAME: string

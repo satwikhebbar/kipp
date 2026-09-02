@@ -19,6 +19,7 @@
     "LINKEDIN_REDIRECT_ORIGIN": { "kind": "text", "production": "optional", "development": "optional" },
     "LLM_API_KEY": { "kind": "secret", "production": "required", "development": "required" },
     "LLM_MAX_RETRIES": { "kind": "text", "production": "optional", "development": "optional" },
+    "LLM_DEBUG_TRANSCRIPT": { "kind": "text", "production": "forbidden", "development": "optional" },
     "LLM_MODEL": { "kind": "text", "production": "optional", "development": "optional" },
     "LLM_PROVIDER": { "kind": "text", "production": "required", "development": "required" },
     "MINI_APP_ORIGIN": { "kind": "text", "production": "optional", "development": "optional" },
