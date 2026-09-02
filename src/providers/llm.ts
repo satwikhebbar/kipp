@@ -62,6 +62,10 @@ export type ToolProviderRequestEvent = {
   toolCallCount?: number
   inputTokens?: number
   outputTokens?: number
+  reasoningTokens?: number
+  messageCharacters?: number
+  toolSchemaCharacters?: number
+  requestBodyCharacters?: number
   failureCategory?: string
 }
 

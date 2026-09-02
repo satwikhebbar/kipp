@@ -967,6 +967,14 @@ function logProviderRequestEvent(env: Env, workflow: string, requestEvent: ToolP
       ...(requestEvent.toolCallCount === undefined ? {} : { toolCallCount: requestEvent.toolCallCount }),
       ...(requestEvent.inputTokens === undefined ? {} : { inputTokens: requestEvent.inputTokens }),
       ...(requestEvent.outputTokens === undefined ? {} : { outputTokens: requestEvent.outputTokens }),
+      ...(requestEvent.reasoningTokens === undefined ? {} : { reasoningTokens: requestEvent.reasoningTokens }),
+      ...(requestEvent.messageCharacters === undefined ? {} : { messageCharacters: requestEvent.messageCharacters }),
+      ...(requestEvent.toolSchemaCharacters === undefined
+        ? {}
+        : { toolSchemaCharacters: requestEvent.toolSchemaCharacters }),
+      ...(requestEvent.requestBodyCharacters === undefined
+        ? {}
+        : { requestBodyCharacters: requestEvent.requestBodyCharacters }),
     },
   })
 }
