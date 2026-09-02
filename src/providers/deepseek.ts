@@ -120,8 +120,7 @@ export function createDeepseekToolClient(
           durationMs: Date.now() - requestStartedAt,
           failureCategory,
         })
-        if (signal?.aborted && timeoutMs !== undefined) throw new ToolProviderTimeoutError("DeepSeek", timeoutMs)
-        throw error
+        throw normalizeTimeout(error, signal, timeoutMs)
       }
       options.onRequestEvent?.({
         phase: "http-response",
@@ -146,9 +145,9 @@ export function createDeepseekToolClient(
           phase: "failed",
           durationMs: Date.now() - requestStartedAt,
           status: response.status,
-          failureCategory: error instanceof Error ? error.name : "response-parse-error",
+          failureCategory: signal?.aborted ? "timeout" : error instanceof Error ? error.name : "response-parse-error",
         })
-        throw error
+        throw normalizeTimeout(error, signal, timeoutMs)
       }
       const message = data.choices?.[0]?.message
       if (!message) {
@@ -189,6 +188,12 @@ export function createDeepseekToolClient(
       }
     },
   }
+}
+
+/** Converts aborts during either fetch or response-body parsing into non-retriable provider timeouts. */
+function normalizeTimeout(error: unknown, signal: AbortSignal | undefined, timeoutMs: number | undefined): unknown {
+  if (signal?.aborted && timeoutMs !== undefined) return new ToolProviderTimeoutError("DeepSeek", timeoutMs)
+  return error
 }
 
 /** Extracts only DeepSeek's bounded validation message, never the request or raw response body. */

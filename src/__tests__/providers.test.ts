@@ -208,6 +208,38 @@ describe("DeepSeek provider", () => {
     expect((mockFetch.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal)
   })
 
+  it("normalizes a response-body timeout so the retry wrapper cannot repeat the paid request", async () => {
+    mockFetch.mockImplementation((_, init: RequestInit) => {
+      const signal = init?.signal as AbortSignal | undefined
+      if (!signal)
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ choices: [{ message: { content: "done" } }], usage: {} }),
+        })
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((_, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+          }),
+      })
+    })
+    const events: Array<Record<string, unknown>> = []
+
+    const { createToolProvider } = await import("../providers")
+    await expect(
+      createToolProvider("key", "deepseek", undefined, 3, {
+        requestTimeoutMs: 1,
+        onRequestEvent: (event) => events.push(event),
+      }).generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] }),
+    ).rejects.toMatchObject({ name: "ToolProviderTimeoutError" })
+
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(events.at(-1)).toMatchObject({ phase: "failed", status: 200, failureCategory: "timeout" })
+  })
+
   it("emits safe request-boundary events without provider payloads", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
