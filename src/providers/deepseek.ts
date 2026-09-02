@@ -24,7 +24,11 @@ interface DeepseekToolResponse {
       tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
     }
   }>
-  usage?: { prompt_tokens?: number; completion_tokens?: number }
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    completion_tokens_details?: { reasoning_tokens?: number }
+  }
 }
 
 /** Creates a DeepSeek chat completion generator (non-tool-calling). */
@@ -92,25 +96,33 @@ export function createDeepseekToolClient(
           content: message.text,
         }
       })
+      const wireTools = tools.map((tool) => ({ type: FUNCTION_TOOL_TYPE, function: toolDeclaration(tool) }))
       const thinkingEnabled = reasoning !== undefined && reasoning !== "disabled"
       const effort = reasoning === "enabled" ? undefined : thinkingEnabled ? reasoning : undefined
       const timeoutMs = options.requestTimeoutMs ?? DEEPSEEK_DEFAULT_REQUEST_TIMEOUT_MS
       const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
+      const requestBody = JSON.stringify({
+        model: modelName,
+        messages: wireMessages,
+        tools: wireTools,
+        ...(toolChoice ? { tool_choice: toolChoice } : {}),
+        ...(reasoning ? { thinking: { type: thinkingEnabled ? "enabled" : "disabled" } } : {}),
+        ...(effort ? { reasoning_effort: effort } : {}),
+      })
       const requestStartedAt = Date.now()
-      options.onRequestEvent?.({ phase: "dispatched", durationMs: 0 })
+      options.onRequestEvent?.({
+        phase: "dispatched",
+        durationMs: 0,
+        messageCharacters: wireMessages.reduce((total, message) => total + JSON.stringify(message).length, 0),
+        toolSchemaCharacters: JSON.stringify(wireTools).length,
+        requestBodyCharacters: requestBody.length,
+      })
       let response: Response
       try {
         response = await fetch(DEEPSEEK_CHAT_COMPLETIONS_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-          body: JSON.stringify({
-            model: modelName,
-            messages: wireMessages,
-            tools: tools.map((tool) => ({ type: FUNCTION_TOOL_TYPE, function: toolDeclaration(tool) })),
-            ...(toolChoice ? { tool_choice: toolChoice } : {}),
-            ...(reasoning ? { thinking: { type: thinkingEnabled ? "enabled" : "disabled" } } : {}),
-            ...(effort ? { reasoning_effort: effort } : {}),
-          }),
+          body: requestBody,
           ...(signal ? { signal } : {}),
         })
       } catch (error) {
@@ -179,6 +191,7 @@ export function createDeepseekToolClient(
         toolCallCount: toolCalls?.length ?? 0,
         inputTokens: data.usage?.prompt_tokens ?? 0,
         outputTokens: data.usage?.completion_tokens ?? 0,
+        reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
       })
       return {
         text: message.content ?? undefined,
