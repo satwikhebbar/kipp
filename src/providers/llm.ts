@@ -23,6 +23,8 @@ export type ToolConversationMessage =
       text?: string
       /** Provider reasoning carried forward only when its native API requires it. */
       reasoningContent?: string
+      /** Opaque native reasoning state required by some OpenAI-compatible APIs. */
+      reasoningDetails?: unknown[]
     }
   | { role: "tool"; toolCallId: string; name: string; output: unknown }
 
@@ -31,6 +33,8 @@ export interface ToolProviderResponse {
   toolCalls?: Array<{ id: string; name: string; input: unknown }>
   /** Opaque native reasoning state; never log this field. */
   reasoningContent?: string
+  /** Opaque native reasoning state; never log this field. */
+  reasoningDetails?: unknown[]
   usage: LLMResponse["usage"]
 }
 
@@ -90,6 +94,8 @@ export type DeepseekToolWireMessage =
       tool_calls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>
       content?: string | null
       reasoning_content?: string
+      reasoning?: string
+      reasoning_details?: unknown[]
     }
 
 /** Non-retriable malformed provider response. */
@@ -115,6 +121,65 @@ export function toolDeclaration(tool: ToolDefinition): {
     description: tool.description,
     parameters: parameters.type === "object" ? parameters : { ...parameters, type: "object" },
   }
+}
+
+/** Projects a tool schema into the stricter JSON Schema subset required by OpenAI-compatible tools. */
+export function strictToolDeclaration(tool: ToolDefinition): {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  strict?: true
+} {
+  const declaration = toolDeclaration(tool)
+  if (!supportsStrictJsonSchema(declaration.parameters)) return declaration
+  return { ...declaration, parameters: strictJsonSchema(declaration.parameters), strict: true }
+}
+
+/** Strict function schemas cannot represent arbitrary-key records. */
+function supportsStrictJsonSchema(schema: Record<string, unknown>): boolean {
+  if (schema.type === "object") {
+    if (
+      Object.keys((schema.properties ?? {}) as Record<string, unknown>).length === 0 &&
+      schema.additionalProperties &&
+      typeof schema.additionalProperties === "object"
+    )
+      return false
+    const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>
+    if (Object.values(properties).some((property) => !supportsStrictJsonSchema(property))) return false
+    if (schema.additionalProperties && typeof schema.additionalProperties === "object")
+      return supportsStrictJsonSchema(schema.additionalProperties as Record<string, unknown>)
+  }
+  if (schema.type === "array" && schema.items && typeof schema.items === "object")
+    return supportsStrictJsonSchema(schema.items as Record<string, unknown>)
+  if (Array.isArray(schema.anyOf))
+    return schema.anyOf.every((option) => supportsStrictJsonSchema(option as Record<string, unknown>))
+  return true
+}
+
+function strictJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  const type = schema.type
+  if (type === "object") {
+    const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>
+    const required = new Set(Array.isArray(schema.required) ? schema.required : [])
+    return {
+      ...schema,
+      properties: Object.fromEntries(
+        Object.entries(properties).map(([name, property]) => {
+          const projected = strictJsonSchema(property)
+          return [name, required.has(name) ? projected : { anyOf: [projected, { type: "null" }] }]
+        }),
+      ),
+      required: Object.keys(properties),
+      additionalProperties: false,
+    }
+  }
+  if (type === "array" && schema.items && typeof schema.items === "object")
+    return { ...schema, items: strictJsonSchema(schema.items as Record<string, unknown>) }
+  if (Array.isArray(schema.anyOf))
+    return { ...schema, anyOf: schema.anyOf.map((option) => strictJsonSchema(option as Record<string, unknown>)) }
+  if (schema.additionalProperties && typeof schema.additionalProperties === "object")
+    return { ...schema, additionalProperties: strictJsonSchema(schema.additionalProperties as Record<string, unknown>) }
+  return { ...schema }
 }
 
 /** Maps a Zod property to a JSON Schema type descriptor. */

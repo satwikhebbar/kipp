@@ -85,7 +85,14 @@
       "priorNightPrepAllowed": false,
       "pantryBaseline": ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"]
     },
-    "customPolicies": [],
+    "customPolicies": [
+      {
+        "id": "fb",
+        "label": "Feedback review",
+        "scope": "current_week",
+        "value": "Address the submitted feedback."
+      }
+    ],
     "weeklyInventory": {
       "items": [
         {

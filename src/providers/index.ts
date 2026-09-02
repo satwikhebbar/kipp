@@ -7,6 +7,7 @@ import {
   ToolProviderProtocolError,
   ToolProviderTimeoutError,
 } from "./llm"
+import { createOpenRouterGenerator, createOpenRouterToolClient } from "./openrouter"
 
 export {
   type GenerateFn,
@@ -31,8 +32,10 @@ export function resolveModel(provider: string, modelName?: string): string {
       return "gemini-2.5-flash"
     case "deepseek":
       return "deepseek-chat"
+    case "openrouter":
+      return "openai/gpt-5.6-luna"
     default:
-      throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek"`)
+      throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek", "openrouter"`)
   }
 }
 
@@ -84,8 +87,10 @@ function createInnerToolProvider(
       return createGeminiToolClient(apiKey, modelName)
     case "deepseek":
       return createDeepseekToolClient(apiKey, modelName, options)
+    case "openrouter":
+      return createOpenRouterToolClient(apiKey, modelName ?? resolveModel(provider), options)
     default:
-      throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek"`)
+      throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek", "openrouter"`)
   }
 }
 
@@ -96,8 +101,10 @@ function createInnerGenerator(apiKey: string, provider: string, modelName?: stri
       return createGeminiGenerator(apiKey, modelName)
     case "deepseek":
       return createDeepseekGenerator(apiKey, modelName)
+    case "openrouter":
+      return createOpenRouterGenerator(apiKey, modelName ?? resolveModel(provider))
     default:
-      throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek"`)
+      throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek", "openrouter"`)
   }
 }
 

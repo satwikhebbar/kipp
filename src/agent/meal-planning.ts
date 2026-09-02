@@ -1,8 +1,13 @@
 import { z } from "zod"
 import { evaluateMealPlanSelection, evaluateMealPlanSelectionPatch } from "../meal-planning/evaluation"
-import type { MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
+import type {
+  MealPlanCandidate,
+  MealPlanContext,
+  MealPlanSelectionCandidate,
+  MealPlanSelectionPatch,
+} from "../meal-planning/types"
 import { EXCEPTION_KINDS, FAILURE_CODES, INVENTORY_STATUSES, POLICY_OUTCOMES } from "../meal-planning/types"
-import type { ToolDefinition } from "../runtime/tools"
+import { type ToolDefinition, ToolHandlerError } from "../runtime/tools"
 
 export const MEAL_PLANNING_TOOL = {
   EVALUATE: "evaluate_meal_plan",
@@ -113,6 +118,209 @@ export const mealPlanSelectionPatchSchema = z
   })
   .strict()
 
+/**
+ * The planner's provider-facing contract deliberately uses arrays for every
+ * formerly dynamic map. OpenAI-compatible strict function schemas cannot
+ * represent arbitrary object keys; keeping this wire shape separate lets the
+ * application retain its map-shaped evaluation and persistence model.
+ */
+const ingredientAliasWireSchema = z
+  .object({
+    availableIngredient: z.string().min(1),
+    definitionIngredient: z.string().min(1),
+  })
+  .strict()
+
+const ingredientAliasesWireSchema = z.array(ingredientAliasWireSchema).optional()
+const knownMealSelectionWireSchema = z
+  .object({
+    mealDefinitionId: z.string().min(1),
+    ingredientChoices: ingredientChoicesSchema,
+    ingredientAliasesUsed: ingredientAliasesWireSchema,
+    usesPriorNightPrep: z.boolean().optional(),
+  })
+  .strict()
+const provisionalMealSelectionWireSchema = z
+  .object({
+    provisionalMealId: z.string().min(1),
+    ingredientChoices: ingredientChoicesSchema,
+    ingredientAliasesUsed: ingredientAliasesWireSchema,
+    usesPriorNightPrep: z.boolean().optional(),
+  })
+  .strict()
+const newMealSelectionWireSchema = z
+  .object({
+    proposedMeal: newMealSelectionSchema.shape.proposedMeal,
+    ingredientAliasesUsed: ingredientAliasesWireSchema,
+    usesPriorNightPrep: z.boolean().optional(),
+  })
+  .strict()
+const mealSelectionWireSchema = z.union([
+  knownMealSelectionWireSchema,
+  provisionalMealSelectionWireSchema,
+  newMealSelectionWireSchema,
+])
+const gridDayWireSchema = z
+  .object({
+    day: z.string().min(1),
+    cells: z
+      .array(
+        z
+          .object({
+            slot: z.string().min(1),
+            selection: mealSelectionWireSchema,
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict()
+const policyOutcomeWireSchema = z
+  .object({
+    policyId: z.string().min(1),
+    outcome: z.enum(POLICY_OUTCOMES),
+    rationale: z.string(),
+  })
+  .strict()
+
+const mealPlanSelectionWireCandidateSchema = z
+  .object({
+    days: z.array(gridDayWireSchema),
+    easyBuys: z.array(z.string()),
+    policyOutcomes: z.array(policyOutcomeWireSchema),
+  })
+  .strict()
+
+const mealPlanSelectionWirePatchSchema = z
+  .object({
+    days: z.array(gridDayWireSchema),
+    easyBuys: z.array(z.string()).optional(),
+    policyOutcomes: z.array(policyOutcomeWireSchema).optional(),
+  })
+  .strict()
+
+export type MealPlanSelectionWireCandidate = z.infer<typeof mealPlanSelectionWireCandidateSchema>
+export type MealPlanSelectionWirePatch = z.infer<typeof mealPlanSelectionWirePatchSchema>
+
+/** Converts strict-schema-compatible provider data to the established internal map form. */
+export function mealPlanSelectionCandidateFromWire(
+  candidate: MealPlanSelectionWireCandidate,
+  policyIds: readonly string[],
+): MealPlanSelectionCandidate {
+  return {
+    grid: gridFromWire(candidate.days),
+    easyBuys: candidate.easyBuys,
+    policyOutcomes: policyOutcomesFromWire(candidate.policyOutcomes, policyIds),
+  }
+}
+
+/** Converts a provider revision payload to the established map-shaped patch form. */
+export function mealPlanSelectionPatchFromWire(
+  candidate: MealPlanSelectionWirePatch,
+  policyIds: readonly string[],
+): MealPlanSelectionPatch {
+  return {
+    grid: gridFromWire(candidate.days),
+    ...(candidate.easyBuys === undefined ? {} : { easyBuys: candidate.easyBuys }),
+    ...(candidate.policyOutcomes === undefined
+      ? {}
+      : { policyOutcomes: policyOutcomesFromWire(candidate.policyOutcomes, policyIds) }),
+  }
+}
+
+/** Useful for deterministic provider fixtures and transcript replay tests. */
+export function mealPlanSelectionCandidateToWire(
+  candidate: MealPlanSelectionCandidate,
+): MealPlanSelectionWireCandidate {
+  return {
+    days: gridToWire(candidate.grid),
+    easyBuys: candidate.easyBuys,
+    policyOutcomes: Object.entries(candidate.policyOutcomes).map(([policyId, outcome]) => ({ policyId, ...outcome })),
+  }
+}
+
+/** Useful for deterministic provider fixtures and transcript replay tests. */
+export function mealPlanSelectionPatchToWire(candidate: MealPlanSelectionPatch): MealPlanSelectionWirePatch {
+  return {
+    days: gridToWire(candidate.grid),
+    ...(candidate.easyBuys === undefined ? {} : { easyBuys: candidate.easyBuys }),
+    ...(candidate.policyOutcomes === undefined
+      ? {}
+      : {
+          policyOutcomes: Object.entries(candidate.policyOutcomes).map(([policyId, outcome]) => ({
+            policyId,
+            ...outcome,
+          })),
+        }),
+  }
+}
+
+function gridToWire(grid: MealPlanSelectionCandidate["grid"]): MealPlanSelectionWireCandidate["days"] {
+  return Object.entries(grid).map(([day, cells]) => ({
+    day,
+    cells: Object.entries(cells).map(([slot, selection]) => ({ slot, selection: selectionToWire(selection) })),
+  }))
+}
+
+function gridFromWire(days: MealPlanSelectionWireCandidate["days"]): MealPlanSelectionCandidate["grid"] {
+  const grid: MealPlanSelectionCandidate["grid"] = {}
+  for (const { day, cells } of days) {
+    if (grid[day]) throw new ToolHandlerError("duplicate day in meal-plan tool input", "invalid-state")
+    const slots: MealPlanSelectionCandidate["grid"][string] = {}
+    for (const { slot, selection } of cells) {
+      if (slots[slot]) throw new ToolHandlerError("duplicate slot in meal-plan tool input", "invalid-state")
+      slots[slot] = selectionFromWire(selection)
+    }
+    grid[day] = slots
+  }
+  return grid
+}
+
+function selectionToWire(
+  selection: MealPlanSelectionCandidate["grid"][string][string],
+): z.infer<typeof mealSelectionWireSchema> {
+  const { ingredientAliasesUsed, ...selectionWithoutAliases } = selection
+  const aliases = ingredientAliasesUsed
+    ? Object.entries(ingredientAliasesUsed).map(([availableIngredient, definitionIngredient]) => ({
+        availableIngredient,
+        definitionIngredient,
+      }))
+    : undefined
+  return { ...selectionWithoutAliases, ...(aliases === undefined ? {} : { ingredientAliasesUsed: aliases }) }
+}
+
+function selectionFromWire(
+  selection: z.infer<typeof mealSelectionWireSchema>,
+): MealPlanSelectionCandidate["grid"][string][string] {
+  const { ingredientAliasesUsed, ...selectionWithoutAliases } = selection
+  const aliases = ingredientAliasesUsed
+    ? Object.fromEntries(
+        ingredientAliasesUsed.map(({ availableIngredient, definitionIngredient }) => [
+          availableIngredient,
+          definitionIngredient,
+        ]),
+      )
+    : undefined
+  if (ingredientAliasesUsed && Object.keys(aliases ?? {}).length !== ingredientAliasesUsed.length)
+    throw new ToolHandlerError("duplicate ingredient alias in meal-plan tool input", "invalid-state")
+  return { ...selectionWithoutAliases, ...(aliases === undefined ? {} : { ingredientAliasesUsed: aliases }) }
+}
+
+function policyOutcomesFromWire(
+  outcomes: readonly z.infer<typeof policyOutcomeWireSchema>[],
+  policyIds: readonly string[],
+): MealPlanSelectionCandidate["policyOutcomes"] {
+  const allowed = new Set(policyIds)
+  const result: MealPlanSelectionCandidate["policyOutcomes"] = {}
+  for (const { policyId, outcome, rationale } of outcomes) {
+    if (!allowed.has(policyId)) throw new ToolHandlerError("unknown policy in meal-plan tool input", "invalid-state")
+    if (result[policyId])
+      throw new ToolHandlerError("duplicate policy outcome in meal-plan tool input", "invalid-state")
+    result[policyId] = { outcome, rationale }
+  }
+  return result
+}
+
 const failureSchema = z
   .object({
     code: z.enum(FAILURE_CODES),
@@ -193,6 +401,16 @@ export const weekContextUpdateInputSchema = z
 
 export type WeekContextUpdateInput = z.infer<typeof weekContextUpdateInputSchema>
 
+/** Parent-message facts extracted before an initial plan is evaluated. */
+export const weekContextExtractionInputSchema = z
+  .object({
+    inventoryChanges: z.array(inventoryItemSchema).default([]),
+    exceptionAdds: z.array(weeklyExceptionSchema).default([]),
+  })
+  .strict()
+
+export type WeekContextExtractionInput = z.infer<typeof weekContextExtractionInputSchema>
+
 export const feedbackItemSchema = z
   .object({
     id: z.string().min(1),
@@ -209,9 +427,9 @@ export const feedbackItemSchema = z
 
 export const PROPOSE_JUSTIFICATION_MAX_CHARACTERS = 500
 
-export const proposePlanInputSchema = z
+export const proposePlanWireInputSchema = z
   .object({
-    candidate: mealPlanSelectionCandidateSchema,
+    candidate: mealPlanSelectionWireCandidateSchema,
     // The model may only attach a scope interpretation to unscoped feedback;
     // inventory, exceptions, and the feedback source itself stay authoritative
     // in the workflow context and are never echoed by the terminal call.
@@ -222,9 +440,9 @@ export const proposePlanInputSchema = z
   })
   .strict()
 
-export const proposePlanRevisionInputSchema = z
+export const proposePlanRevisionWireInputSchema = z
   .object({
-    candidate: mealPlanSelectionPatchSchema,
+    candidate: mealPlanSelectionWirePatchSchema,
     feedbackItems: z.array(feedbackItemSchema).optional(),
     justification: z.string().trim().min(1).optional(),
   })
@@ -246,19 +464,23 @@ const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).strict()
 /** Creates the deterministic candidate-evaluation tool for one bounded meal-planning session. */
 export function createEvaluateMealPlanTool(context: MealPlanContext, revisionBase?: MealPlanCandidate): ToolDefinition {
   const isRevision = revisionBase !== undefined
+  const policyIds = context.customPolicies.map((policy) => policy.id)
   return {
     name: MEAL_PLANNING_TOOL.EVALUATE,
     description: isRevision
       ? "Validate one revision patch against the active plan and household context. Omitted cells remain unchanged. Returns typed failures and measurements; it never persists a plan."
       : "Validate exactly one complete Mon–Sat meal-plan candidate against the household context. Returns typed failures and measurements; it never persists a plan.",
-    input: isRevision ? mealPlanSelectionPatchSchema : mealPlanSelectionCandidateSchema,
+    input: isRevision ? mealPlanSelectionWirePatchSchema : mealPlanSelectionWireCandidateSchema,
     output: mealPlanEvaluationSchema,
     privacy: "private",
     batching: "isolated",
     handler: async (candidate) => {
+      const internalCandidate = isRevision
+        ? mealPlanSelectionPatchFromWire(candidate as MealPlanSelectionWirePatch, policyIds)
+        : mealPlanSelectionCandidateFromWire(candidate as MealPlanSelectionWireCandidate, policyIds)
       return revisionBase
-        ? evaluateMealPlanSelectionPatch(candidate, revisionBase, context).evaluation
-        : evaluateMealPlanSelection(candidate, context).evaluation
+        ? evaluateMealPlanSelectionPatch(internalCandidate as MealPlanSelectionPatch, revisionBase, context).evaluation
+        : evaluateMealPlanSelection(internalCandidate as MealPlanSelectionCandidate, context).evaluation
     },
   }
 }

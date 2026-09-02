@@ -1,7 +1,9 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
+import { acceptedOutputSchema, weekContextExtractionInputSchema } from "../agent/meal-planning"
 import {
   type MealPlanningAgentSessionResult,
   type MealPlanningTerminalOutcome,
+  resolveWeekContextUpdate,
   runMealPlanningAgentSession,
 } from "../agent/meal-planning-session"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
@@ -43,6 +45,9 @@ const MEAL_LIVE_WAIT_CHUNK_MS = 86_400_000 // 24 hours: parked live-loop re-wait
 const MEAL_MAX_SESSION_TURNS = 10
 const MILLISECONDS_PER_SECOND = 1_000
 const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
+const MEAL_PLANNER_PROVIDER = "openrouter"
+const MEAL_PLANNER_MODEL = "openai/gpt-5.6-luna"
+const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
 export interface MealPlanningLiveEvent {
   interactionKind?: WorkflowInteractionKind
@@ -200,7 +205,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText)
   const recent = await stepDo(step, "meal-planning-read-recent", () => store.activePlan(event.payload.chatId))
 
-  const context: MealPlanContext = {
+  const baseContext: MealPlanContext = {
     schedule: profile.schedule,
     profile: profile.profile,
     customPolicies: profile.customPolicies,
@@ -210,6 +215,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
     provisionalMealDefinitions: recent?.version.provisionalMealDefinitions ?? [],
     request: { kind: "initial_plan", text: event.payload.requestText },
   }
+  const context = await extractInitialWeekContext(env, step, event, baseContext)
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
@@ -260,6 +266,60 @@ export async function runAgentCenteredMealPlanningWorkflow(
   await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
 }
 
+async function extractInitialWeekContext(
+  env: Env,
+  step: WorkflowStep,
+  event: WorkflowEvent<MealPlanningWorkflowParams>,
+  context: MealPlanContext,
+): Promise<MealPlanContext> {
+  if (!event.payload.requestText?.trim()) return context
+  const result = await stepDo(step, "meal-planning-extract-week-context", async () => {
+    try {
+      const provider = createToolProvider(
+        env.OPENROUTER_API_KEY,
+        MEAL_PLANNER_PROVIDER,
+        MEAL_PLANNER_MODEL,
+        Number(env.LLM_MAX_RETRIES || "3"),
+        { onRequestEvent: (requestEvent) => logProviderRequestEvent(env, event.instanceId, requestEvent) },
+      )
+      const response = await provider.generate({
+        messages: [
+          { role: "system", text: WEEK_CONTEXT_EXTRACTION_PROMPT },
+          { role: "user", text: event.payload.requestText || "/mealplan" },
+        ],
+        tools: [
+          {
+            name: "extract_week_context",
+            description: "Extract only parent-supplied inventory and calendar facts.",
+            input: weekContextExtractionInputSchema,
+            output: acceptedOutputSchema,
+            privacy: "private",
+            batching: "isolated",
+            handler: async () => ({ accepted: true as const }),
+          },
+        ],
+        toolChoice: "required",
+        reasoning: "disabled",
+      })
+      const call = response.toolCalls?.find((candidate) => candidate.name === "extract_week_context")
+      const parsed = weekContextExtractionInputSchema.safeParse(call?.input)
+      if (!parsed.success) return context
+      if (parsed.data.inventoryChanges.length === 0 && parsed.data.exceptionAdds.length === 0) return context
+      const update = resolveWeekContextUpdate(context, { ...parsed.data, replan: false })
+      return { ...context, weeklyInventory: update.weeklyInventory, weeklyExceptions: update.weeklyExceptions }
+    } catch (error) {
+      logRuntime(env, {
+        workflow: event.instanceId,
+        event: "meal-planning-context-extraction",
+        outcome: "failed",
+        failureCategory: error instanceof Error ? error.name : "unknown",
+      })
+      return context
+    }
+  })
+  return result
+}
+
 /** Resolves the store binding, failing loudly when the D1 database is not configured. */
 function createStore(env: Env): MealPlanningStore {
   if (!env.MEAL_PLANNING_DB) throw new Error("MEAL_PLANNING_DB binding is not configured")
@@ -304,9 +364,9 @@ async function runPlanningSession(
     const session = await stepDo(step, `meal-planning-agent-session-${options.occurrence}-${turn}`, async () => {
       try {
         const provider = createToolProvider(
-          env.LLM_API_KEY,
-          env.LLM_PROVIDER,
-          env.LLM_MODEL,
+          env.OPENROUTER_API_KEY,
+          MEAL_PLANNER_PROVIDER,
+          MEAL_PLANNER_MODEL,
           Number(env.LLM_MAX_RETRIES || "3"),
           { onRequestEvent: (requestEvent) => logProviderRequestEvent(env, event.instanceId, requestEvent) },
         )

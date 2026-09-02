@@ -27,6 +27,7 @@
     "NOTION_API_KEY": { "kind": "secret", "production": "required", "development": "required" },
     "NOTION_FREE_TIER": { "kind": "text", "production": "optional", "development": "optional" },
     "NOTION_IDEAS_DATA_SOURCE_ID": { "kind": "text", "production": "required", "development": "required" },
+    "OPENROUTER_API_KEY": { "kind": "secret", "production": "required", "development": "required" },
     "POSTING_CADENCE_DAYS": { "kind": "text", "production": "required", "development": "required" },
     "PROMPT_STYLE_PATH": { "kind": "text", "production": "optional", "development": "optional" },
     "SUBSTACK_RSS_URL": { "kind": "text", "production": "required", "development": "required" },

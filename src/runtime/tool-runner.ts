@@ -144,6 +144,7 @@ export async function runTools(
       toolCalls: response.toolCalls,
       text: response.text,
       reasoningContent: response.reasoningContent,
+      reasoningDetails: response.reasoningDetails,
     })
     options.onProviderTurn?.(turn + 1, messages, Date.now() - providerStartedAt)
     const isBatch = response.toolCalls.length > 1
@@ -163,7 +164,7 @@ export async function runTools(
           (allowedTools.includes(call.name) && definition?.batching !== "allowed" && allowedNonHandoffCalls.length > 1))
       const result: ToolResult = batchingRejected
         ? { ok: false, category: "batching-not-allowed" }
-        : await guard.execute(call.name, call.input)
+        : await guard.execute(call.name, stripNullProperties(call.input))
       toolNames.push(tool)
       toolExecutions.push(
         result.ok
@@ -219,4 +220,15 @@ export async function runTools(
     toolExecutions,
     usage,
   }
+}
+
+/** Strict OpenAI-compatible schemas represent omitted optional fields as null. */
+function stripNullProperties(input: unknown): unknown {
+  if (Array.isArray(input)) return input.map(stripNullProperties)
+  if (!input || typeof input !== "object") return input
+  return Object.fromEntries(
+    Object.entries(input)
+      .filter(([, value]) => value !== null)
+      .map(([key, value]) => [key, stripNullProperties(value)]),
+  )
 }

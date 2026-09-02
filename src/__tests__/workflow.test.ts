@@ -170,6 +170,7 @@ function mockEnv(): Env {
     SUBSTACK_RSS_URL: "https://test.substack.com/feed",
     LLM_API_KEY: "key",
     LLM_PROVIDER: "gemini",
+    OPENROUTER_API_KEY: "openrouter-key",
     POSTING_CADENCE_DAYS: "7",
     TELEGRAM_BOT_TOKEN: "bot:token",
     TELEGRAM_WEBHOOK_SECRET: "secret",

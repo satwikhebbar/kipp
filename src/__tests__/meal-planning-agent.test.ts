@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
+import {
+  createEvaluateMealPlanTool,
+  mealPlanSelectionCandidateFromWire,
+  mealPlanSelectionCandidateToWire,
+  mealPlanSelectionPatchToWire,
+} from "../agent/meal-planning"
 import { MEAL_PLANNING_AGENT_PROMPT, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import { evaluateMealPlan } from "../meal-planning/evaluation"
@@ -11,6 +17,7 @@ import type {
   MealPlanSelectionCandidate,
 } from "../meal-planning/types"
 import type { ToolProviderClient } from "../providers"
+import { strictToolDeclaration } from "../providers/llm"
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const SLOT_COOK: Record<string, number> = { breakfast: 15, snack1: 0, snack2: 0, "school-lunch": 20, "home-lunch": 20 }
@@ -169,13 +176,24 @@ function call(id: string, name: string, input: unknown) {
 
 function evaluateResponse(candidate: unknown) {
   return {
-    toolCalls: [call("evaluate", "evaluate_meal_plan", selectionCandidate(candidate as MealPlanCandidate))],
+    toolCalls: [
+      call(
+        "evaluate",
+        "evaluate_meal_plan",
+        mealPlanSelectionCandidateToWire(selectionCandidate(candidate as MealPlanCandidate)),
+      ),
+    ],
     usage: { inputTokens: 0, outputTokens: 0 },
   }
 }
 
 function evaluatePatchResponse(patch: unknown) {
-  return { toolCalls: [call("evaluate", "evaluate_meal_plan", patch)], usage: { inputTokens: 0, outputTokens: 0 } }
+  return {
+    toolCalls: [
+      call("evaluate", "evaluate_meal_plan", mealPlanSelectionPatchToWire(patch as MealPlanSelectionCandidate)),
+    ],
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }
 }
 
 function proposeResponse(input: unknown) {
@@ -195,7 +213,7 @@ function updateWeekContextResponse(input: unknown) {
 
 function proposeInput(candidate: unknown, feedbackItems?: unknown) {
   return {
-    candidate: selectionCandidate(candidate as MealPlanCandidate),
+    candidate: mealPlanSelectionCandidateToWire(selectionCandidate(candidate as MealPlanCandidate)),
     ...(feedbackItems ? { feedbackItems } : {}),
   }
 }
@@ -336,7 +354,10 @@ describe("bounded meal-planning agent session", () => {
     const base = passingCandidate()
     const raw = [{ id: "tg-1", text: "Use poha on Monday", scope: { day: "Mon", slot: "breakfast" } }]
     const patch = { grid: { Mon: { breakfast: { mealDefinitionId: "fixture_poha_breakfast" } } } }
-    const provider = providerWith(evaluatePatchResponse(patch), proposeResponse({ candidate: patch }))
+    const provider = providerWith(
+      evaluatePatchResponse(patch),
+      proposeResponse({ candidate: mealPlanSelectionPatchToWire(patch) }),
+    )
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: raw[0].text }], {
       context: context({ request: { kind: "revision", text: raw[0].text }, feedbackItems: raw, recentPlan: base.grid }),
       revisionBaseCandidate: base,
@@ -377,6 +398,7 @@ describe("bounded meal-planning agent session", () => {
           dishRepertoire: ["paratha", "poha", "banana"],
           pantryBaseline: ["wheat flour", "rice", "banana"],
         },
+        customPolicies: [{ id: "household-rule", label: "Household rule", scope: "current_week", value: "" }],
       }),
     })
     expect(result.completed).toBe(true)
@@ -423,9 +445,46 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal).toMatchObject({ kind: "propose_plan" })
     const generate = vi.mocked(provider.generate)
     expect(generate.mock.calls[1]?.[0].tools.map((tool) => tool.name)).toEqual(["propose_plan", "needs_clarification"])
+    const propose = generate.mock.calls[1]?.[0].tools.find((tool) => tool.name === "propose_plan")
+    expect(propose && strictToolDeclaration(propose).strict).toBe(true)
     expect(generate.mock.calls[1]?.[0].messages).toContainEqual(
       expect.objectContaining({ role: "user", text: expect.stringContaining("Evaluation passed") }),
     )
+  })
+
+  it("uses strict, map-free provider contracts while retaining map-shaped candidates internally", () => {
+    const declaration = strictToolDeclaration(createEvaluateMealPlanTool(context()))
+    expect(declaration.strict).toBe(true)
+    const parameters = declaration.parameters as {
+      properties: {
+        days: { type: string; items: { properties: Record<string, unknown> } }
+        policyOutcomes: { type: string }
+      }
+    }
+    expect(parameters.properties.days.type).toBe("array")
+    expect(parameters.properties.days.items.properties).toHaveProperty("cells")
+    expect(parameters.properties.policyOutcomes.type).toBe("array")
+
+    const internal = selectionCandidate(passingCandidate())
+    expect(mealPlanSelectionCandidateToWire(internal).days[0]).toMatchObject({
+      day: "Mon",
+      cells: expect.arrayContaining([expect.objectContaining({ slot: "breakfast" })]),
+    })
+  })
+
+  it("rejects duplicate and unknown map keys at the provider boundary", () => {
+    const wire = mealPlanSelectionCandidateToWire(selectionCandidate(passingCandidate()))
+    const firstDay = wire.days.at(0)
+    if (!firstDay) throw new Error("expected fixture days")
+    expect(() => mealPlanSelectionCandidateFromWire({ ...wire, days: [...wire.days, firstDay] }, [])).toThrow(
+      "duplicate day",
+    )
+    expect(() =>
+      mealPlanSelectionCandidateFromWire(
+        { ...wire, policyOutcomes: [{ policyId: "not-in-context", outcome: "satisfied", rationale: "nope" }] },
+        [],
+      ),
+    ).toThrow("unknown policy")
   })
 
   it("keeps the planning prompt policy-agnostic (no hardcoded custom-policy ids)", () => {
