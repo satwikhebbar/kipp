@@ -874,6 +874,47 @@ describe("structured meal hydration", () => {
     expect(result.candidate?.grid.Mon["home-lunch"].items).toEqual(["Rajma", "rice"])
   })
 
+  it("accepts the pantry rava alias for Upma's semolina ingredient", () => {
+    const upma = {
+      id: "meal-upma",
+      name: "Upma",
+      principalIngredients: ["semolina"],
+      vegetarian: true as const,
+      suitableSlots: ["breakfast"],
+      packedFood: { suitable: true, dry: false },
+      typicalCookMinutes: 15,
+      priorNightPrep: "none" as const,
+      requiredIngredients: ["semolina", "mustard seeds", "curry leaves", "vegetables"],
+      optionalIngredients: [],
+      status: "established" as const,
+    }
+    const context = baseContext({
+      profile: {
+        ...SEED_PROFILE,
+        mealDefinitions: [upma],
+        pantryBaseline: ["rava", "mustard seeds", "curry leaves", "vegetables"],
+      },
+      weeklyInventory: { items: [], notes: [] },
+    })
+    const result = hydrateMealPlan(
+      {
+        grid: {
+          Mon: {
+            breakfast: {
+              mealDefinitionId: upma.id,
+              ingredientAliasesUsed: { rava: "semolina" },
+            },
+          },
+        },
+        easyBuys: [],
+        policyOutcomes: {},
+      },
+      context,
+    )
+    expect(result.failures).toEqual([])
+    expect(result.candidate?.grid.Mon.breakfast.items).toEqual(["rava", "mustard seeds", "curry leaves", "vegetables"])
+  })
+
   it("rejects aliases that do not connect available inventory to a selected definition ingredient", () => {
     const context = baseContext({
       profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: ["wheat flour"] },
