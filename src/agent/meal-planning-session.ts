@@ -52,6 +52,9 @@ export interface MealPlanningAgentSessionOptions {
   allowWeekContextUpdate?: boolean
   /** Debug aid: keep provider reasoning in the returned transcript. */
   retainReasoning?: boolean
+  /** Development-only diagnostics for provider turns. */
+  onProviderTurnStart?: (turn: number, messages: readonly ToolConversationMessage[]) => void
+  onProviderTurn?: (turn: number, messages: readonly ToolConversationMessage[]) => void
 }
 
 export type MealPlanningTerminalOutcome =
@@ -224,6 +227,8 @@ export async function runMealPlanningAgentSession(
       // shared budget without changing other workflows.
       maxProviderTurns: 8,
       maxToolCalls: 12,
+      onProviderTurnStart: options.onProviderTurnStart,
+      onProviderTurn: options.onProviderTurn,
     },
     initialMessages[0]?.role === "system"
       ? initialMessages

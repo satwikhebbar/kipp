@@ -313,6 +313,8 @@ async function runPlanningSession(
           context: options.context,
           revisionBaseCandidate: options.revisionBaseCandidate,
           allowWeekContextUpdate: options.allowWeekContextUpdate,
+          onProviderTurnStart: (turn, messages) => logAgentTurnStart(env, event.instanceId, turn, messages),
+          onProviderTurn: (turn, messages) => logAgentTurn(env, event.instanceId, turn, messages),
         })
       } catch (_error) {
         // Upstream provider failure becomes an intelligible notice, not a crashed instance.
@@ -890,6 +892,53 @@ function isNoChangeCandidate(submitted: MealPlanCandidate, base: MealPlanCandida
   return true
 }
 
+function transcriptEnabled(env: Env): boolean {
+  return env.LLM_DEBUG_TRANSCRIPT?.trim().toLowerCase() === "true" && env.DEPLOYMENT_ENV === "development"
+}
+
+function logAgentTurnStart(
+  env: Env,
+  workflow: string,
+  turn: number,
+  messages: readonly ToolConversationMessage[],
+): void {
+  logRuntime(env, {
+    workflow,
+    event: "meal-planning-agent-turn",
+    outcome: "started",
+    metrics: { turn, messageCount: messages.length },
+  })
+}
+
+function logAgentTurn(env: Env, workflow: string, turn: number, messages: readonly ToolConversationMessage[]): void {
+  if (!transcriptEnabled(env)) return
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      component: "kipp-runtime",
+      workflow,
+      event: "meal-planning-agent-transcript",
+      outcome: "turn-completed",
+      details: { warning: "development diagnostic; may contain household data", turn },
+      transcript: serializeTranscript(messages),
+    }),
+  )
+}
+
+function serializeTranscript(messages: readonly ToolConversationMessage[]): unknown[] {
+  return messages.map((message) => {
+    if (message.role === "assistant" && "toolCalls" in message)
+      return {
+        role: message.role,
+        text: message.text?.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS),
+        toolCalls: message.toolCalls.map((call) => ({ id: call.id, name: call.name, input: call.input })),
+      }
+    if (message.role === "tool")
+      return { role: message.role, toolCallId: message.toolCallId, name: message.name, output: message.output }
+    return { role: message.role, text: message.text.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS) }
+  })
+}
+
 /** Emits per-tool and per-session runtime metadata for one bounded planning session. */
 function logAgentSession(env: Env, workflow: string, session: MealPlanningAgentSessionResult): void {
   for (const execution of session.toolExecutions)
@@ -912,18 +961,8 @@ function logAgentSession(env: Env, workflow: string, session: MealPlanningAgentS
   })
   // Conversation bodies can contain household data, so transcript logging is
   // an explicit development-only diagnostic. Reasoning content is omitted.
-  if (env.LLM_DEBUG_TRANSCRIPT?.trim().toLowerCase() === "true" && env.DEPLOYMENT_ENV === "development") {
-    const transcript = session.messages.map((message) => {
-      if (message.role === "assistant" && "toolCalls" in message)
-        return {
-          role: message.role,
-          text: message.text?.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS),
-          toolCalls: message.toolCalls.map((call) => ({ id: call.id, name: call.name, input: call.input })),
-        }
-      if (message.role === "tool")
-        return { role: message.role, toolCallId: message.toolCallId, name: message.name, output: message.output }
-      return { role: message.role, text: message.text.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS) }
-    })
+  if (transcriptEnabled(env)) {
+    const transcript = serializeTranscript(session.messages)
     console.log(
       JSON.stringify({
         timestamp: new Date().toISOString(),
