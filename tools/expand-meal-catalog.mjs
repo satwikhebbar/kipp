@@ -77,7 +77,10 @@ if (result.failures.length > 0 || !result.definitions) {
 }
 
 const normalize = (name) => name.trim().toLocaleLowerCase()
-const generatedByName = new Map(result.definitions.map((definition) => [normalize(definition.sourceDishName), definition]))
+// expandMealCatalog returns durable definitions (with the parent name retained
+// as an alias), not the provider-only sourceDishName field. Its output order is
+// the validated parentDishNames order, so use that authoritative mapping here.
+const generatedByName = new Map(result.definitions.map((definition, index) => [normalize(parentDishNames[index]), definition]))
 const mergedDefinitions = replace
   ? result.definitions
   : [...(currentProfile.mealDefinitions ?? []).filter((definition) => !generatedByName.has(normalize(definition.name))), ...result.definitions]
@@ -91,6 +94,11 @@ if (dryRun) {
 } else {
   const update = executeD1(`UPDATE meal_profile SET profile_json = ${sqlString(JSON.stringify(profile))}, updated_at = datetime('now') WHERE chat_id = ${sqlString(existing.chat_id)}`)
   const changes = Number(update[0]?.meta?.changes ?? 0)
-  if (changes !== 1) throw new Error(`expected to update one meal profile, updated ${changes}`)
+  // D1/SQLite can report zero changes when the row is concurrently updated or
+  // the replacement is byte-for-byte identical. Verify the durable value
+  // instead of treating that metadata as the sole success signal.
+  const persisted = executeD1(`SELECT profile_json FROM meal_profile WHERE chat_id = ${sqlString(existing.chat_id)}`)
+  const persistedProfile = persisted[0]?.results?.[0]?.profile_json
+  if (persistedProfile !== JSON.stringify(profile)) throw new Error(`meal profile update was not persisted (changes=${changes})`)
   console.log(`${replace ? "Replaced" : "Updated"} the ${production ? "production" : "local"} catalog with ${mergedDefinitions.length} definition(s).`)
 }
