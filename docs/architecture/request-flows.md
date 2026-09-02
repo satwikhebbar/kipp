@@ -142,9 +142,10 @@ is never repeated merely because Telegram confirmation failed.
 Meal planning uses a bounded agent to interpret the parent's request and
 week-relevant context. The deterministic evaluator owns plan validation;
 only the workflow can persist. A plan is approved by default, and every
-feedback submission is first accepted into the `feedback_batch` ledger. The
-workflow later claims it and either produces a CAS-guarded revision or records
-the terminal `stale` or `failed` state.
+Mini App feedback submission is first accepted into the `feedback_batch`
+ledger. The workflow later claims it and either produces a CAS-guarded revision
+or records the terminal `stale` or `failed` state. Telegram text feedback goes
+directly to `submissionFromPayload(payload)` and is not entered in that ledger.
 
 ```mermaid
 sequenceDiagram
@@ -181,7 +182,13 @@ sequenceDiagram
   M->>D: write private Mini App review context
   M->>T: rendered plan with [Give feedback] and [Review this week's plan]
   M->>M: park until week_end
-  opt feedback submission
+  opt Mini App feedback submission
+    U->>T: tap [Review this week's plan]
+    T->>M: signed Mini App feedback batch
+    M->>D: accept and claim feedback_batch
+    M->>A: revision session with submission context
+  end
+  opt Telegram feedback submission
     U->>T: tap [Give feedback] then reply with feedback
     T->>R: claim interaction
     R-->>M: normalized event

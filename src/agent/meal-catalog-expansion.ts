@@ -92,7 +92,9 @@ export async function expandMealCatalog(
     const id = (options.createId ?? (() => `meal_${crypto.randomUUID()}`))()
     if (!id || ids.has(id)) throw new Error("catalog expansion id factory must return unique opaque ids")
     ids.add(id)
-    return establishMealDefinition(valid.get(dishName)!, dishName, id)
+    const proposal = valid.get(dishName)
+    if (!proposal) throw new Error("validated meal proposal missing")
+    return establishMealDefinition(proposal, dishName, id)
   })
   return { definitions, failures: [] }
 }

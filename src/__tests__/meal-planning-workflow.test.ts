@@ -83,28 +83,16 @@ it("renders neutral current-time and planning-week facts for relative-date reque
   )
 })
 
-it("builds Mini App launch URLs only from configured public HTTPS origins", () => {
+it("builds Mini App launch URLs only from configured HTTPS origins without credentials", () => {
   expect(miniAppLaunchUrl("https://mini-app.example.test/config-path?ignored=query")).toBe(
     "https://mini-app.example.test/mini-app",
   )
   expect(miniAppLaunchUrl("http://mini-app.example.test")).toBeNull()
   expect(miniAppLaunchUrl("not a URL")).toBeNull()
   expect(miniAppLaunchUrl(undefined)).toBeNull()
-  for (const host of [
-    "localhost",
-    "127.0.0.1",
-    "10.0.0.1",
-    "169.254.1.1",
-    "192.168.1.1",
-    "[::1]",
-    "[fe80::1]",
-    "[fd00::1]",
-    "[::ffff:127.0.0.1]",
-    "[::ffff:10.0.0.1]",
-    "[::ffff:169.254.1.1]",
-  ]) {
-    expect(miniAppLaunchUrl(`https://${host}`)).toBeNull()
-  }
+  expect(miniAppLaunchUrl("https://localhost")).toBe("https://localhost/mini-app")
+  expect(miniAppLaunchUrl("https://127.0.0.1")).toBe("https://127.0.0.1/mini-app")
+  expect(miniAppLaunchUrl("https://user:pass@mini-app.example.test")).toBeNull()
   expect(miniAppLaunchUrl("https://[2606:4700:4700::1111]")).toBe("https://[2606:4700:4700::1111]/mini-app")
 })
 

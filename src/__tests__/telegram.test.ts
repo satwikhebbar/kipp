@@ -334,7 +334,8 @@ Idea 2`
       env as never,
     )
     expect(res.status).toBe(200)
-    const stub = env.ingestFetches.get("ingest:tg:100:5")!
+    const stub = env.ingestFetches.get("ingest:tg:100:5")
+    if (!stub) throw new Error("expected Telegram ingest")
     expect(stub).toHaveBeenCalledTimes(1)
     const reqBody = JSON.parse(stub.mock.calls[0][1].body)
     expect(reqBody.key).toBe("tg:100:5")
@@ -399,7 +400,8 @@ Idea 2`
       env as never,
     )
     expect(res.status).toBe(200)
-    const startStub = env.ingestFetches.get("claim:page_1")!
+    const startStub = env.ingestFetches.get("claim:page_1")
+    if (!startStub) throw new Error("expected generated workflow start")
     expect(startStub).toHaveBeenCalledTimes(1)
     const startBody = JSON.parse(startStub.mock.calls[0][1].body)
     expect(startBody).toMatchObject({ pageId: "page_1", ideaId: "1", source: "manual" })

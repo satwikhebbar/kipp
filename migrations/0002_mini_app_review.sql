@@ -18,20 +18,12 @@ CREATE UNIQUE INDEX idx_feedback_batch_plan_idempotency
 CREATE INDEX idx_feedback_batch_dispatch
   ON feedback_batch(status, created_at);
 
--- The private Telegram chat is server-owned: Mini App init data never selects
--- a reply destination. The current single-parent deployment resolves at most
--- one current context for a verified user.
-CREATE TABLE mini_app_review_context (
-  telegram_user_id TEXT NOT NULL,
-  chat_id TEXT NOT NULL,
-  plan_id TEXT NOT NULL,
-  week_end TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (telegram_user_id, chat_id)
-);
-CREATE INDEX idx_mini_app_review_context_user
-  ON mini_app_review_context(telegram_user_id, updated_at DESC);
+-- Mini App ownership belongs to the plan itself: the verified Telegram user
+-- can open the plan sent to this private chat, but cannot choose a chat from
+-- init data.
+ALTER TABLE meal_plan ADD COLUMN telegram_user_id TEXT;
+CREATE INDEX idx_meal_plan_telegram_user
+  ON meal_plan(telegram_user_id, status, updated_at DESC);
 
 -- Only a hash of the opaque browser bearer is durable. Sessions are short
 -- lived and scoped to the review context selected after Telegram verification.

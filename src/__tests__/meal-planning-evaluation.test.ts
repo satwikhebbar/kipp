@@ -730,8 +730,9 @@ describe("structured meal hydration", () => {
       cookMinutes: 15,
       priorNightPrep: true,
     })
+    if (!hydrated.candidate) throw new Error("expected hydrated candidate")
     expect(evaluateMealPlanSelection(selection, context).evaluation.failures).toEqual(
-      evaluateMealPlan(hydrated.candidate!, context).failures,
+      evaluateMealPlan(hydrated.candidate, context).failures,
     )
 
     const invalid = hydrateMealPlan(

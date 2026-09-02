@@ -60,7 +60,8 @@ describe("rss-to-backlog", () => {
 
     const state = getState()
     const pages = [...state.notionPages.values()]
-    const main = pages.find((p) => p.kippId === 1)!
+    const main = pages.find((p) => p.kippId === 1)
+    if (!main) throw new Error("expected primary RSS page")
     expect(main.status).toBe("raw")
     expect(main.source).toBe("substack")
     expect(main.substackUrl).toBe("https://newsletter.test/ai-trends-2026")

@@ -610,6 +610,7 @@ describe.each([
     expect(
       await store.claimFeedbackBatchForWorkflow("batch-1", "instance-1", "2026-09-07T00:01:00.000Z"),
     ).toMatchObject({ status: "processing" })
+    expect(await store.claimFeedbackBatchForWorkflow("batch-1", "instance-1", "2026-09-07T00:01:15.000Z")).toBeNull()
     expect(await store.markFeedbackBatchFailed("batch-1", "workflow", "2026-09-07T00:02:00.000Z")).toBe(true)
     expect(await store.claimFeedbackBatchFailureNotification("batch-1", "2026-09-07T00:03:00.000Z")).toBe(true)
     expect(await store.claimFeedbackBatchFailureNotification("batch-1", "2026-09-07T00:04:00.000Z")).toBe(false)

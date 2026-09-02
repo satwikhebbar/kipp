@@ -180,8 +180,8 @@ describe("handleRssCron", () => {
     const result = await handleRssCron(env as never)
     expect(result.started).toBe(true)
 
-    const mainStub = env.ingestFetches.get("ingest:rss:guid:first-guid:0")!
-    expect(mainStub).toBeDefined()
+    const mainStub = env.ingestFetches.get("ingest:rss:guid:first-guid:0")
+    if (!mainStub) throw new Error("expected main RSS ingest")
     expect(mainStub).toHaveBeenCalledTimes(1)
     const [, init] = mainStub.mock.calls[0]
     const body = JSON.parse(init.body)
@@ -189,8 +189,8 @@ describe("handleRssCron", () => {
     expect(body.startWorkflow).toBe(true)
     expect(body.idea.body).toBe("A great hook about testing")
 
-    const sideStub = env.ingestFetches.get("ingest:rss:guid:first-guid:1")!
-    expect(sideStub).toBeDefined()
+    const sideStub = env.ingestFetches.get("ingest:rss:guid:first-guid:1")
+    if (!sideStub) throw new Error("expected side RSS ingest")
     expect(sideStub).toHaveBeenCalledTimes(1)
     const sideBody = JSON.parse(sideStub.mock.calls[0][1].body)
     expect(sideBody.startWorkflow).toBe(false)
@@ -231,15 +231,15 @@ describe("handleRssCron", () => {
 
     await handleRssCron(env as never)
     const firstKey = "ingest:rss:link:https://test.substack.com/p/one:0"
-    const firstStub = env.ingestFetches.get(firstKey)!
-    expect(firstStub).toBeDefined()
+    const firstStub = env.ingestFetches.get(firstKey)
+    if (!firstStub) throw new Error("expected first RSS ingest")
     expect(JSON.parse(firstStub.mock.calls[0][1].body).key).toBe("rss:link:https://test.substack.com/p/one:0")
 
     setupFetch({ rssXml: NO_GUID_RSS, knownLinks: ["https://test.substack.com/p/one"] })
     await handleRssCron(env as never)
     const secondKey = "ingest:rss:link:https://test.substack.com/p/two:0"
-    const secondStub = env.ingestFetches.get(secondKey)!
-    expect(secondStub).toBeDefined()
+    const secondStub = env.ingestFetches.get(secondKey)
+    if (!secondStub) throw new Error("expected second RSS ingest")
     expect(secondKey).not.toBe(firstKey)
     expect(JSON.parse(secondStub.mock.calls[0][1].body).key).toBe("rss:link:https://test.substack.com/p/two:0")
 
