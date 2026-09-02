@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { authenticateMiniApp, MiniAppAuthError, verifyTelegramInitData } from "../meal-planning/mini-app-auth"
+import { authenticateMiniApp, verifyTelegramInitData } from "../meal-planning/mini-app-auth"
 import { createMealPlanningStore } from "../meal-planning/store"
 import { createD1TestDb } from "./d1-test-db"
 
@@ -54,6 +54,10 @@ describe("Mini App Telegram authentication", () => {
     const env = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 }
     const raw = await initData()
     await expect(authenticateMiniApp(raw, env, NOW)).resolves.toMatchObject({ context: { chatId: "chat-42" } })
-    await expect(authenticateMiniApp(raw, env, NOW)).rejects.toBeInstanceOf(MiniAppAuthError)
+    const reordered = [...new URLSearchParams(raw).entries()]
+      .reverse()
+      .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+      .join("&")
+    await expect(authenticateMiniApp(reordered, env, NOW)).rejects.toMatchObject({ reason: "replayed" })
   })
 })

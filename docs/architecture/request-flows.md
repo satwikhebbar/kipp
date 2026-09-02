@@ -142,8 +142,9 @@ is never repeated merely because Telegram confirmation failed.
 Meal planning uses a bounded agent to interpret the parent's request and
 week-relevant context. The deterministic evaluator owns plan validation;
 only the workflow can persist. A plan is approved by default, and every
-feedback submission triggers a CAS-guarded revision that persists a new
-version plus an immutable submission batch.
+feedback submission is first accepted into the `feedback_batch` ledger. The
+workflow later claims it and either produces a CAS-guarded revision or records
+the terminal `stale` or `failed` state.
 
 ```mermaid
 sequenceDiagram

@@ -51,9 +51,9 @@ as a conversational fallback.
   data-check string and verifies its two-stage HMAC using `TELEGRAM_BOT_TOKEN`,
   then rejects malformed values, missing user data, a timestamp more than ten
   minutes old or more than one minute in the future, and constant-time
-  mismatches. It hashes the raw launch value, atomically records that
-  fingerprint with a bounded expiry, and rejects re-use before authorizing the
-  verified user against `TELEGRAM_ALLOWED_USER_ID`.
+  mismatches. After authorizing the verified user against
+  `TELEGRAM_ALLOWED_USER_ID`, it fingerprints the verified launch hash,
+  atomically records that fingerprint with a bounded expiry, and rejects re-use.
 - After verification, create a short-lived opaque server session backed by the
   meal-planning durable store. Session records bind the verified user and the
   resolved review-context chat scope; reads/writes derive authority solely

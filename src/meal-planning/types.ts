@@ -189,10 +189,7 @@ export interface PlanRequest {
 export interface FeedbackItem {
   id: string
   text: string
-  /**
-   * The Mini App's explicit review target. Telegram's existing text feedback
-   * remains unbound while the workflow is migrated to this discriminated form.
-   */
+  /** The Mini App's explicit review target; Telegram text feedback remains unbound. */
   target?: FeedbackTarget
   scope?: { day?: string; slot?: string }
 }

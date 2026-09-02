@@ -66,30 +66,21 @@ describe("Mini App HTTP boundary", () => {
       status: "accepted" as const,
       failureCategory: null,
       failureNotifiedAt: null,
-      acceptedAt: "2026-09-01T00:00:00.000Z",
-      deliveredAt: null,
-      processingAt: null,
-      consumedAt: null,
-      staleAt: null,
-      failedAt: null,
       createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
     }
     db.prepare(
       `INSERT INTO feedback_batch
-         (batch_id, plan_id, base_version, items_json, chat_id, workflow_instance_id, week_end, idempotency_key,
-          status, accepted_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)`,
+         (batch_id, plan_id, base_version, items_json, idempotency_key, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?)`,
     ).run(
       batch.batchId,
       batch.planId,
       batch.baseVersion,
       JSON.stringify(batch.items),
-      batch.chatId,
-      batch.workflowInstanceId,
-      batch.weekEnd,
       batch.idempotencyKey,
-      batch.acceptedAt,
       batch.createdAt,
+      batch.updatedAt,
     )
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true, result: { message_id: 1 } })))
     vi.stubGlobal("fetch", fetchMock)
