@@ -634,10 +634,10 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.failures.some((failure) => failure.code === "dish_repeated")).toBe(true)
   })
 
-  it("documents the seed repertoire ceiling: filling all 30 slots needs the favourite repeat", () => {
+  it("documents the expanded seed repertoire can fill all 30 slots without a favourite repeat", () => {
     const required = SEED_SCHEDULE.days.length * SEED_SCHEDULE.slots.length
     const nonFavourite = SEED_PROFILE.dishRepertoire.length - SEED_PROFILE.foodPreferences.favourites.length
-    expect(nonFavourite).toBeLessThan(required)
+    expect(nonFavourite).toBeGreaterThanOrEqual(required)
   })
 
   it("still enforces constraints when the request text claims to ignore every food rule", () => {

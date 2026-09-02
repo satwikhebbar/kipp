@@ -365,7 +365,7 @@ describe("agent-centered meal-planning Telegram integration", () => {
     const firstGenerateMessages = mockGenerate.mock.calls[0][0].messages.map(
       (message: { role: string; text: string }) => message.text,
     )
-    expect(firstGenerateMessages.join("\n")).toContain("Morning cook budget: 35")
+    expect(firstGenerateMessages.join("\n")).toContain("Morning cook budget: 40")
     expect(firstGenerateMessages.join("\n")).toContain("Dietary exclusions (hard)")
     expect(firstGenerateMessages.join("\n")).toContain("[cheat-day] Friday cheat day")
 
