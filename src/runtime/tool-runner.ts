@@ -54,6 +54,9 @@ export interface ToolRunOptions {
   maxProviderTurns?: number
   /** Aggregate tool-call budget for this session; defaults to the global MAX_TOOL_CALLS. */
   maxToolCalls?: number
+  /** Development-only hook invoked before and after each provider turn. */
+  onProviderTurnStart?: (turn: number, messages: readonly ToolConversationMessage[]) => void
+  onProviderTurn?: (turn: number, messages: readonly ToolConversationMessage[]) => void
 }
 
 /**
@@ -79,6 +82,7 @@ export async function runTools(
   const maxTurns = options.maxProviderTurns ?? MAX_TOOL_PROVIDER_TURNS
   const maxCalls = options.maxToolCalls ?? MAX_TOOL_CALLS
   for (let turn = 0; turn < maxTurns; turn++) {
+    options.onProviderTurnStart?.(turn + 1, messages)
     const guard = new ToolGuard(registry, allowedTools)
     const response = await provider.generate({
       messages,
@@ -91,6 +95,7 @@ export async function runTools(
     if (!response.toolCalls?.length) {
       if (options.requireHandoff) {
         if (response.text) messages.push({ role: "assistant", text: response.text })
+        options.onProviderTurn?.(turn + 1, messages)
         messages.push({ role: "user", text: REQUIRED_HANDOFF_REPAIR_MESSAGE })
         if (turn + 1 < maxTurns) continue
         return {
@@ -132,6 +137,7 @@ export async function runTools(
       text: response.text,
       reasoningContent: response.reasoningContent,
     })
+    options.onProviderTurn?.(turn + 1, messages)
     const isBatch = response.toolCalls.length > 1
     const allowedNonHandoffCalls = response.toolCalls.filter(
       (call) => allowedTools.includes(call.name) && !options.handoffTools?.includes(call.name),
