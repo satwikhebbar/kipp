@@ -499,7 +499,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
 
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.weeklyInventory.items).toEqual([
-      { name: "carrots", status: "available" },
+      { name: "carrot", status: "available" },
       { name: "paneer", status: "unavailable" },
     ])
     expect(active?.plan.weeklyExceptions.items).toEqual([
@@ -509,7 +509,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         instruction: "No school lunch on Friday.",
       },
     ])
-    expect(deepseekBodies[1].messages.at(-1)?.content).toContain("Weekly inventory: carrots, paneer (unavailable)")
+    expect(deepseekBodies[1].messages.at(-1)?.content).toContain("Weekly inventory: carrot, paneer (unavailable)")
     const extractionLog = logSpy.mock.calls
       .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
       .find((line) => line.event === "meal-planning-context-extraction")
@@ -517,7 +517,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       outcome: "succeeded",
       details: {
         applied: true,
-        inventoryChanges: "carrots:available,paneer:unavailable",
+        inventoryChanges: "carrot:available,paneer:unavailable",
         exceptionAdds: 'half_day:{"day":"Fri","mealSlots":["school-lunch"]}',
       },
     })

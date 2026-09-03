@@ -1,4 +1,5 @@
 import { evaluateMealPlanSelection, evaluateMealPlanSelectionPatch } from "../meal-planning/evaluation"
+import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
 import type {
   FailureCode,
   FeedbackItem,
@@ -292,7 +293,7 @@ export function resolveWeekContextUpdate(
   if (input.inventoryChanges.length === 0 && input.exceptionAdds.length === 0)
     throw new ToolHandlerError("week context update must contain at least one change", "invalid-state")
 
-  const normalized = (value: string) => value.trim().toLocaleLowerCase()
+  const normalized = (value: string) => normalizeIngredient(value)
   const inventory = new Map(context.weeklyInventory.items.map((item) => [normalized(item.name), item]))
   const changedNames = new Set<string>()
   for (const item of input.inventoryChanges) {
@@ -300,7 +301,7 @@ export function resolveWeekContextUpdate(
     if (!key || changedNames.has(key))
       throw new ToolHandlerError("inventory changes must have distinct non-empty names", "invalid-state")
     changedNames.add(key)
-    inventory.set(key, { ...item, name: item.name.trim() })
+    inventory.set(key, { ...item, name: normalizeIngredient(item.name) })
   }
 
   const days = new Set(context.schedule.days)
