@@ -21,8 +21,8 @@ const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const SLOT_COOK: Record<string, number> = { breakfast: 15, snack1: 0, snack2: 0, "school-lunch": 20, "home-lunch": 20 }
 const POLICY_IDS = [
   "snack-policy",
-  "equipment-gap",
-  "packing-capacity",
+  "ingredient-naming",
+  "relevant-variety",
   "nutrition-target-fruit",
   "nutrition-target-nuts",
   "school-rule",
@@ -61,6 +61,20 @@ it("requires the planner to self-check singular ingredient names", () => {
   expect(MEAL_PLANNING_AGENT_PROMPT).toContain(
     "confirm that every ingredient name you returned uses its singular canonical form",
   )
+})
+
+it("guides home-lunch composition and one-meal fresh-produce usage", () => {
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain(
+    "select the vegetable curry/subzi as the meal represented in the home-lunch slot",
+  )
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain("The parent can choose the accompanying staple")
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain(
+    "A flavored-rice meal such as pulao or tomato rice is an explicit exception",
+  )
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain(
+    "Treat fresh produce in the weekly inventory as enough for one meal only",
+  )
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain("except onion, tomato, and potato, which may be reused across meals")
 })
 
 it("renders scoped and unbound revision feedback without storage ids", () => {
@@ -104,34 +118,33 @@ it("builds Mini App launch URLs only from configured HTTPS origins without crede
   expect(miniAppLaunchUrl("https://[2606:4700:4700::1111]")).toBe("https://[2606:4700:4700::1111]/mini-app")
 })
 
-// Workflow fixtures intentionally reuse paratha in every slot. Keep that
-// legacy fixture compact while giving its fixture definition stable metadata
-// that makes those placements valid under the selection contract.
-SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) =>
-  definition.id === SEED_MEAL_IDS.paratha
-    ? {
-        ...definition,
-        suitableSlots: Object.keys(SLOT_COOK),
-        packedFood: { suitable: true, dry: true },
-        typicalCookMinutes: 0,
-      }
-    : definition,
-)
+// Workflow fixtures use distinct seeded definitions, with only the favourite
+// paratha repeated twice, so they remain valid under the relevant-variety policy.
+SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) => ({
+  ...definition,
+  suitableSlots: Object.keys(SLOT_COOK),
+  packedFood: { suitable: true, dry: true },
+  typicalCookMinutes: 0,
+  priorNightPrep: "none",
+  principalIngredients: [],
+  requiredIngredients: [],
+  optionalIngredients: [],
+}))
 
 function seedCandidate(override?: { day: string; slot: string; cell: MealCell }): MealPlanSelectionCandidate {
-  const selectionBySlot: Record<string, string> = {
-    breakfast: SEED_MEAL_IDS.paratha,
-    snack1: SEED_MEAL_IDS.paratha,
-    snack2: SEED_MEAL_IDS.paratha,
-    "school-lunch": SEED_MEAL_IDS.paratha,
-    "home-lunch": SEED_MEAL_IDS.paratha,
-  }
+  const fixtureMealIds = (SEED_PROFILE.mealDefinitions ?? []).map((definition) => definition.id)
   const grid: MealPlanSelectionCandidate["grid"] = {}
-  for (const day of DAYS) {
+  for (const [dayIndex, day] of DAYS.entries()) {
     grid[day] = Object.fromEntries(
-      Object.keys(SLOT_COOK).map((slot) => [slot, { mealDefinitionId: selectionBySlot[slot] }]),
+      Object.keys(SLOT_COOK).map((slot, slotIndex) => [
+        slot,
+        { mealDefinitionId: fixtureMealIds[dayIndex * Object.keys(SLOT_COOK).length + slotIndex] },
+      ]),
     )
   }
+  // Keep one favourite repeat in the baseline so revision tests can verify
+  // that unchanged favourite dishes remain valid under the two-use cap.
+  grid.Wed.breakfast = { mealDefinitionId: SEED_MEAL_IDS.paratha }
   if (override) {
     const mealDefinitionId = SEED_MEAL_IDS[override.cell.dish]
     if (!mealDefinitionId) throw new Error(`missing fixture meal definition for ${override.cell.dish}`)
@@ -569,7 +582,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
-    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS.pomegranate)
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
     const step = createFakeStep(
       [
         {
@@ -626,7 +639,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
-    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS.pomegranate)
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
     let delivered = 0
     const batchId = "mini-batch-1"
     const step = {
@@ -797,9 +810,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
-    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS.pomegranate)
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
     // The v3 candidate keeps the v2 Mon change and adds a Tue change.
-    const revisedAgain = revisionPatch("Tue", "snack1", SEED_MEAL_IDS.apple)
+    const revisedAgain = revisionPatch("Tue", "snack1", SEED_MEAL_IDS["sabudana cutlet"])
     // Every revision runs through distinct per-occurrence step names, so the
     // memoized runtime cannot return the initial plan's send/register/promote
     // results for v2/v3.
