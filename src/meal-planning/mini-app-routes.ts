@@ -13,6 +13,8 @@ const BYTES_PER_KIBIBYTE = 1_024
 const MAX_REQUEST_KIBIBYTES = 64
 const MAX_REQUEST_BYTES = MAX_REQUEST_KIBIBYTES * BYTES_PER_KIBIBYTE
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128
+const MAX_ERROR_NAME_LENGTH = 120
+const MAX_ERROR_MESSAGE_LENGTH = 240
 const HTTP_ACCEPTED = 202
 const HTTP_CREATED = 201
 
@@ -101,15 +103,47 @@ function errorResponse(error: unknown): Response {
 /** Dispatches an accepted batch to the server-owned workflow pointer. */
 export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): Promise<boolean> {
   const store = env.MEAL_PLANNING_DB ? createMealPlanningStore(env.MEAL_PLANNING_DB) : null
+  let phase = "validate"
+  logRuntime(env, {
+    workflow: batch.workflowInstanceId ?? undefined,
+    event: "mini-app-feedback-dispatch",
+    outcome: "started",
+    details: { phase, batchId: batch.batchId, planId: batch.planId, status: batch.status },
+  })
   if (!store || !env.MEAL_PLANNING_WORKFLOW || !batch.workflowInstanceId) {
     if (store) await failFeedbackBatchDispatch(batch, env, store)
+    logRuntime(env, {
+      workflow: batch.workflowInstanceId ?? undefined,
+      event: "mini-app-feedback-dispatch",
+      outcome: "failed",
+      failureCategory: "dispatch-not-configured",
+      details: {
+        phase,
+        batchId: batch.batchId,
+        hasDatabase: Boolean(store),
+        hasWorkflowBinding: Boolean(env.MEAL_PLANNING_WORKFLOW),
+        hasWorkflowInstanceId: Boolean(batch.workflowInstanceId),
+      },
+    })
     return false
   }
   // The Workflow claims only delivered batches. Persist the transition before
   // the event is visible so a fast Workflow cannot observe an accepted batch.
-  if (!store || !(await store.markFeedbackBatchDelivered(batch.batchId))) return false
+  phase = "claim-delivery"
+  if (!store || !(await store.markFeedbackBatchDelivered(batch.batchId))) {
+    logRuntime(env, {
+      workflow: batch.workflowInstanceId,
+      event: "mini-app-feedback-dispatch",
+      outcome: "failed",
+      failureCategory: "batch-not-accepted",
+      details: { phase, batchId: batch.batchId },
+    })
+    return false
+  }
   try {
+    phase = "workflow-get"
     const instance = await env.MEAL_PLANNING_WORKFLOW.get(batch.workflowInstanceId)
+    phase = "workflow-send-event"
     await instance.sendEvent({
       type: "telegram-reply",
       payload: {
@@ -122,9 +156,29 @@ export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): 
         items: batch.items,
       },
     })
+    logRuntime(env, {
+      workflow: batch.workflowInstanceId,
+      event: "mini-app-feedback-dispatch",
+      outcome: "succeeded",
+      details: { phase, batchId: batch.batchId },
+    })
     return true
-  } catch {
+  } catch (error) {
     await failFeedbackBatchDispatch(batch, env, store)
+    const errorName = error instanceof Error ? error.name : typeof error
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    logRuntime(env, {
+      workflow: batch.workflowInstanceId ?? undefined,
+      event: "mini-app-feedback-dispatch",
+      outcome: "failed",
+      failureCategory: "workflow-unreachable",
+      details: {
+        phase,
+        batchId: batch.batchId,
+        errorName: errorName.slice(0, MAX_ERROR_NAME_LENGTH),
+        errorMessage: errorMessage.replace(/\s+/g, " ").slice(0, MAX_ERROR_MESSAGE_LENGTH),
+      },
+    })
     return false
   }
 }
@@ -143,12 +197,6 @@ async function failFeedbackBatchDispatch(
       })
       .catch(() => {})
   }
-  logRuntime(env, {
-    workflow: batch.workflowInstanceId ?? undefined,
-    event: "mini-app-feedback-dispatch",
-    outcome: "failed",
-    failureCategory: "workflow-unreachable",
-  })
 }
 
 export const miniAppRoutes = new Hono<{ Bindings: Env }>()

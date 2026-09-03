@@ -99,4 +99,65 @@ describe("Mini App HTTP boundary", () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it("logs the workflow dispatch phase and provider error when the instance is unreachable", async () => {
+    const { db, d1 } = createD1TestDb()
+    const batch = {
+      batchId: "mini-batch-unreachable",
+      planId: "plan-1",
+      baseVersion: 1,
+      items: [{ id: "mini-1", text: "Less oily", target: { kind: "plan" as const } }],
+      chatId: null,
+      workflowInstanceId: "wf-unreachable",
+      weekEnd: "2026-09-05T18:29:59.999Z",
+      idempotencyKey: "key-unreachable",
+      status: "accepted" as const,
+      failureCategory: null,
+      failureNotifiedAt: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    }
+    db.prepare(
+      `INSERT INTO feedback_batch
+         (batch_id, plan_id, base_version, items_json, idempotency_key, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?)`,
+    ).run(
+      batch.batchId,
+      batch.planId,
+      batch.baseVersion,
+      JSON.stringify(batch.items),
+      batch.idempotencyKey,
+      batch.createdAt,
+      batch.updatedAt,
+    )
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    const workflow = {
+      get: vi.fn(async () => {
+        throw new Error("instance is not active")
+      }),
+    } as unknown as Env["MEAL_PLANNING_WORKFLOW"]
+    try {
+      expect(
+        await startFeedbackBatch(batch, {
+          ...env(),
+          LOG_LEVEL: "info",
+          MEAL_PLANNING_DB: d1,
+          MEAL_PLANNING_WORKFLOW: workflow,
+        }),
+      ).toBe(false)
+      const events = log.mock.calls.map(([line]) => JSON.parse(String(line)))
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: "mini-app-feedback-dispatch",
+            outcome: "failed",
+            failureCategory: "workflow-unreachable",
+            details: expect.objectContaining({ phase: "workflow-get", errorName: "Error" }),
+          }),
+        ]),
+      )
+    } finally {
+      log.mockRestore()
+    }
+  })
 })
