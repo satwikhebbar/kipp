@@ -31,14 +31,20 @@ function readKeyValueFile(path) {
 }
 
 const vars = production ? process.env : { ...readKeyValueFile(process.env.DEV_VARS_PATH || ".dev.vars"), ...process.env }
-const apiKey = vars.LLM_API_KEY
-const providerName = vars.LLM_PROVIDER || "deepseek"
-const model = vars.LLM_MODEL || undefined
+// Keep catalog maintenance aligned with the meal-planning workflow. The
+// workflow currently uses Luna through OpenRouter; do not fall back to the
+// legacy LLM_* settings, which may point at a different provider/model.
+const apiKey = vars.OPENROUTER_API_KEY
+const providerName = "openrouter"
+const model = "openai/gpt-5.6-luna"
 const maxRetries = Number(vars.LLM_MAX_RETRIES || 3)
 const databaseName = vars.MEAL_CATALOG_DB_NAME || (production ? "meal-planning" : "kipp-meal-planning-local")
 const configPath = production ? "wrangler.prod.toml" : "wrangler.local.toml"
 
-if (!apiKey) throw new Error(production ? "LLM_API_KEY must be exported for production expansion" : ".dev.vars must include LLM_API_KEY")
+if (!apiKey)
+  throw new Error(
+    production ? "OPENROUTER_API_KEY must be exported for production expansion" : ".dev.vars must include OPENROUTER_API_KEY",
+  )
 
 const [{ expandMealCatalog }, { createToolProvider }, { SEED_SCHEDULE }] = await Promise.all([
   import("../src/agent/meal-catalog-expansion.ts"),
