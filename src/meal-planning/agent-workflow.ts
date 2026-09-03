@@ -217,7 +217,9 @@ export async function runAgentCenteredMealPlanningWorkflow(
     weeklyInventory: recent?.plan.weeklyInventory ?? { items: [], notes: [] },
     weeklyExceptions: recent?.plan.weeklyExceptions ?? { items: [] },
     recentPlan: recent?.version.candidate.grid ?? null,
-    provisionalMealDefinitions: recent?.version.provisionalMealDefinitions ?? [],
+    // Provisional meals are owned by a plan version. They may be reused by a
+    // revision of that plan, but must never leak into a new initial plan.
+    provisionalMealDefinitions: [],
     request: { kind: "initial_plan", text: event.payload.requestText },
   }
   const context = await extractInitialWeekContext(env, step, event, baseContext)
