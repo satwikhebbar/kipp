@@ -13,6 +13,7 @@ import { createToolProvider, type ToolConversationMessage, type ToolProviderRequ
 import { logRuntime } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
 import { computeCoverageSet } from "./coverage"
+import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
   MEAL_FEEDBACK_NOT_APPLIED,
@@ -48,7 +49,7 @@ const MILLISECONDS_PER_SECOND = 1_000
 const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "openai/gpt-5.6-luna"
-const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
+const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
 export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext, "schedule">): string {
   return `${WEEK_CONTEXT_EXTRACTION_PROMPT}\nSchedule days: ${context.schedule.days.join(", ")}\nMeal slots: ${context.schedule.slots.map((slot) => slot.id).join(", ")}`
@@ -320,7 +321,9 @@ async function extractInitialWeekContext(
         })
         return context
       }
-      const inventoryChanges = parsed.data.inventoryChanges.map(({ name, status }) => `${name}:${status}`).join(",")
+      const inventoryChanges = parsed.data.inventoryChanges
+        .map(({ name, status }) => `${normalizeIngredient(name)}:${status}`)
+        .join(",")
       const exceptionAdds = parsed.data.exceptionAdds
         .map((exception) => `${exception.kind}:${JSON.stringify(exception.appliesTo ?? {})}`)
         .join(",")
