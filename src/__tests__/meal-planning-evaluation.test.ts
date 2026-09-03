@@ -116,6 +116,14 @@ function failureCodes(evaluation: ReturnType<typeof evaluateMealPlan>): string[]
 }
 
 describe("meal-planning evaluator", () => {
+  it("uses idli batter as the primary ingredient for Uttappam and Paniyaram", () => {
+    const definitions = new Map((SEED_PROFILE.mealDefinitions ?? []).map((definition) => [definition.name, definition]))
+    expect(definitions.get("uttappam")?.requiredIngredients).toEqual(["idli batter"])
+    expect(definitions.get("paniyaram")?.requiredIngredients).toEqual(["idli batter"])
+    expect(definitions.get("quesadilla")?.requiredIngredients[0]).toBe("wheat flour")
+    expect(definitions.get("quesadilla")?.requiredIngredients).not.toContain("flour tortilla")
+  })
+
   it("passes a valid full week and reports its measurements", () => {
     const evaluation = evaluateMealPlan(baseCandidate(), baseContext())
     expect(evaluation.pass).toBe(true)
@@ -263,6 +271,34 @@ describe("meal-planning evaluator", () => {
       requestedRepeats: ["paratha"],
     })
     expect(evaluateMealPlan(candidate, requested).pass).toBe(true)
+  })
+
+  it("caps favourite dish repeats at two appearances when relevant variety is active", () => {
+    const context = baseContext({
+      schedule: {
+        days: ["Mon", "Tue", "Wed"],
+        slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+      },
+      profile: { ...baseContext().profile, foodPreferences: { favourites: ["paratha"], avoid: [] } },
+      customPolicies: [
+        {
+          id: "relevant-variety",
+          label: "Relevant variety",
+          scope: "persistent",
+          value: "Repeat a dish at most twice, and only when it is marked as a favourite.",
+        },
+      ],
+    })
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "paratha"],
+        ["Tue", "breakfast", "paratha"],
+        ["Wed", "breakfast", "paratha"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: { "relevant-variety": { outcome: "satisfied", rationale: "ok" } },
+    }
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual(["dish_repeated"])
   })
 
   it("does not flag dishes that appear only in the recent plan, only overlaps with the candidate", () => {

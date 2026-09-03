@@ -27,6 +27,8 @@ describe("Mini App HTTP boundary", () => {
     expect(html).toContain("No easy buys needed this week.")
     expect(html).toContain("Holiday")
     expect(html).toContain("/mealplan")
+    expect(html).toContain("dayDate(i).getUTCDate()")
+    expect(html).not.toContain('dateLabel(i).split(" ").slice(-1)[0]')
     expect(html).not.toContain("mealplan-")
 
     const plan = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app/api/plan"), env())

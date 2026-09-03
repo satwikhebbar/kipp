@@ -490,8 +490,8 @@ describe("bounded meal-planning agent session", () => {
   it("keeps the planning prompt policy-agnostic (no hardcoded custom-policy ids)", () => {
     for (const id of [
       "snack-policy",
-      "equipment-gap",
-      "packing-capacity",
+      "ingredient-naming",
+      "relevant-variety",
       "nutrition-target-fruit",
       "nutrition-target-nuts",
       "school-rule",

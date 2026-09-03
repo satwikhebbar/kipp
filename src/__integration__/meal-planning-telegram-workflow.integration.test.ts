@@ -73,8 +73,8 @@ const SLOT_COOK: Record<string, number> = {
 }
 const POLICY_IDS = [
   "snack-policy",
-  "equipment-gap",
-  "packing-capacity",
+  "ingredient-naming",
+  "relevant-variety",
   "nutrition-target-fruit",
   "nutrition-target-nuts",
   "school-rule",
@@ -82,19 +82,19 @@ const POLICY_IDS = [
 ]
 
 // These workflow fixtures deliberately keep one compact hydrated-cell grid.
-// The provider still submits catalog selections, and these three fixture
-// definitions make its slot placements valid under hydration.
-SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) =>
-  [SEED_MEAL_IDS.paratha, SEED_MEAL_IDS.idli, SEED_MEAL_IDS.poha].includes(definition.id)
-    ? {
-        ...definition,
-        suitableSlots: ["breakfast", "snack1", "snack2", "school-lunch", "home-lunch"],
-        packedFood: { suitable: true, dry: true },
-        typicalCookMinutes: 0,
-        requiredIngredients: definition.id === SEED_MEAL_IDS.paratha ? ["wheat flour"] : ["rice"],
-      }
-    : definition,
-)
+// Every catalog definition is made slot-compatible and pantry-backed so the
+// workflow tests exercise routing and persistence rather than meal suitability.
+SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) => ({
+  ...definition,
+  suitableSlots: ["breakfast", "snack1", "snack2", "school-lunch", "home-lunch"],
+  packedFood: { suitable: true, dry: true },
+  typicalCookMinutes: 0,
+  priorNightPrep: "none",
+  requiredIngredients: ["rice"],
+}))
+
+const FIXTURE_DISHES = Object.keys(SEED_MEAL_IDS).slice(0, DAYS.length * Object.keys(SLOT_COOK).length)
+SEED_PROFILE.foodPreferences = { ...SEED_PROFILE.foodPreferences, favourites: FIXTURE_DISHES }
 
 function cell(dish: string, items: string[], slot: string): MealCell {
   return { dish, vegetarian: true, items, cookMinutes: SLOT_COOK[slot], priorNightPrep: false }
@@ -102,14 +102,11 @@ function cell(dish: string, items: string[], slot: string): MealCell {
 
 function seedCandidate(override?: { day: string; slot: string; cell: MealCell }): MealPlanCandidate {
   const grid: Record<string, Record<string, MealCell>> = {}
+  let dishIndex = 0
   for (const day of DAYS) {
     grid[day] = {}
     for (const slot of Object.keys(SLOT_COOK)) {
-      grid[day][slot] = cell(
-        "paratha",
-        slot === "school-lunch" || slot === "home-lunch" ? ["rice"] : ["wheat flour"],
-        slot,
-      )
+      grid[day][slot] = cell(FIXTURE_DISHES[dishIndex++], ["rice"], slot)
     }
   }
   if (override) grid[override.day][override.slot] = override.cell

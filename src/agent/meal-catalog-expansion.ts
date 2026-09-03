@@ -33,14 +33,16 @@ const proposalSchema = z
 
 const submitDefinitionsInputSchema = z.object({ definitions: z.array(proposalSchema) }).strict()
 const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).strict()
+export const MEAL_INGREDIENT_LOCALE_DEFAULT = "India"
 
-export const MEAL_CATALOG_EXPANSION_PROMPT = `You expand a parent's named meal repertoire into practical meal definitions. Use only the submit_meal_definitions action.
+export function mealCatalogExpansionPrompt(locale = MEAL_INGREDIENT_LOCALE_DEFAULT): string {
+  return `You expand a parent's named meal repertoire into practical meal definitions. Use only the submit_meal_definitions action.
 
 The supplied names are parent-provided repertoire meals. Treat each as generally suitable for ordinary school-lunchbox transport: do not assess whether it is packable and do not return a packing-suitability field. Classify packedFood.dry only. Here dry means non-leaking and spill-resistant, not dehydrated: whole fruit and raw vegetable salad count as dry. Set dry false for food likely to spill or leak; uncertainty means false. Choose suitable slot ids only from the supplied schedule.
 
 Each supplied name is the parent's complete meal label — for example, "Idli Chutney", "Rajma Chawal", or "Puri + Aloo Sabji". Preserve its meal scope: do not add, remove, or infer an accompaniment in the display name. sourceDishName must reproduce that supplied name exactly. You may normalize presentation only.
 
-Each definition is a practical meal option, not a fixed recipe. Focus requiredIngredients on the meal's dense, primary, meal-defining ingredients: grains, pulses, flour, dairy, eggs, specifically named vegetables or fruit, and prepared components such as idli batter. Every required ingredient must be a concrete, purchasable item or prepared component that the planner can match to inventory; do not use vague aggregate tokens such as "mixed vegetables", "vegetables", "mixed spices", or "seasoning" in requiredIngredients. If a dish permits interchangeable produce, keep the generic category optional or describe concrete choices in optionalIngredients/allowedIngredientChoices instead. Do not list ordinary pantry seasonings or cooking basics—salt, turmeric, chilli, cumin, mustard seeds, curry leaves, oil, and similar spices are assumed to be available and should not cause an ingredient-availability failure. Add a seasoning to requiredIngredients only when it is unusually central to the named meal and not a normal pantry staple. optionalIngredients and allowedIngredientChoices are alternatives the planner may choose from. Use prepared ingredient states when lengthy work happens before the meal: for example, use "idli batter" rather than rice and urad dal when grinding and fermentation are prior-night work. Mandatory soaking, fermentation, grinding, or marination means priorNightPrep is required: dried kidney beans (rajma), chickpeas, and similar legumes need overnight soaking before morning cooking. Keep the purchasable ingredient token (for example, "kidney beans") unless a prepared product such as idli batter is itself the real ingredient. Make typicalCookMinutes the day-of cooking and serving time after any required preparation. All meals are vegetarian. typicalCookMinutes is a non-negative integer and priorNightPrep is none, optional, or required.
+Each definition is a practical meal option, not a fixed recipe. Focus requiredIngredients on the meal's dense, primary, meal-defining ingredients: grains, pulses, flour, dairy, eggs, specifically named vegetables or fruit, and prepared components such as idli batter. Every required ingredient must be a concrete, purchasable item or prepared component that the planner can match to inventory; do not use vague aggregate tokens such as "mixed vegetables", "vegetables", "mixed spices", or "seasoning" in requiredIngredients. If a dish permits interchangeable produce, keep the generic category optional or describe concrete choices in optionalIngredients/allowedIngredientChoices instead. Do not list ordinary pantry seasonings or cooking basics—salt, turmeric, chilli, cumin, mustard seeds, curry leaves, oil, and similar spices are assumed to be available and should not cause an ingredient-availability failure. Add a seasoning to requiredIngredients only when it is unusually central to the named meal and not a normal pantry staple. optionalIngredients and allowedIngredientChoices are alternatives the planner may choose from. Use prepared ingredient states when lengthy work happens before the meal: for example, use "idli batter" rather than rice and urad dal when grinding and fermentation are prior-night work. Mandatory soaking, fermentation, grinding, or marination means priorNightPrep is required: dried kidney beans (rajma), chickpeas, and similar legumes need overnight soaking before morning cooking. Keep the purchasable ingredient token in the household's locale (${locale}); for India, use familiar local names such as "chana" rather than "chickpea", "toor dal" rather than "pigeon pea", and "sabudana" rather than "tapioca pearl". The same localized token must be used consistently across required and optional ingredients. Make typicalCookMinutes the day-of cooking and serving time after any required preparation. All meals are vegetarian. typicalCookMinutes is a non-negative integer and priorNightPrep is none, optional, or required.
 
 Write every ingredient token in singular canonical form (for example, "apple", "onion", "tomato", and "potato", not their plural forms). Apply this consistently to principalIngredients, requiredIngredients, optionalIngredients, and allowedIngredientChoices; do not rely on the planner to correct the definition later.
 
@@ -52,10 +54,15 @@ Suitable slots must also reflect the meal's role, not merely whether it needs co
 
 Example action input:
 {"definitions":[{"sourceDishName":"Idli Chutney","name":"Idli Chutney","principalIngredients":["idli batter","coconut"],"vegetarian":true,"suitableSlots":["breakfast","school-lunch","home-lunch"],"packedFood":{"dry":false},"typicalCookMinutes":12,"priorNightPrep":"required","requiredIngredients":["idli batter","thick coconut chutney"],"optionalIngredients":["coriander"],"allowedIngredientChoices":[]}]}`
+}
+
+export const MEAL_CATALOG_EXPANSION_PROMPT = mealCatalogExpansionPrompt()
 
 export interface MealCatalogExpansionOptions {
   /** Lets callers provide a deterministic opaque-id factory in tests. */
   createId?: () => string
+  /** Ingredient naming locale; defaults to India. */
+  locale?: string
 }
 
 /**
@@ -74,12 +81,12 @@ export async function expandMealCatalog(
   const failures: MealDefinitionValidationFailure[] = []
 
   for (const batch of chunks(parentDishNames, BATCH_SIZE)) {
-    const initial = await requestDefinitions(provider, batch, input, [])
+    const initial = await requestDefinitions(provider, batch, input, [], options.locale)
     for (const dishName of batch) {
       let proposal = proposalFor(dishName, initial)
       let dishFailures = proposalFailures(proposal, dishName, input, initial)
       for (let attempt = 0; dishFailures.length > 0 && attempt < MAX_REPAIR_ATTEMPTS; attempt++) {
-        const repaired = await requestDefinitions(provider, [dishName], input, dishFailures)
+        const repaired = await requestDefinitions(provider, [dishName], input, dishFailures, options.locale)
         proposal = proposalFor(dishName, repaired)
         dishFailures = proposalFailures(proposal, dishName, input, repaired)
       }
@@ -145,6 +152,7 @@ async function requestDefinitions(
   dishNames: string[],
   input: MealCatalogExpansionInput,
   repairFailures: MealDefinitionValidationFailure[],
+  locale = MEAL_INGREDIENT_LOCALE_DEFAULT,
 ): Promise<MealDefinitionProposal[]> {
   let submitted: MealDefinitionProposal[] | undefined
   const registry: ToolRegistry = {
@@ -165,7 +173,7 @@ async function requestDefinitions(
     ? `Repair feedback for this dish:\n${repairFailures.map((failure) => `- ${failure.code}: ${failure.detail}`).join("\n")}\nReturn a corrected replacement definition.`
     : "Generate the initial definitions."
   const messages: ToolConversationMessage[] = [
-    { role: "system", text: MEAL_CATALOG_EXPANSION_PROMPT },
+    { role: "system", text: mealCatalogExpansionPrompt(locale) },
     {
       role: "user",
       text: [

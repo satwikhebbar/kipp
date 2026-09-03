@@ -439,14 +439,16 @@ Initial custom properties for this household, based on the discovery so far:
 | Custom property | Example value | Scope |
 | --- | --- | --- |
 | `Snack policy` | “School snacks should usually be dry, quick to pack, and not cooked that morning. Roasted lentils or sprouts are good examples.” | Persistent |
-| `Equipment gap` | `["microwave oven"]` | Persistent |
-| `Packing capacity` | “Use at most two lunchbox compartments; avoid leak-prone items.” | Persistent |
+| `Ingredient naming` | “Use ingredient names localized to India and always write them in singular form.” | Persistent |
+| `Relevant variety` | “Repeat a dish at most twice in the plan, and only when it is marked as a favourite.” | Persistent |
 | `Nutrition target` | “Pack fruit in a snack at least three to four times each week.” | Persistent |
 | `Nutrition target` | “Include nuts or dry fruits regularly.” | Persistent |
 | `Weekly season/occasion rule` | “Use monsoon-friendly vegetables this week.” | Current week |
 
-The initial household configuration should start with Snack policy, Equipment
-gap, Packing capacity, and the two Nutrition-target rules above. The seasonal
+The initial household configuration should start with Snack policy, Ingredient
+naming, Relevant variety, and the two Nutrition-target rules above. Equipment
+and packing constraints remain deterministic operating rules rather than
+persistent policies. The seasonal
 example shows the mechanism’s range without requiring it on day one.
 
 #### First-order workflow entities and transaction records
@@ -517,7 +519,13 @@ The agent creates a five-slot plan for every configured school day. It must:
 - Prefer variety across the week and relative to the immediately previous
   plan, while preserving familiar foods configured in the profile. The agent
   should avoid repeating the same named dish or close variants without a
-  reason, and normally cap a principal ingredient at two meals per week.
+  reason. Unless the parent supplies a quantity or explicitly allows reuse,
+  treat each fresh vegetable other than onion, tomato, and potato as sufficient
+  for one meal only; do not use it as the base of multiple meals in the week.
+- Compose home lunch as staple (plain rice or chapati) + one vegetable
+  curry/subzi + one protein dish (dal, kadhi, sambar, or another lentil-based
+  dish). A flavored-rice meal such as pulao or tomato rice is an exception and
+  may stand alone without that three-part combination.
 - Use unfamiliar dishes only when `allowNewFoods` is true. They need not be
   visibly marked as new.
 - Retain structured decision rationale for every cell and expose concise

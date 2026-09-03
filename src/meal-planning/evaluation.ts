@@ -322,6 +322,16 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       detail: `dish "${dish}" is repeated without a favourite or requested-repeat exemption`,
     })
   }
+  if (persistentPolicies.some((policy) => policy.id === "relevant-variety")) {
+    for (const [dish, count] of weekDishCounts) {
+      if (count > 2) {
+        failures.push({
+          code: "dish_repeated",
+          detail: `dish "${dish}" appears ${count} times; relevant variety allows at most two appearances`,
+        })
+      }
+    }
+  }
 
   if (context.requireUrgentUseEarly) {
     const urgentUseByDay = context.urgentUseByDay ?? DEFAULT_URGENT_USE_BY_DAY

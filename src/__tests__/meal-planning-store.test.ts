@@ -82,8 +82,8 @@ describe("createInMemoryMealPlanningStore", () => {
     expect(profile.profile.dishRepertoire.length).toBeGreaterThan(0)
     expect(profile.customPolicies.map((policy) => policy.id)).toEqual([
       "snack-policy",
-      "equipment-gap",
-      "packing-capacity",
+      "ingredient-naming",
+      "relevant-variety",
       "nutrition-target-fruit",
       "nutrition-target-nuts",
       "school-rule",

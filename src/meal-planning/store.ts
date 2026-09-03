@@ -309,7 +309,7 @@ const SEED_MEAL_INGREDIENTS: Record<string, string[]> = {
   "french beans subzi": ["french beans"],
   "ridge gourd curry": ["ridge gourd"],
   paniyaram: ["idli batter"],
-  uttappam: ["dosa batter"],
+  uttappam: ["idli batter"],
   "sabudana khichdi": ["sabudana"],
   "vegetable cutlet": ["potato", "carrot", "peas"],
   "sabudana cutlet": ["sabudana", "potato"],
@@ -536,7 +536,7 @@ export const SEED_PROFILE: MealProfile = {
   ],
 }
 
-/** The initial household configuration per spec §5.11 (Snack policy, Equipment gap, Packing capacity, two Nutrition targets). */
+/** The initial household configuration per spec §5.11 (planning policies for snacks, ingredients, variety, nutrition, and school rules). */
 const SEED_CUSTOM_POLICIES: CustomPolicy[] = [
   {
     id: "snack-policy",
@@ -544,12 +544,17 @@ const SEED_CUSTOM_POLICIES: CustomPolicy[] = [
     scope: "persistent",
     value: "School snacks should usually be dry, quick to pack, and not cooked that morning.",
   },
-  { id: "equipment-gap", label: "Equipment gap", scope: "persistent", value: '["microwave oven"]' },
   {
-    id: "packing-capacity",
-    label: "Packing capacity",
+    id: "ingredient-naming",
+    label: "Ingredient naming",
     scope: "persistent",
-    value: "Use at most two lunchbox compartments; avoid leak-prone items.",
+    value: "Use ingredient names localized to India and always write them in singular form.",
+  },
+  {
+    id: "relevant-variety",
+    label: "Relevant variety",
+    scope: "persistent",
+    value: "Repeat a dish at most twice in the plan, and only when it is marked as a favourite.",
   },
   {
     id: "nutrition-target-fruit",
