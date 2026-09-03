@@ -391,6 +391,72 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
   })
 
+  it("does not expose a prior plan's provisional meals to a new initial plan", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const priorGrid = Object.fromEntries(
+      DAYS.map((day) => [
+        day,
+        Object.fromEntries(
+          Object.keys(SLOT_COOK).map((slot) => [
+            slot,
+            { dish: "old invented meal", items: ["salt"], cookMinutes: 0, vegetarian: true, priorNightPrep: false },
+          ]),
+        ),
+      ]),
+    )
+    await store.createActivePlan({
+      planId: "prior-plan",
+      chatId: CHAT,
+      weekStart: week.weekStart,
+      weekEnd: week.weekEnd,
+      timezone: TZ,
+      instanceId: "prior-workflow",
+      candidate: {
+        grid: priorGrid,
+        easyBuys: [],
+        policyOutcomes: {},
+      } as never,
+      evaluation: { pass: true, failures: [], measurements: {} } as never,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+      provisionalMealDefinitions: [
+        {
+          id: "provisional_old",
+          status: "provisional",
+          name: "Old invented meal",
+          principalIngredients: ["old ingredient"],
+          vegetarian: true,
+          suitableSlots: ["breakfast"],
+          packedFood: { suitable: false, dry: false },
+          typicalCookMinutes: 10,
+          priorNightPrep: "none",
+          requiredIngredients: ["salt", "cumin"],
+          optionalIngredients: [],
+          allowedIngredientChoices: [],
+        },
+      ],
+    })
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    expect(deepseekBodies[0]?.messages.at(-1)?.content).not.toContain("provisional_old")
+    expect(deepseekBodies[0]?.messages.at(-1)?.content).toContain("Plan-local provisional definitions")
+    expect(deepseekBodies[0]?.messages.at(-1)?.content).toContain("none")
+  })
+
   it("applies extracted initial inventory before evaluating and persisting the plan", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
