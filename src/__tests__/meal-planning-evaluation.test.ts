@@ -6,6 +6,7 @@ import {
   evaluateMealPlanSelectionPatch,
 } from "../meal-planning/evaluation"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "../meal-planning/hydration"
+import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
 import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
 
@@ -693,6 +694,14 @@ describe("corpus scenario runner", () => {
 })
 
 describe("structured meal hydration", () => {
+  it.each([
+    ["apples", "apple"],
+    ["onions", "onion"],
+    ["tomatoes", "tomato"],
+    ["potatoes", "potato"],
+  ])("normalizes %s to %s", (plural, singular) => {
+    expect(normalizeIngredient(plural)).toBe(singular)
+  })
   const definition = {
     id: "meal-paratha",
     name: "Paratha",
@@ -847,6 +856,49 @@ describe("structured meal hydration", () => {
       context,
     )
     expect(result.failures).toMatchObject([{ code: "required_ingredient_unavailable", day: "Mon", slot: "breakfast" }])
+    expect(result.candidate).toBeUndefined()
+  })
+
+  it("matches approved singular and plural ingredient forms deterministically", () => {
+    const apple = {
+      ...definition,
+      id: "meal-apple",
+      name: "Apple",
+      principalIngredients: ["apple"],
+      requiredIngredients: ["apple"],
+      suitableSlots: ["snack1"],
+      packedFood: { suitable: true, dry: true },
+    }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [apple], pantryBaseline: [] },
+      weeklyInventory: { items: [{ name: "apples", status: "available" }], notes: [] },
+    })
+    const result = hydrateMealPlan(
+      { grid: { Mon: { snack1: { mealDefinitionId: apple.id } } }, easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(result.failures).toEqual([])
+    expect(result.candidate?.grid.Mon.snack1.items).toEqual(["apples"])
+  })
+
+  it("does not conflate unrelated ingredient names while normalizing", () => {
+    const apple = {
+      ...definition,
+      id: "meal-apple-negative",
+      name: "Apple",
+      principalIngredients: ["apple"],
+      requiredIngredients: ["apple"],
+      suitableSlots: ["snack1"],
+    }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [apple], pantryBaseline: [] },
+      weeklyInventory: { items: [{ name: "pineapple", status: "available" }], notes: [] },
+    })
+    const result = hydrateMealPlan(
+      { grid: { Mon: { snack1: { mealDefinitionId: apple.id } } }, easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(result.failures.map((failure) => failure.code)).toContain("required_ingredient_unavailable")
     expect(result.candidate).toBeUndefined()
   })
 

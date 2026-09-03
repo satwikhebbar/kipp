@@ -1,13 +1,10 @@
+import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   MealCatalogExpansionInput,
   MealDefinition,
   MealDefinitionProposal,
   MealDefinitionValidationFailure,
 } from "./types"
-
-function normalized(value: string): string {
-  return value.trim().toLocaleLowerCase()
-}
 
 function invalid(dishName: string, code: string, detail: string): MealDefinitionValidationFailure {
   return { dishName, code, detail }
@@ -23,7 +20,7 @@ function validateNames(
   if (required && values.length === 0) failures.push(invalid(dishName, "missing_field", `${field} is required`))
   const seen = new Set<string>()
   for (const value of values) {
-    const key = normalized(value)
+    const key = normalizeIngredient(value)
     if (!key) failures.push(invalid(dishName, "blank_value", `${field} cannot contain a blank value`))
     else if (seen.has(key))
       failures.push(invalid(dishName, "duplicate_value", `${field} cannot contain duplicate values`))
@@ -82,9 +79,9 @@ export function validateMealDefinitionProposal(
       )
     }
   }
-  const required = new Set(proposal.requiredIngredients.map(normalized))
+  const required = new Set(proposal.requiredIngredients.map(normalizeIngredient))
   for (const ingredient of [...proposal.optionalIngredients, ...(proposal.allowedIngredientChoices ?? [])]) {
-    if (required.has(normalized(ingredient)))
+    if (required.has(normalizeIngredient(ingredient)))
       failures.push(
         invalid(expectedDishName, "ingredient_overlap", "required ingredients cannot also be optional choices"),
       )
@@ -102,16 +99,16 @@ export function establishMealDefinition(
     id,
     name: proposal.name.trim(),
     aliases: [parentDishName],
-    principalIngredients: proposal.principalIngredients.map((value) => value.trim()),
+    principalIngredients: proposal.principalIngredients.map(normalizeIngredient),
     vegetarian: true,
     suitableSlots: proposal.suitableSlots,
     packedFood: { suitable: true, dry: proposal.packedFood.dry },
     typicalCookMinutes: proposal.typicalCookMinutes,
     priorNightPrep: proposal.priorNightPrep,
-    requiredIngredients: proposal.requiredIngredients.map((value) => value.trim()),
-    optionalIngredients: proposal.optionalIngredients.map((value) => value.trim()),
+    requiredIngredients: proposal.requiredIngredients.map(normalizeIngredient),
+    optionalIngredients: proposal.optionalIngredients.map(normalizeIngredient),
     ...(proposal.allowedIngredientChoices
-      ? { allowedIngredientChoices: proposal.allowedIngredientChoices.map((value) => value.trim()) }
+      ? { allowedIngredientChoices: proposal.allowedIngredientChoices.map(normalizeIngredient) }
       : {}),
     status: "established",
   }

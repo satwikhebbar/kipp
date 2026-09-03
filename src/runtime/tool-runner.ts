@@ -223,7 +223,7 @@ export async function runTools(
 }
 
 /** Strict OpenAI-compatible schemas represent omitted optional fields as null. */
-function stripNullProperties(input: unknown): unknown {
+export function stripNullProperties(input: unknown): unknown {
   if (Array.isArray(input)) return input.map(stripNullProperties)
   if (!input || typeof input !== "object") return input
   return Object.fromEntries(

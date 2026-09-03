@@ -1,13 +1,20 @@
 import { appendFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { expandMealCatalog } from "../agent/meal-catalog-expansion"
-import { type MealPlanningAgentSessionResult, runMealPlanningAgentSession } from "../agent/meal-planning-session"
+import { acceptedOutputSchema, weekContextExtractionInputSchema } from "../agent/meal-planning"
+import {
+  MEAL_PLANNING_AGENT_PROMPT,
+  type MealPlanningAgentSessionResult,
+  runMealPlanningAgentSession,
+} from "../agent/meal-planning-session"
 import {
   renderHouseholdContext,
   renderPlanningTimeContext,
   renderRevisionFeedback,
+  renderWeekContextExtractionPrompt,
 } from "../meal-planning/agent-workflow"
 import { loadScenarios } from "../meal-planning/corpus/load"
+import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
 import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type {
   FeedbackItem,
@@ -26,6 +33,7 @@ import {
   type ToolProviderClient,
 } from "../providers"
 import { messages, parseLLMJson, ToolProviderHttpError, toolDeclaration } from "../providers/llm"
+import { stripNullProperties } from "../runtime/tool-runner"
 
 declare const process: { env: Record<string, string | undefined>; pid: number }
 
@@ -776,6 +784,40 @@ async function runLiveCatalogExpansion(parentDishNames: string[]) {
   }
 }
 
+async function runLiveWeekContextExtraction(requestText: string) {
+  const provider = createToolProvider(apiKey, providerName, model, PROVIDER_MAX_RETRIES, {
+    requestTimeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+  })
+  const response = await provider.generate({
+    messages: [
+      {
+        role: "system",
+        text: renderWeekContextExtractionPrompt({ schedule: SEED_SCHEDULE }),
+      },
+      { role: "user", text: requestText },
+    ],
+    tools: [
+      {
+        name: "extract_week_context",
+        description: "Extract only parent-supplied inventory and calendar facts.",
+        input: weekContextExtractionInputSchema,
+        output: acceptedOutputSchema,
+        privacy: "private",
+        batching: "isolated",
+        handler: async () => ({ accepted: true as const }),
+      },
+    ],
+    toolChoice: "required",
+    reasoning: "disabled",
+  })
+  const call = response.toolCalls?.find((candidate) => candidate.name === "extract_week_context")
+  const parsed = weekContextExtractionInputSchema.safeParse(stripNullProperties(call?.input))
+  expect(parsed.success, `provider must return a valid extraction tool call: ${JSON.stringify(call?.input)}`).toBe(true)
+  if (!parsed.success)
+    throw new Error(`provider returned an invalid extraction tool call: ${JSON.stringify(parsed.error.issues)}`)
+  return parsed.data
+}
+
 /** Cheap one-shot text generator used by the LLM-as-a-judge checks. */
 const generator = createGenerator(apiKey, providerName, model, PROVIDER_MAX_RETRIES)
 
@@ -823,6 +865,14 @@ function assertEstablishedCatalog(
     expect(definition.vegetarian).toBe(true)
     expect(definition.principalIngredients.length).toBeGreaterThan(0)
     expect(definition.requiredIngredients.length).toBeGreaterThan(0)
+    for (const ingredient of [
+      ...definition.principalIngredients,
+      ...definition.requiredIngredients,
+      ...definition.optionalIngredients,
+      ...(definition.allowedIngredientChoices ?? []),
+    ]) {
+      expect(ingredient).toBe(normalizeIngredient(ingredient))
+    }
     expect(definition.typicalCookMinutes).toSatisfy(Number.isInteger)
     expect(definition.typicalCookMinutes).toBeGreaterThanOrEqual(0)
     expect(["none", "optional", "required"]).toContain(definition.priorNightPrep)
@@ -838,6 +888,35 @@ function assertEstablishedCatalog(
 }
 
 describe("DeepSeek agent-centered meal-planning live contract", () => {
+  it("keeps the singular-ingredient self-check in the planner contract", () => {
+    expect(MEAL_PLANNING_AGENT_PROMPT).toContain("singular canonical form")
+  })
+  contractIt("X01: extracts parent-supplied inventory without inferring pantry items", async () => {
+    const result = await runLiveWeekContextExtraction("I have carrots, apples, and paneer, but no eggplant.")
+    expect(result.exceptionAdds).toEqual([])
+    expect(result.inventoryChanges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: expect.stringMatching(/carrot/i), status: "available" }),
+        expect.objectContaining({ name: expect.stringMatching(/apple/i), status: "available" }),
+        expect.objectContaining({ name: expect.stringMatching(/paneer/i), status: "available" }),
+        expect.objectContaining({ name: expect.stringMatching(/eggplant/i), status: "unavailable" }),
+      ]),
+    )
+  })
+
+  contractIt("X02: extracts explicit holiday and half-day exceptions", async () => {
+    const result = await runLiveWeekContextExtraction(
+      "Next week Monday is a school holiday. Friday is a half-day with no school lunch.",
+    )
+    expect(result.inventoryChanges).toEqual([])
+    expect(result.exceptionAdds).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "school_closed", appliesTo: expect.objectContaining({ day: "Mon" }) }),
+        expect.objectContaining({ kind: "half_day", appliesTo: { day: "Fri", mealSlots: ["school-lunch"] } }),
+      ]),
+    )
+  })
+
   contractIt("M01: parent repertoire expands into five validated established definitions", async () => {
     const parentDishNames = ["vegetable paratha", "poha", "idli chutney", "lemon rice", "roasted chana"]
     const result = await runLiveCatalogExpansion(parentDishNames)

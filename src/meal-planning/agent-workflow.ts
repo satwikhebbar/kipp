@@ -11,6 +11,7 @@ import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../cor
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage, type ToolProviderRequestEvent } from "../providers"
 import { logRuntime } from "../runtime/logging"
+import { stripNullProperties } from "../runtime/tool-runner"
 import { computeCoverageSet } from "./coverage"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -47,7 +48,11 @@ const MILLISECONDS_PER_SECOND = 1_000
 const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "openai/gpt-5.6-luna"
-const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
+const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
+
+export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext, "schedule">): string {
+  return `${WEEK_CONTEXT_EXTRACTION_PROMPT}\nSchedule days: ${context.schedule.days.join(", ")}\nMeal slots: ${context.schedule.slots.map((slot) => slot.id).join(", ")}`
+}
 
 export interface MealPlanningLiveEvent {
   interactionKind?: WorkflowInteractionKind
@@ -284,7 +289,7 @@ async function extractInitialWeekContext(
       )
       const response = await provider.generate({
         messages: [
-          { role: "system", text: WEEK_CONTEXT_EXTRACTION_PROMPT },
+          { role: "system", text: renderWeekContextExtractionPrompt(context) },
           { role: "user", text: event.payload.requestText || "/mealplan" },
         ],
         tools: [
@@ -302,10 +307,37 @@ async function extractInitialWeekContext(
         reasoning: "disabled",
       })
       const call = response.toolCalls?.find((candidate) => candidate.name === "extract_week_context")
-      const parsed = weekContextExtractionInputSchema.safeParse(call?.input)
-      if (!parsed.success) return context
-      if (parsed.data.inventoryChanges.length === 0 && parsed.data.exceptionAdds.length === 0) return context
+      const parsed = weekContextExtractionInputSchema.safeParse(stripNullProperties(call?.input))
+      if (!parsed.success) {
+        logRuntime(env, {
+          workflow: event.instanceId,
+          event: "meal-planning-context-extraction",
+          outcome: "failed",
+          failureCategory: "invalid-output",
+          details: { phase: "parsed", toolCallPresent: Boolean(call) },
+        })
+        return context
+      }
+      const inventoryChanges = parsed.data.inventoryChanges.map(({ name, status }) => `${name}:${status}`).join(",")
+      const exceptionAdds = parsed.data.exceptionAdds
+        .map((exception) => `${exception.kind}:${JSON.stringify(exception.appliesTo ?? {})}`)
+        .join(",")
+      if (parsed.data.inventoryChanges.length === 0 && parsed.data.exceptionAdds.length === 0) {
+        logRuntime(env, {
+          workflow: event.instanceId,
+          event: "meal-planning-context-extraction",
+          outcome: "succeeded",
+          details: { applied: false, inventoryChanges, exceptionAdds },
+        })
+        return context
+      }
       const update = resolveWeekContextUpdate(context, { ...parsed.data, replan: false })
+      logRuntime(env, {
+        workflow: event.instanceId,
+        event: "meal-planning-context-extraction",
+        outcome: "succeeded",
+        details: { applied: true, inventoryChanges, exceptionAdds },
+      })
       return { ...context, weeklyInventory: update.weeklyInventory, weeklyExceptions: update.weeklyExceptions }
     } catch (error) {
       logRuntime(env, {
