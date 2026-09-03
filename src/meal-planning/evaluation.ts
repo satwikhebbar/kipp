@@ -1,5 +1,6 @@
 import { computeCoverageSet } from "./coverage"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "./hydration"
+import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   MealCell,
   MealGrid,
@@ -147,14 +148,16 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     refsByDay.set(ref.day, list)
   }
 
-  const clearExclusionTokens = new Set(profile.dietaryExclusions)
+  const clearExclusionTokens = new Set(profile.dietaryExclusions.map(normalizeIngredient))
   const unavailableItems = new Set(
-    weeklyInventory.items.filter((item) => item.status === "unavailable").map((item) => item.name),
+    weeklyInventory.items.filter((item) => item.status === "unavailable").map((item) => normalizeIngredient(item.name)),
   )
   const knownItems = new Set([
-    ...weeklyInventory.items.filter((item) => item.status !== "unavailable").map((item) => item.name),
-    ...profile.pantryBaseline,
-    ...candidate.easyBuys,
+    ...weeklyInventory.items
+      .filter((item) => item.status !== "unavailable")
+      .map((item) => normalizeIngredient(item.name)),
+    ...profile.pantryBaseline.map(normalizeIngredient),
+    ...candidate.easyBuys.map(normalizeIngredient),
   ])
   const recentDishes = new Set(
     Object.values(context.recentPlan ?? {}).flatMap((slots) => Object.values(slots).map((cell) => cell.dish)),
@@ -181,7 +184,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       failures.push({ code: "extra_slot_for_closed_day", day, slot: slotId, detail: `cell on closed day ${day}` })
     }
     for (const token of cell.items) {
-      if (clearExclusionTokens.has(token)) {
+      if (clearExclusionTokens.has(normalizeIngredient(token))) {
         failures.push({ code: "hard_exclusion", day, slot: slotId, detail: `ingredient "${token}" is excluded` })
       }
     }
@@ -211,14 +214,14 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       })
     }
     for (const item of cell.items) {
-      if (unavailableItems.has(item)) {
+      if (unavailableItems.has(normalizeIngredient(item))) {
         failures.push({
           code: "inventory_item_unavailable",
           day,
           slot: slotId,
           detail: `item "${item}" is unavailable`,
         })
-      } else if (!knownItems.has(item)) {
+      } else if (!knownItems.has(normalizeIngredient(item))) {
         failures.push({
           code: "inventory_item_unknown",
           day,
@@ -325,7 +328,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     const urgentIndex = dayIndex.get(urgentUseByDay) ?? schedule.days.length
     for (const item of weeklyInventory.items.filter((entry) => entry.useNote === "use early")) {
       const useIndexes = refs
-        .filter((ref) => ref.cell.items.includes(item.name))
+        .filter((ref) => ref.cell.items.some((value) => normalizeIngredient(value) === normalizeIngredient(item.name)))
         .map((ref) => dayIndex.get(ref.day) ?? Number.POSITIVE_INFINITY)
       const firstUseIndex = Math.min(...useIndexes)
       if (firstUseIndex > urgentIndex) {
@@ -392,7 +395,9 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       .filter((item) => item.useNote === "use early")
       .flatMap((item) =>
         refs
-          .filter((ref) => ref.cell.items.includes(item.name))
+          .filter((ref) =>
+            ref.cell.items.some((value) => normalizeIngredient(value) === normalizeIngredient(item.name)),
+          )
           .map((ref) => dayIndex.get(ref.day) ?? Number.POSITIVE_INFINITY),
       )
     const earliest = Math.min(...useIndexes)

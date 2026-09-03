@@ -1,3 +1,4 @@
+import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   MealCell,
   MealDefinition,
@@ -11,16 +12,16 @@ import type {
   NewMealProposal,
 } from "./types"
 
-function normalized(value: string): string {
-  return value.trim().toLocaleLowerCase()
-}
-
 function definitionNames(definition: MealDefinition): string[] {
-  return [definition.name, ...(definition.aliases ?? [])].map(normalized)
+  return [definition.name, ...(definition.aliases ?? [])].map((value) => value.trim().toLocaleLowerCase())
 }
 
 function allowedChoices(definition: MealDefinition): Set<string> {
-  return new Set([...(definition.optionalIngredients ?? []), ...(definition.allowedIngredientChoices ?? [])])
+  return new Set(
+    [...(definition.optionalIngredients ?? []), ...(definition.allowedIngredientChoices ?? [])].map(
+      normalizeIngredient,
+    ),
+  )
 }
 
 function selectionUsesPrep(selection: MealSelection): boolean {
@@ -91,9 +92,11 @@ export function hydrateMealPlan(
     ...context.profile.pantryBaseline,
     ...selectionCandidate.easyBuys,
   ]
-  const availableIngredients = new Map(availableIngredientNames.map((name) => [normalized(name), name]))
+  const availableIngredients = new Map(availableIngredientNames.map((name) => [normalizeIngredient(name), name]))
   const unavailableIngredients = new Set(
-    context.weeklyInventory.items.filter((item) => item.status === "unavailable").map((item) => normalized(item.name)),
+    context.weeklyInventory.items
+      .filter((item) => item.status === "unavailable")
+      .map((item) => normalizeIngredient(item.name)),
   )
 
   for (const [day, selections] of Object.entries(selectionCandidate.grid)) {
@@ -134,7 +137,7 @@ export function hydrateMealPlan(
           continue
         }
         const invalid = validateProposal(selection.proposedMeal)
-        const name = normalized(selection.proposedMeal.name)
+        const name = selection.proposedMeal.name.trim().toLocaleLowerCase()
         if (invalid) {
           failures.push({ code: "invalid_new_meal", day, slot: slotId, detail: invalid })
           continue
@@ -158,7 +161,8 @@ export function hydrateMealPlan(
       const seenChoices = new Set<string>()
       const validChoices: string[] = []
       for (const choice of choices) {
-        if (seenChoices.has(choice) || !allowed.has(choice)) {
+        const choiceKey = normalizeIngredient(choice)
+        if (seenChoices.has(choiceKey) || !allowed.has(choiceKey)) {
           failures.push({
             code: "invalid_ingredient_choice",
             day,
@@ -168,21 +172,21 @@ export function hydrateMealPlan(
         } else {
           validChoices.push(choice)
         }
-        seenChoices.add(choice)
+        seenChoices.add(choiceKey)
       }
       const ingredients = [...definition.requiredIngredients, ...validChoices]
       const aliases = selectionAliases(selection)
       const aliasByTarget = new Map<string, string>()
       const usedSources = new Set<string>()
       for (const [source, target] of Object.entries(aliases)) {
-        const sourceKey = normalized(source)
-        const targetKey = normalized(target)
+        const sourceKey = normalizeIngredient(source)
+        const targetKey = normalizeIngredient(target)
         const availableSource = availableIngredients.get(sourceKey)
         if (
           !sourceKey ||
           !targetKey ||
           !availableSource ||
-          !ingredients.some((ingredient) => normalized(ingredient) === targetKey) ||
+          !ingredients.some((ingredient) => normalizeIngredient(ingredient) === targetKey) ||
           aliasByTarget.has(targetKey) ||
           usedSources.has(sourceKey)
         ) {
@@ -198,7 +202,7 @@ export function hydrateMealPlan(
         usedSources.add(sourceKey)
       }
       const resolvedIngredients = ingredients.map((ingredient) => {
-        const key = normalized(ingredient)
+        const key = normalizeIngredient(ingredient)
         const direct = availableIngredients.get(key)
         if (direct) return direct
         const aliased = aliasByTarget.get(key)

@@ -76,12 +76,24 @@
         "chana salad"
       ],
       "foodPreferences": {
-        "favourites": ["paratha", "banana"],
+        "favourites": [
+          "paratha",
+          "banana",
+          "roasted chana",
+          "apple",
+          "dates",
+          "orange",
+          "mixed seeds",
+          "pear",
+          "pomegranate",
+          "dry coconut",
+          "jaggery cubes"
+        ],
         "avoid": []
       },
       "allowNewFoods": false,
       "sensoryGuidelines": [],
-      "morningCookingBudgetMinutes": 35,
+      "morningCookingBudgetMinutes": 40,
       "priorNightPrepAllowed": false,
       "pantryBaseline": ["rice", "wheat flour", "oil", "spices", "moong dal", "ghee"]
     },
@@ -507,9 +519,9 @@
           },
           "Wed": {
             "breakfast": {
-              "dish": "paratha",
+              "dish": "upma",
               "vegetarian": true,
-              "items": ["wheat flour"],
+              "items": ["upma rava"],
               "cookMinutes": 15,
               "priorNightPrep": false
             },
@@ -666,7 +678,7 @@
         ],
         "measurements": {
           "dishRepeatCount": 1,
-          "dishRepeats": ["apple"]
+          "dishRepeats": ["upma"]
         }
       }
     }

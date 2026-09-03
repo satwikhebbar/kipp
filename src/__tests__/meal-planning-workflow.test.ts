@@ -1,6 +1,7 @@
 import type { WorkflowEvent } from "cloudflare:workers"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { mealPlanSelectionCandidateToWire, mealPlanSelectionPatchToWire } from "../agent/meal-planning"
+import { MEAL_PLANNING_AGENT_PROMPT } from "../agent/meal-planning-session"
 import type { Env } from "../core/types"
 import {
   type MealPlanningLiveEvent,
@@ -54,6 +55,12 @@ it("renders complete structured catalog facts for the planning agent", () => {
   expect(rendered).not.toContain(" | ")
   expect(rendered).toContain("Rajma, carrot (two carrots), paneer (unavailable)")
   expect(rendered).not.toContain("Rajma (available)")
+})
+
+it("requires the planner to self-check singular ingredient names", () => {
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain(
+    "confirm that every ingredient name you returned uses its singular canonical form",
+  )
 })
 
 it("renders scoped and unbound revision feedback without storage ids", () => {
@@ -316,10 +323,10 @@ function createMemoizingStep(events: MealPlanningLiveEvent[], endTime: number) {
   }
 }
 
-function mealEvent(invokedAtMs: number): WorkflowEvent<MealPlanningWorkflowParams> {
+function mealEvent(invokedAtMs: number, requestText = ""): WorkflowEvent<MealPlanningWorkflowParams> {
   return {
     instanceId: "wf-meal-1",
-    payload: { chatId: CHAT, telegramMessageId: 10, requestText: "", invokedAtMs },
+    payload: { chatId: CHAT, telegramMessageId: 10, requestText, invokedAtMs },
   } as unknown as WorkflowEvent<MealPlanningWorkflowParams>
 }
 
@@ -382,6 +389,72 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         interactionGroup: "meal-planning",
       }),
     )
+  })
+
+  it("applies extracted initial inventory before evaluating and persisting the plan", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    delete base.grid.Fri["school-lunch"]
+    const logSpy = vi.spyOn(console, "log")
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([
+        {
+          name: "extract_week_context",
+          input: {
+            inventoryChanges: [
+              { name: "carrots", status: "available" },
+              { name: "paneer", status: "unavailable" },
+            ],
+            exceptionAdds: [
+              {
+                kind: "half_day",
+                appliesTo: { day: "Fri", mealSlots: ["school-lunch"] },
+                instruction: "No school lunch on Friday.",
+              },
+            ],
+          },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(
+      makeEnv(namespace, d1),
+      mealEvent(invokedAtMs, "Plan this week. I have carrots and do not have paneer."),
+      step as never,
+    )
+
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.weeklyInventory.items).toEqual([
+      { name: "carrots", status: "available" },
+      { name: "paneer", status: "unavailable" },
+    ])
+    expect(active?.plan.weeklyExceptions.items).toEqual([
+      {
+        kind: "half_day",
+        appliesTo: { day: "Fri", mealSlots: ["school-lunch"] },
+        instruction: "No school lunch on Friday.",
+      },
+    ])
+    expect(deepseekBodies[1].messages.at(-1)?.content).toContain("Weekly inventory: carrots, paneer (unavailable)")
+    const extractionLog = logSpy.mock.calls
+      .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+      .find((line) => line.event === "meal-planning-context-extraction")
+    expect(extractionLog).toMatchObject({
+      outcome: "succeeded",
+      details: {
+        applied: true,
+        inventoryChanges: "carrots:available,paneer:unavailable",
+        exceptionAdds: 'half_day:{"day":"Fri","mealSlots":["school-lunch"]}',
+      },
+    })
   })
 
   it("adds a Mini App review button only after persisting its private-chat context", async () => {

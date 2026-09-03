@@ -123,5 +123,6 @@ describe("meal catalog expansion session", () => {
     expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("overnight soaking")
     expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("whole fruit")
     expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("raw vegetable salad")
+    expect(MEAL_CATALOG_EXPANSION_PROMPT).toContain("singular canonical form")
   })
 })
