@@ -21,11 +21,12 @@ replace the entire catalog with only the supplied names:
 pnpm exec tsx tools/expand-meal-catalog.mjs --replace "Aloo Paratha,Mooli Paratha"
 ```
 
-Use `--dry-run` to call and validate the provider without writing D1. To target
-production, export the production LLM credentials and enable `--production`:
+Use `--dry-run` to call and validate the provider without writing D1. The tool
+uses the same OpenRouter Luna model as the meal-planning workflow. To target
+production, export the production OpenRouter credential and enable `--production`:
 
 ```bash
-LLM_API_KEY="..." LLM_PROVIDER="deepseek" \
+OPENROUTER_API_KEY="..." \
   pnpm exec tsx tools/expand-meal-catalog.mjs --production "Aloo Paratha,Mooli Paratha"
 ```
 
