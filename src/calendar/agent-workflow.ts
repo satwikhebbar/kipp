@@ -80,6 +80,10 @@ export async function runAgentCenteredCalendarWorkflow(
   let retryUsed = false
   let editing = false
   let baseline: CalendarPlan | null = null
+  // A successful write is terminal for scheduling. If a workflow replay or a
+  // later Edit turn reaches the agent again and it fails, do not emit a
+  // contradictory pre-write "no decision" message.
+  let calendarWriteOccurred = false
 
   for (let turn = 0; turn < MAX_CALENDAR_INTERACTION_TURNS; turn++) {
     const currentAgentVersion = ++agentVersion
@@ -132,6 +136,7 @@ export async function runAgentCenteredCalendarWorkflow(
           sessionStep.session.calendarFailureRetryCount,
         )
       if (!sessionStep.session.completed || !sessionStep.session.terminal) {
+        if (calendarWriteOccurred) return
         await notify(
           env,
           step,
@@ -162,6 +167,7 @@ export async function runAgentCenteredCalendarWorkflow(
 
         const options = authorizedOptions(ledger, terminal.interaction.optionIds, currentAgentVersion)
         if (!options) {
+          if (calendarWriteOccurred) return
           logRuntime(env, {
             workflow: event.instanceId,
             event: "calendar-plan-authorization",
@@ -249,6 +255,7 @@ export async function runAgentCenteredCalendarWorkflow(
 
       const authorized = inspectCalendarPlan(ledger, terminal.planId, currentAgentVersion)
       if (!authorized.ok) {
+        if (calendarWriteOccurred) return
         await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION)
         return
       }
@@ -272,6 +279,7 @@ export async function runAgentCenteredCalendarWorkflow(
         return
       }
       const correction = await writePlanAndConfirm(env, step, event, consumed.plan, editing, ++interactionVersion, turn)
+      calendarWriteOccurred = true
       if (!correction) return
       interactionVersion++
       baseline = consumed.plan

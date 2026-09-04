@@ -462,6 +462,28 @@ describe("agent-centered CalendarWorkflow", () => {
     )
   })
 
+  it("does not send a no-decision fallback after a successful write when a later edit session fails", async () => {
+    queueReady(ONE_OFF)
+    mockGenerate.mockResolvedValue({ toolCalls: [], usage: {}, text: "I need more information." })
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-edit__" } },
+        { type: "event", payload: { text: "Move it to 8pm" } },
+      ),
+    )
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    const sentTexts = telegram.mock.calls.map(
+      ([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text,
+    )
+    expect(sentTexts).toContainEqual(expect.stringContaining("Added: Call Jamie"))
+    expect(sentTexts).not.toContain(
+      "The calendar agent didn't return a scheduling decision. Please retry your request.",
+    )
+  })
+
   it("compensates a newly created recurring parent when reconciliation fails", async () => {
     queueReady(RECURRING)
     mockReconcileManagedSeries.mockRejectedValueOnce(new Error("reconciliation failed"))
