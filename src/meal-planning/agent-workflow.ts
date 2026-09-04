@@ -772,7 +772,11 @@ async function runRevision(
   // still useful context for the follow-up replan, but it must not become a
   // normal cell-scope requirement: the deterministic removal of a closed day
   // is the requested change.
-  const feedbackItems = contextAlreadyUpdated ? [] : submission.items
+  // A Mini App batch is always plan feedback, even when the planner first
+  // applies a week-context fact (for example, an item going out of season).
+  // Keep those authoritative items in the follow-up evaluation so the
+  // requested cells cannot be silently dropped after the context update.
+  const feedbackItems = contextAlreadyUpdated && !feedbackBatch ? [] : submission.items
   const revisionBaseCandidate = contextAlreadyUpdated
     ? withoutClosedDays(
         active.version.candidate,
@@ -820,7 +824,12 @@ async function runRevision(
       await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-context`)
       return null
     }
-    if (!updatedContext.replan) {
+    // Standalone Telegram context facts may intentionally stop after the
+    // context update. Mini App submissions, and scoped Telegram feedback,
+    // still require a revision even when the model marks the context update
+    // itself as replan:false.
+    const feedbackRequiresRevision = Boolean(feedbackBatch) || submission.items.some((item) => item.scope)
+    if (!updatedContext.replan && !feedbackRequiresRevision) {
       if (feedbackBatch)
         await stepDo(step, `meal-planning-consume-mini-app-batch-${occurrence}`, () =>
           store.markFeedbackBatchConsumed(feedbackBatch.batchId, new Date().toISOString()),

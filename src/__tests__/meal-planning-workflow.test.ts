@@ -681,6 +681,19 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     stubNetwork([
       deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
       deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      // A planner may notice a week-context fact in the same Mini App batch
+      // and return replan:false. The workflow must still continue the
+      // feedback-driven revision after persisting that fact.
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: {
+            inventoryChanges: [{ name: "pear", status: "unavailable", useNote: "Out of season" }],
+            exceptionAdds: [],
+            replan: false,
+          },
+        },
+      ]),
       deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
       deepseekResponse([
         {
