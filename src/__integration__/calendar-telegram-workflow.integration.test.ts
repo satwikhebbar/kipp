@@ -16,6 +16,8 @@ const mockCreateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockUpdateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockReconcileManagedSeries = vitest.hoisted(() => vitest.fn())
 const mockDeleteManagedEvent = vitest.hoisted(() => vitest.fn())
+const mockFindConflictingEvents = vitest.hoisted(() => vitest.fn())
+const mockMoveExistingEvent = vitest.hoisted(() => vitest.fn())
 const MockGoogleCalendarError = vitest.hoisted(
   () =>
     class GoogleCalendarError extends Error {
@@ -36,6 +38,8 @@ vitest.mock("../integrations/google-calendar", () => ({
     updateManagedEvent: mockUpdateManagedEvent,
     reconcileManagedSeries: mockReconcileManagedSeries,
     deleteManagedEvent: mockDeleteManagedEvent,
+    findConflictingEvents: mockFindConflictingEvents,
+    moveExistingEvent: mockMoveExistingEvent,
   }),
   GoogleCalendarError: MockGoogleCalendarError,
 }))
@@ -323,6 +327,8 @@ describe("agent-centered Calendar Telegram integration", () => {
     mockUpdateManagedEvent.mockReset()
     mockReconcileManagedSeries.mockReset().mockResolvedValue(undefined)
     mockDeleteManagedEvent.mockReset().mockResolvedValue(undefined)
+    mockFindConflictingEvents.mockReset().mockResolvedValue([])
+    mockMoveExistingEvent.mockReset().mockResolvedValue({ ok: true })
   })
   afterEach(() => {
     vitest.useRealTimers()
@@ -536,7 +542,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const choiceIndex = await waitForMessageText(network, "safe alternative")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 2)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 3)), runtimeEnv)
     await waitForMessageText(network, "Cancelled")
     await run
 
@@ -938,5 +944,101 @@ describe("agent-centered Calendar Telegram integration", () => {
     await handleTelegramWebhook(callback("confirmation-edit", 10), runtimeEnv)
 
     expect(calendar.getReceivedEvents()).toHaveLength(1)
+  })
+
+  it("runs the full disclosure, reschedule, auto-create, and undo journey through Telegram", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    queueChoice(ONE_OFF)
+
+    await handleTelegramWebhook(message("/calendar Call Jamie on 2026-07-28 at 7pm"), runtimeEnv)
+    const run = startWorkflow(calendar, runtimeEnv)
+    const conflictIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, conflictIndex, 2)), runtimeEnv)
+    const disclosureIndex = await waitForMessageText(network, "occupied by", conflictIndex)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, disclosureIndex)), runtimeEnv)
+    const proposeIndex = await waitForMessageText(network, "Move Standup", disclosureIndex)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, proposeIndex)), runtimeEnv)
+    const confirmationIndex = await waitForMessageText(network, "Moved Standup", proposeIndex)
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, confirmationIndex)), runtimeEnv)
+    await waitForMessageText(network, "Restored Standup", confirmationIndex)
+    await run
+
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(2)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockDeleteManagedEvent).toHaveBeenCalledTimes(1)
+    expect(network.getState().answeredCallbacks.length).toBeGreaterThan(0)
+    expect(network.getState().telegramMessages.every((candidate) => !candidate.text?.includes("existing-1"))).toBe(true)
+  })
+
+  it("discloses a recurring conflict through Telegram without offering a reschedule action", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const router = createFakeInteractionRouter()
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
+    mockBusyIntervals.mockResolvedValue(FIRST_CONFLICT)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "series-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice(RECURRING)
+
+    await handleTelegramWebhook(
+      message("/calendar Weekly review every Tuesday at 7pm starting 2026-07-28 for 3 occurrences"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const choiceIndex = await waitForMessageText(network, "safe alternative")
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 2)), runtimeEnv)
+    const disclosureIndex = await waitForMessageText(network, "occupied by", choiceIndex)
+    const disclosure = network.getState().telegramMessages[disclosureIndex]
+    expect(disclosure?.text).toContain("Standup (19:00–19:30)")
+    const keyboard = disclosure?.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>>
+    const labels = keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    await waitForWorkflowWait(calendar)
+    await handleTelegramWebhook(callback(callbackToken(network, disclosureIndex, 1)), runtimeEnv)
+    await waitForMessageText(network, "Cancelled", disclosureIndex)
+    await run
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      "Asia/Kolkata",
+    )
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(network.getState().telegramMessages.every((candidate) => !candidate.text?.includes("series-1"))).toBe(true)
   })
 })

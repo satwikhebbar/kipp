@@ -3,6 +3,7 @@ import { TokenVaultDO } from "../core/token-vault"
 import { createTokenVault } from "../core/token-vault-client"
 import type { Env } from "../core/types"
 import { createGoogleCalendarClient, type GoogleCalendarError } from "../integrations/google-calendar"
+import { HTTP_STATUS } from "../runtime/http"
 
 const ONE_HOUR_IN_SECONDS = 60 * 60
 const EVENT = {
@@ -551,5 +552,317 @@ describe("Google Calendar client", () => {
       kind: "authorization",
       status,
     } satisfies Partial<GoogleCalendarError>)
+  })
+
+  it("finds only events overlapping the requested interval and classifies each as movable", async () => {
+    const events = {
+      items: [
+        {
+          id: "single",
+          summary: "Call Jamie",
+          etag: "etag-1",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+          description: "must not escape",
+        },
+        {
+          id: "series",
+          summary: "Standup",
+          etag: "etag-2",
+          recurrence: ["RRULE:FREQ=WEEKLY"],
+          start: { dateTime: "2026-07-28T13:45:00.000Z" },
+          end: { dateTime: "2026-07-28T14:15:00.000Z" },
+        },
+        {
+          id: "instance",
+          summary: "Instance",
+          etag: "etag-3",
+          originalStartTime: { dateTime: "2026-07-28T13:30:00.000Z" },
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        },
+        {
+          id: "all-day",
+          summary: "Holiday",
+          etag: "etag-4",
+          start: { date: "2026-07-28" },
+          end: { date: "2026-07-29" },
+        },
+        {
+          id: "outside",
+          summary: "Elsewhere",
+          etag: "etag-5",
+          start: { dateTime: "2026-07-28T16:00:00.000Z" },
+          end: { dateTime: "2026-07-28T16:30:00.000Z" },
+        },
+        {
+          id: "no-etag",
+          summary: "Cannot move",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        },
+      ],
+    }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(200, events)))
+
+    const result = await createGoogleCalendarClient(await environment()).findConflictingEvents(
+      "2026-07-28T00:00:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-28T13:30:00.000Z",
+      "2026-07-28T14:00:00.000Z",
+      "UTC",
+    )
+
+    expect(result.map(({ id, movable, etag }) => ({ id, movable, etag }))).toEqual([
+      { id: "single", movable: true, etag: "etag-1" },
+      { id: "series", movable: false, etag: "etag-2" },
+      { id: "instance", movable: false, etag: "etag-3" },
+      { id: "all-day", movable: false, etag: "etag-4" },
+      { id: "no-etag", movable: false, etag: "" },
+    ])
+    expect(result.every(({ title }) => title)).toBe(true)
+    expect(result.some((item) => "description" in item)).toBe(false)
+  })
+
+  it("treats an all-day date as a local-calendar day and blocks both sides of local midnight", async () => {
+    const allDay = {
+      items: [
+        { id: "holiday", summary: "Holiday", etag: "etag", start: { date: "2026-07-28" }, end: { date: "2026-07-29" } },
+      ],
+    }
+    const fetch = vi.fn().mockImplementation(async () => response(200, allDay))
+    vi.stubGlobal("fetch", fetch)
+    const client = createGoogleCalendarClient(await environment())
+
+    // 00:15 Asia/Kolkata is 2026-07-27T18:45:00.000Z; the all-day local day 07-28 starts 2026-07-27T18:30:00Z.
+    const afterLocalMidnight = await client.findConflictingEvents(
+      "2026-07-27T18:30:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-27T18:45:00.000Z",
+      "2026-07-27T19:00:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(afterLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
+
+    // 23:45 Asia/Kolkata is 2026-07-28T18:15:00.000Z; the all-day local day 07-28 ends 2026-07-28T18:30:00Z.
+    const beforeLocalMidnight = await client.findConflictingEvents(
+      "2026-07-27T18:30:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-28T18:15:00.000Z",
+      "2026-07-28T18:30:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(beforeLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
+
+    // 00:15 Asia/Kolkata on 07-29 is 2026-07-28T18:45:00.000Z, just past the local day 07-28 (ends 18:30Z).
+    const afterLocalMidnightNextDay = await client.findConflictingEvents(
+      "2026-07-27T18:30:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-28T18:45:00.000Z",
+      "2026-07-28T19:00:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(afterLocalMidnightNextDay.map(({ id }) => id)).toEqual([])
+  })
+
+  it("pages the conflicting-events read and propagates the page token", async () => {
+    const first = {
+      items: [
+        {
+          id: "event-1",
+          summary: "One",
+          etag: "etag-1",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        },
+      ],
+      nextPageToken: "page-2",
+    }
+    const second = {
+      items: [
+        {
+          id: "event-2",
+          summary: "Two",
+          etag: "etag-2",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        },
+      ],
+    }
+    const fetch = vi.fn().mockResolvedValueOnce(response(200, first)).mockResolvedValueOnce(response(200, second))
+    vi.stubGlobal("fetch", fetch)
+
+    const result = await createGoogleCalendarClient(await environment()).findConflictingEvents(
+      "2026-07-28T00:00:00.000Z",
+      "2026-07-29T00:00:00.000Z",
+      "2026-07-28T13:30:00.000Z",
+      "2026-07-28T14:00:00.000Z",
+      "UTC",
+    )
+
+    expect(result.map(({ id }) => id)).toEqual(["event-1", "event-2"])
+    expect(fetch.mock.calls[0][0]).not.toContain("pageToken")
+    expect(fetch.mock.calls[1][0]).toContain("pageToken=page-2")
+  })
+
+  it("rejects conflicting-events ranges longer than 31 days before making a request", async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).findConflictingEvents(
+        "2026-07-01T00:00:00.000Z",
+        "2026-08-02T00:00:00.000Z",
+        "2026-07-28T13:30:00.000Z",
+        "2026-07-28T14:00:00.000Z",
+        "UTC",
+      ),
+    ).rejects.toMatchObject({ kind: "permanent" })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it("patches only start/end with If-Match and retains the event timezone", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, {
+          id: "single",
+          etag: "etag-1",
+          start: { dateTime: "2026-07-28T13:30:00.000Z", timeZone: "Asia/Kolkata" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z", timeZone: "Asia/Kolkata" },
+        }),
+      )
+      .mockResolvedValueOnce(response(200))
+    vi.stubGlobal("fetch", fetch)
+
+    const result = await createGoogleCalendarClient(await environment()).moveExistingEvent(
+      "single",
+      "2026-07-28T15:00:00.000Z",
+      "2026-07-28T15:30:00.000Z",
+    )
+
+    expect(result).toEqual({ ok: true })
+    const [url, init] = fetch.mock.calls[1] as [string, RequestInit]
+    expect(url).toContain("/events/single")
+    expect(init.method).toBe("PATCH")
+    expect(init.headers).toMatchObject({ "If-Match": "etag-1" })
+    expect(JSON.parse(init.body as string)).toEqual({
+      start: { dateTime: "2026-07-28T15:00:00.000Z", timeZone: "Asia/Kolkata" },
+      end: { dateTime: "2026-07-28T15:30:00.000Z", timeZone: "Asia/Kolkata" },
+    })
+  })
+
+  it("reports a missing event on the guarded patch as not-found", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, {
+          id: "single",
+          etag: "etag-1",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        }),
+      )
+      .mockResolvedValueOnce(response(404))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: false, reason: "not-found" })
+  })
+
+  it("treats a moved-away read as not-found without patching", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(404)))
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: false, reason: "not-found" })
+  })
+
+  it.each([
+    [HTTP_STATUS.PRECONDITION_FAILED, "precondition-failed"],
+    [HTTP_STATUS.UNAUTHORIZED, "authorization"],
+    [HTTP_STATUS.FORBIDDEN, "authorization"],
+  ] as const)("classifies guarded-patch status %i as %s", async (status, reason) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, {
+          id: "single",
+          etag: "etag-1",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        }),
+      )
+      .mockResolvedValueOnce(response(status))
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: false, reason })
+  })
+
+  it("verifies by re-read when the guarded patch fails transiently and the event already moved", async () => {
+    const original = response(200, {
+      id: "single",
+      etag: "etag-1",
+      start: { dateTime: "2026-07-28T13:30:00.000Z" },
+      end: { dateTime: "2026-07-28T14:00:00.000Z" },
+    })
+    const moved = response(200, {
+      id: "single",
+      etag: "etag-2",
+      start: { dateTime: "2026-07-28T15:00:00.000Z" },
+      end: { dateTime: "2026-07-28T15:30:00.000Z" },
+    })
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(original)
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockResolvedValueOnce(moved)
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: true })
+    expect(fetch).toHaveBeenCalledTimes(5)
+  })
+
+  it("treats an already-moved event as a completed move without a second patch", async () => {
+    const read = response(200, {
+      id: "single",
+      etag: "etag-1",
+      start: { dateTime: "2026-07-28T15:00:00.000Z" },
+      end: { dateTime: "2026-07-28T15:30:00.000Z" },
+    })
+    const fetch = vi.fn().mockResolvedValue(read)
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: true })
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 })

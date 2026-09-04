@@ -16,6 +16,8 @@ const mockCreateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockUpdateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockReconcileManagedSeries = vitest.hoisted(() => vitest.fn())
 const mockDeleteManagedEvent = vitest.hoisted(() => vitest.fn())
+const mockFindConflictingEvents = vitest.hoisted(() => vitest.fn())
+const mockMoveExistingEvent = vitest.hoisted(() => vitest.fn())
 const MockGoogleCalendarError = vitest.hoisted(
   () =>
     class GoogleCalendarError extends Error {
@@ -36,6 +38,8 @@ vitest.mock("../integrations/google-calendar", () => ({
     updateManagedEvent: mockUpdateManagedEvent,
     reconcileManagedSeries: mockReconcileManagedSeries,
     deleteManagedEvent: mockDeleteManagedEvent,
+    findConflictingEvents: mockFindConflictingEvents,
+    moveExistingEvent: mockMoveExistingEvent,
   }),
   GoogleCalendarError: MockGoogleCalendarError,
 }))
@@ -195,6 +199,8 @@ describe("agent-centered CalendarWorkflow", () => {
     mockUpdateManagedEvent.mockReset()
     mockReconcileManagedSeries.mockReset().mockResolvedValue(undefined)
     mockDeleteManagedEvent.mockReset().mockResolvedValue(undefined)
+    mockFindConflictingEvents.mockReset().mockResolvedValue([])
+    mockMoveExistingEvent.mockReset().mockResolvedValue({ ok: true })
     telegramMock()
   })
   afterEach(() => {
@@ -400,7 +406,7 @@ describe("agent-centered CalendarWorkflow", () => {
     }
     const labels = body.reply_markup.inline_keyboard[0]?.map((button) => button.text)
     expect(body.text).not.toContain("Option ID")
-    expect(labels).toEqual(["Use adjustments", "Try another time", "Cancel"])
+    expect(labels).toEqual(["Use adjustments", "Try another time", "Why this busy?", "Cancel"])
     expect(labels?.every((label) => label.length <= 16)).toBe(true)
   })
 
@@ -561,6 +567,327 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(telegram).toHaveBeenLastCalledWith(
       expect.any(String),
       expect.objectContaining({ body: expect.stringContaining("start a new request") }),
+    )
+  })
+
+  it("discloses a conflict, moves one existing event, auto-creates the request, and fully undoes", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    queueChoice(ONE_OFF, "7pm conflicts. I can offer a safe alternative.")
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+        { type: "event", payload: { text: "__calendar-conflict-undo__" } },
+      ),
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(1)
+    expect(mockMoveExistingEvent.mock.calls[0]).toEqual([
+      "existing-1",
+      "2026-07-28T14:15:00.000Z",
+      "2026-07-28T14:45:00.000Z",
+    ])
+    expect(mockMoveExistingEvent.mock.calls[1]).toEqual([
+      "existing-1",
+      "2026-07-28T13:30:00.000Z",
+      "2026-07-28T14:00:00.000Z",
+    ])
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent.mock.calls[0]?.[0]).toMatchObject({
+      summary: "Call Jamie",
+      start: "2026-07-28T13:30:00.000Z",
+      end: "2026-07-28T14:00:00.000Z",
+    })
+    expect(mockDeleteManagedEvent).toHaveBeenCalledWith(mockCreateManagedEvent.mock.calls[0]?.[0].id)
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("Standup (19:00–19:30)"))).toBe(true)
+    expect(texts.some((text) => text.includes("Moved Standup"))).toBe(true)
+    expect(texts.some((text) => text.includes("Restored Standup"))).toBe(true)
+    expect(texts.every((text) => !text.includes("existing-1"))).toBe(true)
+  })
+
+  it("discloses a recurring conflict as disclosure-only and never offers a reschedule action", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "series-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice(RECURRING)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+      "Weekly review every Tuesday at 7pm for 3 occurrences",
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(1)
+    expect(mockFindConflictingEvents).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      "Asia/Kolkata",
+    )
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    const messages = telegram.mock.calls.map(
+      ([, init]) =>
+        JSON.parse((init as RequestInit).body as string) as {
+          text: string
+          reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> }
+        },
+    )
+    const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
+    expect(disclosure?.text).toContain("Standup (19:00–19:30)")
+    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    expect(messages.some((candidate) => candidate.text.includes("Cancelled"))).toBe(true)
+    expect(messages.every((candidate) => !candidate.text.includes("series-1"))).toBe(true)
+  })
+
+  it("discloses a later recurring occurrence conflict instead of an availability change", async () => {
+    const conflict = [{ start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "series-2",
+        title: "Standup",
+        start: "2026-08-04T13:30:00.000Z",
+        end: "2026-08-04T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice(RECURRING)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+      "Weekly review every Tuesday at 7pm for 3 occurrences",
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(1)
+    expect(mockFindConflictingEvents).toHaveBeenCalledWith(
+      "2026-08-03T18:30:00.000Z",
+      "2026-08-04T18:30:00.000Z",
+      "2026-08-04T13:30:00.000Z",
+      "2026-08-04T14:00:00.000Z",
+      "Asia/Kolkata",
+    )
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    const messages = telegram.mock.calls.map(
+      ([, init]) =>
+        JSON.parse((init as RequestInit).body as string) as {
+          text: string
+          reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> }
+        },
+    )
+    const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
+    expect(disclosure?.text).toContain("Standup (19:00–19:30)")
+    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    expect(messages.some((candidate) => candidate.text.includes("Availability changed"))).toBe(false)
+  })
+
+  it("discloses multiple conflicting recurring occurrences as one dated aggregate", async () => {
+    const conflict = [
+      { start: "2026-08-04T13:30:00.000Z", end: "2026-08-04T14:00:00.000Z" },
+      { start: "2026-08-18T13:30:00.000Z", end: "2026-08-18T14:00:00.000Z" },
+    ]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValueOnce([
+      {
+        id: "series-a",
+        title: "Standup",
+        start: "2026-08-04T13:30:00.000Z",
+        end: "2026-08-04T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    mockFindConflictingEvents.mockResolvedValueOnce([
+      {
+        id: "series-b",
+        title: "Retro",
+        start: "2026-08-18T13:30:00.000Z",
+        end: "2026-08-18T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-series",
+        movable: false,
+      },
+    ])
+    queueChoice({
+      ...RECURRING,
+      proposal: { ...RECURRING.proposal, end: { mode: "count" as const, occurrences: 5 } },
+    })
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+      "Weekly review every Tuesday at 7pm for 5 occurrences",
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(2)
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    const messages = telegram.mock.calls.map(
+      ([, init]) =>
+        JSON.parse((init as RequestInit).body as string) as {
+          text: string
+          reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> }
+        },
+    )
+    const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
+    expect(disclosure?.text).toContain("Standup (2026-08-04 19:00–19:30)")
+    expect(disclosure?.text).toContain("Retro (2026-08-18 19:00–19:30)")
+    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    expect(labels).toEqual(["Try another time", "Cancel"])
+    expect(messages.every((candidate) => !candidate.text.includes("series-a"))).toBe(true)
+    expect(messages.every((candidate) => !candidate.text.includes("series-b"))).toBe(true)
+  })
+
+  it("discloses non-movable events without a reschedule action and cancels cleanly", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "all-day-1",
+        title: "Holiday",
+        start: "2026-07-28",
+        end: "2026-07-29",
+        allDay: true,
+        etag: "etag-all",
+        movable: false,
+      },
+    ])
+    queueChoice(ONE_OFF)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+    )
+
+    expect(mockFindConflictingEvents).toHaveBeenCalledTimes(1)
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("Holiday (all day)"))).toBe(true)
+    expect(texts.some((text) => text.includes("Cancelled"))).toBe(true)
+    expect(texts.some((text) => text.includes("existing-1") || text.includes("all-day-1"))).toBe(false)
+  })
+
+  it("compensates when the auto-created request fails after the move verified", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    mockCreateManagedEvent.mockRejectedValueOnce(new MockGoogleCalendarError("create failed", "permanent"))
+    queueChoice(ONE_OFF)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+      ),
+    )
+
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(2)
+    expect(mockMoveExistingEvent.mock.calls[1]).toEqual([
+      "existing-1",
+      "2026-07-28T13:30:00.000Z",
+      "2026-07-28T14:00:00.000Z",
+    ])
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("couldn't create your block"))).toBe(true)
+  })
+
+  it("surfaces a safe availability-changed outcome on a 412 precondition-failed move", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValue(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    mockMoveExistingEvent.mockResolvedValueOnce({ ok: false, reason: "precondition-failed" })
+    queueChoice(ONE_OFF)
+    queueQuestion("Availability changed. Please choose another time.", ["no_available_time"])
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+        { type: "timeout" },
+      ),
+    )
+
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(1)
+    expect(mockGenerate.mock.calls[2]?.[0].messages).toContainEqual(
+      expect.objectContaining({ role: "system", text: expect.stringContaining("availability changed") }),
     )
   })
 })
