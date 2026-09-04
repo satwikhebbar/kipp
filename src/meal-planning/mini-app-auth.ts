@@ -27,12 +27,12 @@ export class MiniAppAuthError extends Error {
   }
 }
 
-/** Internal helper. */
+/** Hex. */
 function hex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(HEX_RADIX).padStart(HEX_BYTE_WIDTH, "0")).join("")
 }
 
-/** Internal helper. */
+/** From hex. */
 function fromHex(value: string): Uint8Array | null {
   if (!/^[0-9a-f]{64}$/i.test(value)) return null
   const result = new Uint8Array(SHA256_BYTE_LENGTH)
@@ -44,13 +44,13 @@ function fromHex(value: string): Uint8Array | null {
   return result
 }
 
-/** Internal helper. */
+/** Hmac. */
 async function hmac(keyBytes: Uint8Array, message: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message)))
 }
 
-/** Internal helper. */
+/** Equal bytes. */
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   if (left.length !== right.length) return false
   let difference = 0
@@ -96,17 +96,17 @@ export async function verifyTelegramInitData(
   return { userId: String(user.id), authDate, verifiedHash: hashValue.toLowerCase() }
 }
 
-/** Internal helper. */
+/** Sha256. */
 async function sha256(value: string): Promise<string> {
   return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))))
 }
 
-/** Internal helper. */
+/** Random token. */
 function randomToken(): string {
   return base64urlEncode(crypto.getRandomValues(new Uint8Array(SESSION_TOKEN_BYTES)))
 }
 
-/** Internal helper. */
+/** Authenticate mini app. */
 export async function authenticateMiniApp(
   rawInitData: string,
   env: Pick<Env, "TELEGRAM_BOT_TOKEN" | "TELEGRAM_ALLOWED_USER_ID" | "MEAL_PLANNING_DB">,
@@ -138,7 +138,7 @@ export async function authenticateMiniApp(
   return { token, session, context }
 }
 
-/** Internal helper. */
+/** Read mini app session. */
 export async function readMiniAppSession(
   authorization: string | undefined,
   env: Pick<Env, "MEAL_PLANNING_DB">,
