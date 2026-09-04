@@ -51,6 +51,7 @@ const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "openai/gpt-5.6-luna"
 const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and the planner will treat school-lunch as the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
+/** Internal helper. */
 export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext, "schedule">): string {
   return `${WEEK_CONTEXT_EXTRACTION_PROMPT}\nSchedule days: ${context.schedule.days.join(", ")}\nMeal slots: ${context.schedule.slots.map((slot) => slot.id).join(", ")}`
 }
@@ -78,6 +79,7 @@ type PlanningOutcome =
     }
   | { kind: "abandoned" }
 
+/** Internal helper. */
 function renderMealDefinition(meal: MealDefinition): string {
   return JSON.stringify({
     id: meal.id,
@@ -91,6 +93,7 @@ function renderMealDefinition(meal: MealDefinition): string {
   })
 }
 
+/** Internal helper. */
 function renderInventoryItem(item: MealPlanContext["weeklyInventory"]["items"][number]): string {
   const annotations = [item.status === "available" ? undefined : item.status, item.quantityNote, item.useNote].filter(
     (value): value is string => Boolean(value),
@@ -274,6 +277,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
   await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
 }
 
+/** Internal helper. */
 async function extractInitialWeekContext(
   env: Env,
   step: WorkflowStep,
@@ -710,6 +714,7 @@ async function liveWeekLoop(
   }
 }
 
+/** Internal helper. */
 async function notifyMiniAppBatchTerminal(
   env: Env,
   step: WorkflowStep,
@@ -726,6 +731,7 @@ async function notifyMiniAppBatchTerminal(
   if (claimed) await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-mini-app-stale-${iteration}`)
 }
 
+/** Internal helper. */
 async function failMiniAppBatch(
   env: Env,
   step: WorkflowStep,
@@ -1017,10 +1023,12 @@ function isNoChangeCandidate(submitted: MealPlanCandidate, base: MealPlanCandida
   return true
 }
 
+/** Internal helper. */
 export function transcriptEnabled(env: Pick<Env, "LLM_DEBUG_TRANSCRIPT" | "DEPLOYMENT_ENV">): boolean {
   return env.LLM_DEBUG_TRANSCRIPT?.trim().toLowerCase() === "true" && env.DEPLOYMENT_ENV === "development"
 }
 
+/** Internal helper. */
 function logAgentTurnStart(
   env: Env,
   workflow: string,
@@ -1035,6 +1043,7 @@ function logAgentTurnStart(
   })
 }
 
+/** Internal helper. */
 function logAgentTurn(
   env: Env,
   workflow: string,
@@ -1063,6 +1072,7 @@ function logAgentTurn(
   )
 }
 
+/** Internal helper. */
 function logAgentTurnFailure(env: Env, workflow: string, turn: number, durationMs: number, error: unknown): void {
   logRuntime(env, {
     workflow,
@@ -1074,6 +1084,7 @@ function logAgentTurnFailure(env: Env, workflow: string, turn: number, durationM
   })
 }
 
+/** Internal helper. */
 function logProviderRequestEvent(env: Env, workflow: string, requestEvent: ToolProviderRequestEvent): void {
   logRuntime(env, {
     workflow,

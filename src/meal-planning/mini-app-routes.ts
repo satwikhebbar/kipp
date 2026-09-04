@@ -22,10 +22,12 @@ export { MINI_APP_SHELL } from "./mini-app/client"
 
 type MiniAppContext = { store: MealPlanningStore; session: Awaited<ReturnType<typeof readMiniAppSession>> }
 
+/** Internal helper. */
 function noStoreHeaders(): Headers {
   return new Headers({ "Cache-Control": "no-store", Pragma: "no-cache" })
 }
 
+/** Internal helper. */
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -36,6 +38,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   })
 }
 
+/** Internal helper. */
 function requestTooLarge(request: Request): boolean {
   const length = request.headers.get("content-length")
   return length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_REQUEST_BYTES)
@@ -67,12 +70,14 @@ async function readBoundedText(request: Request): Promise<string | null> {
   return new TextDecoder().decode(bytes)
 }
 
+/** Internal helper. */
 async function getContext(request: Request, env: Env): Promise<MiniAppContext> {
   if (!env.MEAL_PLANNING_DB) throw new MiniAppAuthError("unavailable")
   const session = await readMiniAppSession(request.headers.get("authorization") ?? undefined, env)
   return { store: createMealPlanningStore(env.MEAL_PLANNING_DB), session }
 }
 
+/** Internal helper. */
 function readyDto(
   active: NonNullable<Awaited<ReturnType<MealPlanningStore["activePlan"]>>>,
   schedule: Awaited<ReturnType<MealPlanningStore["loadOrCreateProfile"]>>["schedule"],
@@ -95,6 +100,7 @@ function readyDto(
   }
 }
 
+/** Internal helper. */
 function errorResponse(error: unknown): Response {
   if (error instanceof MiniAppAuthError) return jsonResponse({ error: "unauthorized" }, error.status)
   return jsonResponse({ error: "unavailable" }, HTTP_STATUS.SERVICE_UNAVAILABLE)
@@ -183,6 +189,7 @@ export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): 
   }
 }
 
+/** Internal helper. */
 async function failFeedbackBatchDispatch(
   batch: FeedbackBatchRecord,
   env: Env,

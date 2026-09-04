@@ -35,6 +35,7 @@ const submitDefinitionsInputSchema = z.object({ definitions: z.array(proposalSch
 const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).strict()
 export const MEAL_INGREDIENT_LOCALE_DEFAULT = "India"
 
+/** Internal helper. */
 export function mealCatalogExpansionPrompt(locale = MEAL_INGREDIENT_LOCALE_DEFAULT): string {
   return `You expand a parent's named meal repertoire into practical meal definitions. Use only the submit_meal_definitions action.
 
@@ -108,6 +109,7 @@ export async function expandMealCatalog(
   return { definitions, failures: [] }
 }
 
+/** Internal helper. */
 function validateInput(input: MealCatalogExpansionInput): string[] {
   if (input.parentDishNames.length === 0) throw new Error("at least one parent dish name is required")
   const seen = new Set<string>()
@@ -120,21 +122,25 @@ function validateInput(input: MealCatalogExpansionInput): string[] {
   return input.parentDishNames
 }
 
+/** Internal helper. */
 function chunks<T>(values: T[], size: number): T[][] {
   const batches: T[][] = []
   for (let index = 0; index < values.length; index += size) batches.push(values.slice(index, index + size))
   return batches
 }
 
+/** Internal helper. */
 function normalized(value: string): string {
   return value.trim().toLocaleLowerCase()
 }
 
+/** Internal helper. */
 function proposalFor(dishName: string, proposals: MealDefinitionProposal[]): MealDefinitionProposal | undefined {
   const matches = proposals.filter((proposal) => normalized(proposal.sourceDishName) === normalized(dishName))
   return matches.length === 1 ? matches[0] : undefined
 }
 
+/** Internal helper. */
 function proposalFailures(
   proposal: MealDefinitionProposal | undefined,
   dishName: string,
@@ -147,6 +153,7 @@ function proposalFailures(
   return validateMealDefinitionProposal(proposal, dishName, input)
 }
 
+/** Internal helper. */
 async function requestDefinitions(
   provider: ToolProviderClient,
   dishNames: string[],

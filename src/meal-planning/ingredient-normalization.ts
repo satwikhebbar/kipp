@@ -2,6 +2,7 @@
 const MIN_PLURAL_BASE_LENGTH = 4
 const PLURAL_SUFFIX_LENGTH = 3
 
+/** Internal helper. */
 export function normalizeIngredient(value: string): string {
   const key = value.trim().toLocaleLowerCase().replace(/\s+/g, " ")
   const irregular: Record<string, string> = {

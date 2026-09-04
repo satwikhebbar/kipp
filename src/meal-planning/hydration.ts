@@ -12,10 +12,12 @@ import type {
   NewMealProposal,
 } from "./types"
 
+/** Internal helper. */
 function definitionNames(definition: MealDefinition): string[] {
   return [definition.name, ...(definition.aliases ?? [])].map((value) => value.trim().toLocaleLowerCase())
 }
 
+/** Internal helper. */
 function allowedChoices(definition: MealDefinition): Set<string> {
   return new Set(
     [...(definition.optionalIngredients ?? []), ...(definition.allowedIngredientChoices ?? [])].map(
@@ -24,14 +26,17 @@ function allowedChoices(definition: MealDefinition): Set<string> {
   )
 }
 
+/** Internal helper. */
 function selectionUsesPrep(selection: MealSelection): boolean {
   return "usesPriorNightPrep" in selection && selection.usesPriorNightPrep === true
 }
 
+/** Internal helper. */
 function selectionAliases(selection: MealSelection): Record<string, string> {
   return "ingredientAliasesUsed" in selection ? (selection.ingredientAliasesUsed ?? {}) : {}
 }
 
+/** Internal helper. */
 function validateProposal(proposal: NewMealProposal): string | undefined {
   if (!proposal.name.trim()) return "name is required"
   if (!proposal.vegetarian) return "new meals must be vegetarian"
@@ -43,6 +48,7 @@ function validateProposal(proposal: NewMealProposal): string | undefined {
   return undefined
 }
 
+/** Internal helper. */
 function definitionFromProposal(proposal: NewMealProposal, id: string): MealDefinition {
   return {
     id,
@@ -59,10 +65,12 @@ function definitionFromProposal(proposal: NewMealProposal, id: string): MealDefi
   }
 }
 
+/** Internal helper. */
 function isKnown(selection: MealSelection): selection is Extract<MealSelection, { mealDefinitionId: string }> {
   return "mealDefinitionId" in selection
 }
 
+/** Internal helper. */
 function isProvisional(selection: MealSelection): selection is Extract<MealSelection, { provisionalMealId: string }> {
   return "provisionalMealId" in selection
 }
