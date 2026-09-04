@@ -530,8 +530,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       outcome: "succeeded",
       details: {
         applied: true,
-        inventoryChanges: "carrot:available,paneer:unavailable",
-        exceptionAdds: 'half_day:{"day":"Fri","mealSlots":["school-lunch"]}',
+        inventoryChangeCount: 2,
+        exceptionAddCount: 1,
       },
     })
   })

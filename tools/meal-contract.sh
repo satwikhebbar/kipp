@@ -52,7 +52,8 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="logs/meal-contract-${RUN_ID}.log"
 TRACE_FILE="logs/meal-contract-${RUN_ID}.provider-trace.ndjson"
 
-env LIVE_CONTRACT=1 LIVE_PROVIDER="$LIVE_PROVIDER" "$API_KEY_NAME=$API_KEY" EVAL_TRACE_PATH="$TRACE_FILE" pnpm exec vitest run \
+export "$API_KEY_NAME=$API_KEY"
+env LIVE_CONTRACT=1 LIVE_PROVIDER="$LIVE_PROVIDER" EVAL_TRACE_PATH="$TRACE_FILE" pnpm exec vitest run \
   -t "$FILTER" "$@" src/__contract__/deepseek-meal-planning.contract.test.ts 2>&1 |
   tee "$LOG_FILE"
 

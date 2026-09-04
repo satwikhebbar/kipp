@@ -35,6 +35,9 @@ import {
 import { messages, parseLLMJson, ToolProviderHttpError, toolDeclaration } from "../providers/llm"
 import { stripNullProperties } from "../runtime/tool-runner"
 
+const EXPECTED_CONTEXT_INVENTORY_CHANGES = 4
+const EXPECTED_CONTEXT_EXCEPTION_ADDS = 2
+
 declare const process: { env: Record<string, string | undefined>; pid: number }
 
 const providerName = process.env.LIVE_PROVIDER ?? "deepseek"
@@ -902,6 +905,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
         expect.objectContaining({ name: expect.stringMatching(/eggplant/i), status: "unavailable" }),
       ]),
     )
+    expect(result.inventoryChanges).toHaveLength(EXPECTED_CONTEXT_INVENTORY_CHANGES)
   })
 
   contractIt("X02: extracts explicit holiday and half-day exceptions", async () => {
@@ -915,6 +919,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
         expect.objectContaining({ kind: "half_day", appliesTo: { day: "Fri", mealSlots: ["school-lunch"] } }),
       ]),
     )
+    expect(result.exceptionAdds).toHaveLength(EXPECTED_CONTEXT_EXCEPTION_ADDS)
   })
 
   contractIt("M01: parent repertoire expands into five validated established definitions", async () => {
