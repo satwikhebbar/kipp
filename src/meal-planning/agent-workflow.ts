@@ -1091,7 +1091,13 @@ function logProviderRequestEvent(env: Env, workflow: string, requestEvent: ToolP
   })
 }
 
-function serializeTranscript(messages: readonly ToolConversationMessage[]): unknown[] {
+/**
+ * Serializes the development-only diagnostic transcript without replacing
+ * structured values. The caller must keep this behind transcriptEnabled();
+ * these messages can contain household data and must never be emitted in
+ * production.
+ */
+export function serializeTranscript(messages: readonly ToolConversationMessage[]): unknown[] {
   return messages.map((message) => {
     if (message.role === "assistant" && "toolCalls" in message)
       return {
@@ -1100,7 +1106,7 @@ function serializeTranscript(messages: readonly ToolConversationMessage[]): unkn
         toolCalls: message.toolCalls.map((call) => ({
           id: call.id,
           name: call.name,
-          input: redactTranscriptValue(call.input),
+          input: call.input,
         })),
       }
     if (message.role === "tool")
@@ -1108,18 +1114,10 @@ function serializeTranscript(messages: readonly ToolConversationMessage[]): unkn
         role: message.role,
         toolCallId: message.toolCallId,
         name: message.name,
-        output: redactTranscriptValue(message.output),
+        output: message.output,
       }
     return { role: message.role, text: message.text.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS) }
   })
-}
-
-function redactTranscriptValue(value: unknown): unknown {
-  if (typeof value === "string") return "[redacted]"
-  if (Array.isArray(value)) return value.map(redactTranscriptValue)
-  if (value && typeof value === "object")
-    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactTranscriptValue(entry)]))
-  return value
 }
 
 /** Emits per-tool and per-session runtime metadata for one bounded planning session. */
