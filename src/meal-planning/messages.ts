@@ -33,6 +33,13 @@ function formatWeekDay(iso: string, timezone: string): string {
   }).format(new Date(iso))
 }
 
+/** Formats a date-only plan bound without shifting it through the plan timezone. */
+function formatPlanBound(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" }).format(
+    new Date(iso),
+  )
+}
+
 /**
  * Renders the active plan as deterministic, phone-friendly fridge-board text:
  * a school-week header, five slot lines per day (dish plus prep and easy-buy
@@ -68,8 +75,8 @@ export function renderPlanMessage(
 
 /** Renders the compact Telegram notification used when the Mini App is available. */
 export function renderPlanLaunchMessage(plan: MealPlanRecord): string {
-  const weekStart = formatWeekDay(plan.weekStart, plan.timezone)
-  const weekEnd = formatWeekDay(plan.weekEnd, plan.timezone)
+  const weekStart = formatPlanBound(plan.weekStart)
+  const weekEnd = formatPlanBound(plan.weekEnd)
   return `School week of ${weekStart} – ${weekEnd}\n\nOpen the review button below to view your meal plan and provide feedback.`
 }
 

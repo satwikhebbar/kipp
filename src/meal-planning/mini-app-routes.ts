@@ -286,10 +286,13 @@ miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
     }
     if (accepted.duplicate) {
       const status = accepted.batch.status
-      return jsonResponse(
-        { status: status === "failed" ? "failed" : "pending", batchId: accepted.batch.batchId },
-        HTTP_STATUS.SERVICE_UNAVAILABLE,
-      )
+      if (status === "consumed")
+        return jsonResponse({ status: "submitted", batchId: accepted.batch.batchId }, HTTP_ACCEPTED)
+      if (status === "accepted" || status === "delivered" || status === "processing")
+        return jsonResponse({ status: "pending", batchId: accepted.batch.batchId }, HTTP_ACCEPTED)
+      if (status === "stale")
+        return jsonResponse({ status: "stale", batchId: accepted.batch.batchId }, HTTP_STATUS.CONFLICT)
+      return jsonResponse({ status: "failed", batchId: accepted.batch.batchId }, HTTP_STATUS.SERVICE_UNAVAILABLE)
     }
     const dispatched = await startFeedbackBatch(accepted.batch, c.env)
     if (!dispatched)
