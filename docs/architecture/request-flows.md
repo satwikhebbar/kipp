@@ -12,6 +12,8 @@ sequenceDiagram
   participant W as Worker trigger
   participant I as IdeaIngestDO
   participant R as InteractionRouterDO
+  participant B as Mini App browser
+  participant H as Mini App HTTP API
   participant F as Waiting workflow
 
   U->>T: command, reply, or button
@@ -184,8 +186,13 @@ sequenceDiagram
   M->>M: park until week_end
   opt Mini App feedback submission
     U->>T: tap [Review this week's plan]
-    T->>M: signed Mini App feedback batch
-    M->>D: accept and claim feedback_batch
+    T->>B: open signed Mini App
+    B->>H: establish authenticated session
+    H->>D: authenticate and scope session
+    B->>H: POST signed feedback batch
+    H->>D: accept feedback_batch
+    H->>M: signal accepted batch
+    M->>D: claim feedback_batch
     M->>A: revision session with submission context
   end
   opt Telegram feedback submission

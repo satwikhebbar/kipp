@@ -55,7 +55,7 @@ const [{ expandMealCatalog }, { createToolProvider }, { SEED_SCHEDULE }] = await
 function executeD1(command) {
   const output = execFileSync(
     "pnpm",
-    ["exec", "wrangler", "d1", "execute", databaseName, ...(production ? ["--remote"] : ["--local"]), "--config", configPath, "--command", command],
+    ["exec", "wrangler", "d1", "execute", databaseName, ...(production ? ["--remote"] : ["--local"]), "--config", configPath, "--command", command, "--json", "--yes"],
     { encoding: "utf8" },
   )
   const jsonStart = output.indexOf("[")
@@ -98,13 +98,8 @@ const profile = { ...currentProfile, dishRepertoire: mergedNames, mealDefinition
 if (dryRun) {
   console.log(`Validated ${result.definitions.length} definition(s); --dry-run left ${production ? "production" : "local"} D1 unchanged.`)
 } else {
-  const update = executeD1(`UPDATE meal_profile SET profile_json = ${sqlString(JSON.stringify(profile))}, updated_at = datetime('now') WHERE chat_id = ${sqlString(existing.chat_id)}`)
+  const update = executeD1(`UPDATE meal_profile SET profile_json = ${sqlString(JSON.stringify(profile))}, updated_at = datetime('now') WHERE chat_id = ${sqlString(existing.chat_id)} AND profile_json = ${sqlString(existing.profile_json)}`)
   const changes = Number(update[0]?.meta?.changes ?? 0)
-  // D1/SQLite can report zero changes when the row is concurrently updated or
-  // the replacement is byte-for-byte identical. Verify the durable value
-  // instead of treating that metadata as the sole success signal.
-  const persisted = executeD1(`SELECT profile_json FROM meal_profile WHERE chat_id = ${sqlString(existing.chat_id)}`)
-  const persistedProfile = persisted[0]?.results?.[0]?.profile_json
-  if (persistedProfile !== JSON.stringify(profile)) throw new Error(`meal profile update was not persisted (changes=${changes})`)
+  if (changes !== 1) throw new Error("meal profile changed while expansion was running; rerun the command")
   console.log(`${replace ? "Replaced" : "Updated"} the ${production ? "production" : "local"} catalog with ${mergedDefinitions.length} definition(s).`)
 }
