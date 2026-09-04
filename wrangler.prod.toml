@@ -56,5 +56,20 @@ binding = "CALENDAR_WORKFLOW"
 name = "kipp-calendar"
 class_name = "CalendarWorkflow"
 
+[[workflows]]
+binding = "MEAL_PLANNING_WORKFLOW"
+name = "kipp-meal-planning"
+class_name = "MealPlanningWorkflow"
+
+[[d1_databases]]
+binding = "MEAL_PLANNING_DB"
+database_name = "meal-planning"
+database_id = "466f87cc-c58c-4103-aa46-c20169b57d6e"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "RECIPE_VIDEO_CACHE"
+id = "5ad314a012d44e9b9aabf70d86279915"
+
 [triggers]
 crons = ["0 9 * * *", "0 8 * * 1", "0 9 * * 1"]
