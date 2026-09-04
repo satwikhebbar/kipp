@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { serializeTranscript } from "../meal-planning/agent-workflow"
+import { serializeTranscript, transcriptEnabled } from "../meal-planning/agent-workflow"
 
 describe("development meal-planning transcripts", () => {
+  it("only enables transcript payloads for an explicit development opt-in", () => {
+    expect(transcriptEnabled({ DEPLOYMENT_ENV: "development", LLM_DEBUG_TRANSCRIPT: "true" })).toBe(true)
+    expect(transcriptEnabled({ DEPLOYMENT_ENV: "development", LLM_DEBUG_TRANSCRIPT: "false" })).toBe(false)
+    expect(transcriptEnabled({ DEPLOYMENT_ENV: "production", LLM_DEBUG_TRANSCRIPT: "true" })).toBe(false)
+  })
+
   it("preserves structured tool inputs and outputs while omitting provider reasoning", () => {
     const transcript = serializeTranscript([
       { role: "system", text: "Plan the week." },

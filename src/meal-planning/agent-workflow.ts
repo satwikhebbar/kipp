@@ -1008,7 +1008,7 @@ function isNoChangeCandidate(submitted: MealPlanCandidate, base: MealPlanCandida
   return true
 }
 
-function transcriptEnabled(env: Env): boolean {
+export function transcriptEnabled(env: Pick<Env, "LLM_DEBUG_TRANSCRIPT" | "DEPLOYMENT_ENV">): boolean {
   return env.LLM_DEBUG_TRANSCRIPT?.trim().toLowerCase() === "true" && env.DEPLOYMENT_ENV === "development"
 }
 
