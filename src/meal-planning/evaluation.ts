@@ -183,6 +183,9 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     if (closedDays.has(day)) {
       failures.push({ code: "extra_slot_for_closed_day", day, slot: slotId, detail: `cell on closed day ${day}` })
     }
+    if (coverage.droppedSlots.some((drop) => drop.day === day && drop.slotId === slotId)) {
+      failures.push({ code: "extra_slot_for_half_day", day, slot: slotId, detail: `cell on half day ${day}` })
+    }
     for (const token of cell.items) {
       if (clearExclusionTokens.has(normalizeIngredient(token))) {
         failures.push({ code: "hard_exclusion", day, slot: slotId, detail: `ingredient "${token}" is excluded` })

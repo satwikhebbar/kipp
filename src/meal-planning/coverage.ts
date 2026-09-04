@@ -41,7 +41,10 @@ export function computeCoverageSet(context: MealPlanContext): CoverageSet {
   for (const exception of weeklyExceptions.items) {
     const day = exception.appliesTo?.day
     if (exception.kind !== "half_day" || !day) continue
-    for (const slotId of resolveMealSlots(exception.appliesTo?.mealSlots, schedule.slots)) {
+    // A generic half-day means there is no packed school lunch. The extractor
+    // may omit mealSlots when the parent does not spell out the exception.
+    const mealSlots = exception.appliesTo?.mealSlots ?? ["school-lunch"]
+    for (const slotId of resolveMealSlots(mealSlots, schedule.slots)) {
       if (!closed.has(day)) droppedSlots.push({ day, slotId })
     }
   }
