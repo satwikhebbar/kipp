@@ -12,7 +12,14 @@ export function normalizeIngredient(value: string): string {
     tomatoes: "tomato",
   }
   if (irregular[key]) return irregular[key]
-  if (key.endsWith("ies") && key.length > MIN_PLURAL_BASE_LENGTH) return `${key.slice(0, -PLURAL_SUFFIX_LENGTH)}y`
-  if (key.endsWith("s") && !key.endsWith("ss") && !key.endsWith("us") && !key.endsWith("is")) return key.slice(0, -1)
-  return key
+  const words = key.split(" ")
+  const last = words[words.length - 1] ?? ""
+  const normalizedLast =
+    irregular[last] ??
+    (last.endsWith("ies") && last.length > MIN_PLURAL_BASE_LENGTH
+      ? `${last.slice(0, -PLURAL_SUFFIX_LENGTH)}y`
+      : last.endsWith("s") && !last.endsWith("ss") && !last.endsWith("us") && !last.endsWith("is")
+        ? last.slice(0, -1)
+        : last)
+  return words.length > 1 ? [...words.slice(0, -1), normalizedLast].join(" ") : normalizedLast
 }

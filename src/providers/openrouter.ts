@@ -136,11 +136,25 @@ export function createOpenRouterToolClient(
         throw normalizeTimeout(error, signal, timeoutMs)
       }
       const message = data.choices?.[0]?.message
-      if (!message) throw new ToolProviderProtocolError("OpenRouter returned empty choices")
+      if (!message) {
+        options.onRequestEvent?.({
+          phase: "failed",
+          durationMs: Date.now() - startedAt,
+          status: response.status,
+          failureCategory: "protocol-error",
+        })
+        throw new ToolProviderProtocolError("OpenRouter returned empty choices")
+      }
       const toolCalls = message.tool_calls?.map((call) => {
         try {
           return { id: call.id, name: call.function.name, input: JSON.parse(call.function.arguments) }
         } catch {
+          options.onRequestEvent?.({
+            phase: "failed",
+            durationMs: Date.now() - startedAt,
+            status: response.status,
+            failureCategory: "protocol-error",
+          })
           throw new ToolProviderProtocolError("OpenRouter returned malformed tool arguments")
         }
       })

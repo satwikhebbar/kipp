@@ -20,7 +20,7 @@ function validateNames(
   if (required && values.length === 0) failures.push(invalid(dishName, "missing_field", `${field} is required`))
   const seen = new Set<string>()
   for (const value of values) {
-    const key = normalizeIngredient(value)
+    const key = field === "suitableSlots" ? value.trim() : normalizeIngredient(value)
     if (!key) failures.push(invalid(dishName, "blank_value", `${field} cannot contain a blank value`))
     else if (seen.has(key))
       failures.push(invalid(dishName, "duplicate_value", `${field} cannot contain duplicate values`))

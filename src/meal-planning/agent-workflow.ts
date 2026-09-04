@@ -327,12 +327,22 @@ async function extractInitialWeekContext(
       const exceptionAdds = parsed.data.exceptionAdds
         .map((exception) => `${exception.kind}:${JSON.stringify(exception.appliesTo ?? {})}`)
         .join(",")
+      const extractionDetails: Record<string, string | number | boolean> = {}
+      if (transcriptEnabled(env)) {
+        extractionDetails.inventoryChanges = inventoryChanges
+        extractionDetails.exceptionAdds = exceptionAdds
+      }
       if (parsed.data.inventoryChanges.length === 0 && parsed.data.exceptionAdds.length === 0) {
         logRuntime(env, {
           workflow: event.instanceId,
           event: "meal-planning-context-extraction",
           outcome: "succeeded",
-          details: { applied: false, inventoryChanges, exceptionAdds },
+          details: {
+            applied: false,
+            inventoryChangeCount: parsed.data.inventoryChanges.length,
+            exceptionAddCount: parsed.data.exceptionAdds.length,
+            ...extractionDetails,
+          },
         })
         return context
       }
@@ -341,7 +351,12 @@ async function extractInitialWeekContext(
         workflow: event.instanceId,
         event: "meal-planning-context-extraction",
         outcome: "succeeded",
-        details: { applied: true, inventoryChanges, exceptionAdds },
+        details: {
+          applied: true,
+          inventoryChangeCount: parsed.data.inventoryChanges.length,
+          exceptionAddCount: parsed.data.exceptionAdds.length,
+          ...extractionDetails,
+        },
       })
       return { ...context, weeklyInventory: update.weeklyInventory, weeklyExceptions: update.weeklyExceptions }
     } catch (error) {
@@ -1082,12 +1097,29 @@ function serializeTranscript(messages: readonly ToolConversationMessage[]): unkn
       return {
         role: message.role,
         text: message.text?.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS),
-        toolCalls: message.toolCalls.map((call) => ({ id: call.id, name: call.name, input: call.input })),
+        toolCalls: message.toolCalls.map((call) => ({
+          id: call.id,
+          name: call.name,
+          input: redactTranscriptValue(call.input),
+        })),
       }
     if (message.role === "tool")
-      return { role: message.role, toolCallId: message.toolCallId, name: message.name, output: message.output }
+      return {
+        role: message.role,
+        toolCallId: message.toolCallId,
+        name: message.name,
+        output: redactTranscriptValue(message.output),
+      }
     return { role: message.role, text: message.text.slice(0, TRANSCRIPT_TEXT_MAX_CHARACTERS) }
   })
+}
+
+function redactTranscriptValue(value: unknown): unknown {
+  if (typeof value === "string") return "[redacted]"
+  if (Array.isArray(value)) return value.map(redactTranscriptValue)
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactTranscriptValue(entry)]))
+  return value
 }
 
 /** Emits per-tool and per-session runtime metadata for one bounded planning session. */
