@@ -597,7 +597,13 @@ describe.each([
     expect(accepted).toMatchObject({
       ok: true,
       duplicate: false,
-      batch: { status: "accepted", items: [{ id: "mini-1" }] },
+      batch: {
+        status: "accepted",
+        items: [{ id: "mini-1" }],
+        chatId: CHAT,
+        workflowInstanceId: "instance-1",
+        weekEnd: WEEKS.weekEnd,
+      },
     })
     expect(await store.acceptFeedbackBatch({ ...input, batchId: "batch-other" })).toMatchObject({
       ok: true,
