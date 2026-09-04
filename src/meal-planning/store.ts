@@ -605,6 +605,12 @@ function feedbackBatchFromRow(row: Record<string, unknown>): FeedbackBatchRecord
     planId: String(row.plan_id),
     baseVersion: Number(row.base_version),
     items: parseJson<FeedbackItem[]>(String(row.items_json), []),
+    chatId: row.chat_id === null || row.chat_id === undefined ? null : String(row.chat_id),
+    workflowInstanceId:
+      row.workflow_instance_id === null || row.workflow_instance_id === undefined
+        ? null
+        : String(row.workflow_instance_id),
+    weekEnd: row.week_end === null || row.week_end === undefined ? null : String(row.week_end),
     idempotencyKey: row.idempotency_key === null ? null : String(row.idempotency_key),
     status: String(row.status) as FeedbackBatchStatus,
     failureCategory:
@@ -1195,7 +1201,12 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .run()
       const row = await db
-        .prepare("SELECT * FROM feedback_batch WHERE plan_id = ? AND idempotency_key = ?")
+        .prepare(
+          `SELECT feedback_batch.*, meal_plan.chat_id, meal_plan.instance_id AS workflow_instance_id, meal_plan.week_end
+           FROM feedback_batch
+           LEFT JOIN meal_plan ON meal_plan.plan_id = feedback_batch.plan_id
+           WHERE feedback_batch.plan_id = ? AND feedback_batch.idempotency_key = ?`,
+        )
         .bind(input.planId, input.idempotencyKey)
         .first()
       if (!row) return { ok: false as const, reason: "stale" as const }
@@ -1207,7 +1218,15 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async feedbackBatch(batchId) {
-      const row = await db.prepare("SELECT * FROM feedback_batch WHERE batch_id = ?").bind(batchId).first()
+      const row = await db
+        .prepare(
+          `SELECT feedback_batch.*, meal_plan.chat_id, meal_plan.instance_id AS workflow_instance_id, meal_plan.week_end
+           FROM feedback_batch
+           LEFT JOIN meal_plan ON meal_plan.plan_id = feedback_batch.plan_id
+           WHERE feedback_batch.batch_id = ?`,
+        )
+        .bind(batchId)
+        .first()
       return row ? feedbackBatchFromRow(row) : null
     },
 
@@ -1244,7 +1263,12 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       ])
       if (Number(results[0]?.meta.changes) !== 1) return null
       const row = await db
-        .prepare("SELECT * FROM feedback_batch WHERE batch_id = ? AND status = 'processing'")
+        .prepare(
+          `SELECT feedback_batch.*, meal_plan.chat_id, meal_plan.instance_id AS workflow_instance_id, meal_plan.week_end
+           FROM feedback_batch
+           LEFT JOIN meal_plan ON meal_plan.plan_id = feedback_batch.plan_id
+           WHERE feedback_batch.batch_id = ? AND feedback_batch.status = 'processing'`,
+        )
         .bind(batchId)
         .first()
       return row ? feedbackBatchFromRow(row) : null
