@@ -6,10 +6,12 @@ import type {
   MealDefinitionValidationFailure,
 } from "./types"
 
+/** Internal helper. */
 function invalid(dishName: string, code: string, detail: string): MealDefinitionValidationFailure {
   return { dishName, code, detail }
 }
 
+/** Internal helper. */
 function validateNames(
   dishName: string,
   field: string,

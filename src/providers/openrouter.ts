@@ -178,11 +178,13 @@ export function createOpenRouterToolClient(
   }
 }
 
+/** Internal helper. */
 function normalizeTimeout(error: unknown, signal: AbortSignal | undefined, timeoutMs: number | undefined): unknown {
   if (signal?.aborted && timeoutMs !== undefined) return new ToolProviderTimeoutError("OpenRouter", timeoutMs)
   return error
 }
 
+/** Internal helper. */
 async function readProviderErrorMessage(response: Response): Promise<string | undefined> {
   try {
     const body = (await response.json()) as { error?: { message?: unknown } }

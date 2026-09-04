@@ -255,6 +255,7 @@ export function mealPlanSelectionPatchToWire(candidate: MealPlanSelectionPatch):
   }
 }
 
+/** Internal helper. */
 function gridToWire(grid: MealPlanSelectionCandidate["grid"]): MealPlanSelectionWireCandidate["days"] {
   return Object.entries(grid).map(([day, cells]) => ({
     day,
@@ -262,6 +263,7 @@ function gridToWire(grid: MealPlanSelectionCandidate["grid"]): MealPlanSelection
   }))
 }
 
+/** Internal helper. */
 function gridFromWire(days: MealPlanSelectionWireCandidate["days"]): MealPlanSelectionCandidate["grid"] {
   const grid: MealPlanSelectionCandidate["grid"] = {}
   for (const { day, cells } of days) {
@@ -276,6 +278,7 @@ function gridFromWire(days: MealPlanSelectionWireCandidate["days"]): MealPlanSel
   return grid
 }
 
+/** Internal helper. */
 function selectionToWire(
   selection: MealPlanSelectionCandidate["grid"][string][string],
 ): z.infer<typeof mealSelectionWireSchema> {
@@ -289,6 +292,7 @@ function selectionToWire(
   return { ...selectionWithoutAliases, ...(aliases === undefined ? {} : { ingredientAliasesUsed: aliases }) }
 }
 
+/** Internal helper. */
 function selectionFromWire(
   selection: z.infer<typeof mealSelectionWireSchema>,
 ): MealPlanSelectionCandidate["grid"][string][string] {
@@ -306,6 +310,7 @@ function selectionFromWire(
   return { ...selectionWithoutAliases, ...(aliases === undefined ? {} : { ingredientAliasesUsed: aliases }) }
 }
 
+/** Internal helper. */
 function policyOutcomesFromWire(
   outcomes: readonly z.infer<typeof policyOutcomeWireSchema>[],
   policyIds: readonly string[],
