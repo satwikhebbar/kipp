@@ -12,12 +12,12 @@ import type {
   NewMealProposal,
 } from "./types"
 
-/** Internal helper. */
+/** Definition names. */
 function definitionNames(definition: MealDefinition): string[] {
   return [definition.name, ...(definition.aliases ?? [])].map((value) => value.trim().toLocaleLowerCase())
 }
 
-/** Internal helper. */
+/** Allowed choices. */
 function allowedChoices(definition: MealDefinition): Set<string> {
   return new Set(
     [...(definition.optionalIngredients ?? []), ...(definition.allowedIngredientChoices ?? [])].map(
@@ -26,17 +26,17 @@ function allowedChoices(definition: MealDefinition): Set<string> {
   )
 }
 
-/** Internal helper. */
+/** Selection uses prep. */
 function selectionUsesPrep(selection: MealSelection): boolean {
   return "usesPriorNightPrep" in selection && selection.usesPriorNightPrep === true
 }
 
-/** Internal helper. */
+/** Selection aliases. */
 function selectionAliases(selection: MealSelection): Record<string, string> {
   return "ingredientAliasesUsed" in selection ? (selection.ingredientAliasesUsed ?? {}) : {}
 }
 
-/** Internal helper. */
+/** Validate proposal. */
 function validateProposal(proposal: NewMealProposal): string | undefined {
   if (!proposal.name.trim()) return "name is required"
   if (!proposal.vegetarian) return "new meals must be vegetarian"
@@ -48,7 +48,7 @@ function validateProposal(proposal: NewMealProposal): string | undefined {
   return undefined
 }
 
-/** Internal helper. */
+/** Definition from proposal. */
 function definitionFromProposal(proposal: NewMealProposal, id: string): MealDefinition {
   return {
     id,
@@ -65,12 +65,12 @@ function definitionFromProposal(proposal: NewMealProposal, id: string): MealDefi
   }
 }
 
-/** Internal helper. */
+/** Is known. */
 function isKnown(selection: MealSelection): selection is Extract<MealSelection, { mealDefinitionId: string }> {
   return "mealDefinitionId" in selection
 }
 
-/** Internal helper. */
+/** Is provisional. */
 function isProvisional(selection: MealSelection): selection is Extract<MealSelection, { provisionalMealId: string }> {
   return "provisionalMealId" in selection
 }

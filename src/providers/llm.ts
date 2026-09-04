@@ -156,7 +156,7 @@ function supportsStrictJsonSchema(schema: Record<string, unknown>): boolean {
   return true
 }
 
-/** Internal helper. */
+/** Strict json schema. */
 function strictJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
   const type = schema.type
   if (type === "object") {
