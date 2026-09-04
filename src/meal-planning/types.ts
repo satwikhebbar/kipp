@@ -3,6 +3,7 @@ export const FAILURE_CODES = [
   "non_vegetarian_school_meal",
   "missing_slot",
   "extra_slot_for_closed_day",
+  "extra_slot_for_half_day",
   "morning_capacity_exceeded",
   "prior_night_prep_not_allowed",
   "prior_night_prep_limit",

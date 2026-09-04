@@ -646,6 +646,23 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.failures[0]).toMatchObject({ code: "missing_slot", day: "Mon", slot: "snack2" })
   })
 
+  it("defaults an unspecified half day to no school lunch and rejects that dropped cell", () => {
+    const context = baseContext({
+      weeklyExceptions: {
+        items: [{ kind: "half_day", appliesTo: { day: "Sat" }, instruction: "Saturday is a half day." }],
+      },
+    })
+    const candidate = baseCandidate()
+    candidate.grid.Sat = Object.fromEntries(FULL_SLOTS.map(([slot, dish]) => [slot, cellFor(slot, dish)]))
+
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(failureCodes(evaluation)).toContain("extra_slot_for_half_day")
+    expect(evaluation.failures).toContainEqual(
+      expect.objectContaining({ code: "extra_slot_for_half_day", day: "Sat", slot: "school-lunch" }),
+    )
+    expect(failureCodes(evaluation)).not.toContain("missing_slot")
+  })
+
   it("a week is infeasible when distinct non-repeatable dishes are fewer than the slot count", () => {
     const context = baseContext({
       weeklyExceptions: { items: [] }, // Saturday open: a full 6 x 5 week

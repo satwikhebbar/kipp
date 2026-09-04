@@ -46,7 +46,7 @@ Treat every submitted feedback item as the driver: a cell-scoped item must be ad
 
 ## Planning
 On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. 
-On a half-day, remove only the slot named by the exception (normally school-lunch); retain every other listed slot, including both snacks and home lunch. 
+On a half-day, remove only the slot named by the exception (normally school-lunch); if mealSlots is omitted, treat school-lunch as the dropped slot. Retain every other listed slot, including both snacks and home lunch. 
 School meals are always vegetarian (no meat); packed snacks are dry and not cooked that morning. 
 For home-lunch, select the vegetable curry/subzi as the meal represented in the home-lunch slot. The parent can choose the accompanying staple (plain rice or chapati) and protein dish (dal, kadhi, sambar, or another lentil-based dish) separately for now. A flavored-rice meal such as pulao or tomato rice is an explicit exception and may stand alone.
 Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules.

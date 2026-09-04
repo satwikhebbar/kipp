@@ -587,6 +587,11 @@
         "pass": false,
         "failures": [
           {
+            "code": "extra_slot_for_half_day",
+            "day": "Wed",
+            "slot": "school-lunch"
+          },
+          {
             "code": "missing_slot",
             "day": "Wed",
             "slot": "home-lunch"
