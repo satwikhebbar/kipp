@@ -166,7 +166,10 @@ describe("security-boundaries", () => {
                     type: "function",
                     function: {
                       name: "submit_linkedin_response",
-                      arguments: JSON.stringify({ response: "My complete response" }),
+                      arguments: JSON.stringify({
+                        response: "My complete response",
+                        post: "My complete response",
+                      }),
                     },
                   },
                 ],
