@@ -6,8 +6,9 @@ import {
   resolveWeekContextUpdate,
   runMealPlanningAgentSession,
 } from "../agent/meal-planning-session"
+import { computeCost, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
-import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
+import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowInteractionKind } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage, type ToolProviderRequestEvent } from "../providers"
 import { logRuntime } from "../runtime/logging"
@@ -31,6 +32,7 @@ import {
   type MealPlanRecord,
   type MealPlanVersionRecord,
   type StoredMealProfile,
+  type VersionUsage,
 } from "./store"
 import { coerceSubmission, type Submission } from "./submissions"
 import type { FeedbackItem, FeedbackTarget, MealDefinition, MealPlanCandidate, MealPlanContext } from "./types"
@@ -49,6 +51,7 @@ const MILLISECONDS_PER_SECOND = 1_000
 const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "openai/gpt-5.6-luna"
+const ZERO_USAGE: LLMUsage = { inputTokens: 0, outputTokens: 0 }
 const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and the planner will treat school-lunch as the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
 /** Render week context extraction prompt. */
@@ -115,6 +118,19 @@ export function renderRevisionFeedback(items: FeedbackItem[]): string {
       return `- Unbound feedback: ${item.text}`
     })
     .join("\n")
+}
+
+/** Sums two LLM usage records. */
+function addUsage(left: LLMUsage, right: LLMUsage): LLMUsage {
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+  }
+}
+
+/** Records one generated plan version's token usage under the meal-planner model (issue #72). */
+function makeVersionUsage(usage: LLMUsage): VersionUsage {
+  return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model: MEAL_PLANNER_MODEL }
 }
 
 /** Renders neutral temporal facts so the planner can resolve relative dates against its active school week. */
@@ -226,20 +242,21 @@ export async function runAgentCenteredMealPlanningWorkflow(
     provisionalMealDefinitions: [],
     request: { kind: "initial_plan", text: event.payload.requestText },
   }
-  const context = await extractInitialWeekContext(env, step, event, baseContext)
+  const { context, usage: extractionUsage } = await extractInitialWeekContext(env, step, event, baseContext)
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
       text: `${renderPlanningTimeContext(new Date(), timezone, week.weekStart, week.weekEnd)}\nRequest: ${event.payload.requestText || "/mealplan"}\n\n${renderHouseholdContext(context)}`,
     },
   ]
-  const outcome = await runPlanningSession(env, step, event, {
+  const planning = await runPlanningSession(env, step, event, {
     context,
     messages,
     isRevision: false,
     occurrence: "initial",
   })
-  if (outcome?.kind !== "proposed") return
+  if (planning?.outcome.kind !== "proposed") return
+  const outcome = planning.outcome
 
   // Optional enrichment must precede the persist batch: version rows are insert-only (§8).
   const enriched = await stepDo(step, "meal-planning-video-enrich", () =>
@@ -261,6 +278,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
       weeklyInventory: outcome.propose.weeklyInventory,
       weeklyExceptions: outcome.propose.weeklyExceptions,
       provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
+      usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage)),
     }),
   )
 
@@ -277,15 +295,16 @@ export async function runAgentCenteredMealPlanningWorkflow(
   await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
 }
 
-/** Extract initial week context. */
+/** Extract initial week context. Returns the token usage of the extraction call when one ran. */
 async function extractInitialWeekContext(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
   context: MealPlanContext,
-): Promise<MealPlanContext> {
-  if (!event.payload.requestText?.trim()) return context
+): Promise<{ context: MealPlanContext; usage: LLMUsage | null }> {
+  if (!event.payload.requestText?.trim()) return { context, usage: null }
   const result = await stepDo(step, "meal-planning-extract-week-context", async () => {
+    let usage: LLMUsage | null = null
     try {
       const provider = createToolProvider(
         env.OPENROUTER_API_KEY,
@@ -313,6 +332,7 @@ async function extractInitialWeekContext(
         toolChoice: "required",
         reasoning: "disabled",
       })
+      usage = { inputTokens: response.usage?.inputTokens ?? 0, outputTokens: response.usage?.outputTokens ?? 0 }
       const call = response.toolCalls?.find((candidate) => candidate.name === "extract_week_context")
       const parsed = weekContextExtractionInputSchema.safeParse(stripNullProperties(call?.input))
       if (!parsed.success) {
@@ -323,7 +343,7 @@ async function extractInitialWeekContext(
           failureCategory: "invalid-output",
           details: { phase: "parsed", toolCallPresent: Boolean(call) },
         })
-        return context
+        return { context, usage }
       }
       const inventoryChanges = parsed.data.inventoryChanges
         .map(({ name, status }) => `${normalizeIngredient(name)}:${status}`)
@@ -348,7 +368,7 @@ async function extractInitialWeekContext(
             ...extractionDetails,
           },
         })
-        return context
+        return { context, usage }
       }
       const update = resolveWeekContextUpdate(context, { ...parsed.data, replan: false })
       logRuntime(env, {
@@ -362,7 +382,10 @@ async function extractInitialWeekContext(
           ...extractionDetails,
         },
       })
-      return { ...context, weeklyInventory: update.weeklyInventory, weeklyExceptions: update.weeklyExceptions }
+      return {
+        context: { ...context, weeklyInventory: update.weeklyInventory, weeklyExceptions: update.weeklyExceptions },
+        usage,
+      }
     } catch (error) {
       logRuntime(env, {
         workflow: event.instanceId,
@@ -370,7 +393,7 @@ async function extractInitialWeekContext(
         outcome: "failed",
         failureCategory: error instanceof Error ? error.name : "unknown",
       })
-      return context
+      return { context, usage }
     }
   })
   return result
@@ -394,7 +417,8 @@ async function stepDo<T>(step: WorkflowStep, name: string, fn: () => Promise<T>)
  * handoff returns the candidate for persistence. `occurrence` is a stable
  * per-session key (`initial` or `revision-<live-loop-iteration>`) that scopes
  * every durable step name so name-memoized replays never reuse another
- * session's steps.
+ * session's steps. Returns the session's accumulated token usage (every turn
+ * that actually ran) alongside the outcome.
  */
 async function runPlanningSession(
   env: Env,
@@ -409,13 +433,14 @@ async function runPlanningSession(
     allowWeekContextUpdate?: boolean
     occurrence: string
   },
-): Promise<PlanningOutcome | null> {
+): Promise<{ outcome: PlanningOutcome; usage: LLMUsage }> {
   const notifyPrefix = `meal-planning-notify-${options.occurrence}`
   const sessionDeadline = Date.now() + MEAL_PLANNING_TTL_MS
+  let usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
     if (Date.now() > sessionDeadline) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-deadline`)
-      return { kind: "abandoned" }
+      return { outcome: { kind: "abandoned" }, usage }
     }
     const session = await stepDo(step, `meal-planning-agent-session-${options.occurrence}-${turn}`, async () => {
       try {
@@ -449,13 +474,14 @@ async function runPlanningSession(
     })
     if (session === null) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
-      return { kind: "abandoned" }
+      return { outcome: { kind: "abandoned" }, usage }
     }
+    usage = addUsage(usage, session.usage)
     options.messages = session.messages
     logAgentSession(env, event.instanceId, session)
     if (!session.completed || !session.terminal) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
-      return { kind: "abandoned" }
+      return { outcome: { kind: "abandoned" }, usage }
     }
     const terminal = session.terminal
     if (terminal.kind === "needs_clarification") {
@@ -468,16 +494,17 @@ async function runPlanningSession(
           options.isRevision ? MEAL_FEEDBACK_NOT_APPLIED : MEAL_PLANNING_CANCELED,
           `${notifyPrefix}-clarification-timeout`,
         )
-        return { kind: "abandoned" }
+        return { outcome: { kind: "abandoned" }, usage }
       }
       options.messages.push({ role: "user", text: reply })
       continue
     }
-    if (terminal.kind === "update_week_context") return { kind: "week_context_updated", update: terminal.update }
-    return { kind: "proposed", propose: terminal }
+    if (terminal.kind === "update_week_context")
+      return { outcome: { kind: "week_context_updated", update: terminal.update }, usage }
+    return { outcome: { kind: "proposed", propose: terminal }, usage }
   }
   await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-exhausted`)
-  return { kind: "abandoned" }
+  return { outcome: { kind: "abandoned" }, usage }
 }
 
 /** Sends a force-reply clarification prompt and returns only the matching free-text reply (or null on timeout). */
@@ -561,7 +588,15 @@ async function sendPlanAndRegister(
   occurrence: string,
 ): Promise<void> {
   const chatId = event.payload.chatId
-  const message = renderPlanLaunchMessage(plan)
+  // Every plan message (initial and each revision) reports the cumulative
+  // usage across this plan's recorded versions, mirroring how the LinkedIn
+  // draft flow reports running totals (issue #72).
+  const costLine = await stepDo(step, `meal-planning-plan-cost-${occurrence}`, async () => {
+    if (!version.usage || !env.MEAL_PLANNING_DB) return ""
+    const usageTotal = await createMealPlanningStore(env.MEAL_PLANNING_DB).sumPlanUsage(plan.planId)
+    return usageTotal ? formatCostLine(computeCost(usageTotal, version.usage.model)) : ""
+  })
+  const message = `${renderPlanLaunchMessage(plan)}${costLine}`
   const reviewUrl = miniAppLaunchUrl(env.MINI_APP_ORIGIN)
   // The Mini App link is shown only after its server-owned private-chat scope
   // has been persisted. Its authorization is still rechecked from signed
@@ -759,7 +794,7 @@ function submissionFromPayload(payload: MealPlanningLiveEvent | undefined): Subm
   return coerceSubmission(payload.text, source, payload.messageId ?? 0)
 }
 
-/** Runs one feedback-driven revision: session → no-change gate → CAS promotion → new plan message. Returns the new plan-message generation on success, null otherwise. */
+/** Runs one feedback-driven revision: session → no-change gate → CAS promotion → new plan message. Returns the new plan-message generation on success, null otherwise. `priorUsage` carries usage across the context-update recursion so a promoted version records every session in the round. */
 async function runRevision(
   env: Env,
   step: WorkflowStep,
@@ -771,6 +806,7 @@ async function runRevision(
   iteration: number,
   contextAlreadyUpdated = false,
   feedbackBatch?: FeedbackBatchRecord,
+  priorUsage: LLMUsage = ZERO_USAGE,
 ): Promise<number | null> {
   const occurrence = `revision-${iteration}`
   const notifyPrefix = `meal-planning-notify-${occurrence}`
@@ -807,7 +843,7 @@ async function runRevision(
       text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(feedbackItems)}${contextAlreadyUpdated ? `\nWeek-context updates from this message are already applied. Carry out the requested replan: ${submission.items.map((item) => item.text).join(" ")}` : ""}\n\n${renderHouseholdContext(context)}`,
     },
   ]
-  const outcome = await runPlanningSession(env, step, event, {
+  const planning = await runPlanningSession(env, step, event, {
     context,
     messages,
     isRevision: true,
@@ -815,7 +851,9 @@ async function runRevision(
     allowWeekContextUpdate: !contextAlreadyUpdated,
     occurrence,
   })
-  if (outcome?.kind === "week_context_updated") {
+  const outcome = planning.outcome
+  const roundUsage = addUsage(priorUsage, planning.usage)
+  if (outcome.kind === "week_context_updated") {
     const updatedContext = outcome.update
     const persisted = await stepDo(step, `meal-planning-update-week-context-${occurrence}`, () =>
       store.updateWeeklyContext({
@@ -867,9 +905,10 @@ async function runRevision(
       iteration,
       true,
       feedbackBatch,
+      roundUsage,
     )
   }
-  if (outcome?.kind !== "proposed") {
+  if (outcome.kind !== "proposed") {
     if (feedbackBatch) await failMiniAppBatch(env, step, store, event.payload.chatId, feedbackBatch.batchId, iteration)
     return null
   }
@@ -898,6 +937,7 @@ async function runRevision(
       video: enriched.video,
       evaluation: propose.evaluation,
       provisionalMealDefinitions: propose.provisionalMealDefinitions,
+      usage: makeVersionUsage(roundUsage),
       inventory: {
         weeklyInventory: propose.weeklyInventory,
         weeklyExceptions: propose.weeklyExceptions,

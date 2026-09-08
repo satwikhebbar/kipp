@@ -181,6 +181,30 @@ describe("createInMemoryMealPlanningStore", () => {
     expect(active?.plan.weeklyInventory.notes).toEqual(["picked up poha"])
   })
 
+  it("persists per-version usage and sums it across the plan (cost tracking)", async () => {
+    const store = await newStore()
+    await store.createActivePlan(
+      createInput({ usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" } }),
+    )
+    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 100, outputTokens: 20 })
+
+    const promoted = await store.promotePlanVersion(
+      promoteInput({ usage: { inputTokens: 40, outputTokens: 5, model: "openai/gpt-5.6-luna" } }),
+    )
+    expect(promoted.ok).toBe(true)
+    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 140, outputTokens: 25 })
+    const active = await store.activePlan(CHAT)
+    expect(active?.version.usage).toEqual({ inputTokens: 40, outputTokens: 5, model: "openai/gpt-5.6-luna" })
+  })
+
+  it("sumPlanUsage returns null and versions hydrate null usage when none recorded it (legacy rows)", async () => {
+    const store = await newStore()
+    await store.createActivePlan(createInput())
+    await store.promotePlanVersion(promoteInput())
+    expect(await store.sumPlanUsage("plan-1")).toBeNull()
+    expect((await store.activePlan(CHAT))?.version.usage).toBeNull()
+  })
+
   it("a stale promote changes nothing: no version row, generation unmoved, current_version unmoved, inventory unmoved, no feedback batch row", async () => {
     const store = await newStore()
     await store.createActivePlan(createInput({ weeklyInventory: { items: [], notes: ["original"] } }))
@@ -386,6 +410,43 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(active?.version.feedbackBatchId).toBe("plan-1:v2")
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+  })
+
+  it("persists usage columns through D1, sums them, and reads a null usage row back as null", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    const created = await store.createActivePlan(
+      createInput({ usage: { inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" } }),
+    )
+    expect(created.version.usage).toEqual({ inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" })
+    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 200, outputTokens: 30 })
+    expect(d1Scalar(db, "SELECT usage_model FROM meal_plan_version WHERE plan_id = ? AND version = 1", "plan-1")).toBe(
+      "openai/gpt-5.6-luna",
+    )
+
+    const promoted = await store.promotePlanVersion(
+      promoteInput({ usage: { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" } }),
+    )
+    expect(promoted.ok).toBe(true)
+    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 250, outputTokens: 40 })
+    const active = await store.activePlan(CHAT)
+    expect(active?.version.usage).toEqual({ inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" })
+  })
+
+  it("a legacy version persisted without usage hydrates null and does not skew the sum", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    const created = await store.createActivePlan(createInput())
+    expect(created.version.usage).toBeNull()
+    expect(await store.sumPlanUsage("plan-1")).toBeNull()
+
+    // A later revision records usage; the null-usage v1 row is skipped by the sum.
+    const promoted = await store.promotePlanVersion(
+      promoteInput({ usage: { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" } }),
+    )
+    expect(promoted.ok).toBe(true)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version WHERE usage_input_tokens IS NULL")).toBe(1)
+    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 50, outputTokens: 10 })
   })
 
   it("createActivePlan with a missing profile throws atomically: no plan, no version, no profile row", async () => {

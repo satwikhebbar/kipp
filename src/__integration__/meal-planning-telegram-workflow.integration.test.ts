@@ -9,6 +9,7 @@ vitest.mock("../providers", () => ({ createToolProvider: () => ({ generate: mock
 const mockGenerate = vitest.hoisted(() => vitest.fn())
 
 const LLM_QUEUE: Array<{ label: string; response: unknown }> = []
+const LLM_USAGE = { inputTokens: 1000, outputTokens: 500 }
 
 function queueResponse(label: string, response: unknown): void {
   LLM_QUEUE.push({ label, response })
@@ -20,11 +21,11 @@ function queueInitialPlan(base: MealPlanCandidate): void {
     toolCalls: [
       { id: "evaluate", name: "evaluate_meal_plan", input: mealPlanSelectionCandidateToWire(selectionCandidate(base)) },
     ],
-    usage: {},
+    usage: LLM_USAGE,
   })
   queueResponse("propose", {
     toolCalls: [{ id: "propose", name: "propose_plan", input: proposeInput(base) }],
-    usage: {},
+    usage: LLM_USAGE,
   })
 }
 
@@ -33,7 +34,7 @@ function queueWeekContextExtraction(): void {
     toolCalls: [
       { id: "extract-week-context", name: "extract_week_context", input: { inventoryChanges: [], exceptionAdds: [] } },
     ],
-    usage: {},
+    usage: LLM_USAGE,
   })
 }
 
@@ -49,11 +50,11 @@ function queueRevision(
         input: mealPlanSelectionCandidateToWire(selectionCandidate(revised)),
       },
     ],
-    usage: {},
+    usage: LLM_USAGE,
   })
   queueResponse("propose-rev", {
     toolCalls: [{ id: "propose-rev", name: "propose_plan", input: proposeInput(revised, [feedback]) }],
-    usage: {},
+    usage: LLM_USAGE,
   })
 }
 
@@ -155,7 +156,7 @@ function queueClarification(message = "How many people should the week serve?"):
         input: { message, reasonCodes: ["slot_unsuitable"], interaction: { kind: "reply" } },
       },
     ],
-    usage: {},
+    usage: LLM_USAGE,
   })
 }
 
@@ -404,9 +405,15 @@ describe("agent-centered meal-planning Telegram integration", () => {
     expect(active?.plan.currentVersion).toBe(2)
     expect(active?.version.requestKind).toBe("revision")
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
-    expect(
-      network.getState().telegramMessages.filter((candidate) => candidate.text.includes("School week of")).length,
-    ).toBe(2)
+    // Each queued LLM call reports 1000 in / 500 out: v1 usage = extract + session
+    // (3000/1500), v2 = its own revision session (2000/1000).
+    expect(active?.version.usage).toEqual({ inputTokens: 2000, outputTokens: 1000, model: "openai/gpt-5.6-luna" })
+    const plans = network.getState().telegramMessages.filter((candidate) => candidate.text.includes("School week of"))
+    expect(plans).toHaveLength(2)
+    expect(plans[0]?.text).toContain("Est. cost:")
+    expect(plans[0]?.text).toContain("3000 in / 1500 out")
+    expect(plans[1]?.text).toContain("Est. cost:")
+    expect(plans[1]?.text).toContain("5000 in / 2500 out")
 
     step.timeout()
     await run
