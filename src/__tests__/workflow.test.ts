@@ -17,7 +17,7 @@ vi.mock("../providers", () => ({
     generate: async (input: {
       messages: Array<
         | { role: string; text: string }
-        | { role: "assistant"; toolCalls: Array<{ input: { response?: string } }> }
+        | { role: "assistant"; toolCalls: Array<{ input: { response?: string; post?: string } }> }
         | { role: "tool" }
       >
     }) => {
@@ -40,7 +40,7 @@ vi.mock("../providers", () => ({
           {
             id: crypto.randomUUID(),
             name: "submit_linkedin_response",
-            input: { response: response.text },
+            input: { response: response.text, post: response.text },
           },
         ],
         usage: response.usage,

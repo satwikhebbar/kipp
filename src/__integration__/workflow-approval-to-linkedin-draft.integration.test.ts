@@ -69,7 +69,10 @@ function linkedInToolResponse(response: string, id: string) {
             {
               id,
               type: "function",
-              function: { name: "submit_linkedin_response", arguments: JSON.stringify({ response }) },
+              function: {
+                name: "submit_linkedin_response",
+                arguments: JSON.stringify({ response, post: response }),
+              },
             },
           ],
         },
