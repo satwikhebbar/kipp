@@ -643,6 +643,7 @@ describe("PipelineWorkflow", () => {
       if (name === "revise-0") {
         return {
           draft: "Revised draft",
+          post: "Revised post",
           messages: [],
           costInputTokens: 300,
           costOutputTokens: 130,
