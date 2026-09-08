@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
-import { appendLinkedInFeedback, createLinkedInConversation, runLinkedInToolSession } from "../agent/linkedin"
+import {
+  appendLinkedInFeedback,
+  createLinkedInConversation,
+  MAX_POST_CHARACTERS,
+  runLinkedInToolSession,
+} from "../agent/linkedin"
 import type { ToolProviderClient } from "../providers"
 
 function providerWith(...responses: Awaited<ReturnType<ToolProviderClient["generate"]>>[]): ToolProviderClient {
@@ -172,6 +177,63 @@ describe("LinkedIn native-tool agent", () => {
       expect.objectContaining({
         tools: expect.not.arrayContaining([expect.objectContaining({ name: "publish_linkedin_draft" })]),
       }),
+    )
+  })
+
+  it("rejects an empty or whitespace-only post and fails closed", async () => {
+    const provider = providerWith(
+      {
+        toolCalls: [{ id: "blank-post", name: "submit_linkedin_response", input: { response: "Review", post: "   " } }],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      {
+        toolCalls: [{ id: "blank-post-2", name: "submit_linkedin_response", input: { response: "Review", post: "" } }],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      {
+        toolCalls: [{ id: "blank-post-3", name: "submit_linkedin_response", input: { response: "Review", post: "" } }],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    )
+
+    const result = await runLinkedInToolSession(provider, createLinkedInConversation("Direct.", { body: "Topic" }))
+
+    expect(result.terminal).toBeNull()
+    expect(result.toolExecutions[0]).toEqual(
+      expect.objectContaining({ outcome: "failed", failureCategory: "invalid-input" }),
+    )
+  })
+
+  it("accepts a post at the exact character limit and rejects a post over the limit", async () => {
+    const atLimit = "x".repeat(MAX_POST_CHARACTERS)
+    const accepted = await runLinkedInToolSession(
+      providerWith({
+        toolCalls: [{ id: "at-limit", name: "submit_linkedin_response", input: { response: "Review", post: atLimit } }],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      createLinkedInConversation("Direct.", { body: "Topic" }),
+    )
+
+    expect(accepted.completed).toBe(true)
+    expect(accepted.terminal?.post).toHaveLength(MAX_POST_CHARACTERS)
+
+    const overLimit = "x".repeat(MAX_POST_CHARACTERS + 1)
+    const overLimitCall = {
+      toolCalls: [
+        { id: "over-limit", name: "submit_linkedin_response", input: { response: "Review", post: overLimit } },
+      ],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }
+    const rejected = await runLinkedInToolSession(
+      providerWith(overLimitCall, overLimitCall, overLimitCall),
+      createLinkedInConversation("Direct.", { body: "Topic" }),
+    )
+
+    expect(rejected.completed).toBe(false)
+    expect(rejected.terminal).toBeNull()
+    expect(rejected.failureReason).toBe("provider-turn-limit")
+    expect(rejected.toolExecutions[0]).toEqual(
+      expect.objectContaining({ outcome: "failed", failureCategory: "invalid-input" }),
     )
   })
 })

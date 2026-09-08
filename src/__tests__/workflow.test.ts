@@ -107,6 +107,7 @@ function buildFetch(pages: HarnessPage[], opts: { linkedinStatus?: number; linke
   const state = pages.map((page) => ({ ...page }))
   const patches: { pageId: string; body: Record<string, unknown> }[] = []
   const telegramTexts: string[] = []
+  const linkedinDrafts: string[] = []
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     const ok = (body: unknown, status = 200) =>
@@ -152,6 +153,11 @@ function buildFetch(pages: HarnessPage[], opts: { linkedinStatus?: number; linke
       return ok({ ok: true, result: { message_id: 100 } })
     }
     if (url.includes("api.linkedin.com")) {
+      const body = JSON.parse((init?.body as string) ?? "{}") as {
+        specificContent?: { "com.linkedin.ugc.ShareContent"?: { shareCommentary?: { text?: string } } }
+      }
+      const shareCommentary = body.specificContent?.["com.linkedin.ugc.ShareContent"]?.shareCommentary
+      if (shareCommentary?.text) linkedinDrafts.push(shareCommentary.text)
       return ok(
         opts.linkedinBody ?? { id: "urn:li:draft:123", "x-restli-id": "urn:li:draft:123" },
         opts.linkedinStatus ?? 201,
@@ -159,7 +165,7 @@ function buildFetch(pages: HarnessPage[], opts: { linkedinStatus?: number; linke
     }
     throw new Error(`Unexpected fetch: ${url}`)
   })
-  return { fetchMock, patches, telegramTexts }
+  return { fetchMock, patches, telegramTexts, linkedinDrafts }
 }
 
 function mockEnv(): Env {
@@ -296,6 +302,100 @@ describe("PipelineWorkflow", () => {
     expect(stepDo).not.toHaveBeenCalledWith("archive", expect.any(Function))
     expect(stepDo).not.toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
     expect(patchedStatuses(patches)).toContain("awaiting-feedback-expired")
+  })
+
+  it("publishes only the clean post while Telegram review shows the conversational response", async () => {
+    const conversationResponse =
+      'Here is the post around your chosen hook.\n\nOPENING HOOK (chosen)\n"quote"\n\nIMAGE IDEAS\n1. train shot\n\nTHE POST\nMy post body.'
+    const cleanPost = "My post body."
+
+    testRun()
+    mockCreateGenerator.mockResolvedValue({
+      toolCalls: [
+        {
+          id: "split",
+          name: "submit_linkedin_response",
+          input: { response: conversationResponse, post: cleanPost },
+        },
+      ],
+      usage: { inputTokens: 5, outputTokens: 3 },
+    })
+    const { fetchMock, telegramTexts, linkedinDrafts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        LINKEDIN_ACCESS_TOKEN: "valid-token",
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        LINKEDIN_CLIENT_ID: "client-id",
+        LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
+      },
+    })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    expect(linkedinDrafts).toEqual([cleanPost])
+    const draftMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
+    expect(draftMsg).toBeDefined()
+    expect(draftMsg).toContain(conversationResponse)
+  })
+
+  it("publishes the revised post on second approval, never the conversational response", async () => {
+    const firstPost = "First post body."
+    const revisedPost = "Revised post body."
+
+    testRun()
+    mockCreateGenerator.mockResolvedValueOnce({
+      toolCalls: [
+        {
+          id: "first",
+          name: "submit_linkedin_response",
+          input: { response: "First conversational response", post: firstPost },
+        },
+      ],
+      usage: { inputTokens: 5, outputTokens: 3 },
+    })
+    mockCreateGenerator.mockResolvedValueOnce({
+      toolCalls: [
+        {
+          id: "revised",
+          name: "submit_linkedin_response",
+          input: { response: "Revised conversational response", post: revisedPost },
+        },
+      ],
+      usage: { inputTokens: 5, outputTokens: 3 },
+    })
+    const { fetchMock, telegramTexts, linkedinDrafts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "Make it shorter" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        LINKEDIN_ACCESS_TOKEN: "valid-token",
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        LINKEDIN_CLIENT_ID: "client-id",
+        LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
+      },
+    })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    expect(linkedinDrafts).toEqual([revisedPost])
+    expect(linkedinDrafts[0]).not.toContain("Revised conversational response")
+    const revisedMsg = telegramTexts.find((t) => t.startsWith("*Revised draft for idea"))
+    expect(revisedMsg).toBeDefined()
+    expect(revisedMsg).toContain("Revised conversational response")
   })
 
   it("does not leak LinkedIn token in Telegram error message or console.error on publish failure", async () => {
