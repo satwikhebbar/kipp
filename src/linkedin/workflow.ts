@@ -225,6 +225,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       })
       if (!session.terminal) throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
       const draft = session.terminal.response
+      const post = session.terminal.post
       const messages = session.messages
 
       const usage = session.usage
@@ -240,6 +241,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       const nextState = assertStepOutputSize({
         draft,
+        post,
         messages,
         chatId,
         costInputTokens: usage.inputTokens,
@@ -279,6 +281,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     }
 
     let currentDraft = state.draft
+    let currentPost = state.post
     let currentMessages = state.messages
     let runningInputTokens = state.costInputTokens ?? 0
     let runningOutputTokens = state.costOutputTokens ?? 0
@@ -391,7 +394,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         try {
           publication = await stepDo("linkedin-publish", async () => {
             const li = createLinkedInClient(publishToken)
-            return li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentDraft)
+            return li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentPost)
           })
         } catch (err) {
           await notifyPublishFailure(err)
@@ -447,6 +450,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         if (!session.terminal)
           throw new Error(`LinkedIn tool session failed: ${session.failureReason ?? "no-response"}`)
         const nextDraft = session.terminal.response
+        const nextPost = session.terminal.post
         const stepUsage = session.usage
         const cumulativeUsage: LLMUsage = {
           inputTokens: runningInputTokens + stepUsage.inputTokens,
@@ -456,6 +460,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const costLine = formatCostLine(cost)
         const nextState = assertStepOutputSize({
           draft: nextDraft,
+          post: nextPost,
           messages: session.messages,
           costInputTokens: cumulativeUsage.inputTokens,
           costOutputTokens: cumulativeUsage.outputTokens,
@@ -465,6 +470,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         return nextState
       })
       currentDraft = revised.draft
+      currentPost = revised.post
       currentMessages = revised.messages
       runningInputTokens = revised.costInputTokens
       runningOutputTokens = revised.costOutputTokens
