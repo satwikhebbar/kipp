@@ -58,6 +58,20 @@ deterministic artifact.
 
 ### 3.1 Tool contract (`src/agent/linkedin.ts`)
 
+Define the limits at the top of the module:
+
+```ts
+const MAX_RESPONSE_CHARACTERS = 10_000 // unchanged: bounds the conversational review message
+const MAX_POST_CHARACTERS = 3_000 // ponytail: LinkedIn UGC shareCommentary text limit
+```
+
+`MAX_POST_CHARACTERS = 3_000` is a concrete contract choice, not a placeholder:
+LinkedIn's UGC Posts API rejects `shareCommentary` text longer than 3,000
+characters, so a schema-accepted `post` can never be rejected by
+`createDraftPost` for length. The style prompt already targets 150–300 words,
+comfortably under the cap; the response field keeps its existing 10,000-char
+bound because it is a review message, not the published artifact.
+
 Change the `submit_linkedin_response` input schema from
 
 ```ts
@@ -81,6 +95,11 @@ Field semantics:
 - **`post`** — the exact final LinkedIn post text. No prelude, no option labels,
   no image ideas, no section headings such as `THE POST`. This is the only text
   ever passed to `createDraftPost`.
+
+Failure behavior at the boundary: a whitespace/empty `post` and a `post` over
+3,000 characters both fail Zod validation in the tool runner, and the session
+repairs or fails closed exactly as the current empty-`response` case does (no
+publish, no partial state).
 
 The tool handler records both candidates, trims each, and the session result
 becomes:
@@ -129,9 +148,9 @@ untouched. No `Env` variable, binding, or `wrangler.toml` change is required.
 
 | File | Change |
 | --- | --- |
-| `src/agent/linkedin.ts` | Two-field input schema, handler records `post`, `LinkedInTerminalOutcome` gains `post`, prompt + tool description updated. |
+| `src/agent/linkedin.ts` | Add `MAX_POST_CHARACTERS = 3_000`; two-field input schema, handler records `post`, `LinkedInTerminalOutcome` gains `post`, prompt + tool description updated. |
 | `src/linkedin/workflow.ts` | Carry `post` through step state and revision rounds; approval publishes `post`; notify copy unchanged in substance. |
-| `src/__tests__/linkedin-agent.test.ts` | Tool-call fixtures gain `post`; terminal assertions become `{ kind, response, post }`; new cases for trimmed/empty/whitespace `post`. |
+| `src/__tests__/linkedin-agent.test.ts` | Tool-call fixtures gain `post`; terminal assertions become `{ kind, response, post }`; new cases for trimmed/empty/whitespace `post` and for a `post` over `MAX_POST_CHARACTERS` being rejected by the schema. |
 | `src/__tests__/workflow.test.ts` | Provider mock wraps text into both fields; add a test where `response` contains cruft and `post` is clean, asserting the LinkedIn body equals only `post`. |
 | `src/__integration__/workflow-approval-to-linkedin-draft.integration.test.ts` | Fixture helper submits both fields; existing assertions updated; new test proves LinkedIn draft text equals `post` and not the conversational `response`, including after a revision. |
 | `src/__integration__/security-boundaries.integration.test.ts` | Fixture tool-call arguments gain `post`. |
@@ -158,7 +177,11 @@ Explicit behavioral assertions:
    `response` when the fields differ.
 3. Whitespace/empty `post` is rejected by schema and the session fails closed
    (same repair semantics as today's empty `response`).
-4. No LinkedIn mutation happens before an explicit approval; hallucinated
+4. A `post` of exactly `MAX_POST_CHARACTERS` (3,000) is accepted, and a `post`
+   of 3,001+ characters is rejected by the schema with the same fail-closed
+   repair semantics — proving the documented LinkedIn length boundary is
+   enforced before any publish step.
+5. No LinkedIn mutation happens before an explicit approval; hallucinated
    publishing tools remain denied (existing security-boundaries cases updated
    only for the new fixture shape).
 
