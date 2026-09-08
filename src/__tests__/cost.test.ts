@@ -34,10 +34,29 @@ describe("computeCost", () => {
     expect(cost.model).toBe("deepseek-chat")
   })
 
-  test("gemini-2.0-flash pricing arithmetic", () => {
-    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "gemini-2.0-flash")
-    expect(cost.totalCostUsd).toBeCloseTo(0.3, 4)
-    expect(cost.model).toBe("gemini-2.0-flash")
+  test("openai/gpt-5.6-luna pricing arithmetic", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "openai/gpt-5.6-luna")
+    expect(cost.totalCostUsd).toBeCloseTo(0.8, 4)
+    expect(cost.model).toBe("openai/gpt-5.6-luna")
+  })
+
+  test("gemini-2.5-flash pricing arithmetic", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "gemini-2.5-flash")
+    expect(cost.totalCostUsd).toBeCloseTo(1.55, 4)
+    expect(cost.model).toBe("gemini-2.5-flash")
+  })
+
+  test("every model the app can select has a pricing entry", () => {
+    // resolveModel fallbacks plus the local dev default (wrangler.toml LLM_MODEL).
+    const selectableModels = [
+      resolveModel("deepseek"),
+      resolveModel("openrouter"),
+      resolveModel("gemini"),
+      "deepseek-v4-flash",
+    ]
+    for (const model of selectableModels) {
+      expect(computeCost({ inputTokens: 0, outputTokens: 0 }, model).totalCostUsd).not.toBeNull()
+    }
   })
 })
 
@@ -60,10 +79,10 @@ describe("formatCostLine", () => {
       totalInputTokens: 100,
       totalOutputTokens: 50,
       totalCostUsd: null,
-      model: "gemini-2.0-flash",
+      model: "some-future-model",
     }
     expect(formatCostLine(cost)).toContain("not in pricing table")
-    expect(formatCostLine(cost)).toContain("gemini-2.0-flash")
+    expect(formatCostLine(cost)).toContain("some-future-model")
   })
 })
 

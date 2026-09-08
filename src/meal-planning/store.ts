@@ -37,6 +37,20 @@ export interface StoredMealProfile {
 
 export type MealPlanStatus = "active" | "replaced"
 
+/** LLM token usage recorded for one generated plan version (issue #72). */
+export interface VersionUsage {
+  inputTokens: number
+  outputTokens: number
+  /** Model string priced at report time via `computeCost`/`PRICING`. */
+  model: string
+}
+
+/** Cumulative usage summed across a plan's versions that recorded usage. */
+export interface PlanUsageTotal {
+  inputTokens: number
+  outputTokens: number
+}
+
 /** A hydrated `meal_plan` header row (plan identity, week bounds, live instance, week-scoped state). */
 export interface MealPlanRecord {
   planId: string
@@ -66,6 +80,8 @@ export interface MealPlanVersionRecord {
   video: Record<string, RecipeVideo>
   /** Full plan-local snapshot, including inherited unchanged provisional meals. */
   provisionalMealDefinitions: MealDefinition[]
+  /** Token usage that produced this version; null for rows persisted before cost tracking. */
+  usage: VersionUsage | null
   createdAt: string
 }
 
@@ -158,6 +174,8 @@ export interface CreateActivePlanInput {
   weeklyExceptions: WeeklyExceptions
   video?: Record<string, RecipeVideo>
   provisionalMealDefinitions?: MealDefinition[]
+  /** Token usage of the generation session(s); omitted when unavailable. */
+  usage?: VersionUsage
 }
 
 /** Result of a committed initial-plan batch. */
@@ -190,6 +208,8 @@ export interface PromotePlanVersionInput {
   inventory?: { weeklyInventory: WeeklyInventory; weeklyExceptions: WeeklyExceptions } | null
   /** The submission that drove this revision; omit (or null) only defensively — every revision is submission-driven. */
   feedbackBatch?: FeedbackBatchInput | null
+  /** Token usage of the revision's generation session(s); omitted when unavailable. */
+  usage?: VersionUsage
 }
 
 export interface UpdateWeeklyContextInput {
@@ -218,6 +238,8 @@ export interface MealPlanningStore {
   loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
   createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
   promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
+  /** Sums token usage across a plan's versions that recorded it; null when none did. */
+  sumPlanUsage(planId: string): Promise<PlanUsageTotal | null>
   /** Updates only week-scoped inventory/calendar facts; it never creates a plan version. */
   updateWeeklyContext(input: UpdateWeeklyContextInput): Promise<UpdateWeeklyContextResult>
   activePlan(chatId: string): Promise<ActivePlanRecord | null>
@@ -699,6 +721,7 @@ function makeVersionRecord(
   feedbackBatchId: string | null,
   video: Record<string, RecipeVideo>,
   provisionalMealDefinitions: MealDefinition[],
+  usage: VersionUsage | null,
   now: string,
 ): MealPlanVersionRecord {
   return {
@@ -711,6 +734,7 @@ function makeVersionRecord(
     feedbackBatchId,
     video,
     provisionalMealDefinitions,
+    usage,
     createdAt: now,
   }
 }
@@ -803,8 +827,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
-                                            base_version, feedback_batch_id, video_json, provisional_meals_json, created_at)
-             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?
+                                            base_version, feedback_batch_id, video_json, provisional_meals_json,
+                                            usage_input_tokens, usage_output_tokens, usage_model, created_at)
+             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
@@ -813,6 +838,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             JSON.stringify(input.evaluation),
             JSON.stringify(input.video ?? NO_VIDEOS),
             JSON.stringify(input.provisionalMealDefinitions ?? []),
+            input.usage?.inputTokens ?? null,
+            input.usage?.outputTokens ?? null,
+            input.usage?.model ?? null,
             now,
             input.chatId,
           ),
@@ -843,6 +871,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           null,
           input.video ?? NO_VIDEOS,
           input.provisionalMealDefinitions ?? [],
+          input.usage ?? null,
           now,
         ),
         generation,
@@ -869,8 +898,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
-                                            base_version, feedback_batch_id, video_json, provisional_meals_json, created_at)
-             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ? FROM meal_plan
+                                            base_version, feedback_batch_id, video_json, provisional_meals_json,
+                                            usage_input_tokens, usage_output_tokens, usage_model, created_at)
+             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ? FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
@@ -887,6 +917,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             batchId,
             JSON.stringify(input.video ?? NO_VIDEOS),
             JSON.stringify(input.provisionalMealDefinitions ?? []),
+            input.usage?.inputTokens ?? null,
+            input.usage?.outputTokens ?? null,
+            input.usage?.model ?? null,
             now,
             input.planId,
             input.chatId,
@@ -977,6 +1010,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           batchId,
           input.video ?? NO_VIDEOS,
           input.provisionalMealDefinitions ?? [],
+          input.usage ?? null,
           now,
         ),
         generation,
@@ -1010,7 +1044,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           `SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
                   p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
                   v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
-                  v.feedback_batch_id, v.video_json, v.provisional_meals_json, v.created_at AS version_created_at
+                  v.feedback_batch_id, v.video_json, v.provisional_meals_json,
+                  v.usage_input_tokens, v.usage_output_tokens, v.usage_model, v.created_at AS version_created_at
            FROM meal_plan p
            JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
            WHERE p.chat_id = ? AND p.status = 'active'`,
@@ -1060,6 +1095,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           feedbackBatchId: row.feedback_batch_id === null ? null : String(row.feedback_batch_id),
           video: parseJson<Record<string, RecipeVideo>>(String(row.video_json), {}),
           provisionalMealDefinitions: parseJson<MealDefinition[]>(String(row.provisional_meals_json), []),
+          usage:
+            row.usage_input_tokens === null || row.usage_input_tokens === undefined
+              ? null
+              : {
+                  inputTokens: Number(row.usage_input_tokens),
+                  outputTokens: Number(row.usage_output_tokens ?? 0),
+                  model: String(row.usage_model ?? ""),
+                },
           createdAt: String(row.version_created_at),
         },
       }
@@ -1071,6 +1114,20 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         .first()
       if (!row) return null
       return { instanceId: String(row.instance_id), weekEnd: String(row.week_end) }
+    },
+
+    async sumPlanUsage(planId) {
+      const row = await db
+        .prepare(
+          `SELECT COALESCE(SUM(usage_input_tokens), 0) AS input_tokens,
+                  COALESCE(SUM(usage_output_tokens), 0) AS output_tokens,
+                  COUNT(usage_input_tokens) AS usage_count
+           FROM meal_plan_version WHERE plan_id = ?`,
+        )
+        .bind(planId)
+        .first()
+      if (!row || Number(row.usage_count) === 0) return null
+      return { inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens) }
     },
 
     async upsertMiniAppReviewContext(input) {
@@ -1398,6 +1455,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         null,
         input.video ?? NO_VIDEOS,
         input.provisionalMealDefinitions ?? [],
+        input.usage ?? null,
         now,
       )
       backing.versions.set(versionKey(input.planId, 1), version)
@@ -1438,6 +1496,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         input.feedbackBatch?.batchId ?? null,
         input.video ?? NO_VIDEOS,
         input.provisionalMealDefinitions ?? [],
+        input.usage ?? null,
         now,
       )
       backing.versions.set(versionKey(input.planId, newVersion), version)
@@ -1505,6 +1564,20 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const plan = activePlanForChat(chatId)
       if (!plan) return null
       return { instanceId: plan.instanceId, weekEnd: plan.weekEnd }
+    },
+
+    async sumPlanUsage(planId) {
+      const records = [...backing.versions.values()].filter(
+        (record) => record.planId === planId && record.usage !== null,
+      )
+      if (records.length === 0) return null
+      return records.reduce(
+        (total, record) => ({
+          inputTokens: total.inputTokens + (record.usage?.inputTokens ?? 0),
+          outputTokens: total.outputTokens + (record.usage?.outputTokens ?? 0),
+        }),
+        { inputTokens: 0, outputTokens: 0 },
+      )
     },
 
     async upsertMiniAppReviewContext(input) {

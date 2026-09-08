@@ -388,10 +388,17 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.plan.instanceId).toBe("wf-meal-1")
     expect(active?.version.version).toBe(1)
     expect(active?.version.requestKind).toBe("initial_plan")
+    // Two provider turns (evaluate + propose), one token each, under the meal model.
+    expect(active?.version.usage).toEqual({ inputTokens: 2, outputTokens: 2, model: "openai/gpt-5.6-luna" })
+    const planId = active?.plan.planId
+    if (!planId) throw new Error("expected a persisted plan id")
+    expect(await store.sumPlanUsage(planId)).toEqual({ inputTokens: 2, outputTokens: 2 })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
 
     const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))
     expect(planMessage).toBeTruthy()
+    expect(planMessage?.text).toContain("Est. cost: ~$0.0000")
+    expect(planMessage?.text).toContain("2 in / 2 out")
     expect(planMessage?.replyMarkup).toBeTruthy()
     expect(registrations).toContainEqual(
       expect.objectContaining({
@@ -616,6 +623,13 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.version.version).toBe(2)
     expect(active?.version.requestKind).toBe("revision")
     expect(active?.version.feedbackBatchId).toBe(`${active?.plan.planId}:v2`)
+    // The revision's own generation usage is recorded on its version row.
+    expect(active?.version.usage).toEqual({ inputTokens: 2, outputTokens: 2, model: "openai/gpt-5.6-luna" })
+    // The v2 message reports the cumulative run total (v1 + v2 usage), like LinkedIn drafts.
+    const planMessages = telegramMessages.filter((message) => message.text.includes("School week of"))
+    expect(planMessages).toHaveLength(2)
+    expect(planMessages[0]?.text).toContain("2 in / 2 out")
+    expect(planMessages[1]?.text).toContain("4 in / 4 out")
     const v1 = db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as {
       candidate_json: string
     }
