@@ -59,7 +59,7 @@ const RAW_PAGE: FakeNotionPage = {
   chatId: "42",
 }
 
-function linkedInToolResponse(response: string, id: string) {
+function linkedInToolResponse(response: string, post: string, id: string) {
   return {
     choices: [
       {
@@ -71,7 +71,7 @@ function linkedInToolResponse(response: string, id: string) {
               type: "function",
               function: {
                 name: "submit_linkedin_response",
-                arguments: JSON.stringify({ response, post: response }),
+                arguments: JSON.stringify({ response, post }),
               },
             },
           ],
@@ -82,8 +82,14 @@ function linkedInToolResponse(response: string, id: string) {
   }
 }
 
-const DRAFT_RESPONSE = linkedInToolResponse("My draft content", "draft")
-const REVISE_RESPONSE = linkedInToolResponse("Revised draft", "revision")
+const CONVERSATIONAL_RESPONSE =
+  'Here is the post reframed around your preferred hook.\n\nOPENING HOOK (chosen)\n"quote"\n\nIMAGE IDEAS\n1. A train shot\n\nTHE POST\nMy draft content'
+const DRAFT_RESPONSE = linkedInToolResponse(CONVERSATIONAL_RESPONSE, "My draft content", "draft")
+const REVISE_RESPONSE = linkedInToolResponse(
+  "Revised per your feedback.\n\nIMAGE IDEAS\nUpdated shots\n\nTHE POST\nRevised draft",
+  "Revised draft",
+  "revision",
+)
 
 function makeStep() {
   return createFakeStep()
@@ -137,7 +143,15 @@ describe("workflow-approval-to-linkedin-draft", () => {
     const state = getState()
     expect(state.linkedinDrafts).toHaveLength(1)
     expect(state.linkedinDrafts[0].text).toBe("My draft content")
+    expect(state.linkedinDrafts[0].text).not.toContain("OPENING HOOK")
+    expect(state.linkedinDrafts[0].text).not.toContain("IMAGE IDEAS")
+    expect(state.linkedinDrafts[0].text).not.toContain("Here is the post reframed")
     expect(state.linkedinDrafts[0].authorUrn).toBe("urn:li:person:123")
+
+    const draftMsg = state.telegramMessages.find((msg) => msg.text.startsWith("*Draft for idea"))
+    expect(draftMsg).toBeDefined()
+    expect(draftMsg?.text).toContain("OPENING HOOK")
+    expect(draftMsg?.text).toContain("IMAGE IDEAS")
 
     expect(state.linkedinUrls).toHaveLength(1)
     expect(state.linkedinUrls[0]).toContain("/v2/ugcPosts")
@@ -206,6 +220,8 @@ describe("workflow-approval-to-linkedin-draft", () => {
     const state = getState()
     expect(state.linkedinDrafts).toHaveLength(1)
     expect(state.linkedinDrafts[0].text).toBe("Revised draft")
+    expect(state.linkedinDrafts[0].text).not.toContain("Revised per your feedback")
+    expect(state.linkedinDrafts[0].text).not.toContain("IMAGE IDEAS")
   })
 
   it("marks idea as expired when feedback times out after revision", async () => {

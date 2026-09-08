@@ -7,7 +7,7 @@ import type { DraftInput } from "./draft"
 
 const SUBMIT_LINKEDIN_RESPONSE = "submit_linkedin_response"
 const MAX_RESPONSE_CHARACTERS = 10_000 // bounds the conversational review message
-const MAX_POST_CHARACTERS = 3_000 // ponytail: LinkedIn UGC shareCommentary text limit
+export const MAX_POST_CHARACTERS = 3_000 // ponytail: LinkedIn UGC shareCommentary text limit
 
 const linkedInInputSchema = z.object({
   response: z.string().trim().min(1).max(MAX_RESPONSE_CHARACTERS),
