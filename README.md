@@ -65,14 +65,15 @@ Ideas enter the Notion Ideas data source through Telegram `/add`, the
 configured Substack RSS feed, or manual entry. `/generate` and scheduled
 cadence checks select raw Notion pages and can start `PipelineWorkflow`.
 
-The LinkedIn writing agent returns a complete `ready_for_review` response. Kipp
-stores the draft, sends it to Telegram, and durably waits for approval or
-revision feedback. Feedback resumes the bounded agent with its prior transcript.
-Only an explicit **Approve** action allows deterministic code to create a
-LinkedIn post with `lifecycleState: DRAFT`, then marks the idea `finalized` in
-Notion. A feedback wait expires after `WAIT_FOR_FEEDBACK_HOURS` (up to 11 hours
-45 minutes; Cloudflare's 12-hour workflow limit reserves a safety buffer) by
-default).
+The LinkedIn writing agent returns a `ready_for_review` outcome with two
+fields: a review `response` for Telegram plus the exact post text. Kipp stores
+the response, sends it to Telegram, and durably waits for approval or revision
+feedback. Feedback resumes the bounded agent with its prior transcript. Only an
+explicit **Approve** action allows deterministic code to create a LinkedIn post
+with `lifecycleState: DRAFT`, using the post text only — never the conversational
+`response`. It then marks the idea `finalized` in Notion. A feedback wait
+expires after `WAIT_FOR_FEEDBACK_HOURS` (up to 11 hours 45 minutes;
+Cloudflare's 12-hour workflow limit reserves a safety buffer) by default).
 
 ### Calendar scheduling
 
