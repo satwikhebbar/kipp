@@ -82,6 +82,26 @@ describe("createTelegramClient", () => {
     const tg = createTelegramClient("bot:token")
     await expect(tg.sendMessage(1, "x")).rejects.toThrow("Telegram API error 400 on sendMessage")
   })
+
+  it("retries without Markdown when Telegram rejects unbalanced entities", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: () =>
+          Promise.resolve(
+            '{"ok":false,"error_code":400,"description":"Bad Request: can\'t parse entities: Can\'t find end of the entity starting at byte offset 92"}',
+          ),
+      })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 7 } }) })
+    const tg = createTelegramClient("bot:token")
+    const result = await tg.sendMessage(1, "lone * asterisk")
+    expect(result.messageId).toBe(7)
+    const bodies = mockFetch.mock.calls.map((call) => (call[1] as { body?: string }).body ?? "")
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]).toContain('"parse_mode":"Markdown"')
+    expect(bodies[1]).not.toContain("parse_mode")
+  })
 })
 
 describe("handleTelegramWebhook", () => {
