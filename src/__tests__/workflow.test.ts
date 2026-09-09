@@ -347,6 +347,40 @@ describe("PipelineWorkflow", () => {
     expect(draftMsg).toContain(cleanPost)
   })
 
+  it("splits an at-cap response and near-cap post that together exceed one message", async () => {
+    const maxResponse = "x".repeat(1500)
+    const nearMaxPost = "p".repeat(2900)
+
+    testRun()
+    mockCreateGenerator.mockResolvedValue({
+      toolCalls: [
+        {
+          id: "big",
+          name: "submit_linkedin_response",
+          input: { response: maxResponse, post: nearMaxPost },
+        },
+      ],
+      usage: { inputTokens: 5, outputTokens: 3 },
+    })
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    const headerMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
+    expect(headerMsg).toBe(telegramTexts[0])
+    const postMsg = telegramTexts.find((t) => t.startsWith("Will be posted as a LinkedIn draft:"))
+    expect(postMsg).toBeDefined()
+    expect(postMsg).toContain(nearMaxPost)
+    expect(postMsg).toContain("Reply with feedback or tap below.")
+    expect(telegramTexts.indexOf(postMsg as string)).toBe(1)
+    for (const text of telegramTexts) expect(text.length).toBeLessThanOrEqual(4096)
+  })
+
   it("publishes the revised post on second approval, never the conversational response", async () => {
     const firstPost = "First post body."
     const revisedPost = "Revised post body."

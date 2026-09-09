@@ -61,16 +61,23 @@ deterministic artifact.
 Define the limits at the top of the module:
 
 ```ts
-const MAX_RESPONSE_CHARACTERS = 10_000 // unchanged: bounds the conversational review message
-const MAX_POST_CHARACTERS = 3_000 // ponytail: LinkedIn UGC shareCommentary text limit
+export const MAX_RESPONSE_CHARACTERS = 1_500 // bounds the conversational review message so response + post fit one Telegram message for typical post lengths
+export const MAX_POST_CHARACTERS = 3_000 // ponytail: LinkedIn UGC shareCommentary text limit
 ```
 
 `MAX_POST_CHARACTERS = 3_000` is a concrete contract choice, not a placeholder:
 LinkedIn's UGC Posts API rejects `shareCommentary` text longer than 3,000
 characters, so a schema-accepted `post` can never be rejected by
 `createDraftPost` for length. The style prompt already targets 150–300 words,
-comfortably under the cap; the response field keeps its existing 10,000-char
-bound because it is a review message, not the published artifact.
+comfortably under the cap.
+
+**Follow-up (2026-09-09 localhost smoke test):** the `response` bound was
+lowered from 10,000 to `MAX_RESPONSE_CHARACTERS = 1_500`. The Telegram review
+message renders `response` plus the labelled `post`, so the two must fit a
+single message for typical post lengths; the schema (not truncation) enforces
+the bound and fails closed if the model ignores it. `sendDraftReview` in
+`src/linkedin/workflow.ts` remains as a rare safety net (chunks only an
+oversized `response`, ≤2 messages).
 
 Change the `submit_linkedin_response` input schema from
 

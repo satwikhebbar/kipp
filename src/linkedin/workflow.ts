@@ -26,6 +26,8 @@ const CLOUDFLARE_MAX_WORKFLOW_DURATION_MS = CLOUDFLARE_MAX_WORKFLOW_DURATION_HOU
 const WORKFLOW_TIMEOUT_SAFETY_MARGIN_MS = WORKFLOW_TIMEOUT_SAFETY_MARGIN_MINUTES * MINUTES_TO_MS
 const MAX_FEEDBACK_SESSION_DURATION_MS = CLOUDFLARE_MAX_WORKFLOW_DURATION_MS - WORKFLOW_TIMEOUT_SAFETY_MARGIN_MS
 const DEFAULT_LLM_RETRIES = 3
+const TELEGRAM_MAX_MESSAGE_CHARS = 4096
+const TELEGRAM_CHUNK_MARGIN_CHARS = 128 // headroom under Telegram's hard message cap
 
 type PipelineWorkflowOutcome =
   | { outcome: "published"; linkedInDraftUrn?: string }
@@ -110,6 +112,61 @@ function interactionKeyboard(interactions: InteractionRegistration[]): Record<st
       ],
     ],
   }
+}
+
+/** Minimal Telegram client surface used by draft notifications. */
+interface TelegramMessenger {
+  sendMessage(
+    chatId: number | string,
+    text: string,
+    opts?: { replyMarkup?: Record<string, unknown>; signal?: AbortSignal },
+  ): Promise<{ messageId: number }>
+}
+
+/** Splits text at newline boundaries so every part fits Telegram's message-length cap. */
+function chunkTelegramText(
+  text: string,
+  maxChars = TELEGRAM_MAX_MESSAGE_CHARS - TELEGRAM_CHUNK_MARGIN_CHARS,
+): string[] {
+  const chunks: string[] = []
+  let rest = text
+  while (rest.length > maxChars) {
+    let cut = rest.lastIndexOf("\n", maxChars)
+    if (cut < 0) cut = rest.lastIndexOf(" ", maxChars)
+    if (cut < 0) cut = maxChars
+    chunks.push(rest.slice(0, cut))
+    rest = rest.slice(cut).replace(/^\n+/, "")
+  }
+  if (rest) chunks.push(rest)
+  return chunks
+}
+
+/**
+ * Sends a draft review to Telegram. A single message is used when the combined
+ * response + post fits Telegram's cap; otherwise the conversational response
+ * is streamed in chunks and the post text goes last as the message that
+ * carries the Approve/Revise keyboard.
+ */
+async function sendDraftReview(
+  tg: TelegramMessenger,
+  chatId: number | string,
+  header: string,
+  response: string,
+  post: string,
+  costLine: string,
+  replyMarkup: Record<string, unknown>,
+): Promise<number> {
+  const intro = `${header}\n\n`
+  const postBlock = `Will be posted as a LinkedIn draft:\n\n${post}\n\nReply with feedback or tap below.${costLine}`
+  if (intro.length + response.length + postBlock.length <= TELEGRAM_MAX_MESSAGE_CHARS) {
+    const result = await tg.sendMessage(chatId, `${intro}${response}\n\n${postBlock}`, { replyMarkup })
+    return result.messageId
+  }
+  const chunks = chunkTelegramText(response)
+  await tg.sendMessage(chatId, `${intro}${chunks[0] ?? ""}`)
+  for (const chunk of chunks.slice(1)) await tg.sendMessage(chatId, chunk)
+  const result = await tg.sendMessage(chatId, postBlock, { replyMarkup })
+  return result.messageId
 }
 
 export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
@@ -267,12 +324,16 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       const notification = await stepDo("notify", async () => {
         const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
         const interactions = createDraftInteractions(0, event.instanceId, 1, feedbackDeadlineMs)
-        const result = await tg.sendMessage(
+        const messageId = await sendDraftReview(
+          tg,
           state.chatId,
-          `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nWill be posted as a LinkedIn draft:\n\n${state.post}\n\nReply with feedback or tap below.${state.costLine}`,
-          { replyMarkup: interactionKeyboard(interactions) },
+          `*Draft for idea #${ideaId}*`,
+          state.draft,
+          state.post,
+          state.costLine,
+          interactionKeyboard(interactions),
         )
-        return { interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: result.messageId })) }
+        return { interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: messageId })) }
       })
       await stepDo("register-notify-interactions", async () => {
         const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
@@ -480,14 +541,16 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const notification = await stepDo(`notify-revised-${i}`, async () => {
           const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
           const interactions = createDraftInteractions(0, event.instanceId, i + 2, feedbackDeadlineMs)
-          const result = await tg.sendMessage(
+          const messageId = await sendDraftReview(
+            tg,
             state.chatId,
-            `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nWill be posted as a LinkedIn draft:\n\n${currentPost}\n\nReply with feedback or tap below.${revised.costLine}`,
-            { replyMarkup: interactionKeyboard(interactions) },
+            `*Revised draft for idea #${ideaId}*`,
+            currentDraft,
+            currentPost,
+            revised.costLine,
+            interactionKeyboard(interactions),
           )
-          return {
-            interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: result.messageId })),
-          }
+          return { interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: messageId })) }
         })
         await stepDo(`register-notify-revised-interactions-${i}`, async () => {
           const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)

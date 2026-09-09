@@ -6,7 +6,7 @@ import type { ToolRegistry } from "../runtime/tools"
 import type { DraftInput } from "./draft"
 
 const SUBMIT_LINKEDIN_RESPONSE = "submit_linkedin_response"
-const MAX_RESPONSE_CHARACTERS = 10_000 // bounds the conversational review message
+export const MAX_RESPONSE_CHARACTERS = 1_500 // bounds the conversational review message so response + post fit one Telegram message for typical post lengths
 export const MAX_POST_CHARACTERS = 3_000 // ponytail: LinkedIn UGC shareCommentary text limit
 
 const linkedInInputSchema = z.object({
@@ -21,7 +21,7 @@ Use the supplied style instructions and source material as the authoritative req
 
 Call submit_linkedin_response exactly once with both fields filled:
 - post: the exact final LinkedIn post text, free of any conversational framing, alternatives, image suggestions, or explanatory headings. This is the only text that will be created as a LinkedIn draft.
-- response: the author-facing review message. Any conversational context the author should see while reviewing (why a hook was chosen, image ideas, options considered) belongs here only.
+- response: the author-facing review message, kept concise — at most ${MAX_RESPONSE_CHARACTERS} characters — so it fits a single Telegram message. Any conversational context the author should see while reviewing (why a hook was chosen, image ideas, options considered) belongs here only.
 
 This is the only available action. Never request or claim to publish, archive, notify, or access credentials. Do not answer with prose outside the tool call.`
 
