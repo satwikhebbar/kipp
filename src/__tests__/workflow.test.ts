@@ -343,6 +343,8 @@ describe("PipelineWorkflow", () => {
     const draftMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
     expect(draftMsg).toBeDefined()
     expect(draftMsg).toContain(conversationResponse)
+    expect(draftMsg).toContain("Will be posted as a LinkedIn draft:")
+    expect(draftMsg).toContain(cleanPost)
   })
 
   it("publishes the revised post on second approval, never the conversational response", async () => {

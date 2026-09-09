@@ -152,6 +152,8 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(draftMsg).toBeDefined()
     expect(draftMsg?.text).toContain("OPENING HOOK")
     expect(draftMsg?.text).toContain("IMAGE IDEAS")
+    expect(draftMsg?.text).toContain("Will be posted as a LinkedIn draft:")
+    expect(draftMsg?.text).toContain("My draft content")
 
     expect(state.linkedinUrls).toHaveLength(1)
     expect(state.linkedinUrls[0]).toContain("/v2/ugcPosts")

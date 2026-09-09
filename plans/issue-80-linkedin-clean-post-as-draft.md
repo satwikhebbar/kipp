@@ -208,6 +208,11 @@ Explicit behavioral assertions:
    quoting `post`)? The plan keeps today's message shape; a labelled block is a
    small follow-up if review prefers more explicitness.
 
+   **Resolved (2026-09-09 localhost smoke test):** the owner reported the review
+   message no longer showed the actual draft. Both notify messages now render
+   the `response` followed by a `Will be posted as a LinkedIn draft:` block
+   quoting `post`, so the reviewer sees exactly what Approve will create.
+
 ## 8. Acceptance criteria
 
 - [ ] Approval creates a LinkedIn DRAFT whose text is exactly the agent-submitted
