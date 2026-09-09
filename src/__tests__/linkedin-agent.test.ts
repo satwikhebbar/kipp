@@ -3,6 +3,7 @@ import {
   appendLinkedInFeedback,
   createLinkedInConversation,
   MAX_POST_CHARACTERS,
+  MAX_RESPONSE_CHARACTERS,
   runLinkedInToolSession,
 } from "../agent/linkedin"
 import type { ToolProviderClient } from "../providers"
@@ -222,6 +223,37 @@ describe("LinkedIn native-tool agent", () => {
       toolCalls: [
         { id: "over-limit", name: "submit_linkedin_response", input: { response: "Review", post: overLimit } },
       ],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }
+    const rejected = await runLinkedInToolSession(
+      providerWith(overLimitCall, overLimitCall, overLimitCall),
+      createLinkedInConversation("Direct.", { body: "Topic" }),
+    )
+
+    expect(rejected.completed).toBe(false)
+    expect(rejected.terminal).toBeNull()
+    expect(rejected.failureReason).toBe("provider-turn-limit")
+    expect(rejected.toolExecutions[0]).toEqual(
+      expect.objectContaining({ outcome: "failed", failureCategory: "invalid-input" }),
+    )
+  })
+
+  it("accepts a response at the exact character limit and rejects a response over the limit", async () => {
+    const atLimit = "x".repeat(MAX_RESPONSE_CHARACTERS)
+    const accepted = await runLinkedInToolSession(
+      providerWith({
+        toolCalls: [{ id: "at-limit", name: "submit_linkedin_response", input: { response: atLimit, post: "Post" } }],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      createLinkedInConversation("Direct.", { body: "Topic" }),
+    )
+
+    expect(accepted.completed).toBe(true)
+    expect(accepted.terminal?.response).toHaveLength(MAX_RESPONSE_CHARACTERS)
+
+    const overLimit = "x".repeat(MAX_RESPONSE_CHARACTERS + 1)
+    const overLimitCall = {
+      toolCalls: [{ id: "over-limit", name: "submit_linkedin_response", input: { response: overLimit, post: "Post" } }],
       usage: { inputTokens: 1, outputTokens: 1 },
     }
     const rejected = await runLinkedInToolSession(
