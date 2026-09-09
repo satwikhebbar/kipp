@@ -144,10 +144,16 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       await tg.answerCallbackQuery(cq.id)
 
       if (cq.data && cq.message)
-        await dispatchRoutedInteraction(env, cq.message.chat.id, cq.from.id, {
-          telegramUpdateId: update.update_id,
-          callbackToken: cq.data,
-        })
+        await dispatchRoutedInteraction(
+          env,
+          cq.message.chat.id,
+          cq.from.id,
+          {
+            telegramUpdateId: update.update_id,
+            callbackToken: cq.data,
+          },
+          new URL(request.url).origin,
+        )
 
       logRuntime(env, { event: "telegram-callback", outcome: "succeeded" })
       return new Response("OK")
@@ -178,12 +184,18 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
     })
 
     if (msg.reply_to_message?.from?.is_bot) {
-      await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
-        telegramUpdateId: msg.message_id,
-        messageId: msg.message_id,
-        replyToMessageId: msg.reply_to_message.message_id,
-        text: msg.text,
-      })
+      await dispatchRoutedInteraction(
+        env,
+        msg.chat.id,
+        msg.from.id,
+        {
+          telegramUpdateId: msg.message_id,
+          messageId: msg.message_id,
+          replyToMessageId: msg.reply_to_message.message_id,
+          text: msg.text,
+        },
+        setupOrigin,
+      )
       return new Response("OK")
     }
 
@@ -275,11 +287,17 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         return new Response("OK")
       }
 
-      const routed = await dispatchRoutedInteraction(env, msg.chat.id, msg.from.id, {
-        telegramUpdateId: msg.message_id,
-        messageId: msg.message_id,
-        text,
-      })
+      const routed = await dispatchRoutedInteraction(
+        env,
+        msg.chat.id,
+        msg.from.id,
+        {
+          telegramUpdateId: msg.message_id,
+          messageId: msg.message_id,
+          text,
+        },
+        setupOrigin,
+      )
       if (routed) return new Response("OK")
 
       if (await dispatchMealFallthrough(env, msg, tg)) return new Response("OK")
@@ -323,6 +341,7 @@ async function dispatchRoutedInteraction(
     replyToMessageId?: number
     text?: string
   },
+  setupOrigin?: string,
 ): Promise<boolean> {
   const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
   const { interaction } = await router.resolve(input)
@@ -363,6 +382,7 @@ async function dispatchRoutedInteraction(
       interactionVersion: interaction.version,
       interactionKind: interaction.kind,
       telegramUpdateId: interaction.telegramUpdateId,
+      ...(setupOrigin !== undefined ? { setupOrigin } : {}),
       ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
     },
   })

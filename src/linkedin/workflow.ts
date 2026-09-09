@@ -120,8 +120,8 @@ function interactionKeyboard(interactions: InteractionRegistration[]): Record<st
 }
 
 /** Returns the configured browser URL that starts LinkedIn OAuth for this deployment. */
-function linkedinSetupUrl(env: Env): string {
-  const origin = env.LINKEDIN_REDIRECT_ORIGIN?.trim()
+function linkedinSetupUrl(env: Env, setupOrigin?: string): string {
+  const origin = env.LINKEDIN_REDIRECT_ORIGIN?.trim() || setupOrigin?.trim()
   return origin ? `${origin.replace(/\/+$/, "")}/setup/linkedin` : "/setup/linkedin"
 }
 
@@ -134,10 +134,11 @@ async function promptForLinkedInReconnect(options: {
   instanceId: string
   chatId: number | string
   ideaId: string
+  setupOrigin?: string
   round: number
   attempt: number
 }): Promise<ReconnectDecision> {
-  const { env, step, instanceId, chatId, ideaId, round, attempt } = options
+  const { env, step, instanceId, chatId, ideaId, setupOrigin, round, attempt } = options
   const response = await promptForActions({
     env,
     step,
@@ -145,7 +146,7 @@ async function promptForLinkedInReconnect(options: {
     chatId,
     version: round + 1,
     name: `linkedin-reconnect-${round}-${attempt}`,
-    message: `LinkedIn authorization is missing or expired. Open ${linkedinSetupUrl(env)} to authorize, then tap Retry to publish draft #${ideaId}.`,
+    message: `LinkedIn authorization is missing or expired. Open ${linkedinSetupUrl(env, setupOrigin)} to authorize, then tap Retry to publish draft #${ideaId}.`,
     actions: [
       ["Retry", INTERACTION_KIND.LINKEDIN_RETRY],
       ["Cancel", INTERACTION_KIND.LINKEDIN_CANCEL],
@@ -533,6 +534,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             instanceId: event.instanceId,
             chatId: state.chatId,
             ideaId,
+            setupOrigin: (reply.payload as { setupOrigin?: string } | undefined)?.setupOrigin,
             round: i,
             attempt,
           })
