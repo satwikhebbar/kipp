@@ -21,17 +21,23 @@ export function createTelegramClient(token: string) {
     text: string,
     opts?: { replyMarkup?: Record<string, unknown>; signal?: AbortSignal },
   ): Promise<{ messageId: number }> {
-    const data = await call<{ result: { message_id: number } }>(
-      "sendMessage",
-      {
-        chat_id: chatId,
-        text,
-        parse_mode: "Markdown",
-        ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
-      },
-      opts?.signal,
-    )
-    return { messageId: data.result.message_id }
+    const messageBody: Record<string, unknown> = {
+      chat_id: chatId,
+      text,
+      parse_mode: "Markdown",
+      ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
+    }
+    try {
+      const data = await call<{ result: { message_id: number } }>("sendMessage", messageBody, opts?.signal)
+      return { messageId: data.result.message_id }
+    } catch (err) {
+      if (!(err instanceof Error) || !err.message.includes("can't parse entities")) throw err
+      // Text with unbalanced Markdown (user or LLM content) is rejected by Telegram;
+      // resend as plain text instead of losing the message.
+      const { parse_mode: _parseMode, ...plainBody } = messageBody
+      const data = await call<{ result: { message_id: number } }>("sendMessage", plainBody, opts?.signal)
+      return { messageId: data.result.message_id }
+    }
   }
 
   async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
