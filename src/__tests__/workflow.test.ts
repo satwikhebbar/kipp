@@ -261,15 +261,17 @@ describe("PipelineWorkflow", () => {
     expect(remainingFeedbackTimeoutSeconds(deadline, startedAt)).toBe(11 * 60 * 60 + 45 * 60)
   })
 
-  it("generates draft, notifies, finalizes on approval", async () => {
+  it("generates a draft, notifies, and asks to reconnect when approving without LinkedIn configured", async () => {
     const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    const { fetchMock } = buildFetch([BASE_PAGE])
+    const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
     vi.stubGlobal("fetch", fetchMock)
-    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })
@@ -278,7 +280,44 @@ describe("PipelineWorkflow", () => {
 
     expect(stepDo).toHaveBeenCalledWith("generate", expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify", expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("notify-not-configured", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("linkedin-publish-0-0", expect.any(Function))
+    const reconnectMsg = telegramTexts.find((t) => t.startsWith("LinkedIn authorization is missing or expired."))
+    expect(reconnectMsg).toBeDefined()
+    expect(stepDo).toHaveBeenCalledWith("notify-publish-cancelled-0", expect.any(Function))
+  })
+
+  it("publishes after the operator authorizes LinkedIn and taps Retry", async () => {
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
+    let callIdx = 0
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    const { fetchMock, linkedinDrafts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    const env = {
+      ...mockEnv(),
+      ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+      LINKEDIN_ACCESS_TOKEN: "",
+      LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+      LINKEDIN_CLIENT_ID: "client-id",
+      LINKEDIN_CLIENT_SECRET: "client-secret",
+      DEPLOYMENT_ENV: "development",
+    }
+    Object.assign(wf, { env })
+    waitForEvent
+      .mockImplementationOnce(async () => ({ type: "event", payload: { text: "__approve__" } }))
+      .mockImplementationOnce(async () => {
+        env.LINKEDIN_ACCESS_TOKEN = "valid-token"
+        return { type: "event", payload: { text: "__linkedin-retry__" } }
+      })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    expect(stepDo).toHaveBeenCalledWith("linkedin-publish-0-0", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("linkedin-publish-0-1", expect.any(Function))
+    expect(linkedinDrafts).toEqual(["My draft content"])
   })
 
   it("times out when no feedback received, marking idea as expired", async () => {
@@ -300,7 +339,7 @@ describe("PipelineWorkflow", () => {
     expect(stepDo).toHaveBeenCalledWith("timeout-0", expect.any(Function))
     expect(stepDo).not.toHaveBeenCalledWith("notify-published", expect.any(Function))
     expect(stepDo).not.toHaveBeenCalledWith("archive", expect.any(Function))
-    expect(stepDo).not.toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
+    expect(stepDo).not.toHaveBeenCalledWith(expect.stringContaining("linkedin-publish"), expect.any(Function))
     expect(patchedStatuses(patches)).toContain("awaiting-feedback-expired")
   })
 
@@ -434,7 +473,7 @@ describe("PipelineWorkflow", () => {
     expect(revisedMsg).toContain("Revised conversational response")
   })
 
-  it("does not leak LinkedIn token in Telegram error message or console.error on publish failure", async () => {
+  it("asks to reconnect and never leaks the LinkedIn token when publish returns 401", async () => {
     const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
@@ -447,7 +486,9 @@ describe("PipelineWorkflow", () => {
     })
     vi.stubGlobal("fetch", fetchMock)
 
-    waitForEvent.mockResolvedValue({ type: "event", payload: { text: "__approve__" } })
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, {
@@ -466,12 +507,13 @@ describe("PipelineWorkflow", () => {
 
     consoleSpy.mockRestore()
 
-    expect(stepDo).toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("notify-publish-failed", expect.any(Function))
-    const telegramText = telegramTexts[telegramTexts.length - 1]
-    expect(telegramText).not.toContain("leaked-secret-abc")
-    expect(telegramText).not.toContain("valid-token")
-    expect(telegramText).toContain("HTTP 401")
+    expect(stepDo).toHaveBeenCalledWith("linkedin-publish-0-0", expect.any(Function))
+    expect(stepDo).not.toHaveBeenCalledWith("notify-publish-failed", expect.any(Function))
+    const reconnectMsg = telegramTexts.find((t) => t.startsWith("LinkedIn authorization is missing or expired."))
+    expect(reconnectMsg).toBeDefined()
+    expect(reconnectMsg).not.toContain("leaked-secret-abc")
+    expect(reconnectMsg).not.toContain("valid-token")
+    expect(reconnectMsg).toContain("/setup/linkedin")
 
     const allErrorOutput = consoleSpy.mock.calls.map((c) => c.join(" ")).join("\n")
     expect(allErrorOutput).not.toContain("leaked-secret-abc")
@@ -505,12 +547,12 @@ describe("PipelineWorkflow", () => {
 
     consoleSpy.mockRestore()
 
-    expect(stepDo).not.toHaveBeenCalledWith("linkedin-publish", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith(expect.stringContaining("linkedin-publish"), expect.any(Function))
     expect(stepDo).toHaveBeenCalledWith("notify-publish-failed", expect.any(Function))
     expect(telegramTexts[telegramTexts.length - 1]).toBe("❌ LinkedIn publish failed. Please try approving again.")
   })
 
-  it("revises on feedback and notifies on second approval without LinkedIn", async () => {
+  it("revises on feedback and asks to reconnect on a later approval without LinkedIn", async () => {
     const responses = [
       { text: "First draft", usage: { inputTokens: 5, outputTokens: 3 } },
       { text: "Revised draft", usage: { inputTokens: 5, outputTokens: 3 } },
@@ -524,6 +566,7 @@ describe("PipelineWorkflow", () => {
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "Make it shorter" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })
@@ -531,7 +574,8 @@ describe("PipelineWorkflow", () => {
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
     expect(stepDo).toHaveBeenCalledWith(expect.stringContaining("revise-"), expect.any(Function))
-    expect(stepDo).toHaveBeenCalledWith("notify-not-configured", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("linkedin-publish-1-0", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("notify-publish-cancelled-1", expect.any(Function))
   })
 
   it("revision generator receives style, initial request, earlier drafts, and Telegram feedback in order", async () => {
@@ -552,6 +596,7 @@ describe("PipelineWorkflow", () => {
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "Make it more academic" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })
@@ -594,6 +639,7 @@ describe("PipelineWorkflow", () => {
       .mockResolvedValueOnce({ type: "event", payload: { text: "first feedback" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "second feedback" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })
@@ -625,6 +671,7 @@ describe("PipelineWorkflow", () => {
       .mockResolvedValueOnce({ type: "event", payload: { text: "__revise__" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "actually make it shorter" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })
@@ -697,6 +744,7 @@ describe("PipelineWorkflow", () => {
     waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "Make it punchier" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })

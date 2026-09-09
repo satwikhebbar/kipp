@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
 import { appendLinkedInFeedback, createLinkedInConversation, runLinkedInToolSession } from "../agent/linkedin"
+import { promptForActions } from "../core/action-prompt"
 import { assertStepOutputSize } from "../core/conversation"
 import { computeCost, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
@@ -28,6 +29,10 @@ const MAX_FEEDBACK_SESSION_DURATION_MS = CLOUDFLARE_MAX_WORKFLOW_DURATION_MS - W
 const DEFAULT_LLM_RETRIES = 3
 const TELEGRAM_MAX_MESSAGE_CHARS = 4096
 const TELEGRAM_CHUNK_MARGIN_CHARS = 128 // headroom under Telegram's hard message cap
+const LINKEDIN_RECONNECT_TTL_MINUTES = 15
+const LINKEDIN_RECONNECT_TTL_MS = LINKEDIN_RECONNECT_TTL_MINUTES * MINUTES_TO_MS
+const MAX_LINKEDIN_PUBLISH_ATTEMPTS = 3
+const LINKEDIN_UNAUTHORIZED_STATUS = 401
 
 type PipelineWorkflowOutcome =
   | { outcome: "published"; linkedInDraftUrn?: string }
@@ -112,6 +117,44 @@ function interactionKeyboard(interactions: InteractionRegistration[]): Record<st
       ],
     ],
   }
+}
+
+/** Returns the configured browser URL that starts LinkedIn OAuth for this deployment. */
+function linkedinSetupUrl(env: Env): string {
+  const origin = env.LINKEDIN_REDIRECT_ORIGIN?.trim()
+  return origin ? `${origin.replace(/\/+$/, "")}/setup/linkedin` : "/setup/linkedin"
+}
+
+type ReconnectDecision = "retry" | "cancel" | "timeout"
+
+/** Prompts the operator to restore LinkedIn authorization and returns their Retry/Cancel choice. */
+async function promptForLinkedInReconnect(options: {
+  env: Env
+  step: WorkflowStep
+  instanceId: string
+  chatId: number | string
+  ideaId: string
+  round: number
+  attempt: number
+}): Promise<ReconnectDecision> {
+  const { env, step, instanceId, chatId, ideaId, round, attempt } = options
+  const response = await promptForActions({
+    env,
+    step,
+    instanceId,
+    chatId,
+    version: round + 1,
+    name: `linkedin-reconnect-${round}-${attempt}`,
+    message: `LinkedIn authorization is missing or expired. Open ${linkedinSetupUrl(env)} to authorize, then tap Retry to publish draft #${ideaId}.`,
+    actions: [
+      ["Retry", INTERACTION_KIND.LINKEDIN_RETRY],
+      ["Cancel", INTERACTION_KIND.LINKEDIN_CANCEL],
+    ],
+    ttlMs: LINKEDIN_RECONNECT_TTL_MS,
+  })
+  if (response.type === "action" && response.kind === INTERACTION_KIND.LINKEDIN_RETRY) return "retry"
+  if (response.type === "action" && response.kind === INTERACTION_KIND.LINKEDIN_CANCEL) return "cancel"
+  return "timeout"
 }
 
 /** Minimal Telegram client surface used by draft notifications. */
@@ -347,6 +390,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let runningInputTokens = state.costInputTokens ?? 0
     let runningOutputTokens = state.costOutputTokens ?? 0
     let latestCostLine = state.costLine
+
     for (let i = 0; i < MAX_FEEDBACK_ROUNDS; i++) {
       const timeoutSeconds = remainingFeedbackTimeoutSeconds(feedbackDeadlineMs)
       if (timeoutSeconds === 0) {
@@ -426,65 +470,92 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           }
         }
 
-        let publishToken: string
-        try {
-          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-token-read", outcome: "started" })
-          publishToken = await getLinkedInToken(this.env)
-          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-token-read", outcome: "succeeded" })
-        } catch (err) {
-          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-token-read", outcome: "failed" })
-          await notifyPublishFailure(err)
-          return { outcome: "publish-failed" }
-        }
+        for (let attempt = 0; attempt < MAX_LINKEDIN_PUBLISH_ATTEMPTS; attempt++) {
+          let publication: { kind: "ok"; urn: string } | { kind: "needs-auth" }
+          try {
+            publication = await stepDo(`linkedin-publish-${i}-${attempt}`, async () => {
+              const publishToken = await getLinkedInToken(this.env)
+              if (!publishToken || !this.env.LINKEDIN_AUTHOR_URN) return { kind: "needs-auth" as const }
+              try {
+                const li = createLinkedInClient(publishToken)
+                const created = await li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentPost)
+                return { kind: "ok" as const, urn: created.urn }
+              } catch (err) {
+                if (err instanceof LinkedInError && err.status === LINKEDIN_UNAUTHORIZED_STATUS) {
+                  logRuntime(this.env, {
+                    workflow: event.instanceId,
+                    event: "linkedin-approval",
+                    outcome: "failed",
+                    failureCategory: "linkedin-authorization-expired",
+                  })
+                  return { kind: "needs-auth" as const }
+                }
+                throw err
+              }
+            })
+          } catch (err) {
+            await notifyPublishFailure(err)
+            return { outcome: "publish-failed" }
+          }
 
-        if (!publishToken || !this.env.LINKEDIN_AUTHOR_URN) {
-          logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "not-configured" })
-          if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-            await stepDo("notify-not-configured", async () => {
+          if (publication.kind === "ok") {
+            logRuntime(this.env, {
+              workflow: event.instanceId,
+              event: "linkedin-draft-created",
+              outcome: "succeeded",
+              details: { urn: publication.urn || "unavailable" },
+            })
+
+            await stepDo("archive", async () => {
+              const manager = createIdeaManager(createNotionClient(this.env))
+              await manager.updateIdea(pageId, { status: "finalized" })
+            })
+            if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
+              await stepDo("notify-published", async () => {
+                const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+                await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${latestCostLine}`)
+              })
+            }
+            const completion = await stepDo("workflow-complete", async () =>
+              publication.urn
+                ? { outcome: "published" as const, linkedInDraftUrn: publication.urn }
+                : { outcome: "published" as const },
+            )
+            logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "succeeded" })
+            return completion
+          }
+
+          if (!state.chatId || !this.env.TELEGRAM_BOT_TOKEN) return { outcome: "not-configured" }
+
+          const decision = await promptForLinkedInReconnect({
+            env: this.env,
+            step,
+            instanceId: event.instanceId,
+            chatId: state.chatId,
+            ideaId,
+            round: i,
+            attempt,
+          })
+          if (decision === "retry") continue
+          if (decision === "cancel") {
+            await stepDo(`notify-publish-cancelled-${i}`, async () => {
               const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-              await tg.sendMessage(
-                state.chatId,
-                "❌ Cannot publish: LinkedIn not configured. Configure credentials and re-approve.",
-              )
+              await tg.sendMessage(state.chatId, "Draft publish cancelled. No LinkedIn draft was created.")
             })
           }
           return { outcome: "not-configured" }
         }
 
-        let publication: { urn: string }
-        try {
-          publication = await stepDo("linkedin-publish", async () => {
-            const li = createLinkedInClient(publishToken)
-            return li.createDraftPost(this.env.LINKEDIN_AUTHOR_URN, currentPost)
-          })
-        } catch (err) {
-          await notifyPublishFailure(err)
-          return { outcome: "publish-failed" }
-        }
-        logRuntime(this.env, {
-          workflow: event.instanceId,
-          event: "linkedin-draft-created",
-          outcome: "succeeded",
-          details: { urn: publication.urn || "unavailable" },
-        })
-
-        await stepDo("archive", async () => {
-          const manager = createIdeaManager(createNotionClient(this.env))
-          await manager.updateIdea(pageId, { status: "finalized" })
-        })
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
-          await stepDo("notify-published", async () => {
+          await stepDo(`notify-publish-attempts-exhausted-${i}`, async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-            await tg.sendMessage(state.chatId, `✅ Draft posted to LinkedIn!${latestCostLine}`)
+            await tg.sendMessage(
+              state.chatId,
+              "Draft publish didn't complete. Re-approve from the review message when LinkedIn is connected.",
+            )
           })
         }
-        const completion = await stepDo("workflow-complete", async () =>
-          publication.urn
-            ? { outcome: "published" as const, linkedInDraftUrn: publication.urn }
-            : { outcome: "published" as const },
-        )
-        logRuntime(this.env, { workflow: event.instanceId, event: "linkedin-approval", outcome: "succeeded" })
-        return completion
+        return { outcome: "publish-failed" }
       }
 
       const revised = await stepDo(`revise-${i}`, async () => {
