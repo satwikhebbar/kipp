@@ -269,7 +269,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const interactions = createDraftInteractions(0, event.instanceId, 1, feedbackDeadlineMs)
         const result = await tg.sendMessage(
           state.chatId,
-          `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nReply with feedback or tap below.${state.costLine}`,
+          `*Draft for idea #${ideaId}*\n\n${state.draft}\n\nWill be posted as a LinkedIn draft:\n\n${state.post}\n\nReply with feedback or tap below.${state.costLine}`,
           { replyMarkup: interactionKeyboard(interactions) },
         )
         return { interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: result.messageId })) }
@@ -482,7 +482,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           const interactions = createDraftInteractions(0, event.instanceId, i + 2, feedbackDeadlineMs)
           const result = await tg.sendMessage(
             state.chatId,
-            `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nReply with feedback or tap below.${revised.costLine}`,
+            `*Revised draft for idea #${ideaId}*\n\n${currentDraft}\n\nWill be posted as a LinkedIn draft:\n\n${currentPost}\n\nReply with feedback or tap below.${revised.costLine}`,
             { replyMarkup: interactionKeyboard(interactions) },
           )
           return {
