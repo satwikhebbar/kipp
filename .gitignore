@@ -25,6 +25,7 @@ wrangler.local.toml
 .agents/skills/beads/
 .claude/
 .codex/
+.cursor/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
