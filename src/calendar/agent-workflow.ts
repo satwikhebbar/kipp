@@ -1,6 +1,6 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 import { runCalendarAgentSession } from "../agent/calendar-session"
-import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
+import { ActionPromptOperationError, type ActionPromptOutcome, promptForActions } from "../core/action-prompt"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
 import {
   createGoogleCalendarClient,
@@ -29,24 +29,38 @@ const CALENDAR_INTERACTION_TTL_MINUTES = 15
 const MILLISECONDS_PER_MINUTE = 60_000
 const CALENDAR_INTERACTION_TTL_MS = CALENDAR_INTERACTION_TTL_MINUTES * MILLISECONDS_PER_MINUTE
 const MAX_CALENDAR_INTERACTION_TURNS = 8
-const MAX_MULTI_ACTION_LABEL_CHARACTERS = 16
 const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try again shortly."
 const CALENDAR_AGENT_UNAVAILABLE = "I couldn't reach the calendar agent. Please try again shortly."
 const CALENDAR_AGENT_NO_DECISION = "The calendar agent didn't return a scheduling decision. Please retry your request."
 const CALENDAR_CANCELLED = "Cancelled. No calendar event was created."
 
-type CalendarActionResponse =
-  | { type: "timeout" }
-  | { type: "action"; kind: WorkflowInteractionKind; actionIndex: number }
-  | { type: "reply"; text: string }
+type CalendarActionResponse = ActionPromptOutcome
 
-type CalendarInteractionStage = "notify" | "register" | "wait"
-
-class CalendarInteractionOperationError extends Error {
-  constructor(readonly stage: CalendarInteractionStage) {
-    super("Calendar interaction operation failed")
-    this.name = "CalendarInteractionOperationError"
-  }
+/** Calendar-scoped adapter over the shared action prompt that keeps caller ergonomics stable. */
+function calendarPromptForActions(
+  env: Env,
+  step: WorkflowStep,
+  event: WorkflowEvent<CalendarWorkflowParams>,
+  version: number,
+  name: string,
+  message: string,
+  actions: Array<[string, WorkflowInteractionKind]>,
+  keyboard = true,
+): Promise<CalendarActionResponse> {
+  return promptForActions({
+    env,
+    step,
+    instanceId: event.instanceId,
+    chatId: event.payload.chatId,
+    version,
+    name,
+    message,
+    actions,
+    keyboard,
+    ttlMs: CALENDAR_INTERACTION_TTL_MS,
+    interactionGroup: "calendar",
+    logEventName: "calendar-interaction",
+  })
 }
 
 interface PreparedCalendarOption {
@@ -180,7 +194,7 @@ export async function runAgentCenteredCalendarWorkflow(
         const replacementKind = options.some((option) => option.plan.kind === "recurring")
           ? INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME
           : INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE
-        const response = await promptForActions(
+        const response = await calendarPromptForActions(
           env,
           step,
           event,
@@ -322,7 +336,7 @@ async function promptForAuthorizationRecovery(
   version: number,
   turn: number,
 ): Promise<boolean> {
-  const retry = await promptForActions(
+  const retry = await calendarPromptForActions(
     env,
     step,
     event,
@@ -483,11 +497,11 @@ async function writePlanAndConfirm(
   const label = plan.kind === "recurring" ? "Edit entire series" : "Edit"
   let edit: CalendarActionResponse
   try {
-    edit = await promptForActions(env, step, event, version, `calendar-agent-confirmation-${turn}`, message, [
+    edit = await calendarPromptForActions(env, step, event, version, `calendar-agent-confirmation-${turn}`, message, [
       [label, INTERACTION_KIND.CALENDAR_EDIT],
     ])
   } catch (error) {
-    if (!(error instanceof CalendarInteractionOperationError) || error.stage !== "notify") return null
+    if (!(error instanceof ActionPromptOperationError) || error.stage !== "notify") return null
     logRuntime(env, {
       workflow: event.instanceId,
       event: "calendar-confirmation",
@@ -495,7 +509,7 @@ async function writePlanAndConfirm(
       failureCategory: "confirmation-recovery-started",
     })
     try {
-      edit = await promptForActions(
+      edit = await calendarPromptForActions(
         env,
         step,
         event,
@@ -656,92 +670,6 @@ async function promptForReply(
   message: string,
   kind: WorkflowInteractionKind,
 ): Promise<string | null> {
-  const response = await promptForActions(env, step, event, version, name, message, [["Reply", kind]], false)
+  const response = await calendarPromptForActions(env, step, event, version, name, message, [["Reply", kind]], false)
   return response.type === "reply" ? response.text : null
-}
-
-/** Registers fixed actions, waits once, and distinguishes callbacks from free text. */
-async function promptForActions(
-  env: Env,
-  step: WorkflowStep,
-  event: WorkflowEvent<CalendarWorkflowParams>,
-  version: number,
-  name: string,
-  message: string,
-  actions: Array<[string, WorkflowInteractionKind]>,
-  keyboard = true,
-): Promise<CalendarActionResponse> {
-  if (keyboard && actions.length > 1 && actions.some(([label]) => label.length > MAX_MULTI_ACTION_LABEL_CHARACTERS))
-    throw new Error(`Calendar action labels must be at most ${MAX_MULTI_ACTION_LABEL_CHARACTERS} characters`)
-  let stage: CalendarInteractionStage = "notify"
-  const prepared = actions.map(([label, kind]) => ({
-    label,
-    kind,
-    interactionId: crypto.randomUUID(),
-    callbackToken: keyboard ? crypto.randomUUID() : undefined,
-  }))
-  try {
-    const sent = await step.do(`${name}-notify`, () =>
-      createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
-        event.payload.chatId,
-        message,
-        keyboard
-          ? {
-              replyMarkup: {
-                inline_keyboard: [
-                  prepared
-                    .filter((action) => action.callbackToken)
-                    .map((action) => ({ text: action.label, callback_data: action.callbackToken })),
-                ],
-              },
-            }
-          : { replyMarkup: { force_reply: true } },
-      ),
-    )
-    stage = "register"
-    await step.do(`${name}-register`, async () => {
-      const router = createInteractionRouter(env.INTERACTION_ROUTER, event.payload.chatId)
-      await Promise.all(
-        prepared.map((action) =>
-          router.register({
-            interactionId: action.interactionId,
-            version,
-            workflowId: event.instanceId,
-            kind: action.kind,
-            callbackToken: action.callbackToken,
-            botMessageId: sent.messageId,
-            expiresAt: Date.now() + CALENDAR_INTERACTION_TTL_MS,
-            interactionGroup: "calendar",
-          } satisfies InteractionRegistration),
-        ),
-      )
-    })
-    stage = "wait"
-    const reply = await step.waitForEvent<{ text?: string; interactionId?: string }>(`${name}-wait`, {
-      type: "telegram-reply",
-      timeout: "15 minutes" as never,
-    })
-    if (reply.type === "timeout") return { type: "timeout" }
-    const text = reply.payload?.text
-    if (!text) return { type: "timeout" }
-    const matchedIndex = prepared.findIndex(
-      (action) =>
-        action.callbackToken &&
-        (action.interactionId === reply.payload?.interactionId ||
-          (text === `__${action.kind}__` &&
-            prepared.filter((candidate) => candidate.kind === action.kind).length === 1)),
-    )
-    return matchedIndex >= 0
-      ? { type: "action", kind: prepared[matchedIndex]?.kind as WorkflowInteractionKind, actionIndex: matchedIndex }
-      : { type: "reply", text }
-  } catch {
-    logRuntime(env, {
-      workflow: event.instanceId,
-      event: "calendar-interaction",
-      outcome: "failed",
-      failureCategory: "interaction-operation-failed",
-      details: { stage, version },
-    })
-    throw new CalendarInteractionOperationError(stage)
-  }
 }

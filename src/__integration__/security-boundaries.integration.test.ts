@@ -224,7 +224,9 @@ describe("security-boundaries", () => {
 
     const leakedMsg = telegramTexts.find((t) => t.includes("leaked-secret-abc"))
     expect(leakedMsg).toBeUndefined()
-    const safeMsg = telegramTexts.find((t) => t.includes("HTTP 401"))
-    expect(safeMsg).toBeDefined()
+    const tokenMsg = telegramTexts.find((t) => t.includes("valid-token"))
+    expect(tokenMsg).toBeUndefined()
+    const reconnectMsg = telegramTexts.find((t) => t.includes("LinkedIn authorization is missing or expired."))
+    expect(reconnectMsg).toBeDefined()
   })
 })

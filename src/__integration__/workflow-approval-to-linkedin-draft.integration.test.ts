@@ -135,7 +135,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
 
     expect(step.getCalledSteps()).toContain("generate")
     expect(step.getCalledSteps()).toContain("notify")
-    expect(step.getCalledSteps()).toContain("linkedin-publish")
+    expect(step.getCalledSteps()).toContain("linkedin-publish-0-0")
     expect(step.getCalledSteps()).toContain("archive")
     expect(step.getCalledSteps()).toContain("notify-published")
     expect(step.getCalledSteps()).toContain("workflow-complete")
@@ -161,7 +161,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(state.notionPages.get("page_1")?.status).toBe("finalized")
   })
 
-  it("notifies but does not publish when no LinkedIn token is available", async () => {
+  it("prompts to reconnect but does not publish when no LinkedIn token is available", async () => {
     const { fetch, getState } = createFakeNetwork({
       notionPages: [RAW_PAGE],
       llmResponses: [DRAFT_RESPONSE],
@@ -183,9 +183,11 @@ describe("workflow-approval-to-linkedin-draft", () => {
       sleepUntil: step.sleepUntil,
     })
 
-    expect(step.getCalledSteps()).toContain("notify-not-configured")
-    expect(step.getCalledSteps()).not.toContain("linkedin-publish")
+    expect(step.getCalledSteps()).toContain("linkedin-publish-0-0")
+    expect(step.getCalledSteps()).toContain("linkedin-reconnect-0-0-notify")
+    expect(step.getCalledSteps()).toContain("linkedin-reconnect-0-0-register")
     expect(step.getCalledSteps()).not.toContain("archive")
+    expect(step.getCalledSteps()).not.toContain("notify-published")
     expect(getState().linkedinDrafts).toHaveLength(0)
   })
 
@@ -215,7 +217,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
 
     expect(step.getCalledSteps()).toContain("revise-0")
     expect(step.getCalledSteps()).toContain("notify-revised-0")
-    expect(step.getCalledSteps()).toContain("linkedin-publish")
+    expect(step.getCalledSteps()).toContain("linkedin-publish-1-0")
     expect(step.getCalledSteps()).toContain("archive")
     expect(step.getCalledSteps()).toContain("notify-published")
 
@@ -249,7 +251,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     })
 
     expect(step.getCalledSteps()).toContain("timeout-1")
-    expect(step.getCalledSteps()).not.toContain("linkedin-publish")
+    expect(step.getCalledSteps().some((name) => name.startsWith("linkedin-publish"))).toBe(false)
     expect(step.getCalledSteps()).not.toContain("archive")
 
     expect(getState().notionPages.get("page_1")?.status).toBe("awaiting-feedback-expired")
@@ -294,7 +296,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     ).rejects.toThrow("provider-turn-limit")
 
     expect(step.getCalledSteps()).not.toContain("notify")
-    expect(step.getCalledSteps()).not.toContain("linkedin-publish")
+    expect(step.getCalledSteps().some((name) => name.startsWith("linkedin-publish"))).toBe(false)
     expect(step.getCalledSteps()).not.toContain("archive")
     expect(getState().linkedinDrafts).toHaveLength(0)
     expect(getState().notionPages.get("page_1")?.status).toBe("raw")
@@ -335,7 +337,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     consoleSpy.mockRestore()
     expect(errorOutput).not.toContain("provider body must stay private")
     expect(step.getCalledSteps()).not.toContain("notify")
-    expect(step.getCalledSteps()).not.toContain("linkedin-publish")
+    expect(step.getCalledSteps().some((name) => name.startsWith("linkedin-publish"))).toBe(false)
     expect(getState().linkedinDrafts).toHaveLength(0)
     expect(getState().notionPages.get("page_1")?.status).toBe("raw")
   })
@@ -385,7 +387,9 @@ describe("workflow-approval-to-linkedin-draft", () => {
 
     const leakedMsg = telegramTexts.find((t) => t.includes("leaked-secret-abc"))
     expect(leakedMsg).toBeUndefined()
-    const httpMsg = telegramTexts.find((t) => t.includes("HTTP 401"))
-    expect(httpMsg).toBeDefined()
+    const tokenMsg = telegramTexts.find((t) => t.includes("valid-token"))
+    expect(tokenMsg).toBeUndefined()
+    const reconnectMsg = telegramTexts.find((t) => t.includes("LinkedIn authorization is missing or expired."))
+    expect(reconnectMsg).toBeDefined()
   })
 })

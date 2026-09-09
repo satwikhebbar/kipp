@@ -121,6 +121,8 @@ export const INTERACTION_KIND = {
   APPROVE: "approve",
   REVISE: "revise",
   REVISION_FEEDBACK: "revision-feedback",
+  LINKEDIN_RETRY: "linkedin-retry",
+  LINKEDIN_CANCEL: "linkedin-cancel",
   CALENDAR_CLARIFICATION: "calendar-clarification",
   CALENDAR_CONFLICT_ALTERNATIVE: "calendar-conflict-alternative",
   CALENDAR_CONFLICT_REPLACE: "calendar-conflict-replace",
