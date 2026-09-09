@@ -270,7 +270,7 @@ describe("PipelineWorkflow", () => {
     const { fetchMock, telegramTexts } = buildFetch([BASE_PAGE])
     vi.stubGlobal("fetch", fetchMock)
     waitForEvent
-      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__", setupOrigin: "https://bot.example" } })
       .mockResolvedValueOnce({ type: "event", payload: { text: "__linkedin-cancel__" } })
 
     const wf = new PipelineWorkflow({} as never, {} as never)
@@ -283,6 +283,7 @@ describe("PipelineWorkflow", () => {
     expect(stepDo).toHaveBeenCalledWith("linkedin-publish-0-0", expect.any(Function))
     const reconnectMsg = telegramTexts.find((t) => t.startsWith("LinkedIn authorization is missing or expired."))
     expect(reconnectMsg).toBeDefined()
+    expect(reconnectMsg).toContain("https://bot.example/setup/linkedin")
     expect(stepDo).toHaveBeenCalledWith("notify-publish-cancelled-0", expect.any(Function))
   })
 
