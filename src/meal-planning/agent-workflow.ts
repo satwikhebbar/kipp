@@ -128,7 +128,7 @@ function addUsage(left: LLMUsage, right: LLMUsage): LLMUsage {
   }
 }
 
-/** Records one generated plan version's token usage under the meal-planner model (issue #72). */
+/** Records one generated plan version's token usage under the meal-planner model. */
 function makeVersionUsage(usage: LLMUsage): VersionUsage {
   return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model: MEAL_PLANNER_MODEL }
 }
@@ -295,7 +295,12 @@ export async function runAgentCenteredMealPlanningWorkflow(
   await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
 }
 
-/** Extract initial week context. Returns the token usage of the extraction call when one ran. */
+/**
+ * Extracts week-scoped facts (inventory changes and schedule exceptions) from
+ * the parent's free-text request, merges them into the supplied context, and
+ * returns the merged context alongside the extraction call's token usage.
+ * Usage is null when there is no request text or the extraction call fails.
+ */
 async function extractInitialWeekContext(
   env: Env,
   step: WorkflowStep,
@@ -590,7 +595,7 @@ async function sendPlanAndRegister(
   const chatId = event.payload.chatId
   // Every plan message (initial and each revision) reports the cumulative
   // usage across this plan's recorded versions, mirroring how the LinkedIn
-  // draft flow reports running totals (issue #72).
+  // draft flow reports running totals.
   const costLine = await stepDo(step, `meal-planning-plan-cost-${occurrence}`, async () => {
     if (!version.usage || !env.MEAL_PLANNING_DB) return ""
     const usageTotal = await createMealPlanningStore(env.MEAL_PLANNING_DB).sumPlanUsage(plan.planId)
