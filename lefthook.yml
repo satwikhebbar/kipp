@@ -6,7 +6,7 @@ pre-commit:
     lint:
       run: pnpm lint
     docs:
-      run: pnpm docs
+      run: pnpm run docs
     test:
       run: pnpm test
     test-integration:
