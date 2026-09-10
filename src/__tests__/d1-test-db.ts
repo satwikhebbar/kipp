@@ -24,6 +24,10 @@ class D1BoundStatement {
     const row = this.db.prepare(this.sql).get(...this.params) as Record<string, unknown> | undefined
     return row ?? null
   }
+
+  all(): D1ResultLike {
+    return executeD1(this.db, this.sql, this.params)
+  }
 }
 
 function executeD1(db: DatabaseSync, sql: string, params: Array<string | number | null>): D1ResultLike {

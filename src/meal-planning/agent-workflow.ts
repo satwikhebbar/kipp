@@ -6,7 +6,7 @@ import {
   resolveWeekContextUpdate,
   runMealPlanningAgentSession,
 } from "../agent/meal-planning-session"
-import { computeCost, formatCostLine } from "../core/cost"
+import { computeCostByModel, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowInteractionKind } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
@@ -599,7 +599,7 @@ async function sendPlanAndRegister(
   const costLine = await stepDo(step, `meal-planning-plan-cost-${occurrence}`, async () => {
     if (!version.usage || !env.MEAL_PLANNING_DB) return ""
     const usageTotal = await createMealPlanningStore(env.MEAL_PLANNING_DB).sumPlanUsage(plan.planId)
-    return usageTotal ? formatCostLine(computeCost(usageTotal, version.usage.model)) : ""
+    return usageTotal ? formatCostLine(computeCostByModel(usageTotal.byModel)) : ""
   })
   const message = `${renderPlanLaunchMessage(plan)}${costLine}`
   const reviewUrl = miniAppLaunchUrl(env.MINI_APP_ORIGIN)
