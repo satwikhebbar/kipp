@@ -37,7 +37,7 @@ export interface StoredMealProfile {
 
 export type MealPlanStatus = "active" | "replaced"
 
-/** LLM token usage recorded for one generated plan version (issue #72). */
+/** LLM token usage recorded for one generated plan version. */
 export interface VersionUsage {
   inputTokens: number
   outputTokens: number
