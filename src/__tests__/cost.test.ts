@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest"
-import { computeCost, formatCostLine } from "../core/cost"
+import { computeCost, computeCostByModel, formatCostLine } from "../core/cost"
 import type { WorkflowCost } from "../core/types"
 import { resolveModel } from "../providers"
 
@@ -57,6 +57,37 @@ describe("computeCost", () => {
     for (const model of selectableModels) {
       expect(computeCost({ inputTokens: 0, outputTokens: 0 }, model).totalCostUsd).not.toBeNull()
     }
+  })
+})
+
+describe("computeCostByModel", () => {
+  test("prices each model group at its own rate and joins the model labels", () => {
+    const cost = computeCostByModel([
+      { inputTokens: 1_000_000, outputTokens: 500_000, model: "openai/gpt-5.6-luna" },
+      { inputTokens: 1_000_000, outputTokens: 500_000, model: "deepseek-v4-flash" },
+    ])
+    expect(cost.totalCostUsd).toBeCloseTo(0.8 + 0.28, 4)
+    expect(cost.totalInputTokens).toBe(2_000_000)
+    expect(cost.totalOutputTokens).toBe(1_000_000)
+    expect(cost.model).toBe("openai/gpt-5.6-luna + deepseek-v4-flash")
+  })
+
+  test("a single group matches computeCost", () => {
+    const groups = [{ inputTokens: 1_000, outputTokens: 500, model: "deepseek-chat" }]
+    expect(computeCostByModel(groups).totalCostUsd).toBeCloseTo(
+      computeCost(groups[0], "deepseek-chat").totalCostUsd ?? -1,
+      8,
+    )
+    expect(computeCostByModel(groups).model).toBe("deepseek-chat")
+  })
+
+  test("an unpriced model nulls the whole estimate", () => {
+    const cost = computeCostByModel([
+      { inputTokens: 10, outputTokens: 5, model: "deepseek-v4-flash" },
+      { inputTokens: 10, outputTokens: 5, model: "some-future-model" },
+    ])
+    expect(cost.totalCostUsd).toBeNull()
+    expect(cost.model).toBe("deepseek-v4-flash + some-future-model")
   })
 })
 

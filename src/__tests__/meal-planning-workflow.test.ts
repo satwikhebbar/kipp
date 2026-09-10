@@ -392,7 +392,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.version.usage).toEqual({ inputTokens: 2, outputTokens: 2, model: "openai/gpt-5.6-luna" })
     const planId = active?.plan.planId
     if (!planId) throw new Error("expected a persisted plan id")
-    expect(await store.sumPlanUsage(planId)).toEqual({ inputTokens: 2, outputTokens: 2 })
+    expect(await store.sumPlanUsage(planId)).toEqual({
+      inputTokens: 2,
+      outputTokens: 2,
+      byModel: [{ inputTokens: 2, outputTokens: 2, model: "openai/gpt-5.6-luna" }],
+    })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
 
     const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))

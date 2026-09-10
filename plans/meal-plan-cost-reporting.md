@@ -185,9 +185,9 @@ fallback still degrades gracefully if it ever names an unpriced model.
    - D1 `INSERT` statements for both `createActivePlan` and
      `promotePlanVersion` write the three columns; every `meal_plan_version`
      SELECT hydration adds them; in-memory store copies them.
-   - New read: `sumPlanUsage(planId): Promise<{ inputTokens: number; outputTokens: number } | null>`
-     (SELECT + reduce over the plan's version rows; null when no row has
-     usage), with an in-memory twin.
+   - New read: `sumPlanUsage(planId): Promise<{ inputTokens: number; outputTokens: number; byModel: VersionUsage[] } | null>`
+     (SELECT + reduce over the plan's version rows grouped by `usage_model`;
+     null when no row has usage), with an in-memory twin.
    - Keep the insert-only invariant: usage columns are written at INSERT only.
 
 3. **`src/meal-planning/agent-workflow.ts`**
@@ -207,16 +207,18 @@ fallback still degrades gracefully if it ever names an unpriced model.
      `sumPlanUsage(planId)` → cost line.
    - `sendPlanAndRegister`: when a usage total exists, send
      `${renderPlanLaunchMessage(plan)}${formatCostLine(cost)}` where
-     `cost = computeCost(totalUsage, <current version's usage.model>)`; when the
+     `cost = computeCostByModel(totalUsage.byModel)` prices each model group at
+     its own rate (a plan revised after a model change stays accurate); when the
      total is absent (legacy rows, usage-less fixtures) keep today's message
-     exactly. Import `computeCost`, `formatCostLine` from `../core/cost`
+     exactly. Import `computeCostByModel`, `formatCostLine` from `../core/cost`
      (acyclic: cost.ts imports only types).
    - Message renderers in `src/meal-planning/messages.ts` are unchanged; the
      cost line is appended at the send site, same as LinkedIn appends
      `state.costLine` to its draft text.
 
 4. **`src/core/cost.ts`** — PRICING rows per the table above (entries added
-   with a comment naming the source and date; `gemini-2.0-flash` removed).
+   with a comment naming the source and date; `gemini-2.0-flash` removed), plus
+   `computeCostByModel(groups)` which prices usage grouped by model.
 
 ### Tests
 
@@ -225,10 +227,13 @@ fallback still degrades gracefully if it ever names an unpriced model.
   select (`MEAL_PLANNER_MODEL`, `resolveModel` fallbacks, the wrangler default
   `deepseek-v4-flash`) has a PRICING entry. Import the constants where the
   import graph allows; otherwise assert a literal list with a keep-in-sync
-  comment. Keep the existing "unknown model → null" case.
+  comment. Keep the existing "unknown model → null" case. Add `computeCostByModel`
+  cases: multiple models sum their per-model costs, a single group matches
+  `computeCost`, and any unpriced model nulls the estimate.
 - **`src/__tests__/meal-planning-store.test.ts`** — `createActivePlan` /
   `promotePlanVersion` persist usage and hydrate it back; `sumPlanUsage` totals
-  across versions and returns null when no version has usage; legacy rows
+  across versions (grouping by model, including a plan whose versions use
+  different models) and returns null when no version has usage; legacy rows
   (null usage) still hydrate and `sumPlanUsage` handles them.
 - **`src/__tests__/meal-planning-workflow.test.ts`** (unit harness, real
   workflow over D1 + stubbed network) — with `usage: { prompt_tokens,

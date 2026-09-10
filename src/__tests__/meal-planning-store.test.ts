@@ -186,15 +186,41 @@ describe("createInMemoryMealPlanningStore", () => {
     await store.createActivePlan(
       createInput({ usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" } }),
     )
-    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 100, outputTokens: 20 })
+    expect(await store.sumPlanUsage("plan-1")).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      byModel: [{ inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" }],
+    })
 
     const promoted = await store.promotePlanVersion(
       promoteInput({ usage: { inputTokens: 40, outputTokens: 5, model: "openai/gpt-5.6-luna" } }),
     )
     expect(promoted.ok).toBe(true)
-    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 140, outputTokens: 25 })
+    expect(await store.sumPlanUsage("plan-1")).toEqual({
+      inputTokens: 140,
+      outputTokens: 25,
+      byModel: [{ inputTokens: 140, outputTokens: 25, model: "openai/gpt-5.6-luna" }],
+    })
     const active = await store.activePlan(CHAT)
     expect(active?.version.usage).toEqual({ inputTokens: 40, outputTokens: 5, model: "openai/gpt-5.6-luna" })
+  })
+
+  it("sumPlanUsage groups tokens by model so each version is priced at its own rate", async () => {
+    const store = await newStore()
+    await store.createActivePlan(
+      createInput({ usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" } }),
+    )
+    await store.promotePlanVersion(
+      promoteInput({ usage: { inputTokens: 40, outputTokens: 5, model: "deepseek-v4-flash" } }),
+    )
+    expect(await store.sumPlanUsage("plan-1")).toEqual({
+      inputTokens: 140,
+      outputTokens: 25,
+      byModel: [
+        { inputTokens: 40, outputTokens: 5, model: "deepseek-v4-flash" },
+        { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" },
+      ],
+    })
   })
 
   it("sumPlanUsage returns null and versions hydrate null usage when none recorded it (legacy rows)", async () => {
@@ -419,7 +445,11 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       createInput({ usage: { inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" } }),
     )
     expect(created.version.usage).toEqual({ inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" })
-    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 200, outputTokens: 30 })
+    expect(await store.sumPlanUsage("plan-1")).toEqual({
+      inputTokens: 200,
+      outputTokens: 30,
+      byModel: [{ inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" }],
+    })
     expect(d1Scalar(db, "SELECT usage_model FROM meal_plan_version WHERE plan_id = ? AND version = 1", "plan-1")).toBe(
       "openai/gpt-5.6-luna",
     )
@@ -428,7 +458,11 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       promoteInput({ usage: { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" } }),
     )
     expect(promoted.ok).toBe(true)
-    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 250, outputTokens: 40 })
+    expect(await store.sumPlanUsage("plan-1")).toEqual({
+      inputTokens: 250,
+      outputTokens: 40,
+      byModel: [{ inputTokens: 250, outputTokens: 40, model: "openai/gpt-5.6-luna" }],
+    })
     const active = await store.activePlan(CHAT)
     expect(active?.version.usage).toEqual({ inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" })
   })
@@ -446,7 +480,11 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     )
     expect(promoted.ok).toBe(true)
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version WHERE usage_input_tokens IS NULL")).toBe(1)
-    expect(await store.sumPlanUsage("plan-1")).toEqual({ inputTokens: 50, outputTokens: 10 })
+    expect(await store.sumPlanUsage("plan-1")).toEqual({
+      inputTokens: 50,
+      outputTokens: 10,
+      byModel: [{ inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" }],
+    })
   })
 
   it("createActivePlan with a missing profile throws atomically: no plan, no version, no profile row", async () => {

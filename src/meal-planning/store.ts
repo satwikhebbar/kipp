@@ -45,10 +45,11 @@ export interface VersionUsage {
   model: string
 }
 
-/** Cumulative usage summed across a plan's versions that recorded usage. */
+/** Cumulative usage summed across a plan's versions that recorded usage, grouped by the model that produced each version. */
 export interface PlanUsageTotal {
   inputTokens: number
   outputTokens: number
+  byModel: VersionUsage[]
 }
 
 /** A hydrated `meal_plan` header row (plan identity, week bounds, live instance, week-scoped state). */
@@ -1117,17 +1118,33 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async sumPlanUsage(planId) {
-      const row = await db
+      // Group by model so each version's tokens are priced at the rate of the
+      // model that actually produced them; a plan revised after a model change
+      // would otherwise price all history at the current version's rate.
+      const result = await db
         .prepare(
-          `SELECT COALESCE(SUM(usage_input_tokens), 0) AS input_tokens,
-                  COALESCE(SUM(usage_output_tokens), 0) AS output_tokens,
-                  COUNT(usage_input_tokens) AS usage_count
-           FROM meal_plan_version WHERE plan_id = ?`,
+          `SELECT usage_model AS model,
+                  COALESCE(SUM(usage_input_tokens), 0) AS input_tokens,
+                  COALESCE(SUM(usage_output_tokens), 0) AS output_tokens
+           FROM meal_plan_version
+           WHERE plan_id = ? AND usage_input_tokens IS NOT NULL
+           GROUP BY usage_model
+           ORDER BY usage_model`,
         )
         .bind(planId)
-        .first()
-      if (!row || Number(row.usage_count) === 0) return null
-      return { inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens) }
+        .all()
+      const rows = result.results ?? []
+      if (rows.length === 0) return null
+      const byModel: VersionUsage[] = rows.map((row) => ({
+        model: String(row.model ?? ""),
+        inputTokens: Number(row.input_tokens),
+        outputTokens: Number(row.output_tokens),
+      }))
+      return {
+        inputTokens: byModel.reduce((sum, group) => sum + group.inputTokens, 0),
+        outputTokens: byModel.reduce((sum, group) => sum + group.outputTokens, 0),
+        byModel,
+      }
     },
 
     async upsertMiniAppReviewContext(input) {
@@ -1571,13 +1588,23 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         (record) => record.planId === planId && record.usage !== null,
       )
       if (records.length === 0) return null
-      return records.reduce(
-        (total, record) => ({
-          inputTokens: total.inputTokens + (record.usage?.inputTokens ?? 0),
-          outputTokens: total.outputTokens + (record.usage?.outputTokens ?? 0),
-        }),
-        { inputTokens: 0, outputTokens: 0 },
-      )
+      const byModel = new Map<string, VersionUsage>()
+      for (const record of records) {
+        const usage = record.usage as VersionUsage
+        const existing = byModel.get(usage.model)
+        if (existing) {
+          existing.inputTokens += usage.inputTokens
+          existing.outputTokens += usage.outputTokens
+        } else {
+          byModel.set(usage.model, { ...usage })
+        }
+      }
+      const groups = [...byModel.values()].sort((a, b) => a.model.localeCompare(b.model))
+      return {
+        inputTokens: groups.reduce((sum, group) => sum + group.inputTokens, 0),
+        outputTokens: groups.reduce((sum, group) => sum + group.outputTokens, 0),
+        byModel: groups,
+      }
     },
 
     async upsertMiniAppReviewContext(input) {

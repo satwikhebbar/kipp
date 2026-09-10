@@ -35,6 +35,35 @@ export function computeCost(usage: LLMUsage, model: string): WorkflowCost {
   }
 }
 
+/** Usage attributed to a single model, used to price cumulative multi-model totals. */
+export interface ModelUsage extends LLMUsage {
+  model: string
+}
+
+/**
+ * Computes the estimated cost across usage grouped by model, pricing each group
+ * at its own model's rate so a plan that spans a model change stays accurate.
+ * The returned `model` label joins the distinct models.
+ */
+export function computeCostByModel(groups: ModelUsage[]): WorkflowCost {
+  let totalCostUsd: number | null = 0
+  let totalInputTokens = 0
+  let totalOutputTokens = 0
+  const models: string[] = []
+  for (const group of groups) {
+    const groupCost = computeCost(group, group.model)
+    if (groupCost.totalCostUsd === null || totalCostUsd === null) {
+      totalCostUsd = null
+    } else {
+      totalCostUsd += groupCost.totalCostUsd
+    }
+    totalInputTokens += group.inputTokens
+    totalOutputTokens += group.outputTokens
+    if (!models.includes(group.model)) models.push(group.model)
+  }
+  return { totalInputTokens, totalOutputTokens, totalCostUsd, model: models.join(" + ") }
+}
+
 /** Formats a cost object as a Markdown line for display. */
 export function formatCostLine(cost: WorkflowCost): string {
   if (cost.totalCostUsd === null) return `\n\n_Model "${cost.model}" not in pricing table — no cost estimate_`
