@@ -26,6 +26,7 @@ wrangler.local.toml
 .claude/
 .codex/
 .cursor/
+.tars/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
