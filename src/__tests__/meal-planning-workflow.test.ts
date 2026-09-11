@@ -77,6 +77,21 @@ it("guides home-lunch composition and one-meal fresh-produce usage", () => {
   expect(MEAL_PLANNING_AGENT_PROMPT).toContain("except onion, tomato, and potato, which may be reused across meals")
 })
 
+it("tells the planner that half-day snack candidates are conditional", () => {
+  const context: MealPlanContext = {
+    schedule: SEED_SCHEDULE,
+    profile: SEED_PROFILE,
+    customPolicies: [],
+    weeklyInventory: { items: [], notes: [] },
+    weeklyExceptions: { items: [{ kind: "half_day" as const, appliesTo: { day: "Wed" }, instruction: "Short day" }] },
+    request: { kind: "initial_plan", text: "Plan this week." },
+  }
+  const rendered = renderHouseholdContext(context)
+  expect(rendered).toContain("Half-day snack candidates")
+  expect(rendered).toContain("use only for snack1 on a half-day")
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain("plan exactly breakfast, snack1, and home lunch")
+})
+
 it("renders scoped and unbound revision feedback without storage ids", () => {
   expect(
     renderRevisionFeedback([
@@ -491,6 +506,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const step = createFakeStep([], Date.parse(week.weekEnd))
     const base = seedCandidate()
     delete base.grid.Fri["school-lunch"]
+    delete base.grid.Fri.snack2
     const logSpy = vi.spyOn(console, "log")
     const { deepseekBodies } = stubNetwork([
       deepseekResponse([
@@ -529,7 +545,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.plan.weeklyExceptions.items).toEqual([
       {
         kind: "half_day",
-        appliesTo: { day: "Fri", mealSlots: ["school-lunch"] },
+        appliesTo: { day: "Fri" },
         instruction: "No school lunch on Friday.",
       },
     ])

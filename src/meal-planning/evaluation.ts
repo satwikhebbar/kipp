@@ -1,4 +1,5 @@
 import { computeCoverageSet } from "./coverage"
+import { effectiveMealSlot } from "./half-day"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "./hydration"
 import { normalizeIngredient } from "./ingredient-normalization"
 import type {
@@ -12,7 +13,6 @@ import type {
   MealPlanSelectionCandidate,
   MealPlanSelectionEvaluation,
   MealPlanSelectionPatch,
-  MealSlot,
 } from "./types"
 
 const MAX_PRIOR_NIGHT_PREP_PER_DAY = 2
@@ -93,11 +93,6 @@ function cellsIn(grid: MealGrid): GridCellRef[] {
     for (const [slotId, cell] of Object.entries(slots)) refs.push({ day, slotId, cell })
   }
   return refs
-}
-
-/** Looks up a configured slot by its id. */
-function slotById(schedule: MealPlanContext["schedule"], slotId: string): MealSlot | undefined {
-  return schedule.slots.find((slot) => slot.id === slotId)
 }
 
 /** True when two cells are structurally identical (dish, vegetarian flag, items, cook minutes, prep flag). */
@@ -199,7 +194,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
         detail: "non-vegetarian cell on a school day",
       })
     }
-    const slot = slotById(schedule, slotId)
+    const slot = effectiveMealSlot(context, day, slotId)
     if (slot?.maxCookMinutes != null && cell.cookMinutes > slot.maxCookMinutes) {
       failures.push({
         code: "slot_unsuitable",

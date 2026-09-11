@@ -22,6 +22,7 @@ const proposalSchema = z
     principalIngredients: z.array(z.string()),
     vegetarian: z.literal(true),
     suitableSlots: z.array(z.string()),
+    halfDaySnack: z.boolean().optional(),
     packedFood: z.object({ dry: z.boolean() }).strict(),
     typicalCookMinutes: z.number(),
     priorNightPrep: priorNightPrepSchema,
@@ -39,7 +40,7 @@ export const MEAL_INGREDIENT_LOCALE_DEFAULT = "India"
 export function mealCatalogExpansionPrompt(locale = MEAL_INGREDIENT_LOCALE_DEFAULT): string {
   return `You expand a parent's named meal repertoire into practical meal definitions. Use only the submit_meal_definitions action.
 
-The supplied names are parent-provided repertoire meals. Treat each as generally suitable for ordinary school-lunchbox transport: do not assess whether it is packable and do not return a packing-suitability field. Classify packedFood.dry only. Here dry means non-leaking and spill-resistant, not dehydrated: whole fruit and raw vegetable salad count as dry. Set dry false for food likely to spill or leak; uncertainty means false. Choose suitable slot ids only from the supplied schedule.
+The supplied names are parent-provided repertoire meals. Treat each as generally suitable for ordinary school-lunchbox transport: do not assess whether it is packable and do not return a packing-suitability field. Classify packedFood.dry only. Here dry means non-leaking and spill-resistant, not dehydrated: whole fruit and raw vegetable salad count as dry. Set dry false for food likely to spill or leak; uncertainty means false. Choose suitable slot ids only from the supplied schedule. Set halfDaySnack true only for a dry, spill-resistant packed meal that is quick to eat in a 10-minute break and takes no more than 20 minutes to cook. A halfDaySnack is eligible only for snack1 on a half-day, never for a normal school-day snack.
 
 Each supplied name is the parent's complete meal label — for example, "Idli Chutney", "Rajma Chawal", or "Puri + Aloo Sabji". Preserve its meal scope: do not add, remove, or infer an accompaniment in the display name. sourceDishName must reproduce that supplied name exactly. You may normalize presentation only.
 
@@ -49,7 +50,7 @@ Write every ingredient token in singular canonical form (for example, "apple", "
 
 For a packed suitable slot, the whole named meal and its required components must travel safely in an ordinary lunchbox. Do not make a pourable accompaniment such as sambar a component of a packed meal; choose a thick, non-pourable accompaniment instead, or omit packed slots from suitableSlots.
 
-Include a slot in suitableSlots only when typicalCookMinutes fits that slot's maxCookMinutes. A slot with maxCookMinutes 0 is for no-cook food only. Prior-night preparation does not make a cooked meal eligible for that slot.
+Include a slot in suitableSlots only when typicalCookMinutes fits that slot's maxCookMinutes. A slot with maxCookMinutes 0 is for no-cook food only. Prior-night preparation does not make a cooked meal eligible for that slot. A cooked halfDaySnack does not need snack1 in suitableSlots; its separate halfDaySnack capability controls that conditional use.
 
 Suitable slots must also reflect the meal's role, not merely whether it needs cooking. A light standalone snack such as whole fruit or roasted chana belongs only in snack slots; do not advertise it as breakfast, school lunch, or home lunch. Conversely, a substantial meal may use meal slots but must not claim snack slots unless it is genuinely a no-cook snack.
 

@@ -1,3 +1,4 @@
+import { effectiveMealSlot, mealDefinitionFitsSlot } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   MealCell,
@@ -56,6 +57,7 @@ function definitionFromProposal(proposal: NewMealProposal, id: string): MealDefi
     principalIngredients: proposal.principalIngredients,
     vegetarian: true,
     suitableSlots: proposal.suitableSlots,
+    halfDaySnack: proposal.halfDaySnack,
     packedFood: proposal.packedFood,
     typicalCookMinutes: proposal.cookMinutes,
     priorNightPrep: proposal.priorNightPrep,
@@ -226,8 +228,8 @@ export function hydrateMealPlan(
         return ingredient
       })
 
-      const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
-      if (!definition.suitableSlots.includes(slotId)) {
+      const slot = effectiveMealSlot(context, day, slotId)
+      if (!mealDefinitionFitsSlot(definition, context, day, slotId)) {
         failures.push({
           code: "slot_unsuitable",
           day,

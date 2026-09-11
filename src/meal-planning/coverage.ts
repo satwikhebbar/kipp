@@ -1,3 +1,4 @@
+import { halfDayDroppedSlotIds } from "./half-day"
 import type { MealPlanContext, MealSlot } from "./types"
 
 export interface CoverageSet {
@@ -41,10 +42,9 @@ export function computeCoverageSet(context: MealPlanContext): CoverageSet {
   for (const exception of weeklyExceptions.items) {
     const day = exception.appliesTo?.day
     if (exception.kind !== "half_day" || !day) continue
-    // A generic half-day means there is no packed school lunch. The extractor
-    // may omit mealSlots when the parent does not spell out the exception.
-    const mealSlots = exception.appliesTo?.mealSlots ?? ["school-lunch"]
-    for (const slotId of resolveMealSlots(mealSlots, schedule.slots)) {
+    // A half-day always means one snack and no packed school lunch. Legacy
+    // mealSlots detail from persisted plans never relaxes this standard shape.
+    for (const slotId of halfDayDroppedSlotIds(schedule.slots)) {
       if (!closed.has(day)) droppedSlots.push({ day, slotId })
     }
   }

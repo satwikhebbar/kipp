@@ -88,6 +88,7 @@ function renderMealDefinition(meal: MealDefinition): string {
     id: meal.id,
     name: meal.name,
     suitableSlots: meal.suitableSlots,
+    halfDaySnack: meal.halfDaySnack ?? false,
     packedFood: meal.packedFood ?? null,
     typicalCookMinutes: meal.typicalCookMinutes,
     priorNightPrep: meal.priorNightPrep,
@@ -190,6 +191,12 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       const target = appliesTo ? ` (${[appliesTo.day, ...(appliesTo.mealSlots ?? [])].filter(Boolean).join(", ")})` : ""
       lines.push(`    ${exception.kind}${target}: "${exception.instruction}"`)
     }
+  }
+  const halfDaySnacks = (p.mealDefinitions ?? []).filter((meal) => meal.status === "established" && meal.halfDaySnack)
+  if (halfDaySnacks.length) {
+    lines.push(
+      `- Half-day snack candidates (use only for snack1 on a half-day): ${halfDaySnacks.map((meal) => `${meal.id} (${meal.name})`).join(", ")}`,
+    )
   }
   lines.push(`- Request kind: ${context.request.kind}`)
   if (context.recentPlan) {
@@ -825,7 +832,7 @@ async function runRevision(
   // requested cells cannot be silently dropped after the context update.
   const feedbackItems = contextAlreadyUpdated && !feedbackBatch ? [] : submission.items
   const revisionBaseCandidate = contextAlreadyUpdated
-    ? withoutClosedDays(
+    ? withoutIneligibleCells(
         active.version.candidate,
         { ...active.plan, weeklyExceptions: active.plan.weeklyExceptions },
         profile,
@@ -978,13 +985,13 @@ async function runRevision(
   return result.generation
 }
 
-/** A newly closed school day is removed deterministically before a revision patch is merged. */
-function withoutClosedDays(
+/** Newly ineligible cells are removed deterministically before a revision patch is merged. */
+function withoutIneligibleCells(
   candidate: MealPlanCandidate,
   plan: MealPlanRecord,
   profile: StoredMealProfile,
 ): MealPlanCandidate {
-  const closedDays = computeCoverageSet({
+  const coverage = computeCoverageSet({
     schedule: profile.schedule,
     profile: profile.profile,
     customPolicies: profile.customPolicies,
@@ -992,10 +999,18 @@ function withoutClosedDays(
     weeklyExceptions: plan.weeklyExceptions,
     recentPlan: candidate.grid,
     request: { kind: "revision", text: "week context update" },
-  }).closedDays
+  })
+  const eligible = new Set(coverage.required.map((cell) => `${cell.day}\u0000${cell.slotId}`))
   return {
     ...candidate,
-    grid: Object.fromEntries(Object.entries(candidate.grid).filter(([day]) => !closedDays.includes(day))),
+    grid: Object.fromEntries(
+      Object.entries(candidate.grid)
+        .map(([day, cells]) => [
+          day,
+          Object.fromEntries(Object.entries(cells).filter(([slot]) => eligible.has(`${day}\u0000${slot}`))),
+        ])
+        .filter(([, cells]) => Object.keys(cells).length),
+    ),
   }
 }
 

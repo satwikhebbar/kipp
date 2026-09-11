@@ -108,10 +108,11 @@ describe("meal-planning corpus loader", () => {
     expect(coverage.required).toHaveLength(3 * 5)
   })
 
-  it("drops a half-day slot by exact id and by exact name", () => {
+  it("uses the standard one-snack half-day schedule regardless of legacy mealSlots detail", () => {
     const byId = parseScenario(
       validScenario({
         context: validContext({
+          schedule: { days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], slots: FIVE_SLOTS },
           weeklyExceptions: {
             items: [
               { kind: "school_closed", appliesTo: { day: "Sat" }, instruction: "Holiday" },
@@ -124,6 +125,7 @@ describe("meal-planning corpus loader", () => {
     const byName = parseScenario(
       validScenario({
         context: validContext({
+          schedule: { days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], slots: FIVE_SLOTS },
           weeklyExceptions: {
             items: [
               { kind: "half_day", appliesTo: { day: "Wed", mealSlots: ["Home lunch"] }, instruction: "Short day" },
@@ -135,8 +137,13 @@ describe("meal-planning corpus loader", () => {
 
     for (const scenario of [byId, byName]) {
       const coverage = computeCoverageSet(scenario.context)
-      expect(coverage.droppedSlots).toContainEqual({ day: "Wed", slotId: "home-lunch" })
-      expect(coverage.required).not.toContainEqual({ day: "Wed", slotId: "home-lunch" })
+      expect(coverage.droppedSlots).toEqual(
+        expect.arrayContaining([
+          { day: "Wed", slotId: "snack2" },
+          { day: "Wed", slotId: "school-lunch" },
+        ]),
+      )
+      expect(coverage.required).toContainEqual({ day: "Wed", slotId: "home-lunch" })
       expect(coverage.required).toContainEqual({ day: "Wed", slotId: "snack1" })
     }
   })

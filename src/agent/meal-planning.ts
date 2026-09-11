@@ -84,6 +84,7 @@ const newMealSelectionSchema = z
         principalIngredients: z.array(z.string()).min(1),
         vegetarian: z.literal(true),
         suitableSlots: z.array(z.string()).min(1),
+        halfDaySnack: z.boolean().optional(),
         packedFood: packedFoodSchema.optional(),
         cookMinutes: z.number().int().min(0),
         priorNightPrep: priorNightPrepSchema,

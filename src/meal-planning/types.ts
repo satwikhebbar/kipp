@@ -79,6 +79,8 @@ export interface MealDefinition {
   principalIngredients: string[]
   vegetarian: true
   suitableSlots: string[]
+  /** A cooked, dry packed meal that is eligible only for snack1 on a half-day. */
+  halfDaySnack?: boolean
   packedFood?: { suitable: boolean; dry: boolean }
   typicalCookMinutes: number
   priorNightPrep: PriorNightPrepRequirement
@@ -97,6 +99,8 @@ export interface MealDefinitionProposal {
   principalIngredients: string[]
   vegetarian: true
   suitableSlots: string[]
+  /** This meal may be used only as snack1 on a half-day, never as a normal snack. */
+  halfDaySnack?: boolean
   /** Parent-supplied repertoire meals are always packing-suitable; the model classifies only dryness. */
   packedFood: { dry: boolean }
   typicalCookMinutes: number
@@ -259,6 +263,7 @@ export interface NewMealProposal {
   principalIngredients: string[]
   vegetarian: true
   suitableSlots: string[]
+  halfDaySnack?: boolean
   packedFood?: { suitable: boolean; dry: boolean }
   cookMinutes: number
   priorNightPrep: PriorNightPrepRequirement

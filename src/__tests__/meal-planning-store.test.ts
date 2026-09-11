@@ -10,6 +10,8 @@ import {
   type InMemoryMealPlanningBacking,
   type MealPlanningStore,
   type PromotePlanVersionInput,
+  SEED_PROFILE,
+  upgradeLegacyHalfDaySnackDefinitions,
 } from "../meal-planning/store"
 import type { MealPlanCandidate, MealPlanEvaluation } from "../meal-planning/types"
 import { createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
@@ -74,6 +76,23 @@ async function newStore(backing?: InMemoryMealPlanningBacking): Promise<MealPlan
 }
 
 describe("createInMemoryMealPlanningStore", () => {
+  it("upgrades legacy built-in cooked snacks to the explicit half-day capability", () => {
+    const legacy = {
+      ...SEED_PROFILE,
+      mealDefinitions: (SEED_PROFILE.mealDefinitions ?? []).map((definition) =>
+        definition.name === "dosa"
+          ? { ...definition, halfDaySnack: undefined, packedFood: { suitable: true, dry: false } }
+          : definition,
+      ),
+    }
+    const upgraded = upgradeLegacyHalfDaySnackDefinitions(legacy)
+    expect(upgraded).not.toBe(legacy)
+    expect(upgraded.mealDefinitions?.find((definition) => definition.name === "dosa")).toMatchObject({
+      halfDaySnack: true,
+      packedFood: { suitable: true, dry: true },
+    })
+  })
+
   it("seeds the initial household profile on first use and never reseeds", async () => {
     const store = createInMemoryMealPlanningStore()
     const profile = await store.loadOrCreateProfile(CHAT)

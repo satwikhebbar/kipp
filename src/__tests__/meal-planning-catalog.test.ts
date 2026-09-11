@@ -59,4 +59,29 @@ describe("meal definition catalog validation", () => {
     )
     expect(failures).toMatchObject([{ code: "slot_cook_time_exceeded", dishName: "Paratha" }])
   })
+
+  it("accepts a dry cooked half-day snack while rejecting unsafe classifications", () => {
+    const halfDaySnack = {
+      ...proposal,
+      suitableSlots: [],
+      halfDaySnack: true as const,
+      packedFood: { dry: true },
+      typicalCookMinutes: 20,
+    }
+    expect(validateMealDefinitionProposal(halfDaySnack, "Paratha", { schedule: SEED_SCHEDULE })).toEqual([])
+    expect(establishMealDefinition(halfDaySnack, "Paratha", "meal_opaque_half_day")).toMatchObject({
+      halfDaySnack: true,
+      packedFood: { suitable: true, dry: true },
+    })
+
+    const failures = validateMealDefinitionProposal(
+      { ...halfDaySnack, packedFood: { dry: false }, typicalCookMinutes: 21 },
+      "Paratha",
+      { schedule: SEED_SCHEDULE },
+    )
+    expect(failures.map((failure) => failure.code)).toEqual([
+      "half_day_snack_not_dry",
+      "half_day_snack_cook_time_exceeded",
+    ])
+  })
 })

@@ -26,7 +26,7 @@ Configure the following before the first run:
 - preferred cuisines and familiar dishes;
 - Monday–Saturday school schedule, with Saturday as a half day;
 - five weekday slots: breakfast, snack 1, snack 2, packed school lunch, and
-  home lunch; Saturday needs breakfast, one snack, and home lunch;
+  home lunch; a half day needs exactly breakfast, one snack, and home lunch;
 - morning cooking capacity and prior-night-prep preference;
 - health goals, fruit/nut frequency, and Friday cheat-day preference;
 - country and city;
@@ -55,12 +55,12 @@ For every scenario, record:
 Apply this checklist to every proposed or revised plan.
 
 - The plan has all required slots for each applicable school day.
-- Saturday uses its reduced schedule; holidays omit school-only slots.
+- A half day has breakfast, snack 1, and home lunch only; holidays omit every slot.
 - All school meals are vegetarian.
-- Snacks are dry, portable, and mostly no-cook or prepared ahead; they are not
-  heavy meals such as cheese-corn sandwiches. Enforced structurally: snack slots
-  are `dry: true, maxCookMinutes: 0` (`store.ts`), so a cooked/heavy snack trips
-  `morning_capacity_exceeded`; no live scenario is needed (formerly T06).
+- Full-day snacks are dry, portable, and mostly no-cook or prepared ahead.
+  Half-day snack 1 may be a dry, easy-to-eat cooked snack (for example dosa,
+  paniyaram, cutlet, or pancake) with at most 20 minutes of cooking. This is
+  enforced structurally by the catalog capability and evaluator.
 - Packed school lunch and home lunch are credible fresh-cook candidates.
 - The combined pre-school work is plausible; the plan does not routinely
   require freshly cooking breakfast, a snack, and packed lunch at once.
@@ -85,7 +85,7 @@ Run these in fresh test weeks unless the scenario explicitly says otherwise.
 | ID | Scenario and input | Expected result |
 | --- | --- | --- |
 | T01 | `Plan next week. I have beans, carrots, bottle gourd, peas, bananas and apples. Friday should be cheat day.` | A complete Monday–Saturday plan uses the inventory where sensible and visibly fulfils the Friday intent. |
-| T02 | `Wednesday is a half day and Saturday is a holiday.` | Kipp summarizes or confirms the exception, then skips the packed school lunch on Wednesday (the child eats lunch at home, so home-lunch stays) and removes every slot on Saturday. |
+| T02 | `Wednesday is a half day and Saturday is a holiday. Use a cooked snack on Wednesday.` | Kipp summarizes or confirms the exception, then keeps only breakfast, cooked snack 1, and home lunch on Wednesday; it removes every slot on Saturday. |
 | T04 | `Tuesday will be difficult.` | Kipp either asks one targeted clarification, or reflects the difficulty from the cook's lens by making that day lighter (e.g. minimal morning cooking). A uniform plan with no Tuesday accommodation fails. |
 | T04a | `Please make Pav on Wednesday this week.` | Kipp asks one clarification: "Pav" is underspecified (Pav Bhaji vs Pav Misal) and not in the allowed dish list. |
 | T04b | `Add pulao as a snack on Thursday.` | Kipp asks one clarification: a cooked dish in a dry, no-cook snack slot is contrarian. |
@@ -258,10 +258,11 @@ test:
 - **C4** — decision: the reduced Saturday schedule is expressed as a
   `half_day` weekly exception (not per-day slots); `meal-planning-loader.test.ts`
   pins Saturday at 3 of 5 slots.
-- **T02** — decision: a half day means the child eats lunch at home, so the
-  packed **school-lunch** slot is dropped and **home-lunch** stays. Encoded in
-  the prompt (`meal-planning-session.ts`) and the `holiday-half-day` corpus
-  candidates; the loader/evaluation tests pin the coverage-set consequence.
+- **T02** — decision: a half day has exactly breakfast, snack 1, and home
+  lunch. Snack 2 and packed **school-lunch** are dropped; the sole snack may
+  be an eligible dry cooked item using up to 20 minutes. Encoded in the prompt,
+  catalog capability, and evaluator; the loader/evaluation tests pin the
+  coverage-set consequence.
 - **T08** — corpus `no-dairy-week` (concrete exclusion tokens `paneer`/`ghee`;
   reintroducing either trips `hard_exclusion`).
 - **T11** — `meal-planning-messages.test.ts` renders no URL and keeps the meal

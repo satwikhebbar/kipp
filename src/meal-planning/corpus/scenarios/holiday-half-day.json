@@ -1,7 +1,7 @@
 {
   "id": "holiday-half-day",
   "name": "Holiday and half day",
-  "summary": "Saturday is closed (no cells allowed) and Wednesday is a half day that drops the packed school-lunch slot (the child eats lunch at home).",
+  "summary": "Saturday is closed (no cells allowed) and Wednesday is a half day with breakfast, one cooked snack, and home lunch.",
   "context": {
     "schedule": {
       "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
@@ -192,11 +192,8 @@
         },
         {
           "kind": "half_day",
-          "appliesTo": {
-            "day": "Wed",
-            "mealSlots": ["school-lunch"]
-          },
-          "instruction": "Wednesday is a half day; the child eats lunch at home, so no packed school lunch"
+          "appliesTo": { "day": "Wed" },
+          "instruction": "Wednesday is a half day; one snack, no packed school lunch, then home lunch"
         }
       ]
     },
@@ -294,17 +291,10 @@
               "priorNightPrep": false
             },
             "snack1": {
-              "dish": "orange",
+              "dish": "weekend pancake",
               "vegetarian": true,
-              "items": ["orange"],
-              "cookMinutes": 0,
-              "priorNightPrep": false
-            },
-            "snack2": {
-              "dish": "mixed seeds",
-              "vegetarian": true,
-              "items": ["mixed seeds"],
-              "cookMinutes": 0,
+              "items": ["pancake mix"],
+              "cookMinutes": 15,
               "priorNightPrep": false
             },
             "home-lunch": {
@@ -592,6 +582,11 @@
             "slot": "school-lunch"
           },
           {
+            "code": "extra_slot_for_half_day",
+            "day": "Wed",
+            "slot": "snack2"
+          },
+          {
             "code": "missing_slot",
             "day": "Wed",
             "slot": "home-lunch"
@@ -689,13 +684,6 @@
               "dish": "orange",
               "vegetarian": true,
               "items": ["orange"],
-              "cookMinutes": 0,
-              "priorNightPrep": false
-            },
-            "snack2": {
-              "dish": "mixed seeds",
-              "vegetarian": true,
-              "items": ["mixed seeds"],
               "cookMinutes": 0,
               "priorNightPrep": false
             },

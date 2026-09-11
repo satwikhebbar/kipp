@@ -111,7 +111,8 @@ const HOLIDAY_HALF_DAY_PANCAKE: MealDefinition = {
   principalIngredients: ["pancake mix"],
   vegetarian: true,
   suitableSlots: ["breakfast", "school-lunch", "home-lunch"],
-  packedFood: { suitable: true, dry: false },
+  halfDaySnack: true,
+  packedFood: { suitable: true, dry: true },
   typicalCookMinutes: 20,
   priorNightPrep: "none",
   requiredIngredients: ["pancake mix"],
@@ -345,6 +346,10 @@ function holidayHalfDayContext(): MealPlanContext {
   const base = scenario("holiday-half-day").context
   return {
     ...base,
+    request: {
+      ...base.request,
+      text: `${base.request.text} Use an eligible cooked half-day snack on Wednesday.`,
+    },
     profile: {
       ...base.profile,
       // Corpus fixtures retain hydrated MealCells. The live session sees this
@@ -1018,8 +1023,10 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
     const terminal = requireProposal(await runLive(ctx))
     expect(Object.keys(terminal.candidate.grid.Sat ?? {}), "Sat is a school holiday; no cells allowed").toHaveLength(0)
     const wed = terminal.candidate.grid.Wed ?? {}
+    expect(wed.snack2, "Wed half day has exactly one snack").toBeUndefined()
     expect(wed["school-lunch"], "Wed half day must skip the packed school lunch").toBeUndefined()
     expect(wed["home-lunch"], "Wed half day keeps the home lunch").toBeDefined()
+    expect(wed.snack1?.cookMinutes, "Wed half-day snack may use delegated cooking time").toBeGreaterThan(0)
   })
 
   contractIt("B3/B4: a two-item batched revision completes with both feedback items represented", async () => {

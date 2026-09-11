@@ -26,7 +26,7 @@ Configure the following before the first run:
 - preferred cuisines and familiar dishes;
 - Monday–Saturday school schedule, with Saturday as a half day;
 - five weekday slots: breakfast, snack 1, snack 2, packed school lunch, and
-  home lunch; Saturday needs breakfast, one snack, and home lunch;
+  home lunch; a half day needs exactly breakfast, one snack, and home lunch;
 - morning cooking capacity and prior-night-prep preference;
 - health goals, fruit/nut frequency, and Friday cheat-day preference;
 - country and city;
@@ -55,10 +55,11 @@ For every scenario, record:
 Apply this checklist to every proposed or revised plan.
 
 - The plan has all required slots for each applicable school day.
-- Saturday uses its reduced schedule; holidays omit school-only slots.
+- A half day has breakfast, snack 1, and home lunch only; holidays omit every slot.
 - All school meals are vegetarian.
-- Snacks are dry, portable, and mostly no-cook or prepared ahead; they are not
-  heavy meals such as cheese-corn sandwiches.
+- Full-day snacks are dry, portable, and mostly no-cook or prepared ahead.
+  Half-day snack 1 may be a dry, easy-to-eat cooked snack (for example dosa,
+  paniyaram, cutlet, or pancake) with at most 20 minutes of cooking.
 - Packed school lunch and home lunch are credible fresh-cook candidates.
 - The combined pre-school work is plausible; the plan does not routinely
   require freshly cooking breakfast, a snack, and packed lunch at once.
@@ -83,7 +84,7 @@ Run these in fresh test weeks unless the scenario explicitly says otherwise.
 | ID | Scenario and input | Expected result |
 | --- | --- | --- |
 | T01 | `Plan next week. I have beans, carrots, bottle gourd, peas, bananas and apples. Friday should be cheat day.` | A complete Monday–Saturday plan uses the inventory where sensible and visibly fulfils the Friday intent. |
-| T02 | `Wednesday is a half day and Saturday is a holiday.` | Kipp summarizes or confirms the exception, then removes irrelevant packed slots on Wednesday and Saturday. |
+| T02 | `Wednesday is a half day and Saturday is a holiday. Use a cooked snack on Wednesday.` | Kipp summarizes or confirms the exception, then keeps only breakfast, cooked snack 1, and home lunch on Wednesday; it removes every slot on Saturday. |
 | T03 | After giving inventory: `Also add paneer and spinach to what we have.` | Weekly inventory is updated without an unnecessary question; later planning can use both items. |
 | T04 | `Tuesday will be difficult.` | Kipp asks one useful clarification instead of guessing whether the issue is time, travel, school closure, or something else. |
 | T05 | `No night prep this week. I have only 35 minutes before school, including getting him ready.` | The plan avoids stacking fresh breakfast, cooked snack, and cooked school lunch in the same morning. |

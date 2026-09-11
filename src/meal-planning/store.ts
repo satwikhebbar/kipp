@@ -349,6 +349,7 @@ const SEED_DRY_SNACKS = new Set([
   "roasted makhana",
   "roasted pistachios",
 ])
+const SEED_HALF_DAY_SNACKS = new Set(["dosa", "pancakes", "paniyaram", "vegetable cutlet", "sabudana cutlet"])
 const SEED_COOKED_MEAL_MINUTES = 20
 
 const SEED_MEAL_SLOTS: Record<string, string[]> = {
@@ -525,8 +526,9 @@ export const SEED_PROFILE: MealProfile = {
       principalIngredients: SEED_MEAL_INGREDIENTS[name] ?? [name],
       vegetarian: true,
       suitableSlots: SEED_MEAL_SLOTS[name] ?? ["home-lunch"],
+      ...(SEED_HALF_DAY_SNACKS.has(name) ? { halfDaySnack: true as const } : {}),
       // Parent-provided repertoire meals are trusted as packable. Dry classification is deliberately conservative.
-      packedFood: { suitable: true, dry: SEED_DRY_SNACKS.has(name) },
+      packedFood: { suitable: true, dry: SEED_DRY_SNACKS.has(name) || SEED_HALF_DAY_SNACKS.has(name) },
       typicalCookMinutes: SEED_DRY_SNACKS.has(name) ? 0 : SEED_COOKED_MEAL_MINUTES,
       priorNightPrep: name === "rajma" ? "required" : "none",
       requiredIngredients: SEED_MEAL_INGREDIENTS[name] ?? [name],
@@ -557,6 +559,24 @@ export const SEED_PROFILE: MealProfile = {
     "sabudana",
     "peanuts",
   ],
+}
+
+/** Adds the new half-day capability to legacy copies of the built-in household catalog. */
+export function upgradeLegacyHalfDaySnackDefinitions(profile: MealProfile): MealProfile {
+  const definitions = profile.mealDefinitions
+  if (!definitions) return profile
+  let changed = false
+  const upgraded = definitions.map((definition) => {
+    if (!SEED_HALF_DAY_SNACKS.has(definition.name)) return definition
+    if (definition.halfDaySnack && definition.packedFood?.suitable && definition.packedFood.dry) return definition
+    changed = true
+    return {
+      ...definition,
+      halfDaySnack: true,
+      packedFood: { suitable: true, dry: true },
+    }
+  })
+  return changed ? { ...profile, mealDefinitions: upgraded } : profile
 }
 
 /** The initial household configuration per spec §5.11 (planning policies for snacks, ingredients, variety, nutrition, and school rules). */
@@ -776,9 +796,17 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(chatId)
         .first()
+      const profile = parseJson<MealProfile>(String(row?.profile_json), SEED_PROFILE)
+      const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(profile)
+      if (upgradedProfile !== profile) {
+        await db
+          .prepare("UPDATE meal_profile SET profile_json = ?, updated_at = ? WHERE chat_id = ?")
+          .bind(JSON.stringify(upgradedProfile), now, chatId)
+          .run()
+      }
       return {
         chatId: String(row?.chat_id),
-        profile: parseJson<MealProfile>(String(row?.profile_json), SEED_PROFILE),
+        profile: upgradedProfile,
         customPolicies: parseJson<CustomPolicy[]>(String(row?.custom_policies_json), []),
         schedule: parseJson<MealSchedule>(String(row?.schedule_json), SEED_SCHEDULE),
         location: parseJson<StoredLocation | null>(String(row?.location_json), null),
@@ -1434,7 +1462,14 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
   return {
     async loadOrCreateProfile(chatId) {
       const existing = backing.profiles.get(chatId)
-      if (existing) return existing
+      if (existing) {
+        const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(existing.profile)
+        if (upgradedProfile !== existing.profile) {
+          existing.profile = upgradedProfile
+          existing.updatedAt = nowIso()
+        }
+        return existing
+      }
       const now = nowIso()
       const profile: StoredMealProfile = {
         chatId,

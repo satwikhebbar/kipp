@@ -629,7 +629,7 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual(["unaddressed_feedback"])
   })
 
-  it("skips slots dropped by half-day exceptions when checking coverage", () => {
+  it("requires exactly one snack and a home lunch on a half-day", () => {
     const context = baseContext({
       weeklyExceptions: {
         items: [
@@ -639,28 +639,32 @@ describe("meal-planning evaluator", () => {
       },
     })
     const candidate = baseCandidate()
-    delete candidate.grid.Wed["home-lunch"]
+    delete candidate.grid.Wed.snack2
+    delete candidate.grid.Wed["school-lunch"]
     delete candidate.grid.Mon.snack2
     const evaluation = evaluateMealPlan(candidate, context)
     expect(failureCodes(evaluation)).toEqual(["missing_slot"])
     expect(evaluation.failures[0]).toMatchObject({ code: "missing_slot", day: "Mon", slot: "snack2" })
   })
 
-  it("defaults an unspecified half day to no school lunch and rejects that dropped cell", () => {
+  it("allows a cooked snack1 up to the half-day cap but not on a normal day", () => {
     const context = baseContext({
       weeklyExceptions: {
         items: [{ kind: "half_day", appliesTo: { day: "Sat" }, instruction: "Saturday is a half day." }],
       },
     })
     const candidate = baseCandidate()
-    candidate.grid.Sat = Object.fromEntries(FULL_SLOTS.map(([slot, dish]) => [slot, cellFor(slot, dish)]))
+    candidate.grid.Sat = {
+      breakfast: cellFor("breakfast", "paratha"),
+      snack1: { ...cellFor("snack1", "banana"), cookMinutes: 20 },
+      "home-lunch": cellFor("home-lunch", "rice and beans"),
+    }
 
     const evaluation = evaluateMealPlan(candidate, context)
-    expect(failureCodes(evaluation)).toContain("extra_slot_for_half_day")
-    expect(evaluation.failures).toContainEqual(
-      expect.objectContaining({ code: "extra_slot_for_half_day", day: "Sat", slot: "school-lunch" }),
-    )
-    expect(failureCodes(evaluation)).not.toContain("missing_slot")
+    expect(evaluation.pass).toBe(true)
+
+    candidate.grid.Mon.snack1.cookMinutes = 20
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("slot_unsuitable")
   })
 
   it("a week is infeasible when distinct non-repeatable dishes are fewer than the slot count", () => {
@@ -1046,6 +1050,38 @@ describe("structured meal hydration", () => {
       context,
     )
     expect(result.failures.map((failure) => failure.code)).toEqual(["slot_unsuitable", "packed_slot_unsuitable"])
+  })
+
+  it("hydrates a cooked half-day snack only on snack1 of a half-day", () => {
+    const dosa = {
+      ...definition,
+      id: "meal-dosa",
+      name: "Dosa",
+      suitableSlots: ["breakfast"],
+      halfDaySnack: true,
+      packedFood: { suitable: true, dry: true },
+      typicalCookMinutes: 15,
+      requiredIngredients: ["wheat flour"],
+    }
+    const ordinary = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [dosa], pantryBaseline: ["wheat flour"] },
+    })
+    const ordinaryResult = hydrateMealPlan(
+      { grid: { Mon: { snack1: { mealDefinitionId: dosa.id } } }, easyBuys: [], policyOutcomes: {} },
+      ordinary,
+    )
+    expect(ordinaryResult.failures.map((failure) => failure.code)).toEqual(["slot_unsuitable"])
+
+    const halfDay = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [dosa], pantryBaseline: ["wheat flour"] },
+      weeklyExceptions: { items: [{ kind: "half_day", appliesTo: { day: "Wed" }, instruction: "Short day" }] },
+    })
+    const halfDayResult = hydrateMealPlan(
+      { grid: { Wed: { snack1: { mealDefinitionId: dosa.id } } }, easyBuys: [], policyOutcomes: {} },
+      halfDay,
+    )
+    expect(halfDayResult.failures).toEqual([])
+    expect(halfDayResult.candidate?.grid.Wed.snack1).toMatchObject({ dish: "Dosa", cookMinutes: 15 })
   })
 
   it("maps none, optional, and required prep definitions deterministically", () => {

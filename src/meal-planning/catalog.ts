@@ -1,3 +1,4 @@
+import { HALF_DAY_SNACK_MAX_COOK_MINUTES, HALF_DAY_SNACK_SLOT_ID } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   MealCatalogExpansionInput,
@@ -55,7 +56,7 @@ export function validateMealDefinitionProposal(
       invalid(expectedDishName, "invalid_prior_night_prep", "priorNightPrep must be none, optional, or required"),
     )
   failures.push(...validateNames(expectedDishName, "principalIngredients", proposal.principalIngredients, true))
-  failures.push(...validateNames(expectedDishName, "suitableSlots", proposal.suitableSlots, true))
+  failures.push(...validateNames(expectedDishName, "suitableSlots", proposal.suitableSlots, !proposal.halfDaySnack))
   failures.push(...validateNames(expectedDishName, "requiredIngredients", proposal.requiredIngredients, true))
   failures.push(...validateNames(expectedDishName, "optionalIngredients", proposal.optionalIngredients, false))
   failures.push(
@@ -77,6 +78,30 @@ export function validateMealDefinitionProposal(
           expectedDishName,
           "slot_cook_time_exceeded",
           `${proposal.typicalCookMinutes} cook minutes exceeds ${slot}'s ${scheduleSlot.maxCookMinutes}-minute limit`,
+        ),
+      )
+    }
+  }
+  if (proposal.halfDaySnack) {
+    if (!slotById.has(HALF_DAY_SNACK_SLOT_ID)) {
+      failures.push(
+        invalid(expectedDishName, "half_day_snack_unavailable", "schedule has no snack1 slot for a half-day snack"),
+      )
+    }
+    if (!proposal.packedFood.dry) {
+      failures.push(
+        invalid(expectedDishName, "half_day_snack_not_dry", "a half-day snack must be dry and spill-resistant"),
+      )
+    }
+    if (
+      Number.isInteger(proposal.typicalCookMinutes) &&
+      proposal.typicalCookMinutes > HALF_DAY_SNACK_MAX_COOK_MINUTES
+    ) {
+      failures.push(
+        invalid(
+          expectedDishName,
+          "half_day_snack_cook_time_exceeded",
+          `${proposal.typicalCookMinutes} cook minutes exceeds the half-day snack limit of ${HALF_DAY_SNACK_MAX_COOK_MINUTES}`,
         ),
       )
     }
@@ -104,6 +129,7 @@ export function establishMealDefinition(
     principalIngredients: proposal.principalIngredients.map(normalizeIngredient),
     vegetarian: true,
     suitableSlots: proposal.suitableSlots,
+    halfDaySnack: proposal.halfDaySnack,
     packedFood: { suitable: true, dry: proposal.packedFood.dry },
     typicalCookMinutes: proposal.typicalCookMinutes,
     priorNightPrep: proposal.priorNightPrep,
