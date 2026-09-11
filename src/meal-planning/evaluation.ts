@@ -1,4 +1,5 @@
 import { computeCoverageSet } from "./coverage"
+import { reconcileEasyBuys } from "./easy-buys"
 import { effectiveMealSlot } from "./half-day"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "./hydration"
 import { normalizeIngredient } from "./ingredient-normalization"
@@ -78,12 +79,13 @@ export function evaluateMealPlanSelectionPatch(
           dishRepeatCount: 0,
           dishRepeats: [],
           inventoryUsed: [],
-          easyBuyCount: patch.easyBuys?.length ?? base.easyBuys.length,
+          easyBuyCount: base.easyBuys.length,
         },
       },
     }
   }
-  return { ...hydration, evaluation: evaluateMealPlan(hydration.candidate, context) }
+  const candidate = reconcileEasyBuys(hydration.candidate, context)
+  return { ...hydration, candidate, evaluation: evaluateMealPlan(candidate, context) }
 }
 
 /** Enumerates every (day, slotId, cell) triple in a grid, in insertion order. */

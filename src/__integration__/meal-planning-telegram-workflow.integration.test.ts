@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
-import { mealPlanSelectionCandidateToWire } from "../agent/meal-planning"
+import { mealPlanSelectionCandidateToWire, mealPlanSelectionPatchToWire } from "../agent/meal-planning"
 import type { Env } from "../core/types"
 import type { MealCell, MealPlanCandidate, MealPlanSelectionCandidate } from "../meal-planning/types"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
@@ -42,18 +42,25 @@ function queueRevision(
   revised: MealPlanCandidate,
   feedback: { id: string; text: string; scope?: { day: string; slot: string } },
 ): void {
+  const candidate = revisionCandidate(revised, feedback)
   queueResponse("evaluate-rev", {
     toolCalls: [
       {
         id: "evaluate-rev",
         name: "evaluate_meal_plan",
-        input: mealPlanSelectionCandidateToWire(selectionCandidate(revised)),
+        input: mealPlanSelectionPatchToWire(candidate),
       },
     ],
     usage: LLM_USAGE,
   })
   queueResponse("propose-rev", {
-    toolCalls: [{ id: "propose-rev", name: "propose_plan", input: proposeInput(revised, [feedback]) }],
+    toolCalls: [
+      {
+        id: "propose-rev",
+        name: "propose_plan",
+        input: { candidate: mealPlanSelectionPatchToWire(candidate), feedbackItems: [feedback] },
+      },
+    ],
     usage: LLM_USAGE,
   })
 }
@@ -134,6 +141,15 @@ function selectionCandidate(candidate: MealPlanCandidate): MealPlanSelectionCand
       ]),
     ),
   }
+}
+
+function revisionCandidate(
+  candidate: MealPlanCandidate,
+  feedback: { scope?: { day: string; slot: string } },
+): Pick<MealPlanSelectionCandidate, "grid"> {
+  if (!feedback.scope) throw new Error("revision fixture requires cell-scoped feedback")
+  const { day, slot } = feedback.scope
+  return { grid: { [day]: { [slot]: selectionCandidate(candidate).grid[day][slot] } } }
 }
 
 function proposeInput(

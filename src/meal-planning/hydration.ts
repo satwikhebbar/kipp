@@ -86,6 +86,7 @@ export function hydrateMealPlan(
   selectionCandidate: MealPlanSelectionCandidate,
   context: MealPlanContext,
   createId: () => string = () => `provisional_${crypto.randomUUID()}`,
+  allowMissingRequiredIngredients = false,
 ): MealPlanHydrationResult {
   const failures: MealPlanFailure[] = []
   const established = (context.profile.mealDefinitions ?? []).filter(
@@ -217,7 +218,7 @@ export function hydrateMealPlan(
         if (direct) return direct
         const aliased = aliasByTarget.get(key)
         if (aliased) return aliased
-        if (unavailableIngredients.has(key) || !availableIngredients.has(key)) {
+        if (unavailableIngredients.has(key) || (!allowMissingRequiredIngredients && !availableIngredients.has(key))) {
           failures.push({
             code: "required_ingredient_unavailable",
             day,
@@ -286,11 +287,12 @@ export function hydrateMealPlanPatch(
   const hydrated = hydrateMealPlan(
     {
       grid: patch.grid,
-      easyBuys: patch.easyBuys ?? base.easyBuys,
+      easyBuys: base.easyBuys,
       policyOutcomes: patch.policyOutcomes ?? base.policyOutcomes,
     },
     context,
     createId,
+    true,
   )
   if (!hydrated.candidate) return hydrated
 

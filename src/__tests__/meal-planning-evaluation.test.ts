@@ -1239,4 +1239,90 @@ describe("structured meal hydration", () => {
     expect(result.failures).toEqual([])
     expect(result.provisionalMealDefinitions).toEqual([provisional])
   })
+
+  it("reconciles easy buys after a revision removes one meal and selects another", () => {
+    const bottleGourdDal = {
+      id: "bottle-gourd-dal",
+      name: "Bottle Gourd Dal",
+      principalIngredients: ["bottle gourd", "chana dal"],
+      vegetarian: true as const,
+      suitableSlots: ["home-lunch"],
+      typicalCookMinutes: 20,
+      priorNightPrep: "none" as const,
+      requiredIngredients: ["bottle gourd", "chana dal"],
+      optionalIngredients: [],
+      status: "established" as const,
+    }
+    const frenchBeansSubzi = {
+      ...bottleGourdDal,
+      id: "french-beans-subzi",
+      name: "French Beans Subzi",
+      principalIngredients: ["french beans"],
+      requiredIngredients: ["french beans"],
+    }
+    const priorGrid = {
+      Mon: {
+        "home-lunch": {
+          dish: "Bottle Gourd Dal",
+          vegetarian: true,
+          items: ["bottle gourd", "chana dal"],
+          cookMinutes: 20,
+          priorNightPrep: false,
+        },
+      },
+    }
+    const context = baseContext({
+      profile: {
+        ...SEED_PROFILE,
+        mealDefinitions: [bottleGourdDal, frenchBeansSubzi],
+        pantryBaseline: [],
+      },
+      weeklyInventory: { items: [], notes: [] },
+      request: { kind: "revision", text: "Use something other than Bottle Gourd Dal." },
+      recentPlan: priorGrid,
+    })
+    const base = {
+      grid: priorGrid,
+      easyBuys: ["bottle gourd", "chana dal"],
+      policyOutcomes: {},
+    }
+
+    const result = evaluateMealPlanSelectionPatch(
+      { grid: { Mon: { "home-lunch": { mealDefinitionId: frenchBeansSubzi.id } } } },
+      base,
+      context,
+    )
+
+    expect(result.candidate?.easyBuys).toEqual(["french beans"])
+    expect(result.evaluation.failures).not.toContainEqual(expect.objectContaining({ code: "inventory_item_unknown" }))
+  })
+
+  it("keeps an explicitly unavailable revised ingredient invalid instead of adding it to easy buys", () => {
+    const definition = {
+      id: "french-beans-subzi",
+      name: "French Beans Subzi",
+      principalIngredients: ["french beans"],
+      vegetarian: true as const,
+      suitableSlots: ["home-lunch"],
+      typicalCookMinutes: 20,
+      priorNightPrep: "none" as const,
+      requiredIngredients: ["french beans"],
+      optionalIngredients: [],
+      status: "established" as const,
+    }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [definition], pantryBaseline: [] },
+      weeklyInventory: { items: [{ name: "french beans", status: "unavailable" }], notes: [] },
+    })
+    const result = evaluateMealPlanSelectionPatch(
+      { grid: { Mon: { "home-lunch": { mealDefinitionId: definition.id } } } },
+      { grid: {}, easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+
+    expect(result.candidate).toBeUndefined()
+    expect(result.evaluation.failures).toContainEqual(
+      expect.objectContaining({ code: "required_ingredient_unavailable" }),
+    )
+  })
 })

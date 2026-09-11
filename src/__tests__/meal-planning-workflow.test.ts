@@ -63,6 +63,13 @@ it("requires the planner to self-check singular ingredient names", () => {
   )
 })
 
+it("keeps easy buys out of the revision agent contract", () => {
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain("The server recalculates easyBuys")
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain("the server adds other newly required ingredients to easyBuys")
+  const revisionSchema = mealPlanSelectionPatchToWire({ grid: {}, policyOutcomes: {} })
+  expect(revisionSchema).not.toHaveProperty("easyBuys")
+})
+
 it("guides home-lunch composition and one-meal fresh-produce usage", () => {
   expect(MEAL_PLANNING_AGENT_PROMPT).toContain(
     "select the vegetable curry/subzi as the meal represented in the home-lunch slot",

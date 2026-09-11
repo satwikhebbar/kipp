@@ -111,7 +111,6 @@ export const mealPlanSelectionCandidateSchema = z
 export const mealPlanSelectionPatchSchema = z
   .object({
     grid: selectionGridSchema.describe("only changed cells, keyed by day then slot id; omit every untouched cell"),
-    easyBuys: z.array(z.string()).optional().describe("replacement shopping list only when it changes"),
     policyOutcomes: z
       .record(z.string(), policyOutcomeSchema)
       .optional()
@@ -195,7 +194,6 @@ const mealPlanSelectionWireCandidateSchema = z
 const mealPlanSelectionWirePatchSchema = z
   .object({
     days: z.array(gridDayWireSchema),
-    easyBuys: z.array(z.string()).optional(),
     policyOutcomes: z.array(policyOutcomeWireSchema).optional(),
   })
   .strict()
@@ -222,7 +220,6 @@ export function mealPlanSelectionPatchFromWire(
 ): MealPlanSelectionPatch {
   return {
     grid: gridFromWire(candidate.days),
-    ...(candidate.easyBuys === undefined ? {} : { easyBuys: candidate.easyBuys }),
     ...(candidate.policyOutcomes === undefined
       ? {}
       : { policyOutcomes: policyOutcomesFromWire(candidate.policyOutcomes, policyIds) }),
@@ -244,7 +241,6 @@ export function mealPlanSelectionCandidateToWire(
 export function mealPlanSelectionPatchToWire(candidate: MealPlanSelectionPatch): MealPlanSelectionWirePatch {
   return {
     days: gridToWire(candidate.grid),
-    ...(candidate.easyBuys === undefined ? {} : { easyBuys: candidate.easyBuys }),
     ...(candidate.policyOutcomes === undefined
       ? {}
       : {

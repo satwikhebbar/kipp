@@ -300,8 +300,6 @@ export interface MealPlanSelectionCandidate {
  */
 export interface MealPlanSelectionPatch {
   grid: MealSelectionGrid
-  /** Omit to retain the active plan's shopping list. */
-  easyBuys?: string[]
   /** Omit to retain the active plan's recorded policy outcomes. */
   policyOutcomes?: Record<string, PolicyOutcome>
 }
