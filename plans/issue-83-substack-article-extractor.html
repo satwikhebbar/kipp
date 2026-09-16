@@ -25,7 +25,7 @@
   </header>
 
   <nav aria-label="Contents"><strong>Contents</strong><ol>
-    <li><a href="#outcome">Outcome and boundaries</a></li><li><a href="#contract">Public interface</a></li><li><a href="#projection">Content projection</a></li><li><a href="#noise">Noise and markup policy</a></li><li><a href="#errors">Failure contract</a></li><li><a href="#tests">Tests and validation</a></li><li><a href="#implementation">Implementation sequence</a></li><li><a href="#assumptions">Assumptions and deferred work</a></li>
+    <li><a href="#outcome">Outcome and boundaries</a></li><li><a href="#contract">Public interface</a></li><li><a href="#projection">Content projection</a></li><li><a href="#noise">Noise and markup policy</a></li><li><a href="#errors">Failure contract</a></li><li><a href="#tests">Tests and validation</a></li><li><a href="#implementation">Implementation sequence</a></li><li><a href="#decisions">Research decisions</a></li><li><a href="#assumptions">Assumptions and deferred work</a></li>
   </ol></nav>
 
   <section id="outcome"><h2>1. Outcome and boundaries</h2>
@@ -126,7 +126,26 @@ type SubstackArticle = {
     </ol>
   </section>
 
-  <section id="assumptions"><h2>8. Assumptions and deferred work</h2>
+  <section id="decisions"><h2>8. Research decisions retained for posterity</h2>
+    <h3>Article-body source: RSS <code>content:encoded</code></h3>
+    <p>The v1 body source is the rich HTML already embedded in the RSS item that triggered the run. On 2026-09-16, the configured public feed’s checked post contained its complete article structure—paragraphs, H2 headings, lists, pull quotes, tables, and images/captions—whereas RSS <code>description</code> was the subtitle, not an article-body substitute. This approach avoids another request and gives the agent content through one narrow, item-bound capability rather than general web access.</p>
+    <table><thead><tr><th>Option considered</th><th>Decision and why</th></tr></thead><tbody>
+      <tr><td>Observed <code>/api/v1/posts/{slug}</code> JSON</td><td>Not used. It offered clean <code>body_html</code>, and its inspected structure matched the RSS body apart from entity serialization, but it is undocumented and unversioned.</td></tr>
+      <tr><td>Public article page</td><td>Not used in v1. The inspected public page was server-rendered and had semantic article HTML, but it would add a request and page-specific extraction dependency. Keep it as a future fallback only if RSS proves incomplete.</td></tr>
+      <tr><td>JSON-LD, hydration data, browser rendering, or third-party extraction</td><td>Not used. JSON-LD did not contain the body; the other routes add undocumented contracts, a browser binding and cost, or new credentials and external dependencies without solving an observed problem.</td></tr>
+    </tbody></table>
+    <p>This is intentionally a single-source design, not a claim that RSS is a permanent platform contract. Per-item completeness checks and the long-post spot check detect insufficient feeds. A failed or over-limit article must fail explicitly, never be silently truncated or replaced with a description excerpt. Do not put full article bodies in routine operational logs.</p>
+
+    <h3>HTML parser: <code>linkedom/worker</code></h3>
+    <p>Cheerio and <code>linkedom/worker</code> were tested against the same captured 27,042-character RSS post and a synthetic malformed-HTML fixture. Both produced the same ten-section result (introduction plus nine H2 sections), with 10,498 characters of normalized text; both decoded entities, retained visible link text without URLs, omitted captions and subscription UI, avoided duplicate nested text, and bundled successfully for the Worker.</p>
+    <table><thead><tr><th>Candidate</th><th>Measured Worker import probe</th><th>Decision</th></tr></thead><tbody>
+      <tr><td><code>linkedom/worker</code></td><td>367.44 KiB upload; 87.35 KiB gzip. Its Worker-specific export is an explicit fit for the target runtime.</td><td><strong>Selected.</strong> Equivalent required output with the smaller measured import cost.</td></tr>
+      <tr><td>Cheerio</td><td>679.60 KiB upload; 164.20 KiB gzip. Its parse5-based default offers stronger browser-tree equivalence, but that advantage was not needed for the known fixtures.</td><td>Rejected for v1 because it added roughly 312 KiB uncompressed and 77 KiB gzip over LinkeDOM without a demonstrated content benefit.</td></tr>
+    </tbody></table>
+    <p>The probe sizes measure the isolated import, not the final application bundle. The lasting rule is to retain the explicit content policy and realistic fixtures: parsing is interchangeable; deciding which content counts and preventing duplicate collection are the critical maintenance concerns. Reconsider the library only if future real fixtures expose a parsing-semantics gap or a Worker compatibility issue.</p>
+  </section>
+
+  <section id="assumptions"><h2>9. Assumptions and deferred work</h2>
     <ul>
       <li><code>content:encoded</code> is the sole body source for this phase. There is no page/API fetch, fallback adapter, arbitrary URL access, or image handling.</li>
       <li>RSS title and description metadata plumbing is owned by Issue #84; this module accepts them as already-supplied values.</li>
