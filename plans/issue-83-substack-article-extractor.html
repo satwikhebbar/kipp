@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue #83 — Structured Substack Article Extractor</title>
+  <style>
+    :root { --ink:#1e293b; --muted:#5c6778; --paper:#fffefa; --line:#dce3e9; --accent:#0f766e; --accent-soft:#e8f5f1; --blue:#1d4ed8; --blue-soft:#eef4ff; --warn:#9a6700; --warn-soft:#fff7df; --code:#f3f6f8; }
+    * { box-sizing:border-box; } body { margin:0; background:#eef2f4; color:var(--ink); font:16px/1.58 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1060px; margin:32px auto; padding:clamp(28px,5vw,70px); background:var(--paper); box-shadow:0 8px 30px #172a3820; }
+    h1,h2,h3 { line-height:1.18; letter-spacing:-.024em; } h1 { margin:10px 0 12px; font-size:clamp(2rem,5vw,3rem); } h2 { margin:52px 0 16px; padding-bottom:9px; border-bottom:1px solid var(--line); font-size:1.62rem; } h3 { margin:30px 0 10px; font-size:1.15rem; }
+    p,li { max-width:880px; } .lede { max-width:860px; color:var(--muted); font-size:1.18rem; } .meta { color:var(--muted); font-size:.92rem; } .tag { display:inline-block; padding:3px 9px; border-radius:999px; background:var(--accent-soft); color:#075b54; font-size:.78rem; font-weight:700; }
+    nav { margin:30px 0 34px; padding:18px 22px; border:1px solid var(--line); background:#f8faf9; } nav ol { columns:2; padding-left:24px; margin:8px 0 0; } nav li { margin:5px 12px 5px 0; } a { color:var(--blue); }
+    .callout { max-width:900px; margin:22px 0; padding:16px 20px; border-left:4px solid var(--accent); background:var(--accent-soft); } .callout.warn { border-color:#c28200; background:var(--warn-soft); }
+    table { width:100%; border-collapse:collapse; margin:18px 0 28px; font-size:.92rem; } th,td { border:1px solid var(--line); padding:10px 11px; text-align:left; vertical-align:top; } th { background:#f0f5f4; } code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code); } code { padding:1px 4px; border-radius:3px; } pre { max-width:900px; padding:16px; white-space:pre-wrap; overflow:auto; border:1px solid var(--line); } .small { color:var(--muted); font-size:.92rem; }
+    @media print { body { background:#fff; } main { max-width:none; margin:0; box-shadow:none; } } @media(max-width:720px) { main { margin:0; } nav ol { columns:1; } }
+  </style>
+</head>
+<body><main>
+  <header>
+    <span class="tag">Implementation plan · GitHub Issue #83 · Phase 1 of #51</span>
+    <h1>Structured Substack Article Extractor</h1>
+    <p class="lede">Build a pure, Worker-safe module that turns one RSS item’s rich article HTML into the compact, section-aware JSON that the later RSS idea workflow will give its LLM.</p>
+    <p class="meta">This phase deliberately does not change RSS polling, agents, Notion, Telegram, cadence, or workflow behaviour. Those integrations belong to Issue #84.</p>
+  </header>
+
+  <nav aria-label="Contents"><strong>Contents</strong><ol>
+    <li><a href="#outcome">Outcome and boundaries</a></li><li><a href="#contract">Public interface</a></li><li><a href="#projection">Content projection</a></li><li><a href="#noise">Noise and markup policy</a></li><li><a href="#errors">Failure contract</a></li><li><a href="#tests">Tests and validation</a></li><li><a href="#implementation">Implementation sequence</a></li><li><a href="#assumptions">Assumptions and deferred work</a></li>
+  </ol></nav>
+
+  <section id="outcome"><h2>1. Outcome and boundaries</h2>
+    <p>Add a deterministic extractor at <code>src/substack/article.ts</code>. Given the title, optional subtitle, source URL, and complete HTML from one RSS item, it returns readable authored prose in source order, organized as an optional introduction plus first-order sections.</p>
+    <p>The extractor is a content projection, not a scraper or an agent capability. It has no network access, never follows URLs, never fetches a Substack page or undocumented API, and does not process images. It must be safe to import in the Cloudflare Worker runtime.</p>
+    <div class="callout"><strong>Phase boundary:</strong> Issue #83 establishes the extraction contract and proves it against real public RSS HTML. Issue #84 will supply RSS metadata, register the bounded article-reading tool, require that tool before idea generation, persist raw ideas, notify Telegram, and remove Substack ideas from cadence.</div>
+  </section>
+
+  <section id="contract"><h2>2. Public interface</h2>
+    <p>Use <code>linkedom/worker</code> and export a parser with this input and output contract:</p>
+    <pre>type SubstackArticleInput = {
+  title: string;
+  subtitle?: string;
+  sourceUrl: string;
+  contentHtml: string;
+};
+
+type SubstackArticle = {
+  title: string;
+  subtitle?: string;
+  sourceUrl: string;
+  sections: Array&lt;{
+    heading: string | null;
+    content: string;
+  }&gt;;
+};</pre>
+    <ul>
+      <li>Normalize title, subtitle, headings, and prose by decoding HTML entities, collapsing internal whitespace, and trimming surrounding whitespace.</li>
+      <li>Omit an empty subtitle. Preserve <code>sourceUrl</code> unchanged as supplied by the caller.</li>
+      <li>Join retained paragraphs within a section with exactly one blank line. The model deliberately has one concatenated <code>content</code> string rather than a block array.</li>
+      <li>Do not emit empty sections. Prose before the first H2 forms one introduction with <code>heading: null</code>.</li>
+    </ul>
+  </section>
+
+  <section id="projection"><h2>3. Content projection rules</h2>
+    <table><thead><tr><th>Source HTML</th><th>Projection</th></tr></thead><tbody>
+      <tr><td>Prose before first H2</td><td>One introduction section with <code>heading: null</code>.</td></tr>
+      <tr><td>H2</td><td>Starts the next first-order section. Sections remain in source order.</td></tr>
+      <tr><td>H1</td><td>Omit: title is dedicated RSS metadata, so repeating it adds no value.</td></tr>
+      <tr><td>Paragraph</td><td>One normalized paragraph in the current section.</td></tr>
+      <tr><td>H3–H6</td><td>Retain as its own plain-text paragraph in the current H2 section. Do not create third-level hierarchy.</td></tr>
+      <tr><td>Lists</td><td>Retain list items as readable <code>•</code>-prefixed lines without duplicating nested text.</td></tr>
+      <tr><td>Pull quotes and block quotes</td><td>Retain as readable paragraphs.</td></tr>
+      <tr><td>Tables</td><td>Retain each row as readable cell-delimited text.</td></tr>
+      <tr><td>Links</td><td>Keep visible link text only; never retain link destinations.</td></tr>
+      <tr><td>Unfamiliar ordinary wrappers</td><td>Treat as transparent and retain normal authored text in source order unless clearly image, UI, or subscription content.</td></tr>
+    </tbody></table>
+    <p>Traversal must consume semantic containers only once, so collecting a list, block quote, or table cannot also collect its nested paragraphs a second time.</p>
+  </section>
+
+  <section id="noise"><h2>4. Noise and markup policy</h2>
+    <p>Remove non-content subtrees before traversal. The result contains no raw markup, UI text, class, ID, data attribute, CDN URL, image-derived content, or styling information.</p>
+    <ul>
+      <li>Remove image markup and wrappers/captions: <code>img</code>, <code>picture</code>, <code>figure</code>, <code>figcaption</code>, and SVG.</li>
+      <li>Remove executable and styling markup: scripts, styles, and equivalent non-visible technical nodes.</li>
+      <li>Remove forms and controls: forms, buttons, inputs, selects, and text areas.</li>
+      <li>Remove known Substack subscription widgets and promotional calls-to-action, including their readable button and caption text.</li>
+    </ul>
+    <div class="callout warn"><strong>Do not overfit to today’s markup:</strong> known UI and image containers are removed deterministically, but neutral <code>div</code>/<code>span</code>-style wrappers are not discarded merely because they are unfamiliar. That preserves author prose as Substack markup evolves.</div>
+  </section>
+
+  <section id="errors"><h2>5. Failure contract</h2>
+    <p>Return a typed parse failure for each of these conditions:</p>
+    <ul>
+      <li>blank or missing title;</li>
+      <li>absent or blank <code>contentHtml</code>; and</li>
+      <li>HTML that leaves no retained authored prose after cleaning.</li>
+    </ul>
+    <p>One non-empty authored paragraph is sufficient for parser success. The later idea-generation phase decides whether the article has enough material for one or more worthwhile ideas; this module must not impose an editorial threshold.</p>
+  </section>
+
+  <section id="tests"><h2>6. Tests and validation</h2>
+    <h3>Committed real fixture</h3>
+    <p>Commit the approved complete public RSS HTML fixture for <em>The Reps We Are Losing</em>, with title, subtitle, and source URL supplied as test metadata. Assert meaningful facts rather than an every-word output snapshot:</p>
+    <ul>
+      <li>an introduction and nine H2 sections, in correct heading order;</li>
+      <li>subtitle handling, representative source prose, entity decoding, and paragraph ordering;</li>
+      <li>retention beyond 6,000 characters;</li>
+      <li>absence of captions, subscription text, image/CDN URLs, link destinations, raw markup, and attributes.</li>
+    </ul>
+    <h3>Compact synthetic fixture</h3>
+    <p>Cover malformed-but-recoverable HTML, neutral wrappers, nested lists, inline links, pull quotes, tables, H3, figures/captions, and subscription UI. Assert readable non-duplicated output and the two-level hierarchy.</p>
+    <h3>Negative cases and runtime checks</h3>
+    <ul>
+      <li>Test typed failures for missing title, missing body, and a body that retains no authored prose.</li>
+      <li>Run unit tests, lint, typecheck, and the Worker deploy dry-run. This proves the <code>linkedom/worker</code> import bundles for the production target.</li>
+      <li>Run the existing inspection script once against several long public posts and manually compare title, headings, paragraph count, and normalized length with the articles. Keep this live check out of normal tests.</li>
+    </ul>
+  </section>
+
+  <section id="implementation"><h2>7. Implementation sequence</h2>
+    <ol>
+      <li>Add the typed input, output, and parse-failure contracts in <code>src/substack/article.ts</code>.</li>
+      <li>Parse the RSS HTML with <code>linkedom/worker</code>, remove explicit non-content subtrees, then walk its remaining content in source order.</li>
+      <li>Implement the two-level section accumulator and normalized text projection, with semantic-container consumption preventing duplicates.</li>
+      <li>Add real and synthetic fixtures plus deterministic unit tests for output facts and failure cases.</li>
+      <li>Run the project’s standard quality gates and a manual long-post inspection; address parser behavior only within this extraction boundary.</li>
+    </ol>
+  </section>
+
+  <section id="assumptions"><h2>8. Assumptions and deferred work</h2>
+    <ul>
+      <li><code>content:encoded</code> is the sole body source for this phase. There is no page/API fetch, fallback adapter, arbitrary URL access, or image handling.</li>
+      <li>RSS title and description metadata plumbing is owned by Issue #84; this module accepts them as already-supplied values.</li>
+      <li>Resource limits, native-tool registration, agent prompting, retrieval alerts, Notion saves, raw-only idea behavior, and cadence removal are all Issue #84 work.</li>
+      <li>The pre-implementation library comparison already selected <code>linkedom/worker</code>: it matched Cheerio’s extraction output on real and synthetic content while producing the smaller Worker bundle.</li>
+    </ul>
+  </section>
+</main></body></html>
