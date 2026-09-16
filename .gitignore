@@ -4,6 +4,7 @@ dist/
 .env
 .dev.vars
 logs/
+tmp/substack-html-inspection/
 *.log
 .DS_Store
 
