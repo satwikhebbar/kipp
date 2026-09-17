@@ -68,6 +68,10 @@ stateDiagram-v2
 `drafted` and `skipped` remain valid data statuses for compatibility, but the
 current workflow moves generated content directly to `awaiting-feedback`.
 
+Substack extraction is an exception to that general path: its ideas remain
+`raw`, are excluded from the scheduled cadence check, and enter LinkedIn
+drafting only after an explicit `/generate` request.
+
 ## Calendar plan lifecycle
 
 ```mermaid

@@ -104,6 +104,7 @@ modules:
       - token_vault
       - interaction_router
       - idea_ingest
+      - substack
   substack:
     path: src/substack
     owns:
@@ -132,6 +133,7 @@ modules:
       - Calendar ready_to_create and needs_user_input handoffs
       - safe Calendar transcript persistence and event-list compaction
       - Meal-planning propose_plan and needs_clarification handoffs
+      - Substack source-grounded idea extraction and ranked candidate handoff
     depends_on:
       - providers
       - runtime
@@ -286,3 +288,4 @@ security_boundaries:
   - Meal-planning plan persistence is evaluator-gated and CAS-guarded (a stale revision changes nothing)
   - RSS article HTML is parsed and reduced before entering model context; images, captions, interface markup, raw tags, and attributes are excluded
   - RSS `content:encoded` is the sole v1 Substack body source; public-page scraping, undocumented APIs, browser rendering, and third-party extraction are deferred alternatives
+  - Substack article retrieval is bound to the triggering RSS item; the agent cannot browse arbitrary URLs or induce outbound article fetches

@@ -18,11 +18,13 @@ flowchart LR
   worker --> linkedinFlow["LinkedIn Workflow"]
   worker --> calendarFlow["Calendar Workflow"]
   worker --> mealFlow["Meal-planning Workflow"]
+  worker --> substackExtract["Substack extraction"]
   worker <--> router["InteractionRouterDO"]
   worker <--> vault["TokenVaultDO"]
   worker <--> ingest["IdeaIngestDO"]
 
   linkedinFlow <--> data["Notion Ideas data source"]
+  substackExtract --> data
   linkedinFlow --> github["Optional GitHub style prompt"]
   linkedinFlow --> llm["Gemini or DeepSeek API"]
   linkedinFlow --> linkedin["LinkedIn API"]

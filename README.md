@@ -24,12 +24,14 @@ flowchart LR
 
   worker --> linkedinFlow["LinkedIn Workflow"]
   worker --> calendarFlow["Calendar Workflow"]
+  worker --> substackExtract["Substack extraction"]
 
   linkedinFlow --> agentRuntime["Bounded tool-session runtime"]
   calendarFlow --> agentRuntime
   agentRuntime --> llm["Gemini or DeepSeek"]
 
   linkedinFlow <--> notion["Notion Ideas data source"]
+  substackExtract --> notion
   linkedinFlow --> github["Optional GitHub style prompt"]
   linkedinFlow --> linkedin["LinkedIn DRAFT"]
   calendarFlow <--> calendar["Primary Google Calendar"]
@@ -63,7 +65,15 @@ delivery history and architecture decisions in
 
 Ideas enter the Notion Ideas data source through Telegram `/add`, the
 configured Substack RSS feed, or manual entry. `/generate` and scheduled
-cadence checks select raw Notion pages and can start `PipelineWorkflow`.
+cadence checks select eligible raw Notion pages and can start
+`PipelineWorkflow`.
+
+The RSS path reads the triggering item's complete `content:encoded` HTML and
+extracts up to seven source-grounded LinkedIn idea candidates. Kipp keeps the
+top five candidates scoring at least 5/10, stores them as raw Substack ideas,
+and sends a concise Telegram notification after storage succeeds. It does not
+start LinkedIn drafting automatically. Substack ideas are excluded from the
+scheduled cadence check and require an explicit `/generate` request.
 
 The LinkedIn writing agent returns a `ready_for_review` outcome with two
 fields: a review `response` for Telegram plus the exact post text. Kipp sends
@@ -180,6 +190,10 @@ pnpm wrangler secret put TOKEN_ENCRYPTION_KEY_k20260720a
 `TOKEN_ENCRYPTION_KEY_IDS` is ordered: the first key encrypts and every listed
 key may decrypt. To rotate keys, add the new ID and secret, call
 `POST /admin/rewrap`, then remove the old ID and secret after rewrapping succeeds.
+
+Set `SUBSTACK_RSS_URL` to the public publication feed URL (normally ending in
+`/feed`). v1 assumes public posts and uses the feed item's `content:encoded`
+body; it does not require Substack credentials or a scraping service.
 
 ### 4. Connect LinkedIn
 
@@ -299,6 +313,12 @@ curl "http://127.0.0.1:8787/__scheduled?cron=0+9+*+*+*"   # RSS ingest
 curl "http://127.0.0.1:8787/__scheduled?cron=0+9+*+*+1"   # cadence
 ```
 
+The RSS trigger uses the configured feed and real Notion, Telegram, and LLM
+services. It selects the first article URL not already represented in Notion;
+rerunning the trigger therefore advances to the next unseen article after a
+successful run. A failed run leaves the article unseen so a later poll can
+retry it.
+
 Local Durable Objects/Workflows are emulated and isolated per worktree, while
 Notion, Telegram, and LLM calls hit the real services.
 
@@ -322,6 +342,7 @@ Notion, Telegram, and LLM calls hit the real services.
 | `pnpm test` | Run the standard Vitest suite. |
 | `pnpm test:unit` | Run unit tests. |
 | `pnpm test:integration` | Run integration tests against fake external services. |
+| `SUBSTACK_EVAL=1 LLM_API_KEY=<key> pnpm exec vitest run --config vitest.config.ts src/__contract__/substack-idea-generation.contract.test.ts` | Run the opt-in live Substack idea-generation evaluation for the configured test article. |
 | `LLM_API_KEY=<key> pnpm test:provider-contract` | Run credential-gated DeepSeek Calendar tool-contract tests. |
 | `pnpm check` | Run lint, documentation checks, typecheck, and the standard tests. |
 
@@ -400,6 +421,7 @@ src/
 │   ├── workflow.ts                LinkedIn durable workflow
 │   ├── ideas/                     Notion-backed idea management
 │   └── prompts/                   LinkedIn style-prompt resolution
+├── substack/                      RSS article parsing and idea extraction
 ├── agent/                         Shared agent sessions, prompts, tools, and terminal outcomes
 ├── core/                          Cross-workflow shared infrastructure
 │   ├── types.ts                   Shared contracts

@@ -123,6 +123,11 @@ guaranteed platform contract. The parser rejects missing or implausibly empty
 body content and reports a typed failure; v1 does not add a scraping service,
 browser binding, or undocumented Substack API fallback. Images, captions,
 subscribe widgets, and other interface markup are removed before model input.
+Transient RSS fetch failures (network errors, HTTP 429, and HTTP 5xx) receive a
+bounded retry policy of up to three retries. Parsing, agent, or Notion failures
+do not create partial ideas; the next RSS poll can retry the unseen article.
+Telegram notification is best-effort and is sent only after all selected ideas
+have been stored successfully.
 
 ## Calendar conversation, evaluation, and write
 
