@@ -192,7 +192,7 @@ describe("handleCadenceCron", () => {
     expect(body).toMatchObject({ pageId: "p1", ideaId: "1", source: "manual" })
   })
 
-  it("does not automatically start a workflow for raw Substack ideas", async () => {
+  it("leaves a raw Substack idea for manual review when no other idea is eligible", async () => {
     vi.stubGlobal("fetch", notionFetch([statusPage("p1", 1, "raw", undefined, "substack")]))
     const env = mockEnv()
     const result = await handleCadenceCron(env as never)
@@ -200,7 +200,7 @@ describe("handleCadenceCron", () => {
     expect(env.startMocks.size).toBe(0)
   })
 
-  it("skips Substack ideas and starts the oldest eligible raw idea", async () => {
+  it("does not let an older Substack idea block automatic drafting of another raw idea", async () => {
     vi.stubGlobal(
       "fetch",
       notionFetch([

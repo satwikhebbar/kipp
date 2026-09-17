@@ -32,17 +32,35 @@ describe("rss-to-backlog", () => {
     vi.unstubAllGlobals()
   })
 
-  it("adds ideas for a new RSS item and starts a workflow", async () => {
+  it("adds raw ideas for a new RSS item without starting a workflow", async () => {
     const { fetch, getState } = createFakeNetwork({
       llmResponses: [
         {
           choices: [
             {
               message: {
-                content: JSON.stringify({
-                  teaser: "AI is evolving fast",
-                  subIdeas: ["LLM agents are the future", "Tool use patterns", "Safety considerations"],
-                }),
+                tool_calls: [
+                  {
+                    id: "submit-ideas",
+                    type: "function",
+                    function: {
+                      name: "submit_substack_ideas",
+                      arguments: JSON.stringify({
+                        ideas: [
+                          {
+                            title: "Reasoning is changing how teams work",
+                            context: "AI has moved beyond isolated demonstrations.",
+                            excerpt:
+                              "This year AI has seen dramatic advances in reasoning, tool use, and autonomous agents.",
+                            coreArgument: "Teams should redesign work around these new capabilities.",
+                            viralityScore: 8,
+                            scoreJustification: "A concrete shift with direct implications for professional work.",
+                          },
+                        ],
+                      }),
+                    },
+                  },
+                ],
               },
             },
           ],
@@ -65,15 +83,12 @@ describe("rss-to-backlog", () => {
     expect(main.status).toBe("raw")
     expect(main.source).toBe("substack")
     expect(main.substackUrl).toBe("https://newsletter.test/ai-trends-2026")
-    expect(main.markdown).toBe("AI is evolving fast")
-    const sideMarkdown = pages.filter((p) => p.kippId > 1).map((p) => p.markdown)
-    expect(sideMarkdown).toContain("LLM agents are the future")
-    expect(sideMarkdown).toContain("Tool use patterns")
-    expect(sideMarkdown).toContain("Safety considerations")
+    expect(main.markdown).toBe(
+      "AI has moved beyond isolated demonstrations.\n\nThis year AI has seen dramatic advances in reasoning, tool use, and autonomous agents.\n\nTeams should redesign work around these new capabilities.",
+    )
 
     const created = binding.getCreated()
-    expect(created.length).toBe(1)
-    expect(created[0].params).toMatchObject({ pageId: main.pageId, ideaId: "1", source: "substack" })
+    expect(created).toHaveLength(0)
   })
 
   it("skips items whose substackUrl already exists in Notion", async () => {

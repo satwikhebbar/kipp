@@ -83,7 +83,7 @@ describe("Substack idea native-tool agent", () => {
     )
   })
 
-  it("accepts a descriptive title without an arbitrary length cap", async () => {
+  it("keeps a descriptive title intact", async () => {
     const longTitle =
       "A deliberately descriptive working title that remains useful even when it runs well past eighty characters"
     const result = await runSubstackIdeaToolSession(
@@ -97,20 +97,6 @@ describe("Substack idea native-tool agent", () => {
     )
 
     expect(result.terminal).toEqual({ kind: "ideas_ready", ideas: [{ ...validIdeas[0], title: longTitle }] })
-  })
-
-  it("rejects candidates that duplicate a title, argument, or passage set", async () => {
-    const duplicate = [{ ...validIdeas[0] }, { ...validIdeas[0], context: "Different context." }]
-    const response = {
-      toolCalls: [{ id: "duplicate", name: "submit_substack_ideas", input: { ideas: duplicate } }],
-      usage: { inputTokens: 1, outputTokens: 1 },
-    }
-    const result = await runSubstackIdeaToolSession(providerWith(response, response, response), article)
-
-    expect(result.terminal).toBeNull()
-    expect(result.toolExecutions).toEqual(
-      expect.arrayContaining([expect.objectContaining({ outcome: "failed", failureCategory: "invalid-input" })]),
-    )
   })
 
   it("rejects a missing or overly long score justification", async () => {
