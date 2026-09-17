@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue #84 — Structured Substack Ideas in the RSS Workflow</title>
+  <style>
+    :root { --ink:#1e293b; --muted:#5c6778; --paper:#fffefa; --line:#dce3e9; --accent:#0f766e; --accent-soft:#e8f5f1; --blue:#1d4ed8; --blue-soft:#eef4ff; --warn:#9a6700; --warn-soft:#fff7df; --code:#f3f6f8; }
+    * { box-sizing:border-box; } body { margin:0; background:#eef2f4; color:var(--ink); font:16px/1.58 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1060px; margin:32px auto; padding:clamp(28px,5vw,70px); background:var(--paper); box-shadow:0 8px 30px #172a3820; }
+    h1,h2,h3 { line-height:1.18; letter-spacing:-.024em; } h1 { margin:10px 0 12px; font-size:clamp(2rem,5vw,3rem); } h2 { margin:52px 0 16px; padding-bottom:9px; border-bottom:1px solid var(--line); font-size:1.62rem; } h3 { margin:30px 0 10px; font-size:1.15rem; }
+    p,li { max-width:900px; } .lede { max-width:860px; color:var(--muted); font-size:1.18rem; } .meta { color:var(--muted); font-size:.92rem; } .tag { display:inline-block; padding:3px 9px; border-radius:999px; background:var(--accent-soft); color:#075b54; font-size:.78rem; font-weight:700; }
+    nav { margin:30px 0 34px; padding:18px 22px; border:1px solid var(--line); background:#f8faf9; } nav ol { columns:2; padding-left:24px; margin:8px 0 0; } nav li { margin:5px 12px 5px 0; } a { color:var(--blue); }
+    .callout { max-width:920px; margin:22px 0; padding:16px 20px; border-left:4px solid var(--accent); background:var(--accent-soft); } .callout.warn { border-color:#c28200; background:var(--warn-soft); }
+    table { width:100%; border-collapse:collapse; margin:18px 0 28px; font-size:.92rem; } th,td { border:1px solid var(--line); padding:10px 11px; text-align:left; vertical-align:top; } th { background:#f0f5f4; } code,pre { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code); } code { padding:1px 4px; border-radius:3px; } pre { max-width:920px; padding:16px; white-space:pre-wrap; overflow:auto; border:1px solid var(--line); } .small { color:var(--muted); font-size:.92rem; }
+    @media print { body { background:#fff; } main { max-width:none; margin:0; box-shadow:none; } } @media(max-width:720px) { main { margin:0; } nav ol { columns:1; } }
+  </style>
+</head>
+<body><main>
+  <header>
+    <span class="tag">Implementation plan · GitHub Issue #84 · Phase 2 of #51</span>
+    <h1>Use structured Substack content in the RSS idea workflow</h1>
+    <p class="lede">When the RSS feed finds a new public Substack post, turn its complete, cleaned article into up to five distinct raw LinkedIn ideas that retain the author’s voice. Do not automatically draft or publish a LinkedIn post.</p>
+    <p class="meta">Prerequisite: Issue #83’s structured RSS-HTML extractor is complete. This plan integrates that module into the live scheduled workflow.</p>
+  </header>
+
+  <nav aria-label="Contents"><strong>Contents</strong><ol>
+    <li><a href="#outcome">Outcome and boundaries</a></li><li><a href="#flow">Happy-path flow</a></li><li><a href="#rss">RSS and article preparation</a></li><li><a href="#agent">Bounded idea agent</a></li><li><a href="#submission">Submission, validation, and saving</a></li><li><a href="#cadence">Cadence and notifications</a></li><li><a href="#failure">Failure and idempotency</a></li><li><a href="#tests">Tests and dry run</a></li><li><a href="#implementation">Implementation sequence</a></li><li><a href="#decisions">Decisions retained for posterity</a></li>
+  </ol></nav>
+
+  <section id="outcome"><h2>1. Outcome and boundaries</h2>
+    <p>Extend the existing scheduled RSS handler. It will find the first feed item whose canonical URL is not already represented in Notion, parse its <code>content:encoded</code> HTML through the Phase 1 module, ask a bounded LLM session to select worthwhile source-grounded ideas, then save the accepted candidates as raw Notion ideas.</p>
+    <ul>
+      <li>Create one to five candidates; three to five is the normal target, but fewer is correct when the article does not contain more strong ideas.</li>
+      <li>Keep each idea as an unstructured body: minimal needed context, one or more source passages, then its core argument. Do not add labels or properties for those pieces.</li>
+      <li>Set every created item to raw, use source <code>substack</code>, and retain the article URL using the existing storage shape.</li>
+      <li>Do not start <code>PipelineWorkflow</code>, create drafts, introduce a scraper/API fallback, process images, add an RSS persistence checkpoint, or alter production configuration.</li>
+    </ul>
+    <div class="callout"><strong>Design boundary:</strong> this is an ordinary scheduled Worker invocation, not a durable Cloudflare Workflow with individual checkpointed steps. Its logical stages are explicit in code, while the existing per-idea Durable Object continues to provide idempotency for confirmed saves.</div>
+  </section>
+
+  <section id="flow"><h2>2. Happy-path flow</h2>
+    <ol>
+      <li>The configured schedule invokes <code>handleRssCron</code>.</li>
+      <li>Fetch and parse the configured RSS feed, then list existing Notion ideas and choose the first unseen article URL.</li>
+      <li>Use the title, optional description-as-subtitle, URL, and <code>content:encoded</code> body to produce the clean structured article JSON from Phase 1.</li>
+      <li>Start the bounded idea-agent session with that article JSON in its initial user message, explicitly marked as untrusted source material rather than instructions.</li>
+      <li>The agent calls <code>submit_substack_ideas</code> with one to five candidate ideas. The tool accepts them after validation and returns the assembled accepted bodies.</li>
+      <li>Save each accepted candidate sequentially through the existing ingest path, always with <code>startWorkflow: false</code>.</li>
+      <li>Send one Telegram summary containing the source title, created count, and working titles; then exit.</li>
+    </ol>
+    <p>There is intentionally no <code>read_substack_article</code> tool. The scheduled handler has exactly one predetermined article and has already safely projected it before the agent starts. Passing only the projected JSON is simpler and avoids a needless one-shot model round trip.</p>
+  </section>
+
+  <section id="rss"><h2>3. RSS and article preparation</h2>
+    <p>Refactor the RSS item model so <code>content:encoded</code> and <code>description</code> remain distinct. The rich encoded body is the only v1 article body; <code>description</code> is normalized as an optional subtitle. Never substitute the description as article content.</p>
+    <ul>
+      <li>Remove the existing HTML stripping and 6,000-character truncation from this path.</li>
+      <li>Call <code>parseSubstackArticle</code> before any provider session. Preserve its typed failures and make them a no-write run failure.</li>
+      <li>Pass no raw HTML, page URL fetching capability, image content, raw attributes, or links’ destinations to the model.</li>
+      <li>Retain the current feed retry behavior for transient fetch failures and the current first-unseen-item behavior.</li>
+    </ul>
+  </section>
+
+  <section id="agent"><h2>4. Bounded idea agent</h2>
+    <p>Replace the legacy free-text RSS generator with the project’s native tool-session runtime and a tool-capable provider. The initial user message contains the complete structured article and a short statement that its text is source material, not executable instructions.</p>
+    <p>The prompt tells the agent to find distinct, compelling core ideas rather than summarize the post or reproduce every section. A strong candidate has a concrete argument that can stand as a LinkedIn post, enough specificity to be credible, and enough original language to carry the author’s voice. Passages can come from one H2 section by default or from more than one section when that better expresses one coherent idea.</p>
+    <p>The agent must preserve source wording where useful, add only the short context required for standalone meaning, and end with a concise core argument. It may lightly adapt or shorten selected passages for readability, but must not invent unsupported claims, promotional teasers, or generic summaries. Distinctness applies only among candidates from this article.</p>
+    <div class="callout warn"><strong>Grounding approach:</strong> use the narrow structured input, prompt instruction, and tool boundary—not deterministic lexical matching. Exact source matching would reject useful light adaptation and is not required for this personal workflow.</div>
+  </section>
+
+  <section id="submission"><h2>5. Submission, validation, and saving</h2>
+    <p><code>submit_substack_ideas</code> is the agent’s only native tool. Its schema receives the complete candidate set:</p>
+    <pre>{
+  ideas: [{
+    title: "Specific working headline (1–80 characters)",
+    context?: "Only the framing needed for standalone meaning",
+    excerpts: ["One or more selected source passages"],
+    coreArgument: "The concise claim this idea makes"
+  }]
+}</pre>
+    <p>Put every model-correctable rule in the tool input schema: one to five ideas, non-empty trimmed fields, title length, at least one non-empty excerpt, and exact normalized duplicate checks across titles, core arguments, and passage sets. Keep the tool available after an invalid submission. The native runtime will return the structured schema errors to the model transcript, allowing it to repair its candidates.</p>
+    <table><thead><tr><th>Outcome</th><th>Behaviour</th></tr></thead><tbody>
+      <tr><td>Schema validation fails</td><td>Return the tool’s structured invalid-input feedback to the agent; it may submit a corrected set.</td></tr>
+      <tr><td>Valid submission</td><td>The handler trims values and assembles the unlabeled Notion body in context → passages → core argument order. Return acceptance and finish the session.</td></tr>
+      <tr><td>Handler/internal failure</td><td>Treat as a fatal operational error, not a prompt-repair problem.</td></tr>
+    </tbody></table>
+    <p>Bound the session to three provider turns and three submission attempts. On acceptance, use the existing sequential ingest service and a stable per-candidate idempotency key. All items use <code>startWorkflow: false</code>.</p>
+  </section>
+
+  <section id="cadence"><h2>6. Cadence and notifications</h2>
+    <p>Update scheduled cadence selection to skip all raw ideas whose source is <code>substack</code>. They remain manual-only and can still be selected through the existing <code>/generate</code> route.</p>
+    <p>After every fully successful RSS ingestion, send Telegram a concise Markdown summary: the source-post title, number of raw ideas created, and their working titles. Do not include excerpts, page links, or a success notification for a replayed/already-known post.</p>
+  </section>
+
+  <section id="failure"><h2>7. Failure, retries, and idempotency</h2>
+    <table><thead><tr><th>Failure point</th><th>Result for this run</th><th>Later RSS poll</th></tr></thead><tbody>
+      <tr><td>RSS fetch, missing rich body, article parse, or agent extraction failure</td><td>No ideas are written; send a concise failure alert.</td><td>Retries naturally because no article URL was saved.</td></tr>
+      <tr><td>Invalid agent submission</td><td>Return the schema feedback and allow repair within the bounded session.</td><td>Fails cleanly if no valid submission is accepted.</td></tr>
+      <tr><td>Notion transient request</td><td>Use the existing Notion request retry policy.</td><td>No new batch/replay state is added.</td></tr>
+      <tr><td>Failure after one or more accepted saves</td><td>Existing per-idea idempotency protects confirmed writes; report the operational failure.</td><td>Do not build a batch checkpoint/resume mechanism for this rare partial-write case.</td></tr>
+    </tbody></table>
+    <p>This deliberately favors small operational complexity. Authentication repair, temporary service recovery, or manual intervention are adequate for the limited partial-write scenario; a durable batch state would add more machinery than the workflow warrants.</p>
+  </section>
+
+  <section id="tests"><h2>8. Tests and dry run</h2>
+    <h3>Deterministic coverage</h3>
+    <ul>
+      <li>Extend RSS parsing tests: preserve encoded HTML separately, retain description as optional subtitle, and reject missing rich content rather than falling back to a description excerpt.</li>
+      <li>Test the agent prompt boundary: only clean structured article JSON is passed, never raw HTML.</li>
+      <li>Test <code>submit_substack_ideas</code> valid assembly and every schema-repairable failure, including candidate count, required fields, title length, and within-article duplicate rules. Assert invalid feedback remains visible for a corrected resubmission.</li>
+      <li>Test raw-only ingest inputs, stable keys, no workflow start, cadence exclusion for Substack, Telegram success summary, and no-write extraction failures.</li>
+    </ul>
+    <h3>Qualitative pre-production dry run</h3>
+    <p>Add a local dry-run command that performs RSS retrieval, parsing, and the bounded agent session but never writes to Notion, a Durable Object, or Telegram. Run it against these public posts and review the proposed raw ideas for grounding, author voice, distinctness, and usefulness as LinkedIn-draft inputs:</p>
+    <ul>
+      <li><a href="https://satwikhebbar.substack.com/p/the-agentic-leaders-field-guide">The Agentic Leader’s Field Guide</a></li>
+      <li><a href="https://satwikhebbar.substack.com/p/dealing-with-great-expectations">Dealing With Great Expectations</a></li>
+      <li><a href="https://satwikhebbar.substack.com/p/thriving-in-the-age-of-good-enough">Thriving in the Age of Good Enough</a></li>
+    </ul>
+    <p>Also run the standard unit, lint, typecheck, and Worker deploy dry-run checks. The long-post corpus is explicitly intended to prove there is no practical input-size issue before introducing an artificial truncation limit.</p>
+  </section>
+
+  <section id="implementation"><h2>9. Implementation sequence</h2>
+    <ol>
+      <li>Refactor RSS item parsing and the scheduled handler to preserve metadata/body separation and call the Phase 1 extractor for the first unseen item.</li>
+      <li>Add the native tool-session prompt and <code>submit_substack_ideas</code> schema/handler; remove the legacy generated <code>teaser</code>/<code>subIdeas</code> path and its truncation.</li>
+      <li>Route accepted candidates through existing idempotent ingestion as raw, no-workflow Substack ideas; add the success notification.</li>
+      <li>Exclude Substack items from cadence while preserving manual <code>/generate</code> behaviour.</li>
+      <li>Add deterministic tests, the local dry-run command, and run the three-post qualitative review plus quality gates.</li>
+    </ol>
+  </section>
+
+  <section id="decisions"><h2>10. Decisions retained for posterity</h2>
+    <h3>Article retrieval and cleanup</h3>
+    <p>Use RSS <code>content:encoded</code> as the single v1 article source. It was verified against the configured public feed to carry complete article structure, while RSS <code>description</code> acts as subtitle metadata. The public page and an observed undocumented API could supply similar HTML, but each adds a second adapter without an observed RSS gap. Phase 1 cleans the body using <code>linkedom/worker</code>, selected over Cheerio after equivalent real/synthetic output with a materially smaller Worker import bundle.</p>
+    <h3>Agent interaction</h3>
+    <p>Supply the already-clean structured article directly in the initial user message. The earlier idea of a mandatory article-reading tool was removed: the agent has no choice of article, and a direct message avoids an unnecessary tool turn while preserving the same bounded content surface. Retain a single submission tool because it gives the model precise validation feedback it can repair.</p>
+    <h3>Persistence</h3>
+    <p>Do not add a cross-candidate checkpoint or “retry on next poll” state. Existing Notion request retries and per-idea idempotency are sufficient. The rare partial-write case is an operational exception, not justification for a new batch persistence subsystem.</p>
+  </section>
+</main></body></html>
