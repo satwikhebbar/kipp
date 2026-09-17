@@ -87,6 +87,43 @@ sequenceDiagram
 No LinkedIn post is auto-published. If feedback does not arrive within
 `WAIT_FOR_FEEDBACK_HOURS`, the idea becomes `awaiting-feedback-expired`.
 
+## RSS Substack idea extraction
+
+The daily RSS trigger uses the triggering item's `content:encoded` field as
+the sole v1 article-body source. It keeps the RSS title and subtitle metadata,
+projects the HTML through the `substack` parser, and passes the resulting
+title/subtitle/source URL/H2-section model directly to a bounded idea agent.
+The agent submits up to seven ranked candidates through its private tool;
+deterministic code keeps the top five candidates scoring at least five and
+creates them as raw Notion ideas. The run sends one Telegram summary and does
+not start LinkedIn drafting or cadence processing for those ideas.
+
+```mermaid
+sequenceDiagram
+  participant C as Cron trigger
+  participant R as Substack RSS
+  participant S as `substack` parser/agent
+  participant I as IdeaIngestDO
+  participant N as Notion Ideas data source
+  participant T as Telegram
+
+  C->>R: fetch configured feed
+  R-->>C: RSS item with title, description, content:encoded
+  C->>C: select first article URL not already ingested
+  C->>S: parse HTML and run bounded extraction session
+  S-->>C: ranked candidates or typed failure
+  C->>C: retain top five with score >= 5
+  C->>I: idempotent raw-idea ingestion for each selected candidate
+  I->>N: create Notion pages
+  C->>T: notify count and article title
+```
+
+RSS `content:encoded` is treated as a syndication input rather than a
+guaranteed platform contract. The parser rejects missing or implausibly empty
+body content and reports a typed failure; v1 does not add a scraping service,
+browser binding, or undocumented Substack API fallback. Images, captions,
+subscribe widgets, and other interface markup are removed before model input.
+
 ## Calendar conversation, evaluation, and write
 
 Calendar uses a bounded agent to interpret ordinary language and explain typed

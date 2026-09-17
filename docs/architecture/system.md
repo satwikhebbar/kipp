@@ -89,6 +89,11 @@ Google Calendar OAuth starts, both OAuth callbacks, and administrative token
 rewrapping. It also dispatches the daily RSS poll, weekly token check, and
 weekly LinkedIn cadence check.
 
+The daily RSS poll uses the triggering item's complete `content:encoded` body.
+The `src/substack/` module parses that HTML with `linkedom/worker`, removes
+media and interface markup, and supplies a transient structured article to the
+bounded idea extractor before raw ideas are ingested into Notion.
+
 Cloudflare Access protects the Worker hostname in production. A separate
 Access application bypasses only `/webhook/telegram`; the Worker still verifies
 Telegram's webhook-secret header and allowed user. Setup, OAuth callback, and

@@ -39,6 +39,7 @@ flowchart LR
 | Notion Ideas data source | LinkedIn idea page bodies plus `Kipp ID`, status, source, Substack URL, chat ID, and idempotency-key properties | The LinkedIn content store. `IdeaIngestDO` serializes idempotent creation and claims a deterministic workflow instance per page. Calendar does not use this store. |
 | Optional private GitHub repository | `style-prompt.md` or a configured prompt path | Supplies a custom LinkedIn style prompt through the Contents API; Kipp falls back to its built-in prompt when unavailable. |
 | `IdeaIngestDO` SQLite | Idempotency-key ownership records; per-page workflow-start state and repair cooldown | Prevents duplicate Notion pages and workflow starts across Telegram, RSS, and cadence entry points. |
+| RSS article model (transient) | Normalized title, optional subtitle, source URL, and ordered H2-section content produced from RSS `content:encoded` | Exists only during the RSS trigger and bounded extraction session; raw HTML is not persisted or sent to the agent. |
 | `TokenVaultDO` SQLite | Short-lived OAuth state; provider-namespaced encrypted LinkedIn and Google Calendar tokens | OAuth state expires after five minutes. Tokens use AES-256-GCM and configured key IDs and can be rewrapped during rotation. |
 | `InteractionRouterDO` SQLite | Opaque callback or reply registration, workflow target, interaction kind, version, expiry, and delivery state | Contains no request prose or credentials. Entries are claimed idempotently and expire after the owning interaction window. |
 | `PipelineWorkflow` state | LinkedIn agent transcript, review version, approval or revision events, usage, and step results | Durable across the configured feedback wait. Transcript output is bounded before persistence. |
@@ -86,6 +87,10 @@ stateDiagram-v2
 
 The workflow persists a complete created-event baseline after a write so an
 immediate edit can re-evaluate without guessing or recreating the event.
+
+Substack article HTML is transient workflow input. `linkedom/worker` removes
+known media and interface subtrees and emits only authored prose blocks; the
+bounded agent receives the compact article model and submits ranked raw ideas.
 
 ## Meal-planning plan lifecycle
 

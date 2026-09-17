@@ -17,6 +17,7 @@ flowchart LR
   entry --> ingest["idea-ingest"]
 
   triggers --> ideas["linkedin/ideas"]
+  triggers --> substack["substack"]
   triggers --> ingest
   triggers --> integrations["integrations"]
   triggers --> providers["providers"]
@@ -52,6 +53,8 @@ flowchart LR
   meal_workflow --> router
 
   ideas --> notion["integrations/notion"]
+  substack --> ideas
+  substack --> agents
   prompts --> github
   linkedin_agent --> providers
   linkedin_agent --> runtime
@@ -68,6 +71,7 @@ flowchart LR
 | Module | Responsibility | Key dependencies |
 | --- | --- | --- |
 | `triggers/` | Adapts HTTP, Telegram, OAuth, and scheduled events into application actions. | Ideas, IdeaIngest, integrations, providers, both workflows, interaction router, token vault |
+| `substack/` | Parses the triggering RSS item's complete `content:encoded` HTML into a compact article model and runs the bounded source-grounded idea-extraction session. | `linkedom/worker`, providers, runtime, ideas, integrations |
 | `linkedin/workflow.ts` | Orchestrates bounded LinkedIn native-tool drafting/revision, notification, approval wait, deterministic publication, and Notion lifecycle updates. | Agents, ideas, conversation, integrations, interaction router, prompts, providers, runtime, token vault |
 | `calendar/workflow.ts` + `calendar/agent-workflow.ts` | Runs the bounded Calendar agent session, persists its safe transcript and opaque plan ledger, maps fixed actions, revalidates fresh state, and performs idempotent writes and recovery. | Calendar agent, Calendar domain, Google Calendar integration, interaction router, providers, runtime, token vault |
 | `calendar/validation.ts` + `calendar/evaluation.ts` + `calendar/plan.ts` | Defines strict one-off/recurring proposal validation, aggregates typed semantic issues, evaluates safe candidates, and authorizes versioned single-use plan and option IDs. | Scheduling and recurrence domains, Google Calendar integration |
