@@ -1,11 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-const mockGen = vi.hoisted(() => vi.fn())
-vi.mock("../providers/index", async () => ({
-  createGenerator: vi.fn(() => mockGen),
-  messages: (await vi.importActual("../providers/llm")).messages,
-  parseLLMJson: (await vi.importActual("../providers/llm")).parseLLMJson,
-}))
+const mockProvider = vi.hoisted(() => ({ generate: vi.fn() }))
+vi.mock("../providers/index", () => ({ createToolProvider: vi.fn(() => mockProvider) }))
 
 import { handleRssCron, itemIdentity, parseRssFeed } from "../triggers/rss"
 import { createFakeIdeaIngestStub } from "./helpers/idea-ingest-stub"
@@ -22,53 +18,45 @@ const SAMPLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
     <link>https://test.substack.com/p/first</link>
     <guid>first-guid</guid>
     <pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate>
-    <description>A plain description</description>
+    <description><![CDATA[A plain subtitle]]></description>
+    <content:encoded><![CDATA[<p>Introduction.</p><h2>First idea</h2><p>Detailed article content here.</p>]]></content:encoded>
   </item>
   <item>
     <title><![CDATA[Second Post with Content]]></title>
     <link>https://test.substack.com/p/second</link>
     <guid>second-guid</guid>
     <pubDate>Tue, 11 Jul 2026 09:00:00 GMT</pubDate>
-    <content:encoded><![CDATA[<p>Detailed article content here</p>]]></content:encoded>
-  </item>
-</channel>
-</rss>`
-
-const SINGLE_RSS = `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-<channel>
-  <item>
-    <title>First Post</title>
-    <link>https://test.substack.com/p/first</link>
-    <guid>first-guid</guid>
-    <pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate>
-    <description>Known item</description>
+    <description>Second subtitle</description>
+    <content:encoded><![CDATA[<p>Second article content.</p>]]></content:encoded>
   </item>
 </channel>
 </rss>`
 
 const NO_GUID_RSS = `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
 <channel>
-  <item>
-    <title>GUIDless One</title>
-    <link>https://test.substack.com/p/one</link>
-    <pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate>
-    <description>First item without a GUID</description>
-  </item>
-  <item>
-    <title>GUIDless Two</title>
-    <link>https://test.substack.com/p/two</link>
-    <pubDate>Tue, 11 Jul 2026 09:00:00 GMT</pubDate>
-    <description>Second item without a GUID</description>
-  </item>
+  <item><title>GUIDless One</title><link>https://test.substack.com/p/one</link><pubDate>Mon, 10 Jul 2026 09:00:00 GMT</pubDate><description>First subtitle</description><content:encoded><![CDATA[<p>First body.</p>]]></content:encoded></item>
+  <item><title>GUIDless Two</title><link>https://test.substack.com/p/two</link><pubDate>Tue, 11 Jul 2026 09:00:00 GMT</pubDate><description>Second subtitle</description><content:encoded><![CDATA[<p>Second body.</p>]]></content:encoded></item>
 </channel>
 </rss>`
 
-const LLM_JSON = JSON.stringify({
-  teaser: "A great hook about testing",
-  subIdeas: ["Idea 1", "Idea 2", "Idea 3"],
-})
+const SUBMITTED_IDEAS = [
+  {
+    title: "First working title",
+    context: "Context.",
+    excerpt: "First excerpt.",
+    coreArgument: "First argument.",
+    viralityScore: 8,
+    scoreJustification: "A concise, source-grounded tension relevant to engineering leaders.",
+  },
+  {
+    title: "Second working title",
+    excerpt: "Second excerpt.",
+    coreArgument: "Second argument.",
+    viralityScore: 6,
+    scoreJustification: "A useful source-grounded observation with a clear professional takeaway.",
+  },
+]
 
 function notionQueryResponse(results: unknown[] = []) {
   return {
@@ -95,11 +83,7 @@ function knownSubstackResult(link: string) {
 }
 
 function mockEnv() {
-  const { stub, ingestFetches } = createFakeIdeaIngestStub({
-    pageId: "page_1",
-    ideaId: "1",
-    workflowInstanceId: "wf-1",
-  })
+  const { stub, ingestFetches } = createFakeIdeaIngestStub({ pageId: "page_1", ideaId: "1" })
   return {
     SUBSTACK_RSS_URL: "https://test.substack.com/feed",
     LLM_API_KEY: "key",
@@ -121,38 +105,40 @@ function mockEnv() {
   }
 }
 
+function submitIdeas(ideas = SUBMITTED_IDEAS) {
+  return {
+    toolCalls: [{ id: "ideas", name: "submit_substack_ideas", input: { ideas } }],
+    usage: { inputTokens: 10, outputTokens: 5 },
+  }
+}
+
 describe("parseRssFeed", () => {
-  it("extracts items from RSS XML", () => {
-    const items = parseRssFeed(SAMPLE_RSS)
-    expect(items).toHaveLength(2)
-  })
-
-  it("parses item fields correctly", () => {
+  it("keeps description as subtitle and only takes article HTML from content:encoded", () => {
     const [first] = parseRssFeed(SAMPLE_RSS)
-    expect(first.title).toBe("First Post")
-    expect(first.link).toBe("https://test.substack.com/p/first")
-    expect(first.guid).toBe("first-guid")
-    expect(first.pubDate).toContain("2026")
+    expect(first).toMatchObject({
+      title: "First Post",
+      subtitle: "A plain subtitle",
+      link: "https://test.substack.com/p/first",
+      guid: "first-guid",
+      contentHtml: "<p>Introduction.</p><h2>First idea</h2><p>Detailed article content here.</p>",
+    })
   })
 
-  it("prefers content:encoded over description", () => {
-    const items = parseRssFeed(SAMPLE_RSS)
-    expect(items[1].contentHtml).toBe("<p>Detailed article content here</p>")
+  it("does not substitute description for a missing content:encoded body", () => {
+    const [item] = parseRssFeed(
+      `<rss><channel><item><title>Post</title><link>https://example.com/p/post</link><description>Subtitle only</description></item></channel></rss>`,
+    )
+    expect(item).toMatchObject({ subtitle: "Subtitle only", contentHtml: "" })
   })
 
-  it("falls back to description when content:encoded is missing", () => {
-    const items = parseRssFeed(SAMPLE_RSS)
-    expect(items[0].contentHtml).toBe("A plain description")
-  })
-
-  it("returns empty array for feed with no items", () => {
-    const empty = parseRssFeed("<rss><channel><title>Empty</title></channel></rss>")
-    expect(empty).toHaveLength(0)
+  it("returns no items for a feed without item elements", () => {
+    expect(parseRssFeed("<rss><channel><title>Empty</title></channel></rss>")).toHaveLength(0)
   })
 })
 
 describe("handleRssCron", () => {
   function setupFetch(options: { rssXml: string; knownLinks: string[] }) {
+    const telegramBodies: unknown[] = []
     mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url === "https://test.substack.com/feed") return { ok: true, text: () => Promise.resolve(options.rssXml) }
       if (url.includes("api.notion.com")) {
@@ -163,58 +149,113 @@ describe("handleRssCron", () => {
           : options.knownLinks.map((link) => knownSubstackResult(link))
         return notionQueryResponse(results)
       }
+      if (url.startsWith("https://api.telegram.org/")) {
+        telegramBodies.push(JSON.parse(init?.body as string))
+        return { ok: true, json: () => Promise.resolve({ result: { message_id: 1 } }) }
+      }
       throw new Error(`Unexpected fetch ${url}`)
     })
+    return telegramBodies
   }
 
   beforeEach(() => {
     mockFetch.mockReset()
-    mockGen.mockReset()
+    mockProvider.generate.mockReset()
   })
 
-  it("ingests main idea with startWorkflow and side ideas without a workflow", async () => {
+  it("supplies parsed source directly to the agent and saves raw ideas without starting workflows", async () => {
     setupFetch({ rssXml: SAMPLE_RSS, knownLinks: [] })
-    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
-
+    mockProvider.generate.mockResolvedValue(submitIdeas())
     const env = mockEnv()
+
     const result = await handleRssCron(env as never)
-    expect(result.started).toBe(true)
 
-    const mainStub = env.ingestFetches.get("ingest:rss:guid:first-guid:0")
-    if (!mainStub) throw new Error("expected main RSS ingest")
-    expect(mainStub).toHaveBeenCalledTimes(1)
-    const [, init] = mainStub.mock.calls[0]
-    const body = JSON.parse(init.body)
-    expect(body.key).toBe("rss:guid:first-guid:0")
-    expect(body.startWorkflow).toBe(true)
-    expect(body.idea.body).toBe("A great hook about testing")
+    expect(result).toEqual({ started: true, ideaId: "1" })
+    expect(mockProvider.generate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: [expect.objectContaining({ name: "submit_substack_ideas" })],
+        messages: expect.arrayContaining([
+          expect.objectContaining({ text: expect.stringContaining('"subtitle":"A plain subtitle"') }),
+          expect.objectContaining({ text: expect.stringContaining("Detailed article content here.") }),
+        ]),
+      }),
+    )
 
-    const sideStub = env.ingestFetches.get("ingest:rss:guid:first-guid:1")
-    if (!sideStub) throw new Error("expected side RSS ingest")
-    expect(sideStub).toHaveBeenCalledTimes(1)
-    const sideBody = JSON.parse(sideStub.mock.calls[0][1].body)
-    expect(sideBody.startWorkflow).toBe(false)
+    const first = env.ingestFetches.get("ingest:rss:guid:first-guid:0")
+    const second = env.ingestFetches.get("ingest:rss:guid:first-guid:1")
+    if (!first || !second) throw new Error("expected raw Substack ingests")
+    expect(JSON.parse(first.mock.calls[0][1].body)).toMatchObject({
+      key: "rss:guid:first-guid:0",
+      startWorkflow: false,
+      idea: { source: "substack", title: "First working title", body: "Context.\n\nFirst excerpt.\n\nFirst argument." },
+    })
+    expect(JSON.parse(second.mock.calls[0][1].body)).toMatchObject({
+      key: "rss:guid:first-guid:1",
+      startWorkflow: false,
+      idea: { source: "substack", title: "Second working title", body: "Second excerpt.\n\nSecond argument." },
+    })
   })
 
-  it("ingests side ideas with sequential rss:{guid}:{i} keys", async () => {
-    setupFetch({ rssXml: SAMPLE_RSS, knownLinks: [] })
-    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
-
+  it("does not invoke the agent or ingest an article already represented in Notion", async () => {
+    setupFetch({
+      rssXml: SAMPLE_RSS,
+      knownLinks: ["https://test.substack.com/p/first", "https://test.substack.com/p/second"],
+    })
     const env = mockEnv()
+    await expect(handleRssCron(env as never)).resolves.toEqual({ started: false })
+    expect(mockProvider.generate).not.toHaveBeenCalled()
+    expect(env.ingestFetches.size).toBe(0)
+  })
+
+  it("notifies the operator with the article title, count, and working titles after saving", async () => {
+    const telegramBodies = setupFetch({ rssXml: SAMPLE_RSS, knownLinks: [] })
+    mockProvider.generate.mockResolvedValue(submitIdeas())
+    const env = mockEnv()
+    env.TELEGRAM_BOT_TOKEN = "bot-token"
+    env.TELEGRAM_ALLOWED_USER_ID = "123"
+
     await handleRssCron(env as never)
 
-    for (let i = 0; i <= 3; i++) {
-      expect(env.ingestFetches.get(`ingest:rss:guid:first-guid:${i}`)).toBeDefined()
-    }
+    expect(telegramBodies).toEqual([
+      expect.objectContaining({
+        chat_id: "123",
+        text: expect.stringContaining("Added 2 raw Substack ideas from First Post"),
+      }),
+    ])
+    expect((telegramBodies[0] as { text: string }).text).toContain("First working title")
+    expect((telegramBodies[0] as { text: string }).text).toContain("Second working title")
   })
 
-  it("does not re-add items whose substackUrl already exists in Notion", async () => {
-    setupFetch({ rssXml: SINGLE_RSS, knownLinks: ["https://test.substack.com/p/first"] })
+  it("saves only the highest-scoring qualifying candidates and exposes no scores in raw bodies", async () => {
+    setupFetch({ rssXml: SAMPLE_RSS, knownLinks: [] })
+    const scoredTitles: Array<[string, number]> = [
+      ["Below floor", 4],
+      ["Six", 6],
+      ["Ten", 10],
+      ["Seven", 7],
+      ["Eight", 8],
+      ["Nine", 9],
+      ["Five", 5],
+    ]
+    const candidates = scoredTitles.map(([title, viralityScore]) => ({
+      title,
+      excerpt: `${title} excerpt.`,
+      coreArgument: `${title} argument.`,
+      viralityScore,
+      scoreJustification: `${title} has a distinct and source-grounded professional tension.`,
+    }))
+    mockProvider.generate.mockResolvedValue(submitIdeas(candidates))
     const env = mockEnv()
-    const result = await handleRssCron(env as never)
-    expect(result.started).toBe(false)
-    expect(mockGen).not.toHaveBeenCalled()
-    expect(env.ingestFetches.size).toBe(0)
+
+    await handleRssCron(env as never)
+
+    expect(env.ingestFetches.get("ingest:rss:guid:first-guid:0")).toBeDefined()
+    expect(env.ingestFetches.get("ingest:rss:guid:first-guid:4")).toBeDefined()
+    expect(env.ingestFetches.get("ingest:rss:guid:first-guid:5")).toBeUndefined()
+    const first = env.ingestFetches.get("ingest:rss:guid:first-guid:0")
+    if (!first) throw new Error("expected the highest-scoring raw Substack ingest")
+    expect(JSON.parse(first.mock.calls[0][1].body).idea).toMatchObject({ title: "Ten" })
+    expect(JSON.parse(first.mock.calls[0][1].body).idea.body).not.toContain("viralityScore")
   })
 
   it("uses GUID-derived keys when a GUID is present and link-derived keys when it is not", () => {
@@ -224,42 +265,31 @@ describe("handleRssCron", () => {
     )
   })
 
-  it("ingests GUID-less items independently and stays idempotent on repeat", async () => {
+  it("uses a link-derived idempotency key for a GUID-less RSS item", async () => {
     setupFetch({ rssXml: NO_GUID_RSS, knownLinks: [] })
-    mockGen.mockResolvedValue({ text: LLM_JSON, usage: { inputTokens: 10, outputTokens: 5 } })
+    mockProvider.generate.mockResolvedValue(submitIdeas([SUBMITTED_IDEAS[0]]))
     const env = mockEnv()
-
     await handleRssCron(env as never)
-    const firstKey = "ingest:rss:link:https://test.substack.com/p/one:0"
-    const firstStub = env.ingestFetches.get(firstKey)
-    if (!firstStub) throw new Error("expected first RSS ingest")
-    expect(JSON.parse(firstStub.mock.calls[0][1].body).key).toBe("rss:link:https://test.substack.com/p/one:0")
+    expect(env.ingestFetches.get("ingest:rss:link:https://test.substack.com/p/one:0")).toBeDefined()
+  })
 
-    setupFetch({ rssXml: NO_GUID_RSS, knownLinks: ["https://test.substack.com/p/one"] })
-    await handleRssCron(env as never)
-    const secondKey = "ingest:rss:link:https://test.substack.com/p/two:0"
-    const secondStub = env.ingestFetches.get(secondKey)
-    if (!secondStub) throw new Error("expected second RSS ingest")
-    expect(secondKey).not.toBe(firstKey)
-    expect(JSON.parse(secondStub.mock.calls[0][1].body).key).toBe("rss:link:https://test.substack.com/p/two:0")
-
+  it("fails before writing when content:encoded is absent", async () => {
     setupFetch({
-      rssXml: NO_GUID_RSS,
-      knownLinks: ["https://test.substack.com/p/one", "https://test.substack.com/p/two"],
+      rssXml: `<rss><channel><item><title>Post</title><link>https://example.com/p/post</link><description>Subtitle</description></item></channel></rss>`,
+      knownLinks: [],
     })
-    const repeat = await handleRssCron(env as never)
-    expect(repeat.started).toBe(false)
-    expect(env.ingestFetches.get(firstKey)).toHaveBeenCalledTimes(1)
-    expect(env.ingestFetches.get(secondKey)).toHaveBeenCalledTimes(1)
+    const env = mockEnv()
+    await expect(handleRssCron(env as never)).rejects.toThrow("missing-content")
+    expect(mockProvider.generate).not.toHaveBeenCalled()
+    expect(env.ingestFetches.size).toBe(0)
   })
 
-  it("returns started:false when RSS feed is empty", async () => {
+  it("returns started:false when the RSS feed is empty", async () => {
     setupFetch({ rssXml: "<rss><channel><title>Empty</title></channel></rss>", knownLinks: [] })
-    const result = await handleRssCron(mockEnv() as never)
-    expect(result.started).toBe(false)
+    await expect(handleRssCron(mockEnv() as never)).resolves.toEqual({ started: false })
   })
 
-  it("throws on non-transient RSS fetch error", async () => {
+  it("throws on a non-transient RSS fetch error", async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 403, text: () => Promise.resolve("fail") })
     await expect(handleRssCron(mockEnv() as never)).rejects.toThrow("RSS fetch error 403")
   })

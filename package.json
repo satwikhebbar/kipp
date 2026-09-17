@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev --config wrangler.local.toml",
     "inspect:substack-html": "node tools/inspect-substack-html.mjs",
+    "dry-run:substack-ideas": "tsx tools/dry-run-substack-ideas.ts",
     "webhook:dev": "bash tools/dev-webhook.sh",
     "deploy:check": "bash tools/pre-deploy-check.sh && wrangler deploy --dry-run --config wrangler.prod.toml",
     "deploy": "pnpm run deploy:check && wrangler deploy --config wrangler.prod.toml && echo 'Verify Cloudflare Dashboard → Observability → Redact query string is enabled.'",

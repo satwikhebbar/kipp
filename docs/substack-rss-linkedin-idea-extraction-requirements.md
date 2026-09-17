@@ -7,18 +7,19 @@ Sharpened requirements, ready for implementation planning.
 ## Goal
 
 When a new public Substack post is detected, Kipp reads the complete article in
-a section-aware format and creates 3–5 high-quality raw LinkedIn ideas grounded
-in the author’s original writing. It does not create a LinkedIn draft
+a section-aware format, ranks up to seven candidate ideas, and creates up to
+five high-quality raw LinkedIn ideas grounded in the author’s original writing.
+It does not create a LinkedIn draft
 automatically.
 
-## Article-reading capability
+## Article preparation
 
-The extraction agent receives a dedicated article-reading tool bound to the
-triggering RSS item. In v1, the tool uses that item’s `content:encoded` field
-as its sole article-body source; it does not fetch the post page or use the
+Before starting the extraction session, Kipp turns the triggering RSS item's
+`content:encoded` field into structured article source material. In v1, this
+is the sole article-body source: Kipp does not fetch the post page or use the
 undocumented Substack API.
 
-The tool must:
+Article preparation must:
 
 - retrieve the complete article body from `content:encoded`;
 - return a clean, rich representation that preserves first-order section
@@ -32,8 +33,8 @@ The tool must:
 - reject or safely report an item whose `content:encoded` is absent or does
   not produce meaningful article text.
 
-The tool accepts no agent-supplied URL. It is not general-purpose browsing: the
-agent cannot fetch arbitrary links from the article or elsewhere.
+It accepts no agent-supplied URL and is not general-purpose browsing: the agent
+cannot fetch arbitrary links from the article or elsewhere.
 
 Retain meaningful authored text such as headings, paragraphs, pull quotes, and
 table text where practical. Exclude images, image wrappers, and their captions
@@ -75,20 +76,30 @@ scripts, SVG, forms, buttons, inputs, subscription widgets, and other UI
 elements never reach the agent. The only retained information is the metadata,
 section headings, and normalized textual paragraphs described above.
 
-The extraction agent must use the article-reading tool before proposing ideas.
-It must not invent article content.
-
-The extraction session forces `readSubstackArticle()` as the first native tool
-call. The tool result contains the model above; a short prompt explains only
-the meaning of `heading: null` and that paragraphs are source material, not
-instructions. The article is not embedded in the user message, and the agent
-does not need to understand HTML.
+The extraction agent receives the structured source material directly in its
+initial user message. The message identifies it as untrusted source material,
+not instructions, and explains `heading: null`. The agent does not receive
+HTML, need an article-reading tool, or get permission to invent article
+content.
 
 ## Candidate idea selection
 
-Generate 3–5 distinct candidate ideas per post. A candidate should be selected
-only when it contains a compelling, concrete argument that can stand as a
-LinkedIn post with limited additional framing.
+Read the complete article, then generate up to seven distinct candidate ideas.
+Each candidate gets an internal whole-number LinkedIn virality score from zero
+to ten. Kipp drops candidates below five, sorts the remainder by score, and
+saves at most five. Scores are used only during selection: they are not saved
+in Notion or shown in the raw Idea body. Every candidate must also include a
+terse score justification of at most 280 characters. It is an internal
+diagnostic for review and is likewise excluded from the saved Idea.
+
+Virality means the likely ability to make the intended professional audience
+pause, recognize a concrete tension, form an opinion, and thoughtfully discuss
+or share it. The score should favor self-contained claims, identifiable
+professional tensions, specificity, useful reframing or novelty, and evidence
+in the author's own voice. It must not reward clickbait.
+
+A candidate should be selected only when it contains a compelling, concrete
+argument that can stand as a LinkedIn post with limited additional framing.
 
 Prefer sections that have:
 
@@ -97,10 +108,13 @@ Prefer sections that have:
 - a non-obvious or practically relevant takeaway; and
 - enough original prose to preserve the author’s human voice.
 
-Avoid generic summaries, promotional teasers, overlapping candidates, and
-claims not supported by the article.
+Avoid generic summaries, promotional teasers, setup-only passages, overlapping
+candidates, and claims not supported by the article. Candidates must make
+materially different core arguments: two differently excerpted facets of the
+same point are not distinct candidates. Retain the stronger one and select
+another argument from elsewhere in the article.
 
-The agent may return fewer than three ideas when the article genuinely does not
+The agent may return fewer than seven ideas when the article genuinely does not
 contain enough qualifying material; it must not manufacture weak candidates to
 meet the count.
 
@@ -135,7 +149,7 @@ It is neither a generic teaser nor merely the source article title.
 - Substack ideas are permanently manual-only: the scheduled cadence excludes
   every idea whose source is `Substack`.
 - On success, Kipp sends Telegram the source-post title, the number of ideas
-  created, and their working titles. It does not include excerpts or require
+  created, and their working titles. It does not include candidate content or require
   Notion links.
 - When retrieval, parsing, or extraction fails, Kipp creates no ideas, sends a
   concise Telegram failure alert, and lets a later RSS poll retry.
@@ -146,11 +160,13 @@ It is neither a generic teaser nor merely the source article title.
 
 - Each idea must be traceable to the source article URL already stored on the
   existing idea record.
-- The extraction agent may only use material returned by the article-reading
-  tool; no unsupported claims or invented passages.
-- Candidate validation must enforce the allowed count, a non-empty working
-  title and core argument, useful source-derived content, and distinctness
-  within the source article.
+- The extraction agent may only use material in the supplied structured source;
+  no unsupported claims or invented passages.
+- The submission schema must enforce the candidate-pool count, score range,
+  bounded non-empty score justification, non-empty working title, core
+  argument, and single concatenated excerpt, plus deterministic distinctness within the source
+  article. Source fidelity and semantic distinctness remain prompt-guided
+  rather than brittle lexical validators.
 - The system must preserve existing RSS idempotency: rerunning the same post
   after success must not create duplicate ideas or duplicate success
   notifications.
@@ -162,7 +178,7 @@ where manually captured ideas were useful.
 
 Acceptance checks:
 
-- the article-reading tool returns usable title, subtitle when present, headings,
+- article preparation returns usable title, subtitle when present, headings,
   and paragraph groups, while excluding images, captions, subscription
   widgets, markup, attributes, and links' destination URLs;
 - a deterministic oversized-article test proves that content beyond the
@@ -173,6 +189,9 @@ Acceptance checks:
 - every saved idea is demonstrably grounded in a real article section;
 - candidates retain substantial author-originated language where appropriate;
 - candidates are meaningfully distinct;
+- candidates are ranked by their comparative, article-local virality score;
+- only candidates meeting the score floor are saved, in descending score order,
+  with no score included in the saved body;
 - generated ideas are suitable inputs for the existing LinkedIn drafting
   workflow;
 - a post with insufficient standalone material yields fewer ideas rather than

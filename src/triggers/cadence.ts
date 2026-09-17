@@ -23,7 +23,9 @@ export async function handleCadenceCron(env: Env): Promise<{
   const cutoff = Date.now() - cadenceDays * MS_PER_DAY
   if (latestFinalized > cutoff) return { started: false }
 
-  const [idea] = await manager.getIdeasByStatuses(["raw"])
+  // RSS ideas remain raw until the author explicitly chooses one; cadence is
+  // reserved for manually captured and Telegram-originated ideas.
+  const idea = (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.source !== "substack")
   if (!idea) return { started: false }
 
   const result = await ingest.start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })

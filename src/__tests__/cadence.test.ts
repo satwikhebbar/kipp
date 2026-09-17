@@ -11,7 +11,13 @@ interface NotionPage {
   markdown: string
 }
 
-function statusPage(id: string, kippId: number, status: string, lastEdited = "2026-07-02T12:00:00Z") {
+function statusPage(
+  id: string,
+  kippId: number,
+  status: string,
+  lastEdited = "2026-07-02T12:00:00Z",
+  source = "manual",
+) {
   return {
     id,
     created_time: "2026-07-01T12:00:00Z",
@@ -19,7 +25,7 @@ function statusPage(id: string, kippId: number, status: string, lastEdited = "20
     properties: {
       "Kipp ID": { unique_id: { prefix: null, number: kippId } },
       Status: { status: { name: status } },
-      Source: { select: { name: "manual" } },
+      Source: { select: { name: source } },
       Title: { title: [{ type: "text", text: { content: `Idea ${kippId}` } }] },
     },
     markdown: `Body of idea ${kippId}`,
@@ -184,6 +190,28 @@ describe("handleCadenceCron", () => {
     const [, init] = claimMock.mock.calls[0]
     const body = JSON.parse(init.body)
     expect(body).toMatchObject({ pageId: "p1", ideaId: "1", source: "manual" })
+  })
+
+  it("does not automatically start a workflow for raw Substack ideas", async () => {
+    vi.stubGlobal("fetch", notionFetch([statusPage("p1", 1, "raw", undefined, "substack")]))
+    const env = mockEnv()
+    const result = await handleCadenceCron(env as never)
+    expect(result).toEqual({ started: false })
+    expect(env.startMocks.size).toBe(0)
+  })
+
+  it("skips Substack ideas and starts the oldest eligible raw idea", async () => {
+    vi.stubGlobal(
+      "fetch",
+      notionFetch([
+        statusPage("substack", 1, "raw", undefined, "substack"),
+        statusPage("manual", 2, "raw", undefined, "manual"),
+      ]),
+    )
+    const env = mockEnv()
+    const result = await handleCadenceCron(env as never)
+    expect(result.ideaId).toBe("2")
+    expect(env.startMocks.get("claim:manual")).toBeDefined()
   })
 
   it("returns started:false when no raw ideas exist", async () => {

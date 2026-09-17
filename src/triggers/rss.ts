@@ -1,67 +1,22 @@
 import { createIdeaIngest } from "../core/idea-ingest"
 import type { Env } from "../core/types"
 import { createNotionClient } from "../integrations/notion"
-import type { IdeaInput } from "../linkedin/ideas/manager"
+import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager } from "../linkedin/ideas/manager"
-import { createGenerator, type GenerateFn, messages, parseLLMJson } from "../providers"
+import { createToolProvider } from "../providers"
 import { isTransientHttpStatus } from "../runtime/http"
+import { parseSubstackArticle } from "../substack/article"
+import { assembleSubstackIdeaBody, runSubstackIdeaToolSession, selectSubstackIdeas } from "../substack/idea-agent"
 
-interface RssItem {
+export interface RssItem {
   title: string
+  subtitle?: string
   link: string
   guid: string
   pubDate: string
   contentHtml: string
 }
 
-interface ExtractedIdeas {
-  teaser: string
-  subIdeas: string[]
-}
-
-const SYSTEM_PROMPT = `You extract LinkedIn post ideas from newsletter content.
-Return ONLY a JSON object with:
-- "teaser": a one-line hook for a LinkedIn post (max 200 chars)
-- "subIdeas": an array of 2-4 LinkedIn post ideas based on this content (each max 300 chars)`
-
-/** Parses RSS XML into structured items. */
-export function parseRssFeed(xml: string): RssItem[] {
-  const items: RssItem[] = []
-  const itemPattern = /<item>([\s\S]*?)<\/item>/gi
-  for (;;) {
-    const match = itemPattern.exec(xml)
-    if (!match) break
-    const block = match[1]
-    const extract = (tag: string) => {
-      const m = block.match(new RegExp(`<${tag}[^>]*>(.*?)<\\/${tag}>`, "is"))
-      if (!m) return ""
-      return m[1].replace(/<!\[CDATA\[(.*?)\]\]>/gs, "$1").trim()
-    }
-    items.push({
-      title: extract("title"),
-      link: extract("link"),
-      guid: extract("guid"),
-      pubDate: extract("pubDate"),
-      contentHtml: extract("content:encoded") || extract("description"),
-    })
-  }
-  return items
-}
-
-/** Strips HTML tags and decodes common HTML entities. */
-function stripHtml(html: string): string {
-  return html
-    .replace(/<[^>]*>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-}
-
-const RSS_CONTENT_TRUNCATE_LENGTH = 6000
-const MAX_SECTION_IDEAS = 4
-const MAX_TITLE_LENGTH = 80
 const DEFAULT_RSS_RETRIES = 3
 const RSS_FETCH_MAX_RETRIES = 3
 const RSS_FETCH_BACKOFF_MS = 1_000
@@ -78,53 +33,41 @@ export class RssFetchError extends Error {
   }
 }
 
+/** Parses RSS XML into article metadata, its optional subtitle, and content:encoded HTML. */
+export function parseRssFeed(xml: string): RssItem[] {
+  const items: RssItem[] = []
+  const itemPattern = /<item>([\s\S]*?)<\/item>/gi
+  for (;;) {
+    const match = itemPattern.exec(xml)
+    if (!match) break
+    const block = match[1]
+    const extract = (tag: string) => {
+      const matched = block.match(new RegExp(`<${tag}[^>]*>(.*?)<\\/${tag}>`, "is"))
+      if (!matched) return ""
+      return matched[1].replace(/<!\[CDATA\[(.*?)\]\]>/gs, "$1").trim()
+    }
+    const subtitle = extract("description")
+    items.push({
+      title: extract("title"),
+      ...(subtitle ? { subtitle } : {}),
+      link: extract("link"),
+      guid: extract("guid"),
+      pubDate: extract("pubDate"),
+      contentHtml: extract("content:encoded"),
+    })
+  }
+  return items
+}
+
 /** Stable non-empty identity for an RSS item: its GUID when present, else its canonical link. */
 export function itemIdentity(item: Pick<RssItem, "guid" | "link">): string {
   return item.guid ? `guid:${item.guid}` : `link:${item.link}`
 }
 
-/** Uses LLM to extract a teaser and sub-ideas from an RSS item's content. */
-async function llmExtractIdeas(gen: GenerateFn, item: RssItem, text: string): Promise<ExtractedIdeas> {
-  const prompt = `Newsletter: "${item.title}"\nURL: ${item.link}\n\nContent:\n${text}`
-  const res = await gen(messages(SYSTEM_PROMPT, prompt))
-  const parsed = parseLLMJson<ExtractedIdeas>(res.text)
-  if (!parsed.teaser || !Array.isArray(parsed.subIdeas)) {
-    throw new Error("LLM returned malformed idea extraction")
-  }
-  return parsed
-}
-
-/** Builds main and side idea inputs from an RSS item and extracted content. */
-function buildIdeaInputs(item: RssItem, extracted: ExtractedIdeas): { main: IdeaInput; side: IdeaInput[] } {
-  const main: IdeaInput = {
-    title: item.title,
-    status: "raw",
-    source: "substack",
-    substackUrl: item.link,
-    body: extracted.teaser,
-  }
-  const side: IdeaInput[] = []
-  for (const sub of extracted.subIdeas.slice(0, MAX_SECTION_IDEAS)) {
-    side.push({
-      title: sub.slice(0, MAX_TITLE_LENGTH),
-      status: "raw",
-      source: "substack",
-      substackUrl: item.link,
-      body: sub,
-    })
-  }
-  return { main, side }
-}
-
-/** Checks the RSS feed for new items and ingests the first unseen item into Notion. */
-export async function handleRssCron(env: Env): Promise<{
-  started: boolean
-  ideaId?: string
-  workflowInstanceId?: string
-}> {
+/** Checks the RSS feed for one unseen article and saves its raw, source-grounded idea candidates. */
+export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaId?: string }> {
   const manager = createIdeaManager(createNotionClient(env))
   const ingest = createIdeaIngest(env)
-
   const items = await fetchRssItems(env.SUBSTACK_RSS_URL)
   if (items.length === 0) return { started: false }
 
@@ -134,23 +77,59 @@ export async function handleRssCron(env: Env): Promise<{
   const newItem = items.find((item) => !knownLinks.has(item.link)) ?? null
   if (!newItem) return { started: false }
 
-  const gen = createGenerator(
+  const article = parseSubstackArticle({
+    title: newItem.title,
+    subtitle: newItem.subtitle,
+    sourceUrl: newItem.link,
+    contentHtml: newItem.contentHtml,
+  })
+  const provider = createToolProvider(
     env.LLM_API_KEY,
     env.LLM_PROVIDER || "gemini",
     env.LLM_MODEL,
     Number(env.LLM_MAX_RETRIES ?? DEFAULT_RSS_RETRIES),
   )
-  const referenceBody = stripHtml(newItem.contentHtml).slice(0, RSS_CONTENT_TRUNCATE_LENGTH)
-  const extracted = await llmExtractIdeas(gen, newItem, referenceBody)
+  const session = await runSubstackIdeaToolSession(provider, article)
+  if (!session.terminal)
+    throw new Error(`Substack idea extraction did not submit candidates: ${session.failureReason ?? "unknown"}`)
+
+  const ideasToSave = selectSubstackIdeas(session.terminal.ideas)
+  if (ideasToSave.length === 0) return { started: false }
 
   const identity = itemIdentity(newItem)
-  const { main, side } = buildIdeaInputs(newItem, extracted)
-  const mainResult = await ingest.ingest({ key: `rss:${identity}:0`, idea: main, startWorkflow: true })
-  for (let i = 0; i < side.length; i++) {
-    await ingest.ingest({ key: `rss:${identity}:${i + 1}`, idea: side[i], startWorkflow: false })
+  const saved = []
+  for (const [index, candidate] of ideasToSave.entries()) {
+    saved.push(
+      await ingest.ingest({
+        key: `rss:${identity}:${index}`,
+        idea: {
+          title: candidate.title,
+          status: "raw",
+          source: "substack",
+          substackUrl: newItem.link,
+          body: assembleSubstackIdeaBody(candidate),
+        },
+        startWorkflow: false,
+      }),
+    )
   }
+  await notifyIdeasAdded(
+    env,
+    newItem.title,
+    ideasToSave.map((idea) => idea.title),
+  )
+  return { started: true, ideaId: saved[0]?.ideaId }
+}
 
-  return { started: true, ideaId: mainResult.ideaId, workflowInstanceId: mainResult.workflowInstanceId }
+/** Sends a best-effort concise summary after all raw ideas are safely stored. */
+async function notifyIdeasAdded(env: Env, articleTitle: string, ideaTitles: string[]): Promise<void> {
+  const chatId = env.TELEGRAM_ALLOWED_USER_ID.trim()
+  if (!chatId || !env.TELEGRAM_BOT_TOKEN) return
+  const titles = ideaTitles.map((title) => `• ${title}`).join("\n")
+  const message = `Added ${ideaTitles.length} raw Substack idea${ideaTitles.length === 1 ? "" : "s"} from ${articleTitle}:\n${titles}`
+  await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+    .sendMessage(chatId, message, { signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS) })
+    .catch(() => {})
 }
 
 /** Fetches and parses an RSS feed from a URL, retrying transient failures (429/5xx). */
@@ -170,7 +149,7 @@ async function fetchRssItems(url: string): Promise<RssItem[]> {
       lastFailureWasNetworkError = true
     }
     if (!(lastFailureWasNetworkError || isTransientHttpStatus(lastStatus)) || attempt === RSS_FETCH_MAX_RETRIES) break
-    await new Promise((r) => setTimeout(r, RSS_FETCH_BACKOFF_MS * 2 ** attempt))
+    await new Promise((resolve) => setTimeout(resolve, RSS_FETCH_BACKOFF_MS * 2 ** attempt))
   }
   throw new RssFetchError(lastStatus, attempts, lastFailureWasNetworkError || isTransientHttpStatus(lastStatus))
 }
