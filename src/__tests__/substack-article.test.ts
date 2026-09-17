@@ -35,7 +35,7 @@ describe("parseSubstackArticle", () => {
   })
 
   it("regresses against the complete RSS body of a published Substack article", async () => {
-    const contentHtml = await readFile("tmp/substack-html-inspection/rss-content-encoded.html", "utf8")
+    const contentHtml = await readFile("fixtures/substack-rss-content-encoded.html", "utf8")
     const article = parseSubstackArticle({
       title: "The Reps We Are Losing",
       subtitle: "How agentic coding can erode the learning loops that build senior engineers",
