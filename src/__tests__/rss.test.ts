@@ -181,16 +181,16 @@ describe("handleRssCron", () => {
       }),
     )
 
-    const first = env.ingestFetches.get("ingest:rss:guid:first-guid:0")
-    const second = env.ingestFetches.get("ingest:rss:guid:first-guid:1")
+    const first = env.ingestFetches.get("ingest:rss:v2:guid:first-guid:0")
+    const second = env.ingestFetches.get("ingest:rss:v2:guid:first-guid:1")
     if (!first || !second) throw new Error("expected raw Substack ingests")
     expect(JSON.parse(first.mock.calls[0][1].body)).toMatchObject({
-      key: "rss:guid:first-guid:0",
+      key: "rss:v2:guid:first-guid:0",
       startWorkflow: false,
       idea: { source: "substack", title: "First working title", body: "Context.\n\nFirst excerpt.\n\nFirst argument." },
     })
     expect(JSON.parse(second.mock.calls[0][1].body)).toMatchObject({
-      key: "rss:guid:first-guid:1",
+      key: "rss:v2:guid:first-guid:1",
       startWorkflow: false,
       idea: { source: "substack", title: "Second working title", body: "Second excerpt.\n\nSecond argument." },
     })
@@ -249,10 +249,10 @@ describe("handleRssCron", () => {
 
     await handleRssCron(env as never)
 
-    expect(env.ingestFetches.get("ingest:rss:guid:first-guid:0")).toBeDefined()
-    expect(env.ingestFetches.get("ingest:rss:guid:first-guid:4")).toBeDefined()
-    expect(env.ingestFetches.get("ingest:rss:guid:first-guid:5")).toBeUndefined()
-    const first = env.ingestFetches.get("ingest:rss:guid:first-guid:0")
+    expect(env.ingestFetches.get("ingest:rss:v2:guid:first-guid:0")).toBeDefined()
+    expect(env.ingestFetches.get("ingest:rss:v2:guid:first-guid:4")).toBeDefined()
+    expect(env.ingestFetches.get("ingest:rss:v2:guid:first-guid:5")).toBeUndefined()
+    const first = env.ingestFetches.get("ingest:rss:v2:guid:first-guid:0")
     if (!first) throw new Error("expected the highest-scoring raw Substack ingest")
     expect(JSON.parse(first.mock.calls[0][1].body).idea).toMatchObject({ title: "Ten" })
     expect(JSON.parse(first.mock.calls[0][1].body).idea.body).not.toContain("viralityScore")
@@ -270,7 +270,7 @@ describe("handleRssCron", () => {
     mockProvider.generate.mockResolvedValue(submitIdeas([SUBMITTED_IDEAS[0]]))
     const env = mockEnv()
     await handleRssCron(env as never)
-    expect(env.ingestFetches.get("ingest:rss:link:https://test.substack.com/p/one:0")).toBeDefined()
+    expect(env.ingestFetches.get("ingest:rss:v2:link:https://test.substack.com/p/one:0")).toBeDefined()
   })
 
   it("fails before writing when content:encoded is absent", async () => {

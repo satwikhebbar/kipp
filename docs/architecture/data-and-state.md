@@ -72,6 +72,11 @@ Substack extraction is an exception to that general path: its ideas remain
 `raw`, are excluded from the scheduled cadence check, and enter LinkedIn
 drafting only after an explicit `/generate` request.
 
+RSS ingestion keys are versioned with the generation contract. A deliberate
+namespace bump is the reset mechanism for stale `IdeaIngestDO` records after a
+workflow overhaul; it avoids reusing a prior key-to-Notion-page mapping while
+leaving unrelated Telegram/manual state untouched.
+
 ## Calendar plan lifecycle
 
 ```mermaid

@@ -319,6 +319,11 @@ rerunning the trigger therefore advances to the next unseen article after a
 successful run. A failed run leaves the article unseen so a later poll can
 retry it.
 
+The RSS idempotency namespace is versioned. After an intentional overhaul of
+RSS idea generation, bumping that namespace lets a clean Notion data source
+start fresh without reusing stale `IdeaIngestDO` records from an earlier
+contract.
+
 Local Durable Objects/Workflows are emulated and isolated per worktree, while
 Notion, Telegram, and LLM calls hit the real services.
 

@@ -20,6 +20,9 @@ export interface RssItem {
 const DEFAULT_RSS_RETRIES = 3
 const RSS_FETCH_MAX_RETRIES = 3
 const RSS_FETCH_BACKOFF_MS = 1_000
+// Bump this namespace when the RSS idea-generation contract changes so stale
+// IdeaIngestDO records cannot point a fresh run at deleted Notion pages.
+const RSS_IDEMPOTENCY_NAMESPACE = "rss:v2"
 
 /** Safe metadata for an RSS request that exhausted its bounded retry policy. */
 export class RssFetchError extends Error {
@@ -101,7 +104,7 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
   for (const [index, candidate] of ideasToSave.entries()) {
     saved.push(
       await ingest.ingest({
-        key: `rss:${identity}:${index}`,
+        key: `${RSS_IDEMPOTENCY_NAMESPACE}:${identity}:${index}`,
         idea: {
           title: candidate.title,
           status: "raw",
