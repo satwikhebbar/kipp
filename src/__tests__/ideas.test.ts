@@ -109,6 +109,11 @@ function fakeClient(seed: StoredPage[] = []) {
             const rich = (prop as { rich_text?: Array<{ text: { content: string } }> })?.rich_text?.[0]?.text?.content
             return rich === value.equals
           }
+          if (property === "Kipp ID")
+            return (
+              (prop as { unique_id?: { number: number } })?.unique_id?.number ===
+              (filter.unique_id as { equals?: number } | undefined)?.equals
+            )
           return true
         })
       }
@@ -182,6 +187,26 @@ describe("createIdeaManager", () => {
     const { client } = fakeClient([{ page: page("p2", 2, "finalized", "manual"), markdown: "two" }])
     const manager = createIdeaManager(client)
     expect(await manager.getNextIdea()).toBeNull()
+  })
+
+  it("getIdeaByIdeaId returns the matching summary without a body", async () => {
+    const { client } = fakeClient([
+      { page: page("p1", 1, "raw", "telegram"), markdown: "one" },
+      { page: page("p2", 2, "finalized", "manual"), markdown: "two" },
+    ])
+    const manager = createIdeaManager(client)
+    const idea = await manager.getIdeaByIdeaId("2")
+    expect(idea?.pageId).toBe("p2")
+    expect(idea?.status).toBe("finalized")
+    expect(idea).not.toHaveProperty("body")
+  })
+
+  it("getIdeaByIdeaId returns null for an unknown or malformed id", async () => {
+    const { client } = fakeClient([{ page: page("p1", 1, "raw", "telegram"), markdown: "one" }])
+    const manager = createIdeaManager(client)
+    expect(await manager.getIdeaByIdeaId("99")).toBeNull()
+    expect(await manager.getIdeaByIdeaId("not-a-number")).toBeNull()
+    expect(await manager.getIdeaByIdeaId("1.5")).toBeNull()
   })
 
   it("createIdea creates a page and returns the assigned Kipp ID", async () => {

@@ -425,6 +425,11 @@ Idea 2`
     expect(startStub).toHaveBeenCalledTimes(1)
     const startBody = JSON.parse(startStub.mock.calls[0][1].body)
     expect(startBody).toMatchObject({ pageId: "page_1", ideaId: "1", source: "manual" })
+
+    const queryCall = mockFetch.mock.calls.find(([url]) => String(url).endsWith("/query"))
+    if (!queryCall) throw new Error("expected a Notion query call")
+    const queryBody = JSON.parse((queryCall[1] as { body: string }).body)
+    expect(queryBody.filter).toEqual({ property: "Kipp ID", unique_id: { equals: 1 } })
   })
 
   it("defaults to the oldest raw idea when /generate has no idea id", async () => {

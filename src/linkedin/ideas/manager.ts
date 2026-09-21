@@ -23,6 +23,7 @@ export interface IdeaManager {
   listIdeas(): Promise<IdeaSummary[]>
   getIdea(pageId: string): Promise<Idea>
   getIdeasByStatuses(statuses: IdeaStatus[]): Promise<IdeaSummary[]>
+  getIdeaByIdeaId(ideaId: string): Promise<IdeaSummary | null>
   getNextIdea(): Promise<Idea | null>
   createIdea(input: IdeaInput): Promise<Idea>
   updateIdea(pageId: string, update: IdeaUpdate): Promise<void>
@@ -57,6 +58,13 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
       KIPP_ID_ASCENDING,
     )
     return pages.map(pageToSummary)
+  }
+
+  async function getIdeaByIdeaId(ideaId: string): Promise<IdeaSummary | null> {
+    const kippId = Number(ideaId)
+    if (!Number.isInteger(kippId)) return null
+    const pages = await client.queryPages({ property: "Kipp ID", unique_id: { equals: kippId } }, [], 1)
+    return pages.length > 0 ? pageToSummary(pages[0]) : null
   }
 
   async function getNextIdea(): Promise<Idea | null> {
@@ -128,6 +136,7 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
     listIdeas,
     getIdea,
     getIdeasByStatuses,
+    getIdeaByIdeaId,
     getNextIdea,
     createIdea,
     updateIdea,

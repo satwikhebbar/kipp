@@ -67,9 +67,9 @@ if (command?.name === "generate") {
   logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
   const manager = createIdeaManager(createNotionClient(env))
   const idea = command.argument
-    ? (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.id === command.argument)
+    ? await manager.getIdeaByIdeaId(command.argument)
     : await manager.getNextIdea()
-  if (!idea) {
+  if (!idea || idea.status !== "raw") {
     await tg.sendMessage(
       msg.chat.id,
       command.argument ? "Nothing to generate for that idea." : "No raw ideas to generate from.",
@@ -85,11 +85,15 @@ if (command?.name === "generate") {
 }
 ```
 
-Both branches reuse existing manager methods: `getNextIdea()` for the default,
-and `getIdeasByStatuses(["raw"])` for explicit selection (already used by the
-cadence check). No new Notion query, filter, manager method, keyboard, or
-callback handling is required. `getNextIdea()` therefore stays in production
-use, and its unit tests in `src/__tests__/ideas.test.ts` are untouched.
+The no-argument default reuses `getNextIdea()`. Explicit selection uses a new
+manager method, `getIdeaByIdeaId(ideaId)`, which issues a single Notion query
+filtered on the `Kipp ID` `unique_id` property (limit 1) and returns a
+metadata-only `IdeaSummary | null` — no markdown body fetch. This replaces the
+earlier `getIdeasByStatuses(["raw"])` scan, which loaded every raw idea to find
+one; the by-id query stays O(1) as the queue grows. A non-integer argument
+short-circuits to `null` without a Notion call. `getNextIdea()` therefore stays
+in production use, and its unit tests in `src/__tests__/ideas.test.ts` are
+untouched; new `getIdeaByIdeaId` tests are added there.
 
 The `LABEL_TRUNCATE_LENGTH = 80` constant stays in place. The default path
 receives a hydrated `Idea` (with `body`) from `getNextIdea()`, so its
@@ -100,8 +104,8 @@ the existing no-argument message byte-for-byte identical for untitled ideas.
 
 ### 3.2 Validation and failure replies
 
-For an explicit id, `getIdeasByStatuses(["raw"])` is the validation gate. The
-id is not found in that set when:
+For an explicit id, `getIdeaByIdeaId(id)` plus the `status === "raw"` check is
+the validation gate. The id is rejected when:
 
 - no idea has that Kipp id (typo or out-of-range number);
 - the argument is not a valid id (for example `/generate abc`); or
@@ -135,15 +139,18 @@ workflow flips the idea out of `raw` fails the status gate.
 
 | File | Change |
 | --- | --- |
-| `src/triggers/telegram-webhook.ts` | Rewrite the `/generate` branch so the argument is optional: no argument falls back to `getNextIdea()` (old behavior); an argument looks up the id among `getIdeasByStatuses(["raw"])`. Keep the empty-queue reply `No raw ideas to generate from.` and add the `Nothing to generate for that idea.` reply for a bad/unavailable explicit id. Keep the `LABEL_TRUNCATE_LENGTH` constant and use the `"body" in idea` guard so the default path keeps the old body-excerpt label while the explicit-id path falls back to `"Untitled"`. Update the two unknown-command hint strings to advertise the optional id. No new imports or helper functions. |
-| `src/__tests__/telegram.test.ts` | Restore the default `/generate` (no argument) case and assert it starts the oldest raw idea; add a default no-argument case for an untitled raw idea asserting the body-excerpt label; add a `/generate <id>` case asserting it starts that named idea; keep the unknown-id and non-`raw` cases (both `Nothing to generate for that idea.`, no start); keep the empty-queue `No raw ideas to generate from.` case; update the Notion-failure and unauthorized `/generate` payloads. |
+| `src/triggers/telegram-webhook.ts` | Rewrite the `/generate` branch so the argument is optional: no argument falls back to `getNextIdea()` (old behavior); an argument resolves via `getIdeaByIdeaId()`, gated on `status === "raw"`. Keep the empty-queue reply `No raw ideas to generate from.` and the `Nothing to generate for that idea.` reply for a bad/unavailable explicit id. Keep the `LABEL_TRUNCATE_LENGTH` constant and the `"body" in idea` guard so the default path keeps the old body-excerpt label while the explicit-id path falls back to `"Untitled"`. Update the two unknown-command hint strings to advertise the optional id. |
+| `src/linkedin/ideas/manager.ts` | Add `getIdeaByIdeaId(ideaId): Promise<IdeaSummary \| null>`: reject non-integer input, then a single `queryPages({ property: "Kipp ID", unique_id: { equals: n } }, [], 1)` returning the metadata-only summary. `getNextIdea` is unchanged. |
+| `src/__tests__/ideas.test.ts` | Extend the fake `queryPages` to honor a `Kipp ID` `unique_id` filter; add `getIdeaByIdeaId` cases for a hit (summary, no body), a miss, and malformed ids. |
+| `src/__tests__/telegram.test.ts` | Restore the default `/generate` (no argument) case and assert it starts the oldest raw idea; add a default no-argument case for an untitled raw idea asserting the body-excerpt label; add a `/generate <id>` case asserting it starts that named idea and issues the `Kipp ID` filter; keep the unknown-id and non-`raw` cases (both `Nothing to generate for that idea.`, no start); keep the empty-queue `No raw ideas to generate from.` case; update the Notion-failure and unauthorized `/generate` payloads. |
+| `src/__integration__/setup.ts` | Teach the fake Notion `/query` handler the `Kipp ID` `unique_id` filter. |
 | `src/__integration__/telegram-to-backlog.integration.test.ts` | Restore a default no-argument `/generate` case (oldest raw idea), keep the named-id selection case (picks a non-oldest idea), the `substack`-source case, and the non-`raw` rejection case; assert the help hints advertise the optional id. |
 | `README.md` | Telegram command table and drafting paragraph: `/generate [idea id]` starts generation for the oldest raw idea, or for the named idea. |
 | `docs/architecture/request-flows.md` | LinkedIn flow: `/generate [idea id]` selects the named raw idea, defaulting to the oldest raw idea. |
 
-No change to `src/linkedin/ideas/manager.ts`, `src/integrations/notion.ts`,
-`src/core/idea-ingest.ts`, `src/triggers/cadence.ts`, `Env`,
-`config/runtime-variables.json`, or `wrangler.prod.toml`.
+No change to `src/integrations/notion.ts`, `src/core/idea-ingest.ts`,
+`src/triggers/cadence.ts`, `Env`, `config/runtime-variables.json`, or
+`wrangler.prod.toml`.
 
 The currently open PR #87 carries the required-id implementation from the
 previous iteration. The next implementation iteration revises that code on the
