@@ -2,13 +2,16 @@
 
 > **Status:** Revised plan for GitHub issue #30 (`Allow choosing which idea to
 > expand to a draft next`).
-> **Document role:** Design of the change that replaces `/generate`'s forced
-> oldest-raw-idea selection with an explicit idea id supplied by the author.
+> **Document role:** Design of the change that makes `/generate`'s idea
+> selection optional: keep the existing default (oldest raw idea) and add an
+> optional explicit idea id.
 > **Scope:** Telegram ingress only. No agent, Notion schema, workflow, or
 > production runtime configuration change.
-> **Revision note:** Supersedes the inline-keyboard chooser design. The author
-> now names the idea directly (`/generate <idea id>`), so no callback contract,
-> keyboard, or selection state is needed.
+> **Revision note:** Supersedes two earlier designs. The first proposed an
+> inline-keyboard chooser. The second made the idea id **required** and dropped
+> the default auto-selection; that was wrong — it broke the existing
+> `/generate` flow that users rely on. This revision keeps the old default
+> intact and layers explicit selection on top as an optional argument.
 
 ## 1. Problem
 
@@ -27,42 +30,48 @@ raw ideas per post, so the queue grows and `/generate` keeps pulling the oldest
 one regardless of what the author actually wants to publish.
 
 `getNextIdea()` has exactly one production caller (`telegram-webhook.ts`); the
-scheduled cadence (`src/triggers/cadence.ts`) selects its own oldest eligible
-idea directly, so the root cause is confined to the `/generate` branch.
+scheduled cadence (`src/triggers/cadence.ts`) selects its own oldest
+non-Substack raw idea directly, so the change is confined to the `/generate`
+branch.
+
+The previous implementation iteration made `/generate <idea id>` mandatory.
+That is a regression for anyone who just wants "the next one" and is being
+reverted: the default must remain valid.
 
 ## 2. Outcome
 
-When the author sends `/generate <idea id>` (for example `/generate 20`), Kipp
-starts `PipelineWorkflow` for that specific idea, but only when the idea exists
-and is still `raw`. No draft is started until the author names an idea.
+`/generate` keeps working exactly as before, and gains an optional idea id:
 
-- `/generate <id>` starts a workflow for exactly that idea, or reports that
-  there is nothing to generate.
-- `/generate` with no argument replies with usage and starts nothing.
-- Any idea that is unavailable — unknown id, malformed id, or a status other
-  than `raw` (including `awaiting-feedback`) — gets the same
-  nothing-to-generate reply and starts nothing.
-- Every raw idea — `substack`, `telegram`, or `manual` — is selectable.
-- The scheduled cadence is unchanged: it is a timer with no interactive surface.
+- `/generate` (no argument) keeps the current behavior: start
+  `PipelineWorkflow` for the oldest raw idea, or reply
+  `No raw ideas to generate from.` when the raw queue is empty.
+- `/generate <idea id>` (for example `/generate 20`) starts `PipelineWorkflow`
+  for that specific idea instead of the oldest one.
+- When an explicit id does not name a currently-`raw` idea — unknown,
+  malformed, or a status other than `raw` (including `awaiting-feedback`) —
+  reply `Nothing to generate for that idea.` and start nothing.
+- Every raw idea — `substack`, `telegram`, or `manual` — is selectable by id.
+- The scheduled cadence is unchanged.
 
 ## 3. Design
 
-### 3.1 `/generate <idea id>` selects by Kipp id
+### 3.1 `/generate [idea id]` — optional id, default preserved
 
-Replace the `getNextIdea()` call in the `/generate` branch with an id lookup
-over the raw set:
+Keep the existing `getNextIdea()` path as the no-argument default and add an id
+lookup as the alternative:
 
 ```ts
 if (command?.name === "generate") {
   logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
-  if (!command.argument) {
-    await tg.sendMessage(msg.chat.id, "Usage: /generate <idea id>")
-    return new Response("OK")
-  }
   const manager = createIdeaManager(createNotionClient(env))
-  const idea = (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.id === command.argument)
+  const idea = command.argument
+    ? (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.id === command.argument)
+    : await manager.getNextIdea()
   if (!idea) {
-    await tg.sendMessage(msg.chat.id, "Nothing to generate for that idea.")
+    await tg.sendMessage(
+      msg.chat.id,
+      command.argument ? "Nothing to generate for that idea." : "No raw ideas to generate from.",
+    )
     return new Response("OK")
   }
   const result = await createIdeaIngest(env).start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })
@@ -73,14 +82,16 @@ if (command?.name === "generate") {
 }
 ```
 
-This reuses the existing `IdeaManager.getIdeasByStatuses(["raw"])` (already used
-by the cadence check). No new Notion query, filter, manager method, keyboard, or
-callback handling is required.
+Both branches reuse existing manager methods: `getNextIdea()` for the default,
+and `getIdeasByStatuses(["raw"])` for explicit selection (already used by the
+cadence check). No new Notion query, filter, manager method, keyboard, or
+callback handling is required. `getNextIdea()` therefore stays in production
+use, and its unit tests in `src/__tests__/ideas.test.ts` are untouched.
 
-### 3.2 Validation and the single failure reply
+### 3.2 Validation and failure replies
 
-`getIdeasByStatuses(["raw"])` is the only validation gate. The id is not found
-in that set when:
+For an explicit id, `getIdeasByStatuses(["raw"])` is the validation gate. The
+id is not found in that set when:
 
 - no idea has that Kipp id (typo or out-of-range number);
 - the argument is not a valid id (for example `/generate abc`); or
@@ -88,10 +99,12 @@ in that set when:
   `awaiting-feedback`, `awaiting-feedback-expired`, `finalized`, or `skipped`.
 
 All of those cases reply with the same message, `Nothing to generate for that
-idea.`, and start nothing. This matches the requirement that an unavailable
-idea — including one awaiting feedback — only needs to tell the user there is
-nothing to generate. Missing the argument is a bad invocation rather than an
-unavailable idea, so it gets the usage reply instead.
+idea.`, and start nothing.
+
+The no-argument default keeps its existing distinct reply,
+`No raw ideas to generate from.`, when there is no raw idea at all. Two
+messages is intentional: they describe different situations (an empty queue vs.
+a bad/unavailable id). See open question 2.
 
 The `IdeaIngestDO` claim (`claim:{pageId}`) already makes near-simultaneous
 double-taps idempotent and reports `alreadyStarted`; a re-issue after the
@@ -112,15 +125,19 @@ workflow flips the idea out of `raw` fails the status gate.
 
 | File | Change |
 | --- | --- |
-| `src/triggers/telegram-webhook.ts` | Rewrite the `/generate` branch to require an idea id, look it up among `getIdeasByStatuses(["raw"])`, and start only on a match; add the usage and nothing-to-generate replies; remove the now-unused `LABEL_TRUNCATE_LENGTH` constant; update the two unknown-command hint strings to say `/generate <idea id>`. No new imports, constants, or helper functions. |
-| `src/__tests__/telegram.test.ts` | Update the `/generate` test to send an id and assert the workflow starts for that page; add cases for the missing-argument usage reply, an unknown id, and a non-`raw` (e.g. `awaiting-feedback`) idea, all asserting no workflow start; add the id to the existing Notion-failure `/generate` payloads. |
-| `src/__integration__/telegram-to-backlog.integration.test.ts` | Rewrite the `/generate` cases around the id argument; add a `substack`-source selection case and an `awaiting-feedback` rejection case. |
-| `README.md` | Telegram command table and drafting paragraph: `/generate <idea id>` starts generation for that raw idea. |
-| `docs/architecture/request-flows.md` | LinkedIn flow: `/generate <idea id>` selects a specific raw idea by id. |
+| `src/triggers/telegram-webhook.ts` | Rewrite the `/generate` branch so the argument is optional: no argument falls back to `getNextIdea()` (old behavior); an argument looks up the id among `getIdeasByStatuses(["raw"])`. Keep the empty-queue reply `No raw ideas to generate from.` and add the `Nothing to generate for that idea.` reply for a bad/unavailable explicit id. Update the two unknown-command hint strings to advertise the optional id. No new imports, constants, or helper functions. |
+| `src/__tests__/telegram.test.ts` | Restore the default `/generate` (no argument) case and assert it starts the oldest raw idea; add a `/generate <id>` case asserting it starts that named idea; keep the unknown-id and non-`raw` cases (both `Nothing to generate for that idea.`, no start); keep the empty-queue `No raw ideas to generate from.` case; update the Notion-failure and unauthorized `/generate` payloads. |
+| `src/__integration__/telegram-to-backlog.integration.test.ts` | Restore a default no-argument `/generate` case (oldest raw idea), keep the named-id selection case (picks a non-oldest idea), the `substack`-source case, and the non-`raw` rejection case; assert the help hints advertise the optional id. |
+| `README.md` | Telegram command table and drafting paragraph: `/generate [idea id]` starts generation for the oldest raw idea, or for the named idea. |
+| `docs/architecture/request-flows.md` | LinkedIn flow: `/generate [idea id]` selects the named raw idea, defaulting to the oldest raw idea. |
 
 No change to `src/linkedin/ideas/manager.ts`, `src/integrations/notion.ts`,
 `src/core/idea-ingest.ts`, `src/triggers/cadence.ts`, `Env`,
 `config/runtime-variables.json`, or `wrangler.prod.toml`.
+
+The currently open PR #87 carries the required-id implementation from the
+previous iteration. The next implementation iteration revises that code on the
+same branch; the plan commit itself is documentation only.
 
 ## 5. Verification plan
 
@@ -135,50 +152,58 @@ Then the full gate `pnpm check` (lint, JSDoc, typecheck, unit tests).
 
 Behavioral assertions:
 
-1. `/generate 1` for a raw idea #1 starts exactly one workflow with that page's
-   `pageId`, `ideaId`, and `source`, and replies naming the idea.
-2. `/generate` with no argument replies `Usage: /generate <idea id>` and starts
-   nothing.
-3. `/generate 99` (no such idea) replies `Nothing to generate for that idea.`
+1. `/generate` with no argument starts exactly one workflow for the oldest raw
+   idea with that page's `pageId`, `ideaId`, and `source`, and replies naming
+   the idea (default restored).
+2. `/generate <id>` for a raw idea that is **not** the oldest starts exactly one
+   workflow for that idea, proving explicit selection overrides the default.
+3. `/generate` with an empty raw queue replies `No raw ideas to generate from.`
    and starts nothing.
-4. `/generate <id>` for an idea whose status is `awaiting-feedback` (and, by the
+4. `/generate 99` (no such idea) replies `Nothing to generate for that idea.`
+   and starts nothing.
+5. `/generate abc` (malformed) replies `Nothing to generate for that idea.` and
+   starts nothing.
+6. `/generate <id>` for an idea whose status is `awaiting-feedback` (and, by the
    same path, `drafted` / `finalized` / `skipped`) replies
    `Nothing to generate for that idea.` and starts nothing.
-5. A non-numeric argument (`/generate abc`) replies
-   `Nothing to generate for that idea.` and starts nothing.
-6. A `substack`-sourced raw idea is selectable by id and starts its workflow.
-7. The Notion-failure and unauthorized-user `/generate` tests continue to pass.
-8. `pnpm check` passes.
+7. A `substack`-sourced raw idea is selectable by id and starts its workflow.
+8. The Notion-failure and unauthorized-user `/generate` tests continue to pass.
+9. `pnpm check` passes.
 
 ## 6. Out of scope
 
 - The inline-keyboard chooser, `gen:` callback contract, and pagination from the
-  superseded revision.
-- Removing the now-unused `getNextIdea()` manager method and its unit tests in
-  `src/__tests__/ideas.test.ts`; it stays in place as a tested but
-  production-unused helper.
+  first superseded revision.
+- Making the idea id mandatory, or removing the no-argument default.
+- Removing `getNextIdea()` or its unit tests in `src/__tests__/ideas.test.ts`.
 - Changing scheduled cadence to ask for a choice instead of auto-selecting.
 - Listing ideas (`/ideas`) or accepting a title/source in place of an id.
 - Any agent-prompt, Notion-property, workflow-step, or deployment-config change.
 
 ## 7. Open questions for review
 
-1. **Uniform failure reply.** The plan uses one message,
-   `Nothing to generate for that idea.`, for unknown, malformed, and non-`raw`
-   ids rather than naming the id or explaining the status. Simpler and matches
-   the requirement; a more specific reply can be added later.
-2. **Missing-argument behavior.** `/generate` with no argument replies with
-   usage instead of falling back to the old oldest-raw-idea auto-selection. The
-   issue's intent is explicit choice, so the forced serial default is dropped.
-3. **`getNextIdea` left in place.** After this change it has no production
-   caller. The plan leaves the method and its unit tests untouched to keep the
-   diff confined to the Telegram ingress.
+1. **Help/hint format.** Because the id is optional, the plan advertises
+   `/generate [idea id]` in the unknown-command hints, README, and architecture
+   doc. Brackets are the common "optional argument" convention but are a small
+   style choice; the alternative is leaving the hints as plain `/generate`.
+2. **Two failure messages.** An empty raw queue on the default path keeps the
+   existing `No raw ideas to generate from.`; a bad/unavailable explicit id gets
+   `Nothing to generate for that idea.`. Keeping both preserves current behavior
+   and tells the user which situation they hit; a single message is simpler.
+3. **Success label fallback.** The plan labels both paths with
+   `idea.title ?? "Untitled"`. The old default path used the idea body truncated
+   to 80 characters when the title was missing; that fallback is dropped because
+   the explicit-id path works from `IdeaSummary` (no body) and a uniform label
+   avoids a second code path. Restore the body fallback for the default path
+   only if the untitled label matters.
 
 ## 8. Acceptance criteria
 
+- [ ] `/generate` with no argument keeps the existing behavior: starts
+      `PipelineWorkflow` for the oldest raw idea, or replies
+      `No raw ideas to generate from.` when the queue is empty.
 - [ ] `/generate <id>` starts `PipelineWorkflow` for exactly that idea when it
       exists and is `raw`, and reports the started/already-running state.
-- [ ] `/generate` with no argument replies with usage and starts nothing.
 - [ ] Unknown, malformed, or non-`raw` ids (including `awaiting-feedback`) reply
       `Nothing to generate for that idea.` and start nothing.
 - [ ] `substack`, `telegram`, and `manual` raw ideas are all selectable by id.
