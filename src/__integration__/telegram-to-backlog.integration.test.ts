@@ -237,5 +237,28 @@ describe("telegram-to-backlog", () => {
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
     expect(state.telegramMessages[0].text).toContain("Unknown command")
+    expect(state.telegramMessages[0].text).toContain("/generate <idea id>")
+  })
+
+  it("advertises /generate <idea id> in the plain-text fallthrough help message", async () => {
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const res = await handleTelegramWebhook(
+      telegramRequest({
+        update_id: 4,
+        message: {
+          message_id: 9,
+          from: { id: 42, is_bot: false, first_name: "Test" },
+          chat: { id: 100, type: "private" },
+          text: "just some text",
+        },
+      }),
+      env,
+    )
+    expect(res.status).toBe(200)
+
+    const state = harness.getState()
+    expect(state.telegramMessages.length).toBe(1)
+    expect(state.telegramMessages[0].text).toContain("Unknown command")
+    expect(state.telegramMessages[0].text).toContain("/generate <idea id>")
   })
 })
