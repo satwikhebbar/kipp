@@ -603,7 +603,7 @@ const SEED_CUSTOM_POLICIES: CustomPolicy[] = [
     id: "nutrition-target-fruit",
     label: "Nutrition target",
     scope: "persistent",
-    value: "Pack fruit in a snack at least three to four times each week.",
+    value: "Pack fruit in exactly three snacks each week.",
   },
   {
     id: "nutrition-target-nuts",
