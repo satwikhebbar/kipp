@@ -37,9 +37,10 @@ sequenceDiagram
 
 Telegram `/add` and RSS create raw pages in the Notion Ideas data source through
 `IdeaIngestDO`. `/generate [idea id]` (the oldest raw idea by default, or the
-named raw idea), the daily RSS poll, and the weekly cadence
-check may start `PipelineWorkflow`; `IdeaIngestDO` ensures a page has at most one
-active deterministic workflow instance.
+named raw idea) and the weekly cadence check may start `PipelineWorkflow`; RSS
+ingestion only stores raw ideas and starts no workflow until an explicit
+`/generate`. `IdeaIngestDO` ensures a page has at most one active deterministic
+workflow instance.
 The LinkedIn agent returns a workflow-specific `ready_for_review` terminal
 outcome; it cannot approve, publish, archive, or access credentials.
 

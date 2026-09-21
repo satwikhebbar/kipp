@@ -12,6 +12,8 @@ import { userFacingFailureMessage } from "../runtime/user-failures"
 
 const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32
+const UNKNOWN_COMMAND_MESSAGE =
+  "Unknown command. Use /add <text>, /generate [idea id], /calendar <request>, /mealplan <request>, or tap inline buttons."
 
 interface TelegramMessageEntity {
   type: string
@@ -287,10 +289,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
       }
 
       if (text.startsWith("/")) {
-        await tg.sendMessage(
-          msg.chat.id,
-          "Unknown command. Use /add <text>, /generate [idea id], /calendar <request>, /mealplan <request>, or tap inline buttons.",
-        )
+        await tg.sendMessage(msg.chat.id, UNKNOWN_COMMAND_MESSAGE)
         return new Response("OK")
       }
 
@@ -309,10 +308,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
       if (await dispatchMealFallthrough(env, msg, tg)) return new Response("OK")
 
-      await tg.sendMessage(
-        msg.chat.id,
-        "Unknown command. Use /add <text>, /generate [idea id], /calendar <request>, /mealplan <request>, or tap inline buttons.",
-      )
+      await tg.sendMessage(msg.chat.id, UNKNOWN_COMMAND_MESSAGE)
       return new Response("OK")
     }
   } catch (err) {
