@@ -77,7 +77,7 @@ describe("telegram-to-backlog", () => {
     expect(state.telegramMessages[0].text).toBe("Usage: /add <idea text>")
   })
 
-  it("handles /generate by creating a workflow for the oldest raw idea", async () => {
+  it("handles /generate by creating a workflow for the named idea", async () => {
     harness = createFakeNetwork({
       notionPages: [
         {
@@ -108,7 +108,7 @@ describe("telegram-to-backlog", () => {
           message_id: 6,
           from: { id: 42, is_bot: false, first_name: "Test" },
           chat: { id: 100, type: "private" },
-          text: "/generate",
+          text: "/generate 2",
         },
       }),
       env,
@@ -117,14 +117,50 @@ describe("telegram-to-backlog", () => {
 
     const created = binding.getCreated()
     expect(created.length).toBe(1)
-    expect(created[0].params).toMatchObject({ pageId: "page_1", ideaId: "1", source: "telegram" })
+    expect(created[0].params).toMatchObject({ pageId: "page_2", ideaId: "2", source: "manual" })
 
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
     expect(state.telegramMessages[0].text).toContain("Started workflow")
   })
 
-  it("handles /generate with no raw ideas by returning a message", async () => {
+  it("starts a workflow for a named substack idea", async () => {
+    harness = createFakeNetwork({
+      notionPages: [
+        {
+          pageId: "page_1",
+          kippId: 1,
+          title: "",
+          status: "raw",
+          source: "substack",
+          markdown: "From Substack",
+          substackUrl: "https://example.substack.com/p/one",
+        },
+      ],
+    })
+    vi.stubGlobal("fetch", harness.fetch)
+
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const res = await handleTelegramWebhook(
+      telegramRequest({
+        update_id: 2,
+        message: {
+          message_id: 6,
+          from: { id: 42, is_bot: false, first_name: "Test" },
+          chat: { id: 100, type: "private" },
+          text: "/generate 1",
+        },
+      }),
+      env,
+    )
+    expect(res.status).toBe(200)
+
+    const created = binding.getCreated()
+    expect(created.length).toBe(1)
+    expect(created[0].params).toMatchObject({ pageId: "page_1", ideaId: "1", source: "substack" })
+  })
+
+  it("rejects /generate for an idea that is not raw", async () => {
     harness = createFakeNetwork({
       notionPages: [
         {
@@ -147,6 +183,28 @@ describe("telegram-to-backlog", () => {
           message_id: 6,
           from: { id: 42, is_bot: false, first_name: "Test" },
           chat: { id: 100, type: "private" },
+          text: "/generate 1",
+        },
+      }),
+      env,
+    )
+    expect(res.status).toBe(200)
+    expect(binding.getCreated().length).toBe(0)
+
+    const state = harness.getState()
+    expect(state.telegramMessages.length).toBe(1)
+    expect(state.telegramMessages[0].text).toContain("Nothing to generate for that idea.")
+  })
+
+  it("prompts for usage when /generate has no idea id", async () => {
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const res = await handleTelegramWebhook(
+      telegramRequest({
+        update_id: 2,
+        message: {
+          message_id: 6,
+          from: { id: 42, is_bot: false, first_name: "Test" },
+          chat: { id: 100, type: "private" },
           text: "/generate",
         },
       }),
@@ -157,7 +215,7 @@ describe("telegram-to-backlog", () => {
 
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
-    expect(state.telegramMessages[0].text).toContain("No raw ideas")
+    expect(state.telegramMessages[0].text).toBe("Usage: /generate <idea id>")
   })
 
   it("responds to unknown commands with help message", async () => {

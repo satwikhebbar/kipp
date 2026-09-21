@@ -363,7 +363,7 @@ Idea 2`
     expect(reqBody.idea).toMatchObject({ source: "telegram", body: "Quick idea here", chatId: "100" })
   })
 
-  it("handles /generate command", async () => {
+  it("handles /generate command with an explicit idea id", async () => {
     const page = {
       object: "page",
       id: "page_1",
@@ -408,7 +408,7 @@ Idea 2`
         message_id: 6,
         from: { id: 42, is_bot: false, first_name: "Test" },
         chat: { id: 100, type: "private" },
-        text: "/generate",
+        text: "/generate 1",
       },
     })
     const res = await handleTelegramWebhook(
@@ -425,6 +425,77 @@ Idea 2`
     expect(startStub).toHaveBeenCalledTimes(1)
     const startBody = JSON.parse(startStub.mock.calls[0][1].body)
     expect(startBody).toMatchObject({ pageId: "page_1", ideaId: "1", source: "manual" })
+  })
+
+  it("replies with usage and starts nothing when /generate has no idea id", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      throw new Error(`Unexpected fetch ${url}`)
+    })
+
+    const env = mockEnv()
+    const body = JSON.stringify({
+      update_id: 3,
+      message: {
+        message_id: 7,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org"))
+    expect(sent?.body).toContain("Usage: /generate <idea id>")
+    expect(env.ingestFetches.size).toBe(0)
+  })
+
+  it("replies that nothing is available when /generate names an idea that is not raw", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      if (url?.includes?.("api.notion.com"))
+        return {
+          ok: true,
+          json: () => Promise.resolve({ object: "list", results: [], has_more: false, next_cursor: null }),
+        }
+      throw new Error(`Unexpected fetch ${url}`)
+    })
+
+    const env = mockEnv()
+    const body = JSON.stringify({
+      update_id: 4,
+      message: {
+        message_id: 8,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate 99",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org"))
+    expect(sent?.body).toContain("Nothing to generate for that idea.")
+    expect(env.ingestFetches.size).toBe(0)
   })
 
   it("shows Calendar help without invoking an LLM or workflow", async () => {
@@ -585,7 +656,7 @@ Idea 2`
         message_id: 12,
         from: { id: 42, is_bot: false, first_name: "Test" },
         chat: { id: 100, type: "private" },
-        text: "/generate",
+        text: "/generate 1",
       },
     })
     const res = await handleTelegramWebhook(
@@ -652,7 +723,7 @@ Idea 2`
         message_id: 14,
         from: { id: 42, is_bot: false, first_name: "Test" },
         chat: { id: 100, type: "private" },
-        text: "/generate",
+        text: "/generate 1",
       },
     })
     const res = await handleTelegramWebhook(
