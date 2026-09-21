@@ -64,9 +64,9 @@ delivery history and architecture decisions in
 ### LinkedIn drafting and review
 
 Ideas enter the Notion Ideas data source through Telegram `/add`, the
-configured Substack RSS feed, or manual entry. `/generate <idea id>` and
-scheduled cadence checks select eligible raw Notion pages and can start
-`PipelineWorkflow`.
+configured Substack RSS feed, or manual entry. `/generate [idea id]` starts the
+oldest raw idea by default, or the named raw idea, and scheduled cadence checks
+select eligible raw Notion pages; both can start `PipelineWorkflow`.
 
 The RSS path reads the triggering item's complete `content:encoded` HTML and
 extracts up to seven source-grounded LinkedIn idea candidates. Kipp keeps the
@@ -332,7 +332,7 @@ Notion, Telegram, and LLM calls hit the real services.
 | Command or action | Result |
 | --- | --- |
 | `/add <text>` | Save a raw LinkedIn idea. |
-| `/generate <idea id>` | Start LinkedIn generation for the chosen raw idea. |
+| `/generate [idea id]` | Start LinkedIn generation for the oldest raw idea, or the named raw idea. |
 | **Approve** / **Revise More** / reply | Review or revise the current LinkedIn draft. |
 | `/calendar <request>` | Start a one-off or recurring Calendar conversation. |
 | Calendar buttons or reply | Select an authorized choice, supply clarification, cancel, retry, or edit. |

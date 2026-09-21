@@ -427,11 +427,41 @@ Idea 2`
     expect(startBody).toMatchObject({ pageId: "page_1", ideaId: "1", source: "manual" })
   })
 
-  it("replies with usage and starts nothing when /generate has no idea id", async () => {
+  it("defaults to the oldest raw idea when /generate has no idea id", async () => {
+    const page = {
+      object: "page",
+      id: "page_1",
+      created_time: "2026-07-01T12:00:00Z",
+      last_edited_time: "2026-07-02T12:00:00Z",
+      properties: {
+        "Kipp ID": { unique_id: { prefix: null, number: 1 } },
+        Status: { status: { name: "raw" } },
+        Source: { select: { name: "manual" } },
+        Title: { title: [{ type: "text", text: { content: "Oldest raw idea" } }] },
+      },
+    }
+    const okJson = (obj: unknown) =>
+      new Response(JSON.stringify(obj), { status: 200, headers: { "Content-Type": "application/json" } })
+
     mockFetch.mockImplementation(async (url: string) => {
-      if (url?.includes?.("api.telegram.org"))
+      const u = String(url)
+      if (u.includes("api.notion.com")) {
+        if (u.endsWith("/query")) return okJson({ object: "list", results: [page], has_more: false, next_cursor: null })
+        const md = u.match(/\/v1\/pages\/([^/]+)\/markdown$/)
+        if (md)
+          return okJson({
+            object: "page_markdown",
+            id: md[1],
+            markdown: "Body text",
+            truncated: false,
+            unknown_block_ids: [],
+          })
+        const pm = u.match(/\/v1\/pages\/([^/]+)$/)
+        if (pm) return okJson(page)
+      }
+      if (u.includes("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
-      throw new Error(`Unexpected fetch ${url}`)
+      throw new Error(`Unexpected fetch ${u}`)
     })
 
     const env = mockEnv()
@@ -453,10 +483,113 @@ Idea 2`
       env as never,
     )
     expect(res.status).toBe(200)
+    const startStub = env.ingestFetches.get("claim:page_1")
+    if (!startStub) throw new Error("expected generated workflow start")
+    expect(startStub).toHaveBeenCalledTimes(1)
     const sent = mockFetch.mock.calls
       .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
       .find((call) => String(call.url).includes("api.telegram.org"))
-    expect(sent?.body).toContain("Usage: /generate <idea id>")
+    expect(sent?.body).toContain("Oldest raw idea")
+  })
+
+  it("keeps the body-excerpt label for an untitled idea on default /generate", async () => {
+    const bodyText = "y".repeat(120)
+    const page = {
+      object: "page",
+      id: "page_1",
+      created_time: "2026-07-01T12:00:00Z",
+      last_edited_time: "2026-07-02T12:00:00Z",
+      properties: {
+        "Kipp ID": { unique_id: { prefix: null, number: 1 } },
+        Status: { status: { name: "raw" } },
+        Source: { select: { name: "manual" } },
+      },
+    }
+    const okJson = (obj: unknown) =>
+      new Response(JSON.stringify(obj), { status: 200, headers: { "Content-Type": "application/json" } })
+
+    mockFetch.mockImplementation(async (url: string) => {
+      const u = String(url)
+      if (u.includes("api.notion.com")) {
+        if (u.endsWith("/query")) return okJson({ object: "list", results: [page], has_more: false, next_cursor: null })
+        const md = u.match(/\/v1\/pages\/([^/]+)\/markdown$/)
+        if (md)
+          return okJson({
+            object: "page_markdown",
+            id: md[1],
+            markdown: bodyText,
+            truncated: false,
+            unknown_block_ids: [],
+          })
+        const pm = u.match(/\/v1\/pages\/([^/]+)$/)
+        if (pm) return okJson(page)
+      }
+      if (u.includes("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      throw new Error(`Unexpected fetch ${u}`)
+    })
+
+    const env = mockEnv()
+    const body = JSON.stringify({
+      update_id: 5,
+      message: {
+        message_id: 9,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org"))
+    expect(sent?.body).toContain("y".repeat(80))
+    expect(sent?.body).not.toContain("Untitled")
+  })
+
+  it("replies that no raw ideas exist when /generate has none and no id is given", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      if (url?.includes?.("api.notion.com"))
+        return {
+          ok: true,
+          json: () => Promise.resolve({ object: "list", results: [], has_more: false, next_cursor: null }),
+        }
+      throw new Error(`Unexpected fetch ${url}`)
+    })
+
+    const env = mockEnv()
+    const body = JSON.stringify({
+      update_id: 6,
+      message: {
+        message_id: 10,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org"))
+    expect(sent?.body).toContain("No raw ideas to generate from.")
     expect(env.ingestFetches.size).toBe(0)
   })
 
