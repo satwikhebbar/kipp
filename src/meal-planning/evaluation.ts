@@ -27,15 +27,21 @@ interface GridCellRef {
 
 /**
  * Evaluates the LLM-facing selection contract as one deterministic operation:
- * first validate and hydrate definitions, then apply the existing candidate
- * evaluator. The hydrated candidate is returned only when it is valid enough
- * to be evaluated or persisted.
+ * first validate and hydrate definitions, then reconcile the EasyBuys list from
+ * the hydrated candidate and the week's inventory/pantry, then apply the
+ * existing candidate evaluator. The hydrated, reconciled candidate is returned
+ * only when it is valid enough to be evaluated or persisted.
+ *
+ * Ordinary ingredients the model did not list are shopping items, not hydration
+ * failures (`allowMissingRequiredIngredients`); the reconciliation below is the
+ * authoritative source of the persisted EasyBuys list. Explicitly unavailable
+ * ingredients and structural failures still gate persistence.
  */
 export function evaluateMealPlanSelection(
   selectionCandidate: MealPlanSelectionCandidate,
   context: MealPlanContext,
 ): MealPlanSelectionEvaluation {
-  const hydration = hydrateMealPlan(selectionCandidate, context)
+  const hydration = hydrateMealPlan(selectionCandidate, context, undefined, true)
   if (!hydration.candidate) {
     return {
       ...hydration,
@@ -55,7 +61,8 @@ export function evaluateMealPlanSelection(
       },
     }
   }
-  return { ...hydration, evaluation: evaluateMealPlan(hydration.candidate, context) }
+  const candidate = reconcileEasyBuys(hydration.candidate, context)
+  return { ...hydration, candidate, evaluation: evaluateMealPlan(candidate, context) }
 }
 
 /** Evaluates a revision patch after hydrating and merging it into the active plan. */

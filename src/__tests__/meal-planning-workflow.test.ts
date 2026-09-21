@@ -503,6 +503,126 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(deepseekBodies[0]?.messages.at(-1)?.content).toContain("none")
   })
 
+  it("resets week-scoped inventory and holidays when the target week changes", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const priorWeek = resolvePlanningWeek(invokedAtMs - 7 * 24 * 60 * 60 * 1000, TZ)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const priorGrid = Object.fromEntries(
+      DAYS.map((day) => [
+        day,
+        Object.fromEntries(
+          Object.keys(SLOT_COOK).map((slot) => [
+            slot,
+            { dish: "old week dish", items: ["salt"], cookMinutes: 0, vegetarian: true, priorNightPrep: false },
+          ]),
+        ),
+      ]),
+    )
+    await store.createActivePlan({
+      planId: "prior-week-plan",
+      chatId: CHAT,
+      weekStart: priorWeek.weekStart,
+      weekEnd: priorWeek.weekEnd,
+      timezone: TZ,
+      instanceId: "prior-week-workflow",
+      candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
+      evaluation: { pass: true, failures: [], measurements: {} } as never,
+      weeklyInventory: {
+        items: [
+          { name: "peas", status: "available" },
+          { name: "idli batter", status: "available" },
+          { name: "french beans", status: "available" },
+        ],
+        notes: [],
+      },
+      weeklyExceptions: {
+        items: [{ kind: "school_closed", appliesTo: { day: "Mon" }, instruction: "Prior-week holiday" }],
+      },
+      provisionalMealDefinitions: [],
+    })
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const firstPrompt = deepseekBodies[0]?.messages.at(-1)?.content ?? ""
+    expect(firstPrompt).toContain("old week dish")
+    expect(firstPrompt).toContain("Weekly inventory: none")
+    expect(firstPrompt).not.toContain("Weekly exceptions:")
+    expect(firstPrompt).not.toContain("idli batter")
+    expect(firstPrompt).not.toContain("Prior-week holiday")
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.weekStart).toBe(week.weekStart)
+    expect(active?.plan.weeklyInventory.items).toEqual([])
+    expect(active?.plan.weeklyExceptions.items).toEqual([])
+  })
+
+  it("keeps week-scoped inventory and holidays for a same-week re-invocation", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const priorGrid = Object.fromEntries(
+      DAYS.map((day) => [
+        day,
+        Object.fromEntries(
+          Object.keys(SLOT_COOK).map((slot) => [
+            slot,
+            { dish: "old week dish", items: ["salt"], cookMinutes: 0, vegetarian: true, priorNightPrep: false },
+          ]),
+        ),
+      ]),
+    )
+    await store.createActivePlan({
+      planId: "same-week-plan",
+      chatId: CHAT,
+      weekStart: week.weekStart,
+      weekEnd: week.weekEnd,
+      timezone: TZ,
+      instanceId: "same-week-workflow",
+      candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
+      evaluation: { pass: true, failures: [], measurements: {} } as never,
+      weeklyInventory: { items: [{ name: "peas", status: "available" }], notes: [] },
+      weeklyExceptions: {
+        items: [{ kind: "school_closed", appliesTo: { day: "Mon" }, instruction: "Same-week holiday" }],
+      },
+      provisionalMealDefinitions: [],
+    })
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const firstPrompt = deepseekBodies[0]?.messages.at(-1)?.content ?? ""
+    expect(firstPrompt).toContain("Weekly inventory: peas")
+    expect(firstPrompt).toContain("Weekly exceptions:")
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.weeklyInventory.items).toEqual([{ name: "peas", status: "available" }])
+    expect(active?.plan.weeklyExceptions.items).toEqual([
+      { kind: "school_closed", appliesTo: { day: "Mon" }, instruction: "Same-week holiday" },
+    ])
+  })
+
   it("applies extracted initial inventory before evaluating and persisting the plan", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")

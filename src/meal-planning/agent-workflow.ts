@@ -237,12 +237,18 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText)
   const recent = await stepDo(step, "meal-planning-read-recent", () => store.activePlan(event.payload.chatId))
 
+  // Week-scoped facts belong to the target week only. The active plan may still
+  // target a previous week (it is only replaced when the new plan is created),
+  // so seeding from it unconditionally would carry last week's inventory and
+  // holidays into the new plan. Same-week re-invocation keeps them; a different
+  // target week starts fresh and extraction re-adds only restated facts.
+  const sameWeekPlan = recent?.plan.weekStart === week.weekStart ? recent : null
   const baseContext: MealPlanContext = {
     schedule: profile.schedule,
     profile: profile.profile,
     customPolicies: profile.customPolicies,
-    weeklyInventory: recent?.plan.weeklyInventory ?? { items: [], notes: [] },
-    weeklyExceptions: recent?.plan.weeklyExceptions ?? { items: [] },
+    weeklyInventory: sameWeekPlan?.plan.weeklyInventory ?? { items: [], notes: [] },
+    weeklyExceptions: sameWeekPlan?.plan.weeklyExceptions ?? { items: [] },
     recentPlan: recent?.version.candidate.grid ?? null,
     // Provisional meals are owned by a plan version. They may be reused by a
     // revision of that plan, but must never leak into a new initial plan.
