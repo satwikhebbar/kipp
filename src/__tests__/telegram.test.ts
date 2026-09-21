@@ -598,7 +598,41 @@ Idea 2`
     expect(env.ingestFetches.size).toBe(0)
   })
 
-  it("replies that nothing is available when /generate names an idea that is not raw", async () => {
+  it("replies that the idea id must be a number when /generate gets a non-numeric id", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      throw new Error(`Unexpected fetch ${url}`)
+    })
+
+    const env = mockEnv()
+    const body = JSON.stringify({
+      update_id: 4,
+      message: {
+        message_id: 8,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate thirty-five",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org"))
+    expect(sent?.body).toContain("Idea id must be a positive whole number.")
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes("api.notion.com"))).toBe(false)
+    expect(env.ingestFetches.size).toBe(0)
+  })
+
+  it("replies that no idea was found when /generate names an unknown id", async () => {
     mockFetch.mockImplementation(async (url: string) => {
       if (url?.includes?.("api.telegram.org"))
         return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
@@ -632,7 +666,57 @@ Idea 2`
     const sent = mockFetch.mock.calls
       .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
       .find((call) => String(call.url).includes("api.telegram.org"))
-    expect(sent?.body).toContain("Nothing to generate for that idea.")
+    expect(sent?.body).toContain("No idea found with id 99.")
+    expect(env.ingestFetches.size).toBe(0)
+  })
+
+  it("replies that the idea is not raw when /generate names a non-raw idea", async () => {
+    const page = {
+      object: "page",
+      id: "page_1",
+      created_time: "2026-07-01T12:00:00Z",
+      last_edited_time: "2026-07-02T12:00:00Z",
+      properties: {
+        "Kipp ID": { unique_id: { prefix: null, number: 1 } },
+        Status: { status: { name: "awaiting-feedback" } },
+        Source: { select: { name: "manual" } },
+        Title: { title: [{ type: "text", text: { content: "In flight" } }] },
+      },
+    }
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url?.includes?.("api.telegram.org"))
+        return { ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) }
+      if (url?.includes?.("api.notion.com"))
+        return {
+          ok: true,
+          json: () => Promise.resolve({ object: "list", results: [page], has_more: false, next_cursor: null }),
+        }
+      throw new Error(`Unexpected fetch ${url}`)
+    })
+
+    const env = mockEnv()
+    const body = JSON.stringify({
+      update_id: 4,
+      message: {
+        message_id: 8,
+        from: { id: 42, is_bot: false, first_name: "Test" },
+        chat: { id: 100, type: "private" },
+        text: "/generate 1",
+      },
+    })
+    const res = await handleTelegramWebhook(
+      new Request("http://localhost", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body,
+      }),
+      env as never,
+    )
+    expect(res.status).toBe(200)
+    const sent = mockFetch.mock.calls
+      .map(([url, opts]) => ({ url, body: typeof opts?.body === "string" ? opts.body : "" }))
+      .find((call) => String(call.url).includes("api.telegram.org"))
+    expect(sent?.body).toContain("Idea #1 is not raw.")
     expect(env.ingestFetches.size).toBe(0)
   })
 

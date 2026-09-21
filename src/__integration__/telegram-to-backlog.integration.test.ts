@@ -193,7 +193,7 @@ describe("telegram-to-backlog", () => {
 
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
-    expect(state.telegramMessages[0].text).toContain("Nothing to generate for that idea.")
+    expect(state.telegramMessages[0].text).toContain("Idea #1 is not raw.")
   })
 
   it("defaults to the oldest raw idea when /generate has no idea id", async () => {

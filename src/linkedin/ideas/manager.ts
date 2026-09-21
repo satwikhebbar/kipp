@@ -38,6 +38,12 @@ const TITLE_MAX_LENGTH = 80
 const KIPP_ID_ASCENDING = [{ property: "Kipp ID", direction: "ascending" }]
 const LAST_EDITED_DESCENDING = [{ timestamp: "last_edited_time", direction: "descending" }]
 
+/** Parses a user-supplied idea id, returning null unless it is a positive integer. */
+export function parseIdeaId(value: string): number | null {
+  const id = Number(value)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
 /** Creates an idea manager over a Notion client for CRUD on the Ideas data source. */
 export function createIdeaManager(client: NotionClient): IdeaManager {
   async function listIdeas(): Promise<IdeaSummary[]> {
@@ -61,8 +67,8 @@ export function createIdeaManager(client: NotionClient): IdeaManager {
   }
 
   async function getIdeaByIdeaId(ideaId: string): Promise<IdeaSummary | null> {
-    const kippId = Number(ideaId)
-    if (!Number.isInteger(kippId)) return null
+    const kippId = parseIdeaId(ideaId)
+    if (kippId === null) return null
     const pages = await client.queryPages({ property: "Kipp ID", unique_id: { equals: kippId } }, [], 1)
     return pages.length > 0 ? pageToSummary(pages[0]) : null
   }
