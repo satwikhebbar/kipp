@@ -10,6 +10,7 @@ import { createMealPlanningStore } from "../meal-planning/store"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
 
+const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32
 
 interface TelegramMessageEntity {
@@ -200,20 +201,24 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
     if (command?.name === "generate") {
       logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
-      if (!command.argument) {
-        await tg.sendMessage(msg.chat.id, "Usage: /generate <idea id>")
-        return new Response("OK")
-      }
       const manager = createIdeaManager(createNotionClient(env))
-      const idea = (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.id === command.argument)
+      const idea = command.argument
+        ? (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.id === command.argument)
+        : await manager.getNextIdea()
       if (!idea) {
-        await tg.sendMessage(msg.chat.id, "Nothing to generate for that idea.")
+        await tg.sendMessage(
+          msg.chat.id,
+          command.argument ? "Nothing to generate for that idea." : "No raw ideas to generate from.",
+        )
         return new Response("OK")
       }
       const ingest = createIdeaIngest(env)
       const result = await ingest.start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })
       const verb = result.alreadyStarted ? "Workflow already running" : "Started workflow"
-      await tg.sendMessage(msg.chat.id, `${verb} for idea #${idea.id}: ${idea.title ?? "Untitled"}`)
+      const label =
+        idea.title ??
+        ("body" in idea && typeof idea.body === "string" ? idea.body.slice(0, LABEL_TRUNCATE_LENGTH) : "Untitled")
+      await tg.sendMessage(msg.chat.id, `${verb} for idea #${idea.id}: ${label}`)
       logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
       return new Response("OK")
     }
@@ -284,7 +289,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
       if (text.startsWith("/")) {
         await tg.sendMessage(
           msg.chat.id,
-          "Unknown command. Use /add <text>, /generate <idea id>, /calendar <request>, /mealplan <request>, or tap inline buttons.",
+          "Unknown command. Use /add <text>, /generate [idea id], /calendar <request>, /mealplan <request>, or tap inline buttons.",
         )
         return new Response("OK")
       }
@@ -306,7 +311,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
       await tg.sendMessage(
         msg.chat.id,
-        "Unknown command. Use /add <text>, /generate <idea id>, /calendar <request>, /mealplan <request>, or tap inline buttons.",
+        "Unknown command. Use /add <text>, /generate [idea id], /calendar <request>, /mealplan <request>, or tap inline buttons.",
       )
       return new Response("OK")
     }

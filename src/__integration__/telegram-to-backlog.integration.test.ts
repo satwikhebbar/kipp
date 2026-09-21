@@ -196,7 +196,29 @@ describe("telegram-to-backlog", () => {
     expect(state.telegramMessages[0].text).toContain("Nothing to generate for that idea.")
   })
 
-  it("prompts for usage when /generate has no idea id", async () => {
+  it("defaults to the oldest raw idea when /generate has no idea id", async () => {
+    harness = createFakeNetwork({
+      notionPages: [
+        {
+          pageId: "page_2",
+          kippId: 2,
+          title: "Idea two",
+          status: "raw",
+          source: "manual",
+          markdown: "Idea two",
+        },
+        {
+          pageId: "page_1",
+          kippId: 1,
+          title: "Idea one",
+          status: "raw",
+          source: "telegram",
+          markdown: "Idea one",
+        },
+      ],
+    })
+    vi.stubGlobal("fetch", harness.fetch)
+
     const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
     const res = await handleTelegramWebhook(
       telegramRequest({
@@ -211,11 +233,14 @@ describe("telegram-to-backlog", () => {
       env,
     )
     expect(res.status).toBe(200)
-    expect(binding.getCreated().length).toBe(0)
+
+    const created = binding.getCreated()
+    expect(created.length).toBe(1)
+    expect(created[0].params).toMatchObject({ pageId: "page_1", ideaId: "1", source: "telegram" })
 
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
-    expect(state.telegramMessages[0].text).toBe("Usage: /generate <idea id>")
+    expect(state.telegramMessages[0].text).toContain("Idea one")
   })
 
   it("responds to unknown commands with help message", async () => {
@@ -237,10 +262,10 @@ describe("telegram-to-backlog", () => {
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
     expect(state.telegramMessages[0].text).toContain("Unknown command")
-    expect(state.telegramMessages[0].text).toContain("/generate <idea id>")
+    expect(state.telegramMessages[0].text).toContain("/generate [idea id]")
   })
 
-  it("advertises /generate <idea id> in the plain-text fallthrough help message", async () => {
+  it("advertises /generate [idea id] in the plain-text fallthrough help message", async () => {
     const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
     const res = await handleTelegramWebhook(
       telegramRequest({
@@ -259,6 +284,6 @@ describe("telegram-to-backlog", () => {
     const state = harness.getState()
     expect(state.telegramMessages.length).toBe(1)
     expect(state.telegramMessages[0].text).toContain("Unknown command")
-    expect(state.telegramMessages[0].text).toContain("/generate <idea id>")
+    expect(state.telegramMessages[0].text).toContain("/generate [idea id]")
   })
 })
