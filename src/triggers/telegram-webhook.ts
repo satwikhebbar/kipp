@@ -4,7 +4,7 @@ import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
 import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
-import { createIdeaManager } from "../linkedin/ideas/manager"
+import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
 import { MEAL_HELP, MEAL_PLAN_ENDED } from "../meal-planning/messages"
 import { createMealPlanningStore } from "../meal-planning/store"
 import { logRuntime } from "../runtime/logging"
@@ -203,13 +203,22 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
     if (command?.name === "generate") {
       logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
+      const requestedId = command.argument
+      if (requestedId && parseIdeaId(requestedId) === null) {
+        await tg.sendMessage(msg.chat.id, "Idea id must be a positive whole number.")
+        return new Response("OK")
+      }
       const manager = createIdeaManager(createNotionClient(env))
-      const idea = command.argument ? await manager.getIdeaByIdeaId(command.argument) : await manager.getNextIdea()
-      if (!idea || idea.status !== "raw") {
+      const idea = requestedId ? await manager.getIdeaByIdeaId(requestedId) : await manager.getNextIdea()
+      if (!idea) {
         await tg.sendMessage(
           msg.chat.id,
-          command.argument ? "Nothing to generate for that idea." : "No raw ideas to generate from.",
+          requestedId ? `No idea found with id ${requestedId}.` : "No raw ideas to generate from.",
         )
+        return new Response("OK")
+      }
+      if (idea.status !== "raw") {
+        await tg.sendMessage(msg.chat.id, `Idea #${idea.id} is not raw.`)
         return new Response("OK")
       }
       const ingest = createIdeaIngest(env)
