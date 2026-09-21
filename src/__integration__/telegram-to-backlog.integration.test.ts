@@ -243,6 +243,31 @@ describe("telegram-to-backlog", () => {
     expect(state.telegramMessages[0].text).toContain("Idea one")
   })
 
+  it("reports when /generate has no idea id and no raw ideas exist", async () => {
+    harness = createFakeNetwork({ notionPages: [] })
+    vi.stubGlobal("fetch", harness.fetch)
+
+    const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
+    const res = await handleTelegramWebhook(
+      telegramRequest({
+        update_id: 20,
+        message: {
+          message_id: 30,
+          from: { id: 42, is_bot: false, first_name: "Test" },
+          chat: { id: 100, type: "private" },
+          text: "/generate",
+        },
+      }),
+      env,
+    )
+    expect(res.status).toBe(200)
+    expect(binding.getCreated().length).toBe(0)
+
+    const state = harness.getState()
+    expect(state.telegramMessages.length).toBe(1)
+    expect(state.telegramMessages[0].text).toContain("No raw ideas to generate from.")
+  })
+
   it("responds to unknown commands with help message", async () => {
     const env = baseEnv({ PIPELINE_WORKFLOW: binding as never })
     const res = await handleTelegramWebhook(
