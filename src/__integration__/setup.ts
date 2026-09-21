@@ -112,12 +112,19 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
             status?: { equals?: string }
             url?: { equals?: string }
             rich_text?: { equals?: string }
+            or?: Array<{ property?: string; status?: { equals?: string } }>
           }
           sorts?: Array<{ property?: string; direction?: string }>
         }
         let results = [...state.notionPages.values()]
         const filter = body.filter
         if (filter?.property === "Status") results = results.filter((p) => p.status === filter.status?.equals)
+        if (filter?.or) {
+          const statuses = filter.or
+            .filter((clause) => clause.property === "Status")
+            .map((clause) => clause.status?.equals)
+          results = results.filter((p) => statuses.includes(p.status))
+        }
         if (filter?.property === "Substack URL") results = results.filter((p) => p.substackUrl === filter.url?.equals)
         if (filter?.property === "Idempotency Key")
           results = results.filter((p) => p.idempotencyKey === filter.rich_text?.equals)

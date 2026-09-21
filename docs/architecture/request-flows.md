@@ -36,8 +36,8 @@ sequenceDiagram
 ## LinkedIn idea capture, generation, and review
 
 Telegram `/add` and RSS create raw pages in the Notion Ideas data source through
-`IdeaIngestDO`. `/generate`, the daily RSS poll, and the weekly cadence check
-may start `PipelineWorkflow`; `IdeaIngestDO` ensures a page has at most one
+`IdeaIngestDO`. `/generate <idea id>`, the daily RSS poll, and the weekly cadence
+check may start `PipelineWorkflow`; `IdeaIngestDO` ensures a page has at most one
 active deterministic workflow instance.
 The LinkedIn agent returns a workflow-specific `ready_for_review` terminal
 outcome; it cannot approve, publish, archive, or access credentials.
@@ -55,7 +55,7 @@ sequenceDiagram
   participant V as TokenVaultDO
   participant LI as LinkedIn API
 
-  U->>T: /add idea or /generate
+  U->>T: /add idea or /generate <idea id>
   T->>W: verified webhook
   W->>I: ingest or select raw idea
   I->>N: create or claim page
