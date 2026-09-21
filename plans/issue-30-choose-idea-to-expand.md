@@ -11,7 +11,9 @@
 > inline-keyboard chooser. The second made the idea id **required** and dropped
 > the default auto-selection; that was wrong — it broke the existing
 > `/generate` flow that users rely on. This revision keeps the old default
-> intact and layers explicit selection on top as an optional argument.
+> intact and layers explicit selection on top as an optional argument. It also
+> preserves the old body-excerpt label for the default path; only the
+> explicit-id path falls back to `"Untitled"`.
 
 ## 1. Problem
 
@@ -76,7 +78,8 @@ if (command?.name === "generate") {
   }
   const result = await createIdeaIngest(env).start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })
   const verb = result.alreadyStarted ? "Workflow already running" : "Started workflow"
-  await tg.sendMessage(msg.chat.id, `${verb} for idea #${idea.id}: ${idea.title ?? "Untitled"}`)
+  const label = idea.title ?? ("body" in idea ? idea.body.slice(0, LABEL_TRUNCATE_LENGTH) : "Untitled")
+  await tg.sendMessage(msg.chat.id, `${verb} for idea #${idea.id}: ${label}`)
   logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
   return new Response("OK")
 }
@@ -87,6 +90,13 @@ and `getIdeasByStatuses(["raw"])` for explicit selection (already used by the
 cadence check). No new Notion query, filter, manager method, keyboard, or
 callback handling is required. `getNextIdea()` therefore stays in production
 use, and its unit tests in `src/__tests__/ideas.test.ts` are untouched.
+
+The `LABEL_TRUNCATE_LENGTH = 80` constant stays in place. The default path
+receives a hydrated `Idea` (with `body`) from `getNextIdea()`, so its
+missing-title label remains the old `idea.body.slice(0, LABEL_TRUNCATE_LENGTH)`
+excerpt; the `"body" in idea` guard narrows the union so the explicit-id path,
+which receives a body-less `IdeaSummary`, falls back to `"Untitled"`. This keeps
+the existing no-argument message byte-for-byte identical for untitled ideas.
 
 ### 3.2 Validation and failure replies
 
@@ -125,8 +135,8 @@ workflow flips the idea out of `raw` fails the status gate.
 
 | File | Change |
 | --- | --- |
-| `src/triggers/telegram-webhook.ts` | Rewrite the `/generate` branch so the argument is optional: no argument falls back to `getNextIdea()` (old behavior); an argument looks up the id among `getIdeasByStatuses(["raw"])`. Keep the empty-queue reply `No raw ideas to generate from.` and add the `Nothing to generate for that idea.` reply for a bad/unavailable explicit id. Update the two unknown-command hint strings to advertise the optional id. No new imports, constants, or helper functions. |
-| `src/__tests__/telegram.test.ts` | Restore the default `/generate` (no argument) case and assert it starts the oldest raw idea; add a `/generate <id>` case asserting it starts that named idea; keep the unknown-id and non-`raw` cases (both `Nothing to generate for that idea.`, no start); keep the empty-queue `No raw ideas to generate from.` case; update the Notion-failure and unauthorized `/generate` payloads. |
+| `src/triggers/telegram-webhook.ts` | Rewrite the `/generate` branch so the argument is optional: no argument falls back to `getNextIdea()` (old behavior); an argument looks up the id among `getIdeasByStatuses(["raw"])`. Keep the empty-queue reply `No raw ideas to generate from.` and add the `Nothing to generate for that idea.` reply for a bad/unavailable explicit id. Keep the `LABEL_TRUNCATE_LENGTH` constant and use the `"body" in idea` guard so the default path keeps the old body-excerpt label while the explicit-id path falls back to `"Untitled"`. Update the two unknown-command hint strings to advertise the optional id. No new imports or helper functions. |
+| `src/__tests__/telegram.test.ts` | Restore the default `/generate` (no argument) case and assert it starts the oldest raw idea; add a default no-argument case for an untitled raw idea asserting the body-excerpt label; add a `/generate <id>` case asserting it starts that named idea; keep the unknown-id and non-`raw` cases (both `Nothing to generate for that idea.`, no start); keep the empty-queue `No raw ideas to generate from.` case; update the Notion-failure and unauthorized `/generate` payloads. |
 | `src/__integration__/telegram-to-backlog.integration.test.ts` | Restore a default no-argument `/generate` case (oldest raw idea), keep the named-id selection case (picks a non-oldest idea), the `substack`-source case, and the non-`raw` rejection case; assert the help hints advertise the optional id. |
 | `README.md` | Telegram command table and drafting paragraph: `/generate [idea id]` starts generation for the oldest raw idea, or for the named idea. |
 | `docs/architecture/request-flows.md` | LinkedIn flow: `/generate [idea id]` selects the named raw idea, defaulting to the oldest raw idea. |
@@ -155,20 +165,23 @@ Behavioral assertions:
 1. `/generate` with no argument starts exactly one workflow for the oldest raw
    idea with that page's `pageId`, `ideaId`, and `source`, and replies naming
    the idea (default restored).
-2. `/generate <id>` for a raw idea that is **not** the oldest starts exactly one
+2. A no-argument `/generate` for an **untitled** raw idea replies with the
+   existing body excerpt truncated to `LABEL_TRUNCATE_LENGTH` (80) characters,
+   preserving the pre-change message for the default path.
+3. `/generate <id>` for a raw idea that is **not** the oldest starts exactly one
    workflow for that idea, proving explicit selection overrides the default.
-3. `/generate` with an empty raw queue replies `No raw ideas to generate from.`
+4. `/generate` with an empty raw queue replies `No raw ideas to generate from.`
    and starts nothing.
-4. `/generate 99` (no such idea) replies `Nothing to generate for that idea.`
+5. `/generate 99` (no such idea) replies `Nothing to generate for that idea.`
    and starts nothing.
-5. `/generate abc` (malformed) replies `Nothing to generate for that idea.` and
+6. `/generate abc` (malformed) replies `Nothing to generate for that idea.` and
    starts nothing.
-6. `/generate <id>` for an idea whose status is `awaiting-feedback` (and, by the
+7. `/generate <id>` for an idea whose status is `awaiting-feedback` (and, by the
    same path, `drafted` / `finalized` / `skipped`) replies
    `Nothing to generate for that idea.` and starts nothing.
-7. A `substack`-sourced raw idea is selectable by id and starts its workflow.
-8. The Notion-failure and unauthorized-user `/generate` tests continue to pass.
-9. `pnpm check` passes.
+8. A `substack`-sourced raw idea is selectable by id and starts its workflow.
+9. The Notion-failure and unauthorized-user `/generate` tests continue to pass.
+10. `pnpm check` passes.
 
 ## 6. Out of scope
 
@@ -190,18 +203,24 @@ Behavioral assertions:
    existing `No raw ideas to generate from.`; a bad/unavailable explicit id gets
    `Nothing to generate for that idea.`. Keeping both preserves current behavior
    and tells the user which situation they hit; a single message is simpler.
-3. **Success label fallback.** The plan labels both paths with
-   `idea.title ?? "Untitled"`. The old default path used the idea body truncated
-   to 80 characters when the title was missing; that fallback is dropped because
-   the explicit-id path works from `IdeaSummary` (no body) and a uniform label
-   avoids a second code path. Restore the body fallback for the default path
-   only if the untitled label matters.
+
+### Resolved in this revision
+
+- **Success label fallback.** The default path keeps the exact old label,
+  `idea.title ?? idea.body.slice(0, LABEL_TRUNCATE_LENGTH)`, because
+  `getNextIdea()` returns a hydrated `Idea`. Only the explicit-id path, which
+  works from a body-less `IdeaSummary`, falls back to `"Untitled"`. The
+  `"body" in idea` guard selects between them, and a unit test covers an
+  untitled default-selected idea so the old behavior stays locked in.
 
 ## 8. Acceptance criteria
 
 - [ ] `/generate` with no argument keeps the existing behavior: starts
       `PipelineWorkflow` for the oldest raw idea, or replies
       `No raw ideas to generate from.` when the queue is empty.
+- [ ] The no-argument success message is unchanged for untitled ideas: it still
+      uses the `idea.body.slice(0, LABEL_TRUNCATE_LENGTH)` excerpt, not
+      `"Untitled"`, with a test covering an untitled default-selected idea.
 - [ ] `/generate <id>` starts `PipelineWorkflow` for exactly that idea when it
       exists and is `raw`, and reports the started/already-running state.
 - [ ] Unknown, malformed, or non-`raw` ids (including `awaiting-feedback`) reply
