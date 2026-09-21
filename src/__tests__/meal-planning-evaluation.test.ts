@@ -1326,3 +1326,122 @@ describe("structured meal hydration", () => {
     )
   })
 })
+
+describe("initial-plan easy-buy reconciliation", () => {
+  function homeLunchSubzi(id: string, name: string, required: string[]) {
+    return {
+      id,
+      name,
+      principalIngredients: required,
+      vegetarian: true as const,
+      suitableSlots: ["home-lunch"],
+      packedFood: { suitable: false, dry: false },
+      typicalCookMinutes: 20,
+      priorNightPrep: "none" as const,
+      requiredIngredients: required,
+      optionalIngredients: [],
+      status: "established" as const,
+    }
+  }
+
+  it("reconciles the observed catalog-meal ingredients when the model omits them from easyBuys", () => {
+    const pattaGobiMatar = homeLunchSubzi("patta-gobi-matar", "Patta Gobi Matar", [
+      "peas",
+      "cauliflower",
+      "tomato",
+      "onion",
+    ])
+    const paniyaram = {
+      ...homeLunchSubzi("paniyaram", "Paniyaram", ["idli batter", "rice"]),
+      suitableSlots: ["breakfast"],
+    }
+    const frenchBeansSubzi = homeLunchSubzi("french-beans-subzi", "French Beans Subzi", ["french beans", "coconut"])
+    const context = baseContext({
+      profile: {
+        ...SEED_PROFILE,
+        mealDefinitions: [pattaGobiMatar, paniyaram, frenchBeansSubzi],
+        pantryBaseline: [],
+      },
+      weeklyInventory: { items: [], notes: [] },
+    })
+    const result = evaluateMealPlanSelection(
+      {
+        grid: {
+          Mon: {
+            breakfast: { mealDefinitionId: "paniyaram" },
+            "home-lunch": { mealDefinitionId: "patta-gobi-matar" },
+          },
+          Tue: { "home-lunch": { mealDefinitionId: "french-beans-subzi" } },
+        },
+        easyBuys: ["rice", "sourdough"],
+        policyOutcomes: {},
+      },
+      context,
+    )
+
+    expect(result.evaluation.failures).not.toContainEqual(
+      expect.objectContaining({ code: "required_ingredient_unavailable" }),
+    )
+    expect(result.candidate?.easyBuys).toEqual([
+      "idli batter",
+      "rice",
+      "peas",
+      "cauliflower",
+      "tomato",
+      "onion",
+      "french beans",
+      "coconut",
+    ])
+  })
+
+  it("keeps inventory-resolved and pantry ingredients out of the reconciled initial easy buys", () => {
+    const rajma = {
+      id: "meal-rajma-chawal",
+      name: "Rajma Chawal",
+      principalIngredients: ["Kidney Beans", "rice"],
+      vegetarian: true as const,
+      suitableSlots: ["home-lunch"],
+      packedFood: { suitable: false, dry: false },
+      typicalCookMinutes: 20,
+      priorNightPrep: "none" as const,
+      requiredIngredients: ["Kidney Beans", "rice"],
+      optionalIngredients: [],
+      status: "established" as const,
+    }
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [rajma], pantryBaseline: ["rice"] },
+      weeklyInventory: { items: [{ name: "Rajma", status: "available" }], notes: [] },
+    })
+    const result = evaluateMealPlanSelection(
+      {
+        grid: {
+          Mon: {
+            "home-lunch": { mealDefinitionId: rajma.id, ingredientAliasesUsed: { Rajma: "Kidney Beans" } },
+          },
+        },
+        easyBuys: [],
+        policyOutcomes: {},
+      },
+      context,
+    )
+
+    expect(result.candidate?.easyBuys).toEqual([])
+  })
+
+  it("still rejects an explicitly unavailable required ingredient on the initial path", () => {
+    const frenchBeansSubzi = homeLunchSubzi("french-beans-subzi", "French Beans Subzi", ["french beans"])
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [frenchBeansSubzi], pantryBaseline: [] },
+      weeklyInventory: { items: [{ name: "french beans", status: "unavailable" }], notes: [] },
+    })
+    const result = evaluateMealPlanSelection(
+      { grid: { Mon: { "home-lunch": { mealDefinitionId: frenchBeansSubzi.id } } }, easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+
+    expect(result.candidate).toBeUndefined()
+    expect(result.evaluation.failures).toContainEqual(
+      expect.objectContaining({ code: "required_ingredient_unavailable" }),
+    )
+  })
+})
