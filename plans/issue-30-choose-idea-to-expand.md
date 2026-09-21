@@ -1,11 +1,14 @@
 # Choose Which Raw Idea to Draft Next
 
-> **Status:** Plan for GitHub issue #30 (`Allow choosing which idea to expand to a
-> draft next`).
+> **Status:** Revised plan for GitHub issue #30 (`Allow choosing which idea to
+> expand to a draft next`).
 > **Document role:** Design of the change that replaces `/generate`'s forced
-> oldest-raw-idea selection with an explicit, author-chosen idea.
+> oldest-raw-idea selection with an explicit idea id supplied by the author.
 > **Scope:** Telegram ingress only. No agent, Notion schema, workflow, or
 > production runtime configuration change.
+> **Revision note:** Supersedes the inline-keyboard chooser design. The author
+> now names the idea directly (`/generate <idea id>`), so no callback contract,
+> keyboard, or selection state is needed.
 
 ## 1. Problem
 
@@ -23,152 +26,97 @@ The author cannot say "draft this one today." Substack runs can add up to five
 raw ideas per post, so the queue grows and `/generate` keeps pulling the oldest
 one regardless of what the author actually wants to publish.
 
-`getNextIdea()` has exactly one caller (`telegram-webhook.ts`); the scheduled
-cadence (`src/triggers/cadence.ts`) selects its own oldest eligible idea
-directly, so the root cause is confined to the `/generate` branch.
+`getNextIdea()` has exactly one production caller (`telegram-webhook.ts`); the
+scheduled cadence (`src/triggers/cadence.ts`) selects its own oldest eligible
+idea directly, so the root cause is confined to the `/generate` branch.
 
 ## 2. Outcome
 
-When the author sends `/generate`, Kipp replies with the available raw ideas as
-inline buttons. Tapping one starts `PipelineWorkflow` for that idea. No draft is
-started until the author explicitly picks.
+When the author sends `/generate <idea id>` (for example `/generate 20`), Kipp
+starts `PipelineWorkflow` for that specific idea, but only when the idea exists
+and is still `raw`. No draft is started until the author names an idea.
 
-- `/generate` never auto-starts a workflow.
-- Every raw idea — `substack`, `telegram`, or `manual` — is offered.
-- Tapping a stale button (idea already drafted, or unknown) starts nothing and
-  explains why.
+- `/generate <id>` starts a workflow for exactly that idea, or reports that
+  there is nothing to generate.
+- `/generate` with no argument replies with usage and starts nothing.
+- Any idea that is unavailable — unknown id, malformed id, or a status other
+  than `raw` (including `awaiting-feedback`) — gets the same
+  nothing-to-generate reply and starts nothing.
+- Every raw idea — `substack`, `telegram`, or `manual` — is selectable.
 - The scheduled cadence is unchanged: it is a timer with no interactive surface.
 
 ## 3. Design
 
-### 3.1 `/generate` presents the raw ideas
+### 3.1 `/generate <idea id>` selects by Kipp id
 
-Replace the `getNextIdea()` call in the `/generate` branch with a raw-idea list
-and an inline keyboard:
+Replace the `getNextIdea()` call in the `/generate` branch with an id lookup
+over the raw set:
 
 ```ts
-if (command?.name === "generate" && !command.argument) {
+if (command?.name === "generate") {
   logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
-  const manager = createIdeaManager(createNotionClient(env))
-  const ideas = await manager.getIdeasByStatuses(["raw"])
-  if (ideas.length === 0) {
-    await tg.sendMessage(msg.chat.id, "No raw ideas to generate from.")
+  if (!command.argument) {
+    await tg.sendMessage(msg.chat.id, "Usage: /generate <idea id>")
     return new Response("OK")
   }
-  const choices = ideas.slice(-MAX_IDEA_CHOICES).reverse()
-  const heading =
-    ideas.length > MAX_IDEA_CHOICES
-      ? `Choose a raw idea to draft (showing the ${MAX_IDEA_CHOICES} most recent of ${ideas.length}):`
-      : "Choose a raw idea to draft:"
-  await tg.sendMessage(msg.chat.id, heading, {
-    replyMarkup: {
-      inline_keyboard: choices.map((idea) => [
-        { text: ideaChoiceLabel(idea), callback_data: `${IDEA_CALLBACK_PREFIX}${idea.pageId}` },
-      ]),
-    },
-  })
+  const manager = createIdeaManager(createNotionClient(env))
+  const idea = (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.id === command.argument)
+  if (!idea) {
+    await tg.sendMessage(msg.chat.id, "Nothing to generate for that idea.")
+    return new Response("OK")
+  }
+  const result = await createIdeaIngest(env).start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })
+  const verb = result.alreadyStarted ? "Workflow already running" : "Started workflow"
+  await tg.sendMessage(msg.chat.id, `${verb} for idea #${idea.id}: ${idea.title ?? "Untitled"}`)
   logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
   return new Response("OK")
 }
 ```
 
 This reuses the existing `IdeaManager.getIdeasByStatuses(["raw"])` (already used
-by the cadence check) and the existing `sendMessage` `replyMarkup` support. No
-new Notion query, filter, or manager method is required.
+by the cadence check). No new Notion query, filter, manager method, keyboard, or
+callback handling is required.
 
-### 3.2 Selection callback contract
+### 3.2 Validation and the single failure reply
 
-Buttons carry `gen:<pageId>` as `callback_data`. A Notion page id is a 36-char
-UUID, so `gen:` + id is ~40 bytes, within Telegram's 64-byte callback limit.
+`getIdeasByStatuses(["raw"])` is the only validation gate. The id is not found
+in that set when:
 
-Handle the prefix in the existing `callback_query` branch, after
-`answerCallbackQuery` and before `dispatchRoutedInteraction`:
+- no idea has that Kipp id (typo or out-of-range number);
+- the argument is not a valid id (for example `/generate abc`); or
+- the idea exists but its status is not `raw` — `drafted`,
+  `awaiting-feedback`, `awaiting-feedback-expired`, `finalized`, or `skipped`.
 
-```ts
-if (cq.data?.startsWith(IDEA_CALLBACK_PREFIX) && cq.message) {
-  await startSelectedIdea(env, tg, cq.message.chat.id, cq.data.slice(IDEA_CALLBACK_PREFIX.length))
-  logRuntime(env, { event: "linkedin-generation-request", outcome: "succeeded" })
-  return new Response("OK")
-}
-```
+All of those cases reply with the same message, `Nothing to generate for that
+idea.`, and start nothing. This matches the requirement that an unavailable
+idea — including one awaiting feedback — only needs to tell the user there is
+nothing to generate. Missing the argument is a bad invocation rather than an
+unavailable idea, so it gets the usage reply instead.
 
-`startSelectedIdea` re-reads the raw set and only starts a workflow when the
-tapped page is still `raw`:
+The `IdeaIngestDO` claim (`claim:{pageId}`) already makes near-simultaneous
+double-taps idempotent and reports `alreadyStarted`; a re-issue after the
+workflow flips the idea out of `raw` fails the status gate.
 
-```ts
-/** Starts PipelineWorkflow for the raw idea chosen from the /generate keyboard. */
-async function startSelectedIdea(
-  env: Env,
-  tg: ReturnType<typeof createTelegramClient>,
-  chatId: number,
-  pageId: string,
-): Promise<void> {
-  const manager = createIdeaManager(createNotionClient(env))
-  const idea = (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.pageId === pageId)
-  if (!idea) {
-    await tg.sendMessage(chatId, "That idea is no longer available to draft.")
-    return
-  }
-  const result = await createIdeaIngest(env).start({ pageId: idea.pageId, ideaId: idea.id, source: idea.source })
-  const verb = result.alreadyStarted ? "Workflow already running" : "Started workflow"
-  const label = idea.title?.trim() || `Idea #${idea.id}`
-  await tg.sendMessage(chatId, `${verb} for idea #${idea.id}: ${label}`)
-}
-```
-
-Why this shape:
-
-- It deliberately does **not** register anything in `InteractionRouterDO`. That
-  router routes callbacks to an existing workflow instance; no instance exists
-  before selection. A direct `gen:` prefix is the smaller path.
-- `getIdeasByStatuses(["raw"])` doubles as the stale guard, so a double-tap after
-  the workflow flips the idea to `drafted` cannot start a second workflow. The
-  `IdeaIngestDO` claim (`claim:{pageId}`) already makes near-simultaneous
-  double-taps idempotent and reports `alreadyStarted`.
-- Authorization is unchanged: `verifyUser` runs at the top of the
-  `callback_query` branch before any `gen:` handling.
-- Boundary failures (Notion errors) already flow through the branch's
-  `catch` → `handleBoundaryError`, which notifies the chat with safe wording.
-
-### 3.3 Bounds and labels
-
-Telegram caps a message at 4,096 characters and an inline keyboard at 100
-buttons. Add two module constants and one label helper:
-
-```ts
-const IDEA_CALLBACK_PREFIX = "gen:"
-const MAX_IDEA_CHOICES = 20
-const IDEA_CHOICE_LABEL_MAX = 48
-
-/** Builds a bounded inline-button label that identifies one raw idea. */
-function ideaChoiceLabel(idea: IdeaSummary): string {
-  const title = idea.title?.trim()
-  const label = title ? `#${idea.id} ${title}` : `#${idea.id} Untitled`
-  return label.length > IDEA_CHOICE_LABEL_MAX ? `${label.slice(0, IDEA_CHOICE_LABEL_MAX - 1)}…` : label
-}
-```
-
-The heading text carries the truncation note so the author knows older ideas are
-not shown. The full title remains available in Notion.
-
-### 3.4 Unchanged behavior
+### 3.3 Unchanged behavior
 
 - Scheduled cadence (`handleCadenceCron`) still selects the oldest non-Substack
   raw idea; it is a timer, not a conversation.
 - `/add`, RSS ingestion, the LinkedIn workflow, `IdeaIngestDO`, the interaction
   router, and the Notion schema are untouched.
-- `/generate <argument>` still falls through to the unknown-command reply, as
-  today. A text-based picker is out of scope (see §6).
+- Authorization is unchanged: `verifyUser` still runs at the top of
+  `handleMessage` before the `/generate` branch.
+- Boundary failures (Notion errors) still flow through the branch's `catch` →
+  `handleBoundaryError`, which notifies the chat with safe wording.
 
 ## 4. File-level change list
 
 | File | Change |
 | --- | --- |
-| `src/triggers/telegram-webhook.ts` | Replace the `getNextIdea()` auto-start with the raw-idea chooser; add the `gen:` callback branch; add `IDEA_CALLBACK_PREFIX`, `MAX_IDEA_CHOICES`, `IDEA_CHOICE_LABEL_MAX`, `ideaChoiceLabel`, and `startSelectedIdea` (all with JSDoc per `tools/require-jsdoc.mjs`); import `IdeaSummary` from `../core/types`. |
-| `src/__tests__/telegram.test.ts` | Update the `/generate` test to assert a chooser message (keyboard, no workflow start); add cases for callback selection, stale/unknown selection, disallowed callback user, and the choice cap. |
-| `src/__integration__/telegram-to-backlog.integration.test.ts` | Rewrite the `/generate` tests around the chooser + callback round-trip; add a Substack-source selection case. |
-| `README.md` | Telegram command table: `/generate` now lists raw ideas to choose from. |
-| `docs/architecture/request-flows.md` | LinkedIn flow: `/generate` lists raw ideas and the selection callback starts the workflow. |
+| `src/triggers/telegram-webhook.ts` | Rewrite the `/generate` branch to require an idea id, look it up among `getIdeasByStatuses(["raw"])`, and start only on a match; add the usage and nothing-to-generate replies; remove the now-unused `LABEL_TRUNCATE_LENGTH` constant; update the two unknown-command hint strings to say `/generate <idea id>`. No new imports, constants, or helper functions. |
+| `src/__tests__/telegram.test.ts` | Update the `/generate` test to send an id and assert the workflow starts for that page; add cases for the missing-argument usage reply, an unknown id, and a non-`raw` (e.g. `awaiting-feedback`) idea, all asserting no workflow start; add the id to the existing Notion-failure `/generate` payloads. |
+| `src/__integration__/telegram-to-backlog.integration.test.ts` | Rewrite the `/generate` cases around the id argument; add a `substack`-source selection case and an `awaiting-feedback` rejection case. |
+| `README.md` | Telegram command table and drafting paragraph: `/generate <idea id>` starts generation for that raw idea. |
+| `docs/architecture/request-flows.md` | LinkedIn flow: `/generate <idea id>` selects a specific raw idea by id. |
 
 No change to `src/linkedin/ideas/manager.ts`, `src/integrations/notion.ts`,
 `src/core/idea-ingest.ts`, `src/triggers/cadence.ts`, `Env`,
@@ -187,58 +135,53 @@ Then the full gate `pnpm check` (lint, JSDoc, typecheck, unit tests).
 
 Behavioral assertions:
 
-1. `/generate` with one or more raw ideas sends a message with an inline
-   keyboard whose buttons are `gen:<pageId>` and whose labels contain each Kipp
-   ID; no `PIPELINE_WORKFLOW` instance is created.
-2. `/generate` with no raw ideas still replies `No raw ideas to generate from.`
-   and starts nothing.
-3. A `callback_query` with `data: "gen:<pageId>"` for a raw page starts exactly
-   one workflow with that page's `pageId`, `ideaId`, and `source`, and replies
-   `Started workflow for idea #<id>: <title>`.
-4. A `gen:` callback for a page that is no longer `raw`, or for an unknown page,
-   starts nothing and replies `That idea is no longer available to draft.`
-5. A `gen:` callback from a user failing `verifyUser` returns HTTP 403 and sends
+1. `/generate 1` for a raw idea #1 starts exactly one workflow with that page's
+   `pageId`, `ideaId`, and `source`, and replies naming the idea.
+2. `/generate` with no argument replies `Usage: /generate <idea id>` and starts
    nothing.
-6. With more than `MAX_IDEA_CHOICES` raw ideas, only the newest `MAX_IDEA_CHOICES`
-   are offered and the heading states how many were omitted.
-7. Choosing a `substack`-sourced raw idea starts it (Substack ideas stay
-   manual-only but become individually selectable).
-8. Existing routed callbacks (Approve / Revise) and the Notion-failure and
-   unauthorized-user `/generate` tests continue to pass.
+3. `/generate 99` (no such idea) replies `Nothing to generate for that idea.`
+   and starts nothing.
+4. `/generate <id>` for an idea whose status is `awaiting-feedback` (and, by the
+   same path, `drafted` / `finalized` / `skipped`) replies
+   `Nothing to generate for that idea.` and starts nothing.
+5. A non-numeric argument (`/generate abc`) replies
+   `Nothing to generate for that idea.` and starts nothing.
+6. A `substack`-sourced raw idea is selectable by id and starts its workflow.
+7. The Notion-failure and unauthorized-user `/generate` tests continue to pass.
+8. `pnpm check` passes.
 
 ## 6. Out of scope
 
-- Text-based selection (`/generate <id>` or a `/ideas` command). Inline buttons
-  cover the requirement; a text fallback can be added later if buttons prove
-  awkward.
-- Pagination of the raw-idea list beyond the newest 20.
+- The inline-keyboard chooser, `gen:` callback contract, and pagination from the
+  superseded revision.
+- Removing the now-unused `getNextIdea()` manager method and its unit tests in
+  `src/__tests__/ideas.test.ts`; it stays in place as a tested but
+  production-unused helper.
 - Changing scheduled cadence to ask for a choice instead of auto-selecting.
-- Showing idea bodies or Substack source URLs in the chooser.
+- Listing ideas (`/ideas`) or accepting a title/source in place of an id.
 - Any agent-prompt, Notion-property, workflow-step, or deployment-config change.
 
 ## 7. Open questions for review
 
-1. **Cap and ordering.** The plan offers the 20 newest raw ideas, newest first.
-   This keeps the message and keyboard well inside Telegram limits and favors
-   "what I feel like publishing today." Alternative: no cap (message length can
-   exceed 4,096 characters as raw ideas accumulate) or a `/ideas` paginator.
-2. **Callback data exposes the Notion page id.** Notion page ids are not secrets
-   and the callback is user-gated, so `gen:<pageId>` is accepted. An opaque
-   token would require registering a workflow-less interaction in
-   `InteractionRouterDO`, which the plan avoids.
-3. **Cadence behavior.** The plan leaves the scheduled cadence auto-selecting the
-   oldest non-Substack idea. If the owner wants the timer to stop drafting
-   without a human choice, that is a separate, behavior-changing issue.
+1. **Uniform failure reply.** The plan uses one message,
+   `Nothing to generate for that idea.`, for unknown, malformed, and non-`raw`
+   ids rather than naming the id or explaining the status. Simpler and matches
+   the requirement; a more specific reply can be added later.
+2. **Missing-argument behavior.** `/generate` with no argument replies with
+   usage instead of falling back to the old oldest-raw-idea auto-selection. The
+   issue's intent is explicit choice, so the forced serial default is dropped.
+3. **`getNextIdea` left in place.** After this change it has no production
+   caller. The plan leaves the method and its unit tests untouched to keep the
+   diff confined to the Telegram ingress.
 
 ## 8. Acceptance criteria
 
-- [ ] `/generate` lists raw ideas and starts no workflow until the author taps
-      one.
-- [ ] Tapping a raw idea starts `PipelineWorkflow` for exactly that idea and
-      reports the started/already-running state.
-- [ ] Stale, unknown, or unauthorized selections start nothing and are handled
-      safely.
-- [ ] `substack`, `telegram`, and `manual` raw ideas are all selectable.
+- [ ] `/generate <id>` starts `PipelineWorkflow` for exactly that idea when it
+      exists and is `raw`, and reports the started/already-running state.
+- [ ] `/generate` with no argument replies with usage and starts nothing.
+- [ ] Unknown, malformed, or non-`raw` ids (including `awaiting-feedback`) reply
+      `Nothing to generate for that idea.` and start nothing.
+- [ ] `substack`, `telegram`, and `manual` raw ideas are all selectable by id.
 - [ ] Scheduled cadence, RSS ingestion, `/add`, and the drafting workflow are
       unchanged.
 - [ ] Targeted tests and `pnpm check` pass.
