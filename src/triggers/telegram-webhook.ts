@@ -204,10 +204,8 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
     if (command?.name === "generate") {
       logRuntime(env, { event: "linkedin-generation-request", outcome: "started" })
       const manager = createIdeaManager(createNotionClient(env))
-      const idea = command.argument
-        ? (await manager.getIdeasByStatuses(["raw"])).find((candidate) => candidate.id === command.argument)
-        : await manager.getNextIdea()
-      if (!idea) {
+      const idea = command.argument ? await manager.getIdeaByIdeaId(command.argument) : await manager.getNextIdea()
+      if (!idea || idea.status !== "raw") {
         await tg.sendMessage(
           msg.chat.id,
           command.argument ? "Nothing to generate for that idea." : "No raw ideas to generate from.",

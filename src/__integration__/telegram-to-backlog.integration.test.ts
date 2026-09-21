@@ -81,20 +81,20 @@ describe("telegram-to-backlog", () => {
     harness = createFakeNetwork({
       notionPages: [
         {
-          pageId: "page_2",
-          kippId: 2,
-          title: "",
-          status: "raw",
-          source: "manual",
-          markdown: "Idea two",
-        },
-        {
           pageId: "page_1",
           kippId: 1,
           title: "",
           status: "raw",
           source: "telegram",
           markdown: "Idea one",
+        },
+        {
+          pageId: "page_2",
+          kippId: 2,
+          title: "",
+          status: "raw",
+          source: "manual",
+          markdown: "Idea two",
         },
       ],
     })

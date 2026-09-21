@@ -112,6 +112,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
             status?: { equals?: string }
             url?: { equals?: string }
             rich_text?: { equals?: string }
+            unique_id?: { equals?: number }
             or?: Array<{ property?: string; status?: { equals?: string } }>
           }
           sorts?: Array<{ property?: string; direction?: string }>
@@ -119,6 +120,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
         let results = [...state.notionPages.values()]
         const filter = body.filter
         if (filter?.property === "Status") results = results.filter((p) => p.status === filter.status?.equals)
+        if (filter?.property === "Kipp ID") results = results.filter((p) => p.kippId === filter.unique_id?.equals)
         if (filter?.or) {
           const statuses = filter.or
             .filter((clause) => clause.property === "Status")
