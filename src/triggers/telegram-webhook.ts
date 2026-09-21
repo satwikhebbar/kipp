@@ -306,7 +306,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
 
       await tg.sendMessage(
         msg.chat.id,
-        "Unknown command. Use /add <text>, /generate, /calendar <request>, /mealplan <request>, or tap inline buttons.",
+        "Unknown command. Use /add <text>, /generate <idea id>, /calendar <request>, /mealplan <request>, or tap inline buttons.",
       )
       return new Response("OK")
     }
