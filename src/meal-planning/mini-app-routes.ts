@@ -317,6 +317,7 @@ miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
     ) {
       return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
     }
+    if (planId !== session.planId) return jsonResponse({ error: "historical_or_stale" }, HTTP_STATUS.CONFLICT)
     const active = await store.activePlan(session.chatId)
     if (!active || active.plan.planId !== planId)
       return jsonResponse({ error: "historical_or_stale" }, HTTP_STATUS.CONFLICT)
