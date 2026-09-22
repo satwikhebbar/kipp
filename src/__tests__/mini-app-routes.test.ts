@@ -13,6 +13,80 @@ function env(): Env {
   } as Env
 }
 
+const BOT_TOKEN = "bot-token"
+const FAKE_NOW = new Date("2026-09-22T05:40:00.000Z")
+
+async function sign(key: Uint8Array, value: string): Promise<Uint8Array> {
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+  return new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(value)))
+}
+
+function toHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
+async function signedInitData(): Promise<string> {
+  const params = new URLSearchParams({
+    auth_date: String(Math.floor(FAKE_NOW.getTime() / 1_000)),
+    query_id: "query-routes",
+    user: JSON.stringify({ id: 42, first_name: "Parent" }),
+  })
+  const secret = await sign(new TextEncoder().encode("WebAppData"), BOT_TOKEN)
+  const check = [...params.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n")
+  params.set("hash", toHex(await sign(secret, check)))
+  return params.toString()
+}
+
+/** Seeds one active plan for the allowed user and returns its Mini App plan response. */
+async function planResponse(weekStart: string, weekEnd: string): Promise<Response> {
+  const { d1 } = createD1TestDb()
+  const store = createMealPlanningStore(d1)
+  await store.loadOrCreateProfile("chat-42")
+  await store.createActivePlan({
+    planId: "plan-1",
+    chatId: "chat-42",
+    weekStart,
+    weekEnd,
+    timezone: "Asia/Kolkata",
+    instanceId: "instance-1",
+    candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
+    evaluation: {
+      pass: true,
+      failures: [],
+      measurements: {
+        morningCookByDay: {},
+        morningCookMax: 0,
+        priorNightPrepByDay: {},
+        priorNightPrepMax: 0,
+        dishRepeatCount: 0,
+        dishRepeats: [],
+        inventoryUsed: [],
+        easyBuyCount: 0,
+      },
+    },
+    weeklyInventory: { items: [], notes: [] },
+    weeklyExceptions: { items: [] },
+  })
+  await store.upsertMiniAppReviewContext({ telegramUserId: "42", chatId: "chat-42", planId: "plan-1", weekEnd })
+  const testEnv = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 } as Env
+  const session = await miniAppRoutes.fetch(
+    new Request("https://kipp.example/mini-app/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: await signedInitData(),
+    }),
+    testEnv,
+  )
+  const { token } = (await session.json()) as { token: string }
+  return miniAppRoutes.fetch(
+    new Request("https://kipp.example/mini-app/api/plan", { headers: { Authorization: `Bearer ${token}` } }),
+    testEnv,
+  )
+}
+
 describe("Mini App HTTP boundary", () => {
   it("serves a data-free Mini App shell with ready, empty, and feedback affordances", async () => {
     const shell = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app"), env())
@@ -34,6 +108,33 @@ describe("Mini App HTTP boundary", () => {
     const plan = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app/api/plan"), env())
     expect(plan.status).toBe(403)
     expect(plan.headers.get("cache-control")).toBe("no-store")
+  })
+
+  it("serves a plan created for next week until its own week ends", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const response = await planResponse("2026-09-27T18:30:00.000Z", "2026-10-03T18:29:59.000Z")
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({
+        status: "ready",
+        plan: { planId: "plan-1", weekStart: "2026-09-27T18:30:00.000Z" },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("reports no plan once the plan's week has ended", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const response = await planResponse("2026-09-13T18:30:00.000Z", "2026-09-19T18:29:59.000Z")
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ status: "empty" })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("requires the raw init-data content type and bounds malformed feedback requests", async () => {
