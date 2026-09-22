@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { escapeTelegramMarkdown, renderPlanMessage } from "../meal-planning/messages"
+import { escapeTelegramMarkdown, renderPlanLaunchMessage, renderPlanMessage } from "../meal-planning/messages"
 import type { MealPlanRecord, MealPlanVersionRecord } from "../meal-planning/store"
 import type { MealCell, MealGrid, MealPlanCandidate, MealPlanEvaluation, MealSchedule } from "../meal-planning/types"
 
@@ -127,5 +127,17 @@ describe("renderPlanMessage", () => {
 
   it("escapes only Telegram Markdown special characters", () => {
     expect(escapeTelegramMarkdown("a_b *c* [d] `e` \\f")).toBe("a\\_b \\*c\\* \\[d\\] \\`e\\` \\\\f")
+  })
+})
+
+describe("renderPlanLaunchMessage", () => {
+  it("labels the week in the plan timezone, not UTC", () => {
+    const rendered = renderPlanLaunchMessage({
+      ...PLAN,
+      weekStart: "2026-09-27T18:30:00.000Z",
+      weekEnd: "2026-10-03T18:29:59.000Z",
+    })
+    expect(rendered).toContain("School week of Mon, Sep 28 – Sat, Oct 3")
+    expect(rendered).not.toContain("Sun, Sep 27")
   })
 })
