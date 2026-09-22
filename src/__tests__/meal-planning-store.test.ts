@@ -699,6 +699,62 @@ describe.each([
     ).toBe(false)
   })
 
+  it("keeps generation leases token-scoped and blocks feedback while generation is active", async () => {
+    const store = await makeStore()
+    await store.createActivePlan(createInput())
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "generation-1",
+      startedAt: "2026-09-07T00:00:00.000Z",
+      expiresAt: "2999-09-07T01:00:00.000Z",
+    })
+    expect(await store.activePlanGeneration(CHAT, "2026-09-07T00:30:00.000Z")).toMatchObject({
+      generationId: "generation-1",
+      status: "generating",
+    })
+    expect(await store.finishPlanGeneration(CHAT, "wrong-generation")).toBe(false)
+    expect(await store.activePlanGeneration(CHAT, "2026-09-07T00:30:00.000Z")).not.toBeNull()
+
+    expect(
+      await store.acceptFeedbackBatch({
+        batchId: "blocked-batch",
+        planId: "plan-1",
+        chatId: CHAT,
+        baseVersion: 1,
+        workflowInstanceId: "instance-1",
+        idempotencyKey: "blocked-request",
+        items: [{ text: "wait", target: { kind: "plan" } }],
+      }),
+    ).toEqual({ ok: false, reason: "generating" })
+
+    expect(await store.finishPlanGeneration(CHAT, "generation-1")).toBe(true)
+    expect(await store.activePlanGeneration(CHAT, "2026-09-07T00:30:00.000Z")).toBeNull()
+    expect(
+      await store.acceptFeedbackBatch({
+        batchId: "accepted-after-generation",
+        planId: "plan-1",
+        chatId: CHAT,
+        baseVersion: 1,
+        workflowInstanceId: "instance-1",
+        idempotencyKey: "accepted-request",
+        items: [{ text: "now", target: { kind: "plan" } }],
+      }),
+    ).toMatchObject({ ok: true, batch: { status: "accepted" } })
+  })
+
+  it("hydrates current and replaced plans through chat-scoped history reads", async () => {
+    const store = await makeStore()
+    await store.createActivePlan(createInput())
+    await store.createActivePlan(createInput({ planId: "plan-2", instanceId: "instance-2" }))
+
+    expect(await store.listPlanHistory(CHAT)).toMatchObject([
+      { plan: { planId: "plan-2", status: "active" }, version: { version: 1 } },
+      { plan: { planId: "plan-1", status: "replaced" }, version: { version: 1 } },
+    ])
+    expect(await store.planById(CHAT, "plan-1")).toMatchObject({ plan: { status: "replaced" } })
+    expect(await store.planById("other-chat", "plan-1")).toBeNull()
+  })
+
   it("accepts one version-bound batch idempotently and advances its dispatch lifecycle", async () => {
     const store = await makeStore()
     await store.createActivePlan(createInput())

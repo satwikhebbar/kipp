@@ -37,6 +37,18 @@ export interface StoredMealProfile {
 
 export type MealPlanStatus = "active" | "replaced"
 
+export type MealPlanGenerationStatus = "generating" | "failed"
+
+/** A chat-scoped lease covering initial-plan generation. */
+export interface MealPlanGenerationRecord {
+  chatId: string
+  generationId: string
+  status: MealPlanGenerationStatus
+  startedAt: string
+  expiresAt: string
+  updatedAt: string
+}
+
 /** LLM token usage recorded for one generated plan version. */
 export interface VersionUsage {
   inputTokens: number
@@ -158,7 +170,14 @@ export interface AcceptFeedbackBatchInput {
 
 export type AcceptFeedbackBatchResult =
   | { ok: true; batch: FeedbackBatchRecord; duplicate: boolean }
-  | { ok: false; reason: "stale" | "idempotency_mismatch" | "invalid_items" }
+  | { ok: false; reason: "stale" | "generating" | "idempotency_mismatch" | "invalid_items" }
+
+export interface StartPlanGenerationInput {
+  chatId: string
+  generationId: string
+  expiresAt: string
+  startedAt?: string
+}
 
 /** Input to `createActivePlan`: everything the atomic initial-plan batch needs. */
 export interface CreateActivePlanInput {
@@ -243,7 +262,12 @@ export interface MealPlanningStore {
   sumPlanUsage(planId: string): Promise<PlanUsageTotal | null>
   /** Updates only week-scoped inventory/calendar facts; it never creates a plan version. */
   updateWeeklyContext(input: UpdateWeeklyContextInput): Promise<UpdateWeeklyContextResult>
+  startPlanGeneration(input: StartPlanGenerationInput): Promise<MealPlanGenerationRecord>
+  finishPlanGeneration(chatId: string, generationId: string, failed?: boolean): Promise<boolean>
+  activePlanGeneration(chatId: string, now?: string): Promise<MealPlanGenerationRecord | null>
   activePlan(chatId: string): Promise<ActivePlanRecord | null>
+  listPlanHistory(chatId: string): Promise<ActivePlanRecord[]>
+  planById(chatId: string, planId: string): Promise<ActivePlanRecord | null>
   /** Reads the active plan's live instance pointer (whether or not its week has ended). */
   activePlanPointer(chatId: string): Promise<ActivePlanPointer | null>
   upsertMiniAppReviewContext(
@@ -278,6 +302,7 @@ export interface InMemoryMealPlanningBacking {
   reviewContexts?: Map<string, MiniAppReviewContext>
   sessions?: Map<string, MiniAppSessionRecord>
   initDataFingerprints?: Map<string, string>
+  generations?: Map<string, MealPlanGenerationRecord>
 }
 
 /** Options for the in-memory store; `failNextOn` is a single-shot test hook that simulates a mid-batch statement failure. */
@@ -760,6 +785,72 @@ function makeVersionRecord(
   }
 }
 
+const PLAN_WITH_VERSION_SELECT = `
+  SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
+         p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
+         v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
+         v.feedback_batch_id, v.video_json, v.provisional_meals_json,
+         v.usage_input_tokens, v.usage_output_tokens, v.usage_model, v.created_at AS version_created_at
+  FROM meal_plan p
+  JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version`
+
+/** Hydrates a plan header and its immutable current version from a joined row. */
+function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
+  return {
+    plan: {
+      planId: String(row.plan_id),
+      chatId: String(row.chat_id),
+      weekStart: String(row.week_start),
+      weekEnd: String(row.week_end),
+      timezone: String(row.timezone),
+      instanceId: String(row.instance_id),
+      status: String(row.status) as MealPlanStatus,
+      currentVersion: Number(row.current_version),
+      weeklyInventory: parseJson<WeeklyInventory>(String(row.weekly_inventory_json), { items: [], notes: [] }),
+      weeklyExceptions: parseJson<WeeklyExceptions>(String(row.weekly_exceptions_json), { items: [] }),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    },
+    version: {
+      planId: String(row.plan_id),
+      version: Number(row.version),
+      candidate: parseJson<MealPlanCandidate>(String(row.candidate_json), {
+        grid: {},
+        easyBuys: [],
+        policyOutcomes: {},
+      }),
+      evaluation: parseJson<MealPlanEvaluation>(String(row.evaluation_json), {
+        pass: false,
+        failures: [],
+        measurements: {
+          morningCookByDay: {},
+          morningCookMax: 0,
+          priorNightPrepByDay: {},
+          priorNightPrepMax: 0,
+          dishRepeatCount: 0,
+          dishRepeats: [],
+          inventoryUsed: [],
+          easyBuyCount: 0,
+        },
+      }),
+      requestKind: String(row.request_kind) as RequestKind,
+      baseVersion: row.base_version === null ? null : Number(row.base_version),
+      feedbackBatchId: row.feedback_batch_id === null ? null : String(row.feedback_batch_id),
+      video: parseJson<Record<string, RecipeVideo>>(String(row.video_json), {}),
+      provisionalMealDefinitions: parseJson<MealDefinition[]>(String(row.provisional_meals_json), []),
+      usage:
+        row.usage_input_tokens === null || row.usage_input_tokens === undefined
+          ? null
+          : {
+              inputTokens: Number(row.usage_input_tokens),
+              outputTokens: Number(row.usage_output_tokens ?? 0),
+              model: String(row.usage_model ?? ""),
+            },
+      createdAt: String(row.version_created_at),
+    },
+  }
+}
+
 /**
  * Production store over a Cloudflare D1 binding. Every operation is one atomic
  * `db.batch`; the partial unique index `idx_meal_plan_one_active` and the CAS
@@ -1067,74 +1158,102 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         : { ok: false as const, reason: "stale" as const }
     },
 
+    async startPlanGeneration(input) {
+      const startedAt = input.startedAt ?? nowIso()
+      await db
+        .prepare(
+          `INSERT INTO meal_plan_generation (chat_id, generation_id, status, started_at, expires_at, updated_at)
+           VALUES (?, ?, 'generating', ?, ?, ?)
+           ON CONFLICT(chat_id) DO UPDATE SET generation_id = excluded.generation_id,
+             status = 'generating', started_at = excluded.started_at,
+             expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+        )
+        .bind(input.chatId, input.generationId, startedAt, input.expiresAt, startedAt)
+        .run()
+      return {
+        chatId: input.chatId,
+        generationId: input.generationId,
+        status: "generating",
+        startedAt,
+        expiresAt: input.expiresAt,
+        updatedAt: startedAt,
+      }
+    },
+
+    async finishPlanGeneration(chatId, generationId, failed = false) {
+      const now = nowIso()
+      if (failed) {
+        const result = await db
+          .prepare(
+            `UPDATE meal_plan_generation SET status = 'failed', expires_at = ?, updated_at = ?
+             WHERE chat_id = ? AND generation_id = ?`,
+          )
+          .bind(now, now, chatId, generationId)
+          .run()
+        return Number(result.meta.changes) === 1
+      }
+      const result = await db
+        .prepare("DELETE FROM meal_plan_generation WHERE chat_id = ? AND generation_id = ?")
+        .bind(chatId, generationId)
+        .run()
+      return Number(result.meta.changes) === 1
+    },
+
+    async activePlanGeneration(chatId, now = nowIso()) {
+      await db.prepare("DELETE FROM meal_plan_generation WHERE expires_at <= ?").bind(now).run()
+      const row = await db
+        .prepare(
+          `SELECT chat_id, generation_id, status, started_at, expires_at, updated_at
+           FROM meal_plan_generation
+           WHERE chat_id = ? AND status = 'generating' AND expires_at > ?`,
+        )
+        .bind(chatId, now)
+        .first()
+      if (!row) return null
+      return {
+        chatId: String(row.chat_id),
+        generationId: String(row.generation_id),
+        status: String(row.status) as MealPlanGenerationStatus,
+        startedAt: String(row.started_at),
+        expiresAt: String(row.expires_at),
+        updatedAt: String(row.updated_at),
+      }
+    },
+
     async activePlan(chatId) {
       const row = await db
         .prepare(
-          `SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
-                  p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
-                  v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
-                  v.feedback_batch_id, v.video_json, v.provisional_meals_json,
-                  v.usage_input_tokens, v.usage_output_tokens, v.usage_model, v.created_at AS version_created_at
-           FROM meal_plan p
-           JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
+          `${PLAN_WITH_VERSION_SELECT}
            WHERE p.chat_id = ? AND p.status = 'active'`,
         )
         .bind(chatId)
         .first()
       if (!row) return null
-      return {
-        plan: {
-          planId: String(row.plan_id),
-          chatId: String(row.chat_id),
-          weekStart: String(row.week_start),
-          weekEnd: String(row.week_end),
-          timezone: String(row.timezone),
-          instanceId: String(row.instance_id),
-          status: String(row.status) as MealPlanStatus,
-          currentVersion: Number(row.current_version),
-          weeklyInventory: parseJson<WeeklyInventory>(String(row.weekly_inventory_json), { items: [], notes: [] }),
-          weeklyExceptions: parseJson<WeeklyExceptions>(String(row.weekly_exceptions_json), { items: [] }),
-          createdAt: String(row.created_at),
-          updatedAt: String(row.updated_at),
-        },
-        version: {
-          planId: String(row.plan_id),
-          version: Number(row.version),
-          candidate: parseJson<MealPlanCandidate>(String(row.candidate_json), {
-            grid: {},
-            easyBuys: [],
-            policyOutcomes: {},
-          }),
-          evaluation: parseJson<MealPlanEvaluation>(String(row.evaluation_json), {
-            pass: false,
-            failures: [],
-            measurements: {
-              morningCookByDay: {},
-              morningCookMax: 0,
-              priorNightPrepByDay: {},
-              priorNightPrepMax: 0,
-              dishRepeatCount: 0,
-              dishRepeats: [],
-              inventoryUsed: [],
-              easyBuyCount: 0,
-            },
-          }),
-          requestKind: String(row.request_kind) as RequestKind,
-          baseVersion: row.base_version === null ? null : Number(row.base_version),
-          feedbackBatchId: row.feedback_batch_id === null ? null : String(row.feedback_batch_id),
-          video: parseJson<Record<string, RecipeVideo>>(String(row.video_json), {}),
-          provisionalMealDefinitions: parseJson<MealDefinition[]>(String(row.provisional_meals_json), []),
-          usage:
-            row.usage_input_tokens === null || row.usage_input_tokens === undefined
-              ? null
-              : {
-                  inputTokens: Number(row.usage_input_tokens),
-                  outputTokens: Number(row.usage_output_tokens ?? 0),
-                  model: String(row.usage_model ?? ""),
-                },
-          createdAt: String(row.version_created_at),
-        },
-      }
+      return mealPlanFromRow(row)
+    },
+
+    async listPlanHistory(chatId) {
+      const result = await db
+        .prepare(
+          `${PLAN_WITH_VERSION_SELECT}
+           WHERE p.chat_id = ?
+           ORDER BY CASE WHEN p.status = 'active' THEN 0 ELSE 1 END,
+                    p.updated_at DESC, p.created_at DESC`,
+        )
+        .bind(chatId)
+        .all()
+      return (result.results ?? []).map((row) => mealPlanFromRow(row))
+    },
+
+    async planById(chatId, planId) {
+      const row = await db
+        .prepare(
+          `${PLAN_WITH_VERSION_SELECT}
+           WHERE p.chat_id = ? AND p.plan_id = ?`,
+        )
+        .bind(chatId, planId)
+        .first()
+      return row ? mealPlanFromRow(row) : null
     },
     async activePlanPointer(chatId) {
       const row = await db
@@ -1262,31 +1381,39 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async acceptFeedbackBatch(input) {
+      const now = nowIso()
       const planRow = await db
         .prepare(
           `SELECT v.candidate_json, profile.schedule_json
            FROM meal_plan p
            JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
            JOIN meal_profile profile ON profile.chat_id = p.chat_id
-           WHERE p.plan_id = ? AND p.chat_id = ? AND p.instance_id = ? AND p.current_version = ? AND p.status = 'active'`,
+           WHERE p.plan_id = ? AND p.chat_id = ? AND p.instance_id = ? AND p.current_version = ? AND p.status = 'active'
+             AND NOT EXISTS (SELECT 1 FROM meal_plan_generation g
+                             WHERE g.chat_id = p.chat_id AND g.status = 'generating' AND g.expires_at > ?)`,
         )
-        .bind(input.planId, input.chatId, input.workflowInstanceId, input.baseVersion)
+        .bind(input.planId, input.chatId, input.workflowInstanceId, input.baseVersion, now)
         .first()
-      if (!planRow) return { ok: false as const, reason: "stale" as const }
+      if (!planRow) {
+        if (await this.activePlanGeneration(input.chatId, now))
+          return { ok: false as const, reason: "generating" as const }
+        return { ok: false as const, reason: "stale" as const }
+      }
       const items = normalizeMiniAppFeedbackItems(
         input.items,
         parseJson<MealPlanCandidate>(String(planRow.candidate_json), { grid: {}, easyBuys: [], policyOutcomes: {} }),
         parseJson<MealSchedule>(String(planRow.schedule_json), SEED_SCHEDULE),
       )
       if (!items) return { ok: false as const, reason: "invalid_items" as const }
-      const now = nowIso()
       const itemsJson = JSON.stringify(items)
       await db
         .prepare(
           `INSERT OR IGNORE INTO feedback_batch
              (batch_id, plan_id, base_version, items_json, idempotency_key, status, created_at, updated_at)
            SELECT ?, ?, ?, ?, ?, 'accepted', ?, ? FROM meal_plan
-           WHERE plan_id = ? AND chat_id = ? AND instance_id = ? AND current_version = ? AND status = 'active'`,
+           WHERE plan_id = ? AND chat_id = ? AND instance_id = ? AND current_version = ? AND status = 'active'
+             AND NOT EXISTS (SELECT 1 FROM meal_plan_generation
+                             WHERE chat_id = ? AND status = 'generating' AND expires_at > ?)`,
         )
         .bind(
           input.batchId,
@@ -1300,6 +1427,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.chatId,
           input.workflowInstanceId,
           input.baseVersion,
+          input.chatId,
+          now,
         )
         .run()
       const row = await db
@@ -1311,7 +1440,11 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(input.planId, input.idempotencyKey)
         .first()
-      if (!row) return { ok: false as const, reason: "stale" as const }
+      if (!row) {
+        if (await this.activePlanGeneration(input.chatId, now))
+          return { ok: false as const, reason: "generating" as const }
+        return { ok: false as const, reason: "stale" as const }
+      }
       const batch = feedbackBatchFromRow(row)
       if (batch.baseVersion !== input.baseVersion || JSON.stringify(batch.items) !== itemsJson) {
         return { ok: false as const, reason: "idempotency_mismatch" as const }
@@ -1435,15 +1568,18 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     reviewContexts: new Map(),
     sessions: new Map(),
     initDataFingerprints: new Map(),
+    generations: new Map(),
   }
   // Older test backings predate Mini App state. Initializing their absent maps
   // here preserves the restart-simulation contract without weakening it.
   if (!backing.reviewContexts) backing.reviewContexts = new Map()
   if (!backing.sessions) backing.sessions = new Map()
   if (!backing.initDataFingerprints) backing.initDataFingerprints = new Map()
+  if (!backing.generations) backing.generations = new Map()
   const reviewContexts = backing.reviewContexts
   const sessions = backing.sessions
   const initDataFingerprints = backing.initDataFingerprints
+  const generations = backing.generations
 
   function throwIfFailing(operation: "createActivePlan" | "promotePlanVersion"): void {
     if (options.failNextOn === operation) {
@@ -1604,12 +1740,72 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       return { ok: true as const }
     },
 
+    async startPlanGeneration(input) {
+      const startedAt = input.startedAt ?? nowIso()
+      const record: MealPlanGenerationRecord = {
+        chatId: input.chatId,
+        generationId: input.generationId,
+        status: "generating",
+        startedAt,
+        expiresAt: input.expiresAt,
+        updatedAt: startedAt,
+      }
+      generations.set(input.chatId, record)
+      return record
+    },
+
+    async finishPlanGeneration(chatId, generationId, failed = false) {
+      const record = generations.get(chatId)
+      if (!record || record.generationId !== generationId) return false
+      if (failed) {
+        const now = nowIso()
+        record.status = "failed"
+        record.expiresAt = now
+        record.updatedAt = now
+      } else {
+        generations.delete(chatId)
+      }
+      return true
+    },
+
+    async activePlanGeneration(chatId, now = nowIso()) {
+      const record = generations.get(chatId)
+      if (!record) return null
+      if (record.expiresAt <= now || record.status !== "generating") {
+        generations.delete(chatId)
+        return null
+      }
+      return record
+    },
+
     async activePlan(chatId) {
       const plan = activePlanForChat(chatId)
       if (!plan) return null
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       if (!version) return null
       return { plan, version }
+    },
+
+    async listPlanHistory(chatId) {
+      return [...backing.plans.values()]
+        .filter((plan) => plan.chatId === chatId)
+        .sort(
+          (left, right) =>
+            Number(left.status !== "active") - Number(right.status !== "active") ||
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            right.createdAt.localeCompare(left.createdAt),
+        )
+        .flatMap((plan) => {
+          const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
+          return version ? [{ plan, version }] : []
+        })
+    },
+
+    async planById(chatId, planId) {
+      const plan = backing.plans.get(planId)
+      if (!plan || plan.chatId !== chatId) return null
+      const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
+      return version ? { plan, version } : null
     },
 
     async activePlanPointer(chatId) {
@@ -1677,6 +1873,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async acceptFeedbackBatch(input) {
+      if (await this.activePlanGeneration(input.chatId)) return { ok: false as const, reason: "generating" as const }
       const plan = backing.plans.get(input.planId)
       if (
         plan?.status !== "active" ||
