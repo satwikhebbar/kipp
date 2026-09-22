@@ -8,6 +8,7 @@ import {
   createInMemoryMealPlanningStore,
   createMealPlanningStore,
   type InMemoryMealPlanningBacking,
+  MAX_MEAL_PLAN_HISTORY,
   type MealPlanningStore,
   type PromotePlanVersionInput,
   SEED_PROFILE,
@@ -744,15 +745,17 @@ describe.each([
 
   it("hydrates current and replaced plans through chat-scoped history reads", async () => {
     const store = await makeStore()
-    await store.createActivePlan(createInput())
-    await store.createActivePlan(createInput({ planId: "plan-2", instanceId: "instance-2" }))
+    for (let index = 1; index <= MAX_MEAL_PLAN_HISTORY + 2; index++) {
+      const planId = `plan-${String(index).padStart(2, "0")}`
+      await store.createActivePlan(createInput({ planId, instanceId: `instance-${planId}` }))
+    }
 
-    expect(await store.listPlanHistory(CHAT)).toMatchObject([
-      { plan: { planId: "plan-2", status: "active" }, version: { version: 1 } },
-      { plan: { planId: "plan-1", status: "replaced" }, version: { version: 1 } },
-    ])
-    expect(await store.planById(CHAT, "plan-1")).toMatchObject({ plan: { status: "replaced" } })
-    expect(await store.planById("other-chat", "plan-1")).toBeNull()
+    const history = await store.listPlanHistory(CHAT)
+    expect(history).toHaveLength(MAX_MEAL_PLAN_HISTORY)
+    expect(history[0]).toMatchObject({ plan: { planId: "plan-14", status: "active" }, version: { version: 1 } })
+    expect(history.at(-1)).toMatchObject({ plan: { planId: "plan-03", status: "replaced" }, version: { version: 1 } })
+    expect(await store.planById(CHAT, "plan-03")).toMatchObject({ plan: { status: "replaced" } })
+    expect(await store.planById("other-chat", "plan-03")).toBeNull()
   })
 
   it("accepts one version-bound batch idempotently and advances its dispatch lifecycle", async () => {
