@@ -221,7 +221,7 @@ describe("Mini App HTTP boundary", () => {
           method: "POST",
           headers: { Authorization: `Bearer ${fixture.token}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            planId: "plan-replaced",
+            planId: "plan-current",
             baseVersion: 1,
             idempotencyKey: "historical-feedback",
             items: [{ id: "feedback-1", text: "Less oily", target: { kind: "plan" } }],
@@ -231,6 +231,8 @@ describe("Mini App HTTP boundary", () => {
       )
       expect(feedback.status).toBe(409)
       expect(await feedback.json()).toEqual({ error: "historical_or_stale" })
+      const batches = await fixture.d1.prepare("SELECT COUNT(*) AS count FROM feedback_batch").bind().all()
+      expect(batches.results?.[0]?.count).toBe(0)
     } finally {
       vi.useRealTimers()
     }
