@@ -300,7 +300,18 @@ Telegram permits only one webhook per bot, so use a separate development bot.
    Never enable `ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK` in production.
 2. Add the Notion keys from step 6 to `.dev.vars`: `NOTION_API_KEY` and
    `NOTION_IDEAS_DATA_SOURCE_ID`.
-3. Start Kipp with `pnpm dev` (normally on port 8787).
+3. Start Kipp with `pnpm dev` (normally on port 8787). The `predev` hook
+   applies pending D1 migrations to the local database first, so a fresh
+   worktree works without a manual step. To apply them yourself:
+
+   ```bash
+   pnpm exec wrangler d1 migrations apply MEAL_PLANNING_DB --local --config wrangler.local.toml
+   ```
+
+   `--config wrangler.local.toml` is required: the tracked `wrangler.toml` does
+   not declare the `MEAL_PLANNING_DB` binding. Each worktree keeps its own local
+   database under `.wrangler/state` (gitignored); deleting that directory resets
+   it and the next `pnpm dev` re-applies the migrations.
 4. Expose it with `ngrok http 8787`.
 5. Run `pnpm run webhook:dev` to point the development bot at the active tunnel.
 
