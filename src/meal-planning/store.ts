@@ -15,6 +15,8 @@ import type {
 
 /** The empty per-cell video record written when enrichment is absent. */
 const NO_VIDEOS: Record<string, RecipeVideo> = {}
+/** Maximum number of current/replaced plans exposed by one history read. */
+export const MAX_MEAL_PLAN_HISTORY = 12
 
 /** `{ country, city }` location snapshot stored on the household profile row. */
 export interface StoredLocation {
@@ -1238,9 +1240,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           `${PLAN_WITH_VERSION_SELECT}
            WHERE p.chat_id = ?
            ORDER BY CASE WHEN p.status = 'active' THEN 0 ELSE 1 END,
-                    p.updated_at DESC, p.created_at DESC`,
+                    p.updated_at DESC, p.created_at DESC, p.plan_id DESC
+           LIMIT ?`,
         )
-        .bind(chatId)
+        .bind(chatId, MAX_MEAL_PLAN_HISTORY)
         .all()
       return (result.results ?? []).map((row) => mealPlanFromRow(row))
     },
@@ -1793,8 +1796,10 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
           (left, right) =>
             Number(left.status !== "active") - Number(right.status !== "active") ||
             right.updatedAt.localeCompare(left.updatedAt) ||
-            right.createdAt.localeCompare(left.createdAt),
+            right.createdAt.localeCompare(left.createdAt) ||
+            right.planId.localeCompare(left.planId),
         )
+        .slice(0, MAX_MEAL_PLAN_HISTORY)
         .flatMap((plan) => {
           const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
           return version ? [{ plan, version }] : []
