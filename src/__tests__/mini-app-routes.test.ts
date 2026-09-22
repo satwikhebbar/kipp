@@ -121,6 +121,7 @@ describe("Mini App HTTP boundary", () => {
     expect(html).toContain("Holiday")
     expect(html).toContain("/mealplan")
     expect(html).toContain("Read-only while your next plan is being generated.")
+    expect(html).toContain("Your first meal plan is being generated.")
     expect(html).toContain("Historical plan — read-only.")
     expect(html).toContain("Refresh plan")
     expect(html).toContain('className="history"')
@@ -157,6 +158,52 @@ describe("Mini App HTTP boundary", () => {
       expect(await response.json()).toMatchObject({
         status: "current",
         plan: { planId: "plan-1", weekEnd: "2026-09-19T18:29:59.000Z", readOnly: false },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("returns an explicit generating state when the first plan has no prior snapshot", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const { d1 } = createD1TestDb()
+      const store = createMealPlanningStore(d1)
+      await store.loadOrCreateProfile("chat-42")
+      await seedPlan(store, "pending-plan", "2026-09-27T18:30:00.000Z", "2026-10-03T18:29:59.000Z")
+      await store.upsertMiniAppReviewContext({
+        telegramUserId: "42",
+        chatId: "chat-42",
+        planId: "pending-plan",
+        weekEnd: "2026-10-03T18:29:59.000Z",
+      })
+      await store.startPlanGeneration({
+        chatId: "chat-42",
+        generationId: "generation-first-plan",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      })
+      const testEnv = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 } as Env
+      const session = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/session", {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: await signedInitData(),
+        }),
+        testEnv,
+      )
+      expect(session.status).toBe(201)
+      const { token } = (await session.json()) as { token: string }
+      const response = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan?planId=missing-plan", {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        testEnv,
+      )
+      expect(await response.json()).toMatchObject({
+        status: "generating",
+        currentPlan: null,
+        history: expect.any(Array),
       })
     } finally {
       vi.useRealTimers()
