@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { z } from "zod"
-import type { ToolConversationMessage } from "../providers/llm"
+import type { ToolConversationMessage, ToolProviderRequestEvent } from "../providers/llm"
 import { toolDeclaration } from "../providers/llm"
 import type { ToolDefinition, ToolRegistry } from "../runtime/tools"
 
@@ -515,6 +515,82 @@ describe("OpenRouter provider", () => {
         reasoning_details: [{ type: "reasoning.summary", text: "opaque" }],
       }),
     )
+  })
+
+  it("reports the stop reason and a truncated-json classification for a cut-off tool call", async () => {
+    const argumentsValue = '{"value":"tr'
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          choices: [
+            {
+              finish_reason: "length",
+              message: { tool_calls: [{ id: "call-1", function: { name: "echo", arguments: argumentsValue } }] },
+            },
+          ],
+          usage: {},
+        }),
+    })
+    const events: ToolProviderRequestEvent[] = []
+    const { createOpenRouterToolClient } = await import("../providers/openrouter")
+    const client = createOpenRouterToolClient("key", "openai/gpt-5.6-luna", {
+      onRequestEvent: (event) => events.push(event),
+    })
+    await expect(client.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] })).rejects.toThrow(
+      "malformed tool arguments",
+    )
+    expect(events.at(-1)).toMatchObject({
+      phase: "failed",
+      failureCategory: "malformed-tool-arguments",
+      finishReason: "length",
+      choicesCount: 1,
+      toolCallNames: ["echo"],
+      argumentsCharacters: argumentsValue.length,
+      argumentsParseReason: "truncated-json",
+    })
+  })
+
+  it("classifies arguments delivered as an object and reports an empty-choices failure", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          choices: [
+            {
+              finish_reason: "tool_calls",
+              message: { tool_calls: [{ id: "c", function: { name: "echo", arguments: { value: "hi" } } }] },
+            },
+          ],
+          usage: {},
+        }),
+    })
+    const events: ToolProviderRequestEvent[] = []
+    const { createOpenRouterToolClient } = await import("../providers/openrouter")
+    const client = createOpenRouterToolClient("key", "openai/gpt-5.6-luna", {
+      onRequestEvent: (event) => events.push(event),
+    })
+    await expect(client.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] })).rejects.toThrow(
+      "malformed tool arguments",
+    )
+    expect(events.at(-1)).toMatchObject({
+      failureCategory: "malformed-tool-arguments",
+      argumentsParseReason: "invalid-json",
+    })
+
+    mockFetch.mockReset()
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: () => Promise.resolve({ choices: [], usage: {} }) })
+    events.length = 0
+    await expect(client.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] })).rejects.toThrow(
+      "empty choices",
+    )
+    expect(events.at(-1)).toMatchObject({
+      phase: "failed",
+      failureCategory: "empty-choices",
+      choicesCount: 0,
+    })
   })
 })
 

@@ -1151,16 +1151,28 @@ function logAgentTurnFailure(env: Env, workflow: string, turn: number, durationM
 }
 
 /** Log provider request event. */
-function logProviderRequestEvent(env: Env, workflow: string, requestEvent: ToolProviderRequestEvent): void {
+/**
+ * Projects a provider request event into the runtime log. Emits only
+ * non-payload diagnostics — stop reason, tool names, lengths, and a coarse
+ * parse-failure classification — so a protocol failure is diagnosable without
+ * attaching household data. Exported for the log-shape test.
+ */
+export function logProviderRequestEvent(env: Env, workflow: string, requestEvent: ToolProviderRequestEvent): void {
+  // Diagnostics that explain a protocol failure without attaching the provider
+  // payload: the stop reason (truncation), the tool names involved, and a coarse
+  // classification of the JSON parse failure.
+  const details: Record<string, string | number | boolean> = { phase: requestEvent.phase }
+  if (requestEvent.status !== undefined) details.status = requestEvent.status
+  if (requestEvent.finishReason !== undefined) details.finishReason = requestEvent.finishReason
+  if (requestEvent.argumentsParseReason !== undefined) details.argumentsParseReason = requestEvent.argumentsParseReason
+  if (requestEvent.toolCallNames?.length) details.toolCallNames = requestEvent.toolCallNames.join(",")
   logRuntime(env, {
     workflow,
     event: "meal-planning-provider-request",
     outcome: requestEvent.phase === "failed" ? "failed" : requestEvent.phase === "parsed" ? "succeeded" : "started",
     durationMs: requestEvent.durationMs,
     ...(requestEvent.failureCategory ? { failureCategory: requestEvent.failureCategory } : {}),
-    ...(requestEvent.status === undefined
-      ? {}
-      : { details: { phase: requestEvent.phase, status: requestEvent.status } }),
+    details,
     metrics: {
       ...(requestEvent.toolCallCount === undefined ? {} : { toolCallCount: requestEvent.toolCallCount }),
       ...(requestEvent.inputTokens === undefined ? {} : { inputTokens: requestEvent.inputTokens }),
@@ -1173,6 +1185,10 @@ function logProviderRequestEvent(env: Env, workflow: string, requestEvent: ToolP
       ...(requestEvent.requestBodyCharacters === undefined
         ? {}
         : { requestBodyCharacters: requestEvent.requestBodyCharacters }),
+      ...(requestEvent.choicesCount === undefined ? {} : { choicesCount: requestEvent.choicesCount }),
+      ...(requestEvent.argumentsCharacters === undefined
+        ? {}
+        : { argumentsCharacters: requestEvent.argumentsCharacters }),
     },
   })
 }
