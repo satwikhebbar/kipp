@@ -7,7 +7,6 @@ import { logRuntime } from "../runtime/logging"
 import { MINI_APP_SHELL } from "./mini-app/client"
 import { authenticateMiniApp, MiniAppAuthError, readMiniAppSession } from "./mini-app-auth"
 import { createMealPlanningStore, type FeedbackBatchRecord, type MealPlanningStore } from "./store"
-import { resolvePlanningWeek } from "./week"
 
 const BYTES_PER_KIBIBYTE = 1_024
 const MAX_REQUEST_KIBIBYTES = 64
@@ -238,9 +237,10 @@ miniAppRoutes.get("/mini-app/api/plan", async (c) => {
     const { store, session } = await getContext(c.req.raw, c.env)
     const active = await store.activePlan(session.chatId)
     const profile = await store.loadOrCreateProfile(session.chatId)
-    const currentWeek = resolvePlanningWeek(Date.now(), active?.plan.timezone ?? "Asia/Kolkata")
-    if (!active || active.plan.planId !== session.planId || active.plan.weekStart !== currentWeek.weekStart) {
-      return jsonResponse({ status: "empty", weekStart: currentWeek.weekStart, weekEnd: currentWeek.weekEnd })
+    // A plan stays reviewable from creation until its own week ends — including a
+    // plan created for next week — matching the feedback button's `week_end` expiry.
+    if (!active || active.plan.planId !== session.planId || Date.parse(active.plan.weekEnd) < Date.now()) {
+      return jsonResponse({ status: "empty" })
     }
     return jsonResponse(readyDto(active, profile.schedule))
   } catch (error) {
