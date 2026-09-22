@@ -20,6 +20,7 @@ const HTTP_CREATED = 201
 export { MINI_APP_SHELL } from "./mini-app/client"
 
 type MiniAppContext = { store: MealPlanningStore; session: Awaited<ReturnType<typeof readMiniAppSession>> }
+type MealPlanRead = NonNullable<Awaited<ReturnType<MealPlanningStore["activePlan"]>>>
 
 /** No store headers. */
 function noStoreHeaders(): Headers {
@@ -76,26 +77,75 @@ async function getContext(request: Request, env: Env): Promise<MiniAppContext> {
   return { store: createMealPlanningStore(env.MEAL_PLANNING_DB), session }
 }
 
-/** Ready dto. */
-function readyDto(
-  active: NonNullable<Awaited<ReturnType<MealPlanningStore["activePlan"]>>>,
+/** Plan DTO. */
+function planDto(
+  active: MealPlanRead,
   schedule: Awaited<ReturnType<MealPlanningStore["loadOrCreateProfile"]>>["schedule"],
+  readOnly: boolean,
 ) {
   return {
-    status: "ready" as const,
-    plan: {
-      planId: active.plan.planId,
-      version: active.version.version,
-      weekStart: active.plan.weekStart,
-      weekEnd: active.plan.weekEnd,
-      timezone: active.plan.timezone,
-      schedule,
-      candidate: active.version.candidate,
-      weeklyInventory: active.plan.weeklyInventory,
-      weeklyExceptions: active.plan.weeklyExceptions,
-      video: active.version.video,
-      provisionalMealDefinitions: active.version.provisionalMealDefinitions,
-    },
+    planId: active.plan.planId,
+    version: active.version.version,
+    weekStart: active.plan.weekStart,
+    weekEnd: active.plan.weekEnd,
+    timezone: active.plan.timezone,
+    readOnly,
+    schedule,
+    candidate: active.version.candidate,
+    weeklyInventory: active.plan.weeklyInventory,
+    weeklyExceptions: active.plan.weeklyExceptions,
+    video: active.version.video,
+    provisionalMealDefinitions: active.version.provisionalMealDefinitions,
+  }
+}
+
+/** History entry DTO. */
+function historyEntry(active: MealPlanRead, readOnly: boolean) {
+  return {
+    planId: active.plan.planId,
+    version: active.version.version,
+    weekStart: active.plan.weekStart,
+    weekEnd: active.plan.weekEnd,
+    lifecycle: active.plan.status === "active" ? "current" : "historical",
+    readOnly,
+  }
+}
+
+/** History-aware authenticated Mini App response. */
+async function readPlanDto(
+  request: Request,
+  store: MealPlanningStore,
+  session: Awaited<ReturnType<typeof readMiniAppSession>>,
+) {
+  const profile = await store.loadOrCreateProfile(session.chatId)
+  const history = await store.listPlanHistory(session.chatId)
+  const generation = await store.activePlanGeneration(session.chatId)
+  const requestedPlanId = new URL(request.url).searchParams.get("planId")?.trim() || session.planId
+  const selected = await store.planById(session.chatId, requestedPlanId)
+  const active = history.find((entry) => entry.plan.status === "active") ?? null
+  const historyDto = history.map((entry) => historyEntry(entry, entry.plan.status !== "active" || generation !== null))
+  if (!selected) {
+    if (generation) return { status: "generating" as const, currentPlan: null, history: historyDto }
+    return { status: "empty" as const }
+  }
+  if (selected.plan.status !== "active") {
+    return {
+      status: "historical" as const,
+      plan: planDto(selected, profile.schedule, true),
+      history: historyDto,
+    }
+  }
+  if (generation) {
+    return {
+      status: "generating" as const,
+      currentPlan: planDto(selected, profile.schedule, true),
+      history: historyDto,
+    }
+  }
+  return {
+    status: "current" as const,
+    plan: planDto(active ?? selected, profile.schedule, false),
+    history: historyDto,
   }
 }
 
@@ -235,14 +285,7 @@ miniAppRoutes.post("/mini-app/api/session", async (c) => {
 miniAppRoutes.get("/mini-app/api/plan", async (c) => {
   try {
     const { store, session } = await getContext(c.req.raw, c.env)
-    const active = await store.activePlan(session.chatId)
-    const profile = await store.loadOrCreateProfile(session.chatId)
-    // A plan stays reviewable from creation until its own week ends — including a
-    // plan created for next week — matching the feedback button's `week_end` expiry.
-    if (!active || active.plan.planId !== session.planId || Date.parse(active.plan.weekEnd) < Date.now()) {
-      return jsonResponse({ status: "empty" })
-    }
-    return jsonResponse(readyDto(active, profile.schedule))
+    return jsonResponse(await readPlanDto(c.req.raw, store, session))
   } catch (error) {
     return errorResponse(error)
   }
@@ -267,7 +310,7 @@ miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
     const baseVersion = typeof body.baseVersion === "number" ? body.baseVersion : NaN
     const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : ""
     if (
-      planId !== session.planId ||
+      !planId ||
       !Number.isSafeInteger(baseVersion) ||
       !idempotencyKey ||
       idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH
@@ -275,7 +318,8 @@ miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
       return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
     }
     const active = await store.activePlan(session.chatId)
-    if (!active || active.plan.planId !== planId) return jsonResponse({ error: "conflict" }, HTTP_STATUS.CONFLICT)
+    if (!active || active.plan.planId !== planId)
+      return jsonResponse({ error: "historical_or_stale" }, HTTP_STATUS.CONFLICT)
     const accepted = await store.acceptFeedbackBatch({
       batchId: crypto.randomUUID(),
       planId,
@@ -288,7 +332,9 @@ miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
     if (!accepted.ok) {
       return jsonResponse(
         { error: accepted.reason === "invalid_items" ? "invalid_items" : accepted.reason },
-        accepted.reason === "stale" ? HTTP_STATUS.CONFLICT : HTTP_STATUS.BAD_REQUEST,
+        accepted.reason === "stale" || accepted.reason === "generating"
+          ? HTTP_STATUS.CONFLICT
+          : HTTP_STATUS.BAD_REQUEST,
       )
     }
     if (accepted.duplicate) {

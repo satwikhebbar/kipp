@@ -5,7 +5,7 @@ import { type Env, INTERACTION_KIND } from "../core/types"
 import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
-import { MEAL_HELP, MEAL_PLAN_ENDED } from "../meal-planning/messages"
+import { MEAL_HELP, MEAL_PLAN_ENDED, MEAL_PLAN_GENERATING } from "../meal-planning/messages"
 import { createMealPlanningStore } from "../meal-planning/store"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
@@ -375,6 +375,18 @@ async function dispatchRoutedInteraction(
     })
     return false
   }
+  if (
+    env.MEAL_PLANNING_DB &&
+    interaction.kind.startsWith("meal-") &&
+    (interaction.kind === INTERACTION_KIND.MEAL_FEEDBACK ||
+      interaction.kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY) &&
+    (await createMealPlanningStore(env.MEAL_PLANNING_DB).activePlanGeneration(String(chatId)))
+  ) {
+    await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(String(chatId), MEAL_PLAN_GENERATING, {
+      signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
+    })
+    return true
+  }
   const instance = await workflow.get(interaction.workflowId)
   const interactionText =
     interaction.text ??
@@ -430,6 +442,10 @@ async function dispatchMealFallthrough(
   const store = createMealPlanningStore(env.MEAL_PLANNING_DB)
   const pointer = await store.activePlanPointer(String(msg.chat.id))
   if (!pointer) return false
+  if (await store.activePlanGeneration(String(msg.chat.id))) {
+    await tg.sendMessage(msg.chat.id, MEAL_PLAN_GENERATING)
+    return true
+  }
   if (pointer.weekEnd > new Date().toISOString()) {
     const instance = await env.MEAL_PLANNING_WORKFLOW.get(pointer.instanceId)
     try {

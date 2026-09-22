@@ -40,18 +40,20 @@ async function signedInitData(): Promise<string> {
   return params.toString()
 }
 
-/** Seeds one active plan for the allowed user and returns its Mini App plan response. */
-async function planResponse(weekStart: string, weekEnd: string): Promise<Response> {
-  const { d1 } = createD1TestDb()
-  const store = createMealPlanningStore(d1)
+async function seedPlan(
+  store: ReturnType<typeof createMealPlanningStore>,
+  planId: string,
+  weekStart: string,
+  weekEnd: string,
+) {
   await store.loadOrCreateProfile("chat-42")
   await store.createActivePlan({
-    planId: "plan-1",
+    planId,
     chatId: "chat-42",
     weekStart,
     weekEnd,
     timezone: "Asia/Kolkata",
-    instanceId: "instance-1",
+    instanceId: `instance-${planId}`,
     candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
     evaluation: {
       pass: true,
@@ -70,7 +72,18 @@ async function planResponse(weekStart: string, weekEnd: string): Promise<Respons
     weeklyInventory: { items: [], notes: [] },
     weeklyExceptions: { items: [] },
   })
-  await store.upsertMiniAppReviewContext({ telegramUserId: "42", chatId: "chat-42", planId: "plan-1", weekEnd })
+}
+
+/** Seeds one active plan, authenticates the allowed user, and returns the Mini App fixture. */
+async function authenticatedPlanFixture(
+  planId: string,
+  weekStart: string,
+  weekEnd: string,
+): Promise<{ d1: D1Database; store: ReturnType<typeof createMealPlanningStore>; testEnv: Env; token: string }> {
+  const { d1 } = createD1TestDb()
+  const store = createMealPlanningStore(d1)
+  await seedPlan(store, planId, weekStart, weekEnd)
+  await store.upsertMiniAppReviewContext({ telegramUserId: "42", chatId: "chat-42", planId, weekEnd })
   const testEnv = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 } as Env
   const session = await miniAppRoutes.fetch(
     new Request("https://kipp.example/mini-app/api/session", {
@@ -81,6 +94,12 @@ async function planResponse(weekStart: string, weekEnd: string): Promise<Respons
     testEnv,
   )
   const { token } = (await session.json()) as { token: string }
+  return { d1, store, testEnv, token }
+}
+
+/** Seeds one active plan for the allowed user and returns its Mini App plan response. */
+async function planResponse(weekStart: string, weekEnd: string): Promise<Response> {
+  const { testEnv, token } = await authenticatedPlanFixture("plan-1", weekStart, weekEnd)
   return miniAppRoutes.fetch(
     new Request("https://kipp.example/mini-app/api/plan", { headers: { Authorization: `Bearer ${token}` } }),
     testEnv,
@@ -117,21 +136,101 @@ describe("Mini App HTTP boundary", () => {
       const response = await planResponse("2026-09-27T18:30:00.000Z", "2026-10-03T18:29:59.000Z")
       expect(response.status).toBe(200)
       expect(await response.json()).toMatchObject({
-        status: "ready",
-        plan: { planId: "plan-1", weekStart: "2026-09-27T18:30:00.000Z" },
+        status: "current",
+        plan: { planId: "plan-1", weekStart: "2026-09-27T18:30:00.000Z", readOnly: false },
       })
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it("reports no plan once the plan's week has ended", async () => {
+  it("keeps an ended plan available as the current read-only-capable read model", async () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(FAKE_NOW)
     try {
       const response = await planResponse("2026-09-13T18:30:00.000Z", "2026-09-19T18:29:59.000Z")
       expect(response.status).toBe(200)
-      expect(await response.json()).toEqual({ status: "empty" })
+      expect(await response.json()).toMatchObject({
+        status: "current",
+        plan: { planId: "plan-1", weekEnd: "2026-09-19T18:29:59.000Z", readOnly: false },
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("marks the current plan read-only while a replacement is generating", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const fixture = await authenticatedPlanFixture(
+        "plan-generating",
+        "2026-09-27T18:30:00.000Z",
+        "2026-10-03T18:29:59.000Z",
+      )
+      await fixture.store.startPlanGeneration({
+        chatId: "chat-42",
+        generationId: "generation-1",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      })
+      const response = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan", {
+          headers: { Authorization: `Bearer ${fixture.token}` },
+        }),
+        fixture.testEnv,
+      )
+      expect(await response.json()).toMatchObject({
+        status: "generating",
+        currentPlan: { planId: "plan-generating", readOnly: true },
+        history: [{ planId: "plan-generating", lifecycle: "current", readOnly: true }],
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("serves a replaced plan as historical and rejects feedback for it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const fixture = await authenticatedPlanFixture(
+        "plan-replaced",
+        "2026-09-27T18:30:00.000Z",
+        "2026-10-03T18:29:59.000Z",
+      )
+      await seedPlan(fixture.store, "plan-current", "2026-09-27T18:30:00.000Z", "2026-10-03T18:29:59.000Z")
+      await fixture.store.upsertMiniAppReviewContext({
+        telegramUserId: "42",
+        chatId: "chat-42",
+        planId: "plan-current",
+        weekEnd: "2026-10-03T18:29:59.000Z",
+      })
+      const historical = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan?planId=plan-replaced", {
+          headers: { Authorization: `Bearer ${fixture.token}` },
+        }),
+        fixture.testEnv,
+      )
+      expect(await historical.json()).toMatchObject({
+        status: "historical",
+        plan: { planId: "plan-replaced", readOnly: true },
+      })
+
+      const feedback = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/feedback", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${fixture.token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            planId: "plan-replaced",
+            baseVersion: 1,
+            idempotencyKey: "historical-feedback",
+            items: [{ id: "feedback-1", text: "Less oily", target: { kind: "plan" } }],
+          }),
+        }),
+        fixture.testEnv,
+      )
+      expect(feedback.status).toBe(409)
+      expect(await feedback.json()).toEqual({ error: "historical_or_stale" })
     } finally {
       vi.useRealTimers()
     }

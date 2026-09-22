@@ -20,6 +20,7 @@ import {
   MEAL_FEEDBACK_NOT_APPLIED,
   MEAL_NO_CHANGES,
   MEAL_OPEN_FEEDBACK_PROMPT,
+  MEAL_PLAN_GENERATING,
   MEAL_PLANNING_CANCELED,
   MEAL_STALE_PLAN,
   renderPlanLaunchMessage,
@@ -42,6 +43,7 @@ import type { MealPlanningWorkflowParams } from "./workflow"
 
 const MEAL_PLANNING_TIMEZONE_DEFAULT = "Asia/Kolkata"
 const MEAL_PLANNING_TTL_MS = 1_800_000 // 30 minutes: one bounded planning session
+const MEAL_PLAN_GENERATION_LEASE_MS = 3_600_000 // 60 minutes: planning plus enrichment, with crash expiry
 const MEAL_CLARIFICATION_TTL_MS = 900_000 // 15 minutes: clarification prompt lifetime
 const MEAL_FEEDBACK_REPLY_TTL_MS = 900_000 // 15 minutes: feedback prompt lifetime
 const MEAL_PLANNING_GROUP = "meal-planning"
@@ -234,78 +236,98 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const profile = await stepDo(step, "meal-planning-load-profile", () =>
     store.loadOrCreateProfile(event.payload.chatId),
   )
-  const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText)
-  const recent = await stepDo(step, "meal-planning-read-recent", () => store.activePlan(event.payload.chatId))
-
-  // Week-scoped facts belong to the target week only. The active plan may still
-  // target a previous week (it is only replaced when the new plan is created),
-  // so seeding from it unconditionally would carry last week's inventory and
-  // holidays into the new plan. Same-week re-invocation keeps them; a different
-  // target week starts fresh and extraction re-adds only restated facts.
-  const sameWeekPlan = recent?.plan.weekStart === week.weekStart ? recent : null
-  const baseContext: MealPlanContext = {
-    schedule: profile.schedule,
-    profile: profile.profile,
-    customPolicies: profile.customPolicies,
-    weeklyInventory: sameWeekPlan?.plan.weeklyInventory ?? { items: [], notes: [] },
-    weeklyExceptions: sameWeekPlan?.plan.weeklyExceptions ?? { items: [] },
-    recentPlan: recent?.version.candidate.grid ?? null,
-    // Provisional meals are owned by a plan version. They may be reused by a
-    // revision of that plan, but must never leak into a new initial plan.
-    provisionalMealDefinitions: [],
-    request: { kind: "initial_plan", text: event.payload.requestText },
-  }
-  const { context, usage: extractionUsage } = await extractInitialWeekContext(env, step, event, baseContext)
-  const messages: ToolConversationMessage[] = [
-    {
-      role: "user",
-      text: `${renderPlanningTimeContext(new Date(), timezone, week.weekStart, week.weekEnd)}\nRequest: ${event.payload.requestText || "/mealplan"}\n\n${renderHouseholdContext(context)}`,
-    },
-  ]
-  const planning = await runPlanningSession(env, step, event, {
-    context,
-    messages,
-    isRevision: false,
-    occurrence: "initial",
-  })
-  if (planning?.outcome.kind !== "proposed") return
-  const outcome = planning.outcome
-
-  // Optional enrichment must precede the persist batch: version rows are insert-only (§8).
-  const enriched = await stepDo(step, "meal-planning-video-enrich", () =>
-    enrichLunchVideos(env, outcome.propose.candidate),
-  )
-
-  const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
-  const persisted = await stepDo(step, "meal-planning-create-plan", () =>
-    store.createActivePlan({
-      planId,
+  const generationId = event.instanceId
+  await stepDo(step, "meal-planning-start-generation-lease", () =>
+    store.startPlanGeneration({
       chatId: event.payload.chatId,
-      weekStart: week.weekStart,
-      weekEnd: week.weekEnd,
-      timezone,
-      instanceId: event.instanceId,
-      candidate: enriched.candidate,
-      video: enriched.video,
-      evaluation: outcome.propose.evaluation,
-      weeklyInventory: outcome.propose.weeklyInventory,
-      weeklyExceptions: outcome.propose.weeklyExceptions,
-      provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
-      usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage)),
+      generationId,
+      expiresAt: new Date(Date.now() + MEAL_PLAN_GENERATION_LEASE_MS).toISOString(),
     }),
   )
+  let generationFinished = false
+  try {
+    const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText)
+    const recent = await stepDo(step, "meal-planning-read-recent", () => store.activePlan(event.payload.chatId))
 
-  await sendPlanAndRegister(
-    env,
-    step,
-    event,
-    profile,
-    persisted.plan,
-    persisted.version,
-    persisted.generation,
-    "initial",
-  )
-  await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
+    // Week-scoped facts belong to the target week only. The active plan may still
+    // target a previous week (it is only replaced when the new plan is created),
+    // so seeding from it unconditionally would carry last week's inventory and
+    // holidays into the new plan. Same-week re-invocation keeps them; a different
+    // target week starts fresh and extraction re-adds only restated facts.
+    const sameWeekPlan = recent?.plan.weekStart === week.weekStart ? recent : null
+    const baseContext: MealPlanContext = {
+      schedule: profile.schedule,
+      profile: profile.profile,
+      customPolicies: profile.customPolicies,
+      weeklyInventory: sameWeekPlan?.plan.weeklyInventory ?? { items: [], notes: [] },
+      weeklyExceptions: sameWeekPlan?.plan.weeklyExceptions ?? { items: [] },
+      recentPlan: recent?.version.candidate.grid ?? null,
+      // Provisional meals are owned by a plan version. They may be reused by a
+      // revision of that plan, but must never leak into a new initial plan.
+      provisionalMealDefinitions: [],
+      request: { kind: "initial_plan", text: event.payload.requestText },
+    }
+    const { context, usage: extractionUsage } = await extractInitialWeekContext(env, step, event, baseContext)
+    const messages: ToolConversationMessage[] = [
+      {
+        role: "user",
+        text: `${renderPlanningTimeContext(new Date(), timezone, week.weekStart, week.weekEnd)}\nRequest: ${event.payload.requestText || "/mealplan"}\n\n${renderHouseholdContext(context)}`,
+      },
+    ]
+    const planning = await runPlanningSession(env, step, event, {
+      context,
+      messages,
+      isRevision: false,
+      occurrence: "initial",
+    })
+    if (planning?.outcome.kind !== "proposed") return
+    const outcome = planning.outcome
+
+    // Optional enrichment must precede the persist batch: version rows are insert-only (§8).
+    const enriched = await stepDo(step, "meal-planning-video-enrich", () =>
+      enrichLunchVideos(env, outcome.propose.candidate),
+    )
+
+    const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
+    const persisted = await stepDo(step, "meal-planning-create-plan", () =>
+      store.createActivePlan({
+        planId,
+        chatId: event.payload.chatId,
+        weekStart: week.weekStart,
+        weekEnd: week.weekEnd,
+        timezone,
+        instanceId: event.instanceId,
+        candidate: enriched.candidate,
+        video: enriched.video,
+        evaluation: outcome.propose.evaluation,
+        weeklyInventory: outcome.propose.weeklyInventory,
+        weeklyExceptions: outcome.propose.weeklyExceptions,
+        provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
+        usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage)),
+      }),
+    )
+    await stepDo(step, "meal-planning-finish-generation-lease", () =>
+      store.finishPlanGeneration(event.payload.chatId, generationId),
+    )
+    generationFinished = true
+
+    await sendPlanAndRegister(
+      env,
+      step,
+      event,
+      profile,
+      persisted.plan,
+      persisted.version,
+      persisted.generation,
+      "initial",
+    )
+    await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
+  } finally {
+    if (!generationFinished)
+      await stepDo(step, "meal-planning-fail-generation-lease", () =>
+        store.finishPlanGeneration(event.payload.chatId, generationId, true),
+      )
+  }
 }
 
 /**
@@ -708,6 +730,10 @@ async function liveWeekLoop(
     const payload = response.payload
     const kind = payload?.interactionKind
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK) {
+      if (await stepDo(step, `meal-planning-read-generation-${iteration}`, () => store.activePlanGeneration(chatId))) {
+        await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
+        continue
+      }
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) continue
       if (payload.version !== undefined && payload.version < active.plan.currentVersion) {
@@ -718,6 +744,10 @@ async function liveWeekLoop(
       continue
     }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
+      if (await stepDo(step, `meal-planning-read-generation-${iteration}`, () => store.activePlanGeneration(chatId))) {
+        await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
+        continue
+      }
       let feedbackBatch: FeedbackBatchRecord | undefined
       if (payload?.source === "mini-app") {
         if (!payload.feedbackBatchId || !Number.isSafeInteger(payload.baseVersion)) continue
