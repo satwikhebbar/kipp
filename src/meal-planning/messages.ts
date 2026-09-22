@@ -17,6 +17,7 @@ export const MEAL_FEEDBACK_NOT_APPLIED =
 export const MEAL_NO_CHANGES = "No changes — your feedback is noted."
 export const MEAL_OPEN_FEEDBACK_PROMPT = "Reply with your feedback for this plan (e.g. 'Wed lunch: too oily')."
 export const MEAL_PLAN_ENDED = "This week's plan has ended — run /mealplan for the next week."
+export const MEAL_PLAN_GENERATING = "A new meal plan is being generated — please wait before sending feedback."
 
 /** Escapes Telegram legacy-Markdown special characters so dynamic text renders literally. */
 export function escapeTelegramMarkdown(text: string): string {
