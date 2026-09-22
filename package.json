@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "wrangler d1 migrations apply MEAL_PLANNING_DB --local --config wrangler.local.toml",
     "dev": "wrangler dev --config wrangler.local.toml",
     "webhook:dev": "bash tools/dev-webhook.sh",
     "deploy:check": "bash tools/pre-deploy-check.sh && wrangler deploy --dry-run --config wrangler.prod.toml",
