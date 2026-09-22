@@ -1,5 +1,6 @@
 import type { LLMResponse } from "../core/types"
 import {
+  classifyToolArgumentsParseFailure,
   type DeepseekToolWireMessage,
   type GenerateOptions,
   strictToolDeclaration,
@@ -17,6 +18,7 @@ const MAX_PROVIDER_ERROR_MESSAGE_CHARACTERS = 500
 
 interface OpenRouterToolResponse {
   choices?: Array<{
+    finish_reason?: string | null
     message?: {
       content?: string | null
       reasoning?: string | null
@@ -135,25 +137,35 @@ export function createOpenRouterToolClient(
         })
         throw normalizeTimeout(error, signal, timeoutMs)
       }
+      const choicesCount = data.choices?.length ?? 0
+      const finishReason = data.choices?.[0]?.finish_reason ?? undefined
       const message = data.choices?.[0]?.message
       if (!message) {
         options.onRequestEvent?.({
           phase: "failed",
           durationMs: Date.now() - startedAt,
           status: response.status,
-          failureCategory: "protocol-error",
+          failureCategory: "empty-choices",
+          choicesCount,
+          finishReason,
         })
         throw new ToolProviderProtocolError("OpenRouter returned empty choices")
       }
-      const toolCalls = message.tool_calls?.map((call) => {
+      const rawCalls = message.tool_calls ?? []
+      const toolCalls = rawCalls.map((call) => {
         try {
           return { id: call.id, name: call.function.name, input: JSON.parse(call.function.arguments) }
-        } catch {
+        } catch (error) {
           options.onRequestEvent?.({
             phase: "failed",
             durationMs: Date.now() - startedAt,
             status: response.status,
-            failureCategory: "protocol-error",
+            failureCategory: "malformed-tool-arguments",
+            choicesCount,
+            finishReason,
+            toolCallNames: rawCalls.map((entry) => entry.function.name),
+            argumentsCharacters: call.function.arguments?.length ?? 0,
+            argumentsParseReason: classifyToolArgumentsParseFailure(error),
           })
           throw new ToolProviderProtocolError("OpenRouter returned malformed tool arguments")
         }
@@ -162,7 +174,8 @@ export function createOpenRouterToolClient(
         phase: "parsed",
         durationMs: Date.now() - startedAt,
         status: response.status,
-        toolCallCount: toolCalls?.length ?? 0,
+        toolCallCount: toolCalls.length,
+        finishReason,
         inputTokens: data.usage?.prompt_tokens ?? 0,
         outputTokens: data.usage?.completion_tokens ?? 0,
         reasoningTokens: data.usage?.completion_tokens_details?.reasoning_tokens ?? 0,

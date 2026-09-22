@@ -71,6 +71,42 @@ export type ToolProviderRequestEvent = {
   toolSchemaCharacters?: number
   requestBodyCharacters?: number
   failureCategory?: string
+  /** First choice's stop reason ("stop", "length", "tool_calls", …); "length" means the response was truncated. */
+  finishReason?: string
+  /** Number of choices the provider returned; 0 or absent explains an empty-choices failure. */
+  choicesCount?: number
+  /** Returned tool-call names only — static tool identifiers, never their arguments. */
+  toolCallNames?: string[]
+  /** Character length of the tool-call arguments that failed to parse. */
+  argumentsCharacters?: number
+  /** Why the arguments failed to parse, without exposing any of the payload. */
+  argumentsParseReason?: "truncated-json" | "invalid-json"
+}
+
+/**
+ * V8 syntax-error fragments that a JSON document cut off mid-stream produces.
+ * The wording varies by Node version and by where the truncation lands, so this
+ * is a heuristic; `finishReason === "length"` on the same event is the
+ * authoritative truncation signal.
+ */
+const TRUNCATED_JSON_ERROR_FRAGMENTS = [
+  "Unexpected end of JSON input",
+  "Unterminated string",
+  "Expected property name or '}'",
+  "Expected double-quoted property name",
+  "Expected ',' or '}'",
+]
+
+/**
+ * Classifies a tool-arguments JSON parse failure without exposing the payload:
+ * a response cut off mid-stream reads as truncated, anything else (for example
+ * arguments delivered as an object rather than a JSON string) is invalid.
+ */
+export function classifyToolArgumentsParseFailure(error: unknown): "truncated-json" | "invalid-json" {
+  const message = error instanceof Error ? error.message : ""
+  return TRUNCATED_JSON_ERROR_FRAGMENTS.some((fragment) => message.includes(fragment))
+    ? "truncated-json"
+    : "invalid-json"
 }
 
 /** Non-sensitive provider failure metadata for runtime observability. */
