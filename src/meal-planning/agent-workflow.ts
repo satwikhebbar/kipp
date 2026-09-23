@@ -737,20 +737,26 @@ async function liveWeekLoop(
     const payload = response.payload
     const kind = payload?.interactionKind
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK) {
-      if (await stepDo(step, `meal-planning-read-generation-${iteration}`, () => store.activePlanGeneration(chatId))) {
-        await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
-        continue
-      }
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) continue
       if (payload.version !== undefined && payload.version < active.plan.currentVersion) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-plan`)
         continue
       }
+      if (await stepDo(step, `meal-planning-read-generation-${iteration}`, () => store.activePlanGeneration(chatId))) {
+        await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
+        continue
+      }
       await promptForFeedbackReply(env, step, event, active.plan, generation, iteration)
       continue
     }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
+      const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
+      if (!active) continue
+      if (payload?.version !== undefined && payload.version < active.plan.currentVersion) {
+        await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-reply`)
+        continue
+      }
       const generationActive = await stepDo(step, `meal-planning-read-generation-${iteration}`, () =>
         store.activePlanGeneration(chatId),
       )
@@ -792,8 +798,6 @@ async function liveWeekLoop(
       }
       const submission = feedbackBatch ? { items: feedbackBatch.items } : submissionFromPayload(payload)
       if (!submission) continue
-      const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
-      if (!active) continue
       try {
         const promotedGeneration = await runRevision(
           env,
