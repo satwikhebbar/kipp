@@ -129,7 +129,7 @@ describe("DeepSeek provider", () => {
     })
 
     const { createDeepseekGenerator } = await import("../providers/deepseek")
-    const gen = createDeepseekGenerator("key", "deepseek-reasoner")
+    const gen = createDeepseekGenerator("key", "deepseek-flash")
     const result = await gen({
       messages: [
         { role: "system", content: "sys" },
@@ -143,7 +143,7 @@ describe("DeepSeek provider", () => {
       model: string
       messages: Array<{ role: string; content: string }>
     }
-    expect(body.model).toBe("deepseek-reasoner")
+    expect(body.model).toBe("deepseek-flash")
     expect(body.messages).toEqual([
       { role: "system", content: "sys" },
       { role: "user", content: "u1" },
@@ -480,7 +480,7 @@ describe("OpenRouter provider", () => {
       })
 
     const { createOpenRouterToolClient } = await import("../providers/openrouter")
-    const client = createOpenRouterToolClient("key", "openai/gpt-5.6-luna")
+    const client = createOpenRouterToolClient("key", "openai/gpt-6-luna")
     const first = await client.generate({
       messages: TOOL_TEST_MESSAGES,
       tools: [TOOL_TEST_REGISTRY.echo],
@@ -504,7 +504,7 @@ describe("OpenRouter provider", () => {
 
     const firstBody = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string)
     const secondBody = JSON.parse((mockFetch.mock.calls[1][1] as RequestInit).body as string)
-    expect(firstBody).toMatchObject({ model: "openai/gpt-5.6-luna", reasoning: { effort: "high" } })
+    expect(firstBody).toMatchObject({ model: "openai/gpt-6-luna", reasoning: { effort: "high" } })
     expect(firstBody.provider).toEqual({ require_parameters: true })
     expect(firstBody.tools[0].function.strict).toBe(true)
     expect(firstBody.tools[0].function.parameters.required).toEqual(["value"])
@@ -535,7 +535,7 @@ describe("OpenRouter provider", () => {
     })
     const events: ToolProviderRequestEvent[] = []
     const { createOpenRouterToolClient } = await import("../providers/openrouter")
-    const client = createOpenRouterToolClient("key", "openai/gpt-5.6-luna", {
+    const client = createOpenRouterToolClient("key", "openai/gpt-6-luna", {
       onRequestEvent: (event) => events.push(event),
     })
     await expect(client.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] })).rejects.toThrow(
@@ -569,7 +569,7 @@ describe("OpenRouter provider", () => {
     })
     const events: ToolProviderRequestEvent[] = []
     const { createOpenRouterToolClient } = await import("../providers/openrouter")
-    const client = createOpenRouterToolClient("key", "openai/gpt-5.6-luna", {
+    const client = createOpenRouterToolClient("key", "openai/gpt-6-luna", {
       onRequestEvent: (event) => events.push(event),
     })
     await expect(client.generate({ messages: TOOL_TEST_MESSAGES, tools: [TOOL_TEST_REGISTRY.echo] })).rejects.toThrow(

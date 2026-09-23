@@ -71,7 +71,7 @@ crons = ["0 9 * * *", "0 8 * * 1", "0 9 * * 1"]
 [vars]
 SUBSTACK_RSS_URL = "https://your-name.substack.com/feed"
 # LLM_MODEL = "gemini-3-flash-preview"
-LLM_MODEL = "deepseek-v4-flash"
+LLM_MODEL = "deepseek-flash"
 DATA_REPO_BRANCH = "main"
 POSTING_CADENCE_DAYS = "7"
 LINKEDIN_AUTHOR_URN = "urn:li:person:your-linkedin-person-urn"

@@ -31,9 +31,9 @@ export function resolveModel(provider: string, modelName?: string): string {
     case "gemini":
       return "gemini-2.5-flash"
     case "deepseek":
-      return "deepseek-chat"
+      return "deepseek-flash"
     case "openrouter":
-      return "openai/gpt-5.6-luna"
+      return "openai/gpt-6-luna"
     default:
       throw new Error(`Unknown LLM provider: "${provider}". Supported: "gemini", "deepseek", "openrouter"`)
   }

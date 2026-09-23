@@ -13,7 +13,7 @@ const NOW = Date.parse("2026-08-01T00:00:00.000Z")
 const CONTRACT_TTL_MS = 900_000
 
 async function runContract(requestText: string) {
-  const provider = createToolProvider(apiKey ?? "", "deepseek", "deepseek-v4-flash", 0)
+  const provider = createToolProvider(apiKey ?? "", "deepseek", "deepseek-flash", 0)
   try {
     return await runCalendarAgentSession(provider, [{ role: "user", text: requestText }], {
       calendar: { listEvents: async () => ({ events: [], truncated: false }) },

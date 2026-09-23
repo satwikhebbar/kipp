@@ -46,8 +46,8 @@ const model =
   (providerName === "gemini"
     ? "gemini-3.7-flash"
     : providerName === "openrouter"
-      ? "openai/gpt-5.6-luna"
-      : "deepseek-v4-flash")
+      ? "openai/gpt-6-luna"
+      : "deepseek-flash")
 const apiKey =
   providerName === "gemini"
     ? (process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? process.env.LLM_API_KEY ?? "")
