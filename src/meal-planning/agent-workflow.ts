@@ -43,7 +43,7 @@ import type { MealPlanningWorkflowParams } from "./workflow"
 
 const MEAL_PLANNING_TIMEZONE_DEFAULT = "Asia/Kolkata"
 const MEAL_PLANNING_TTL_MS = 1_800_000 // 30 minutes: one bounded planning session
-const MEAL_PLAN_GENERATION_LEASE_MS = 3_600_000 // 60 minutes: planning plus enrichment, with crash expiry
+const MEAL_PLAN_GENERATION_LEASE_MS = MEAL_PLANNING_TTL_MS + MEAL_PLANNING_TTL_MS // planning plus enrichment, with crash expiry
 const MEAL_CLARIFICATION_TTL_MS = 900_000 // 15 minutes: clarification prompt lifetime
 const MEAL_FEEDBACK_REPLY_TTL_MS = 900_000 // 15 minutes: feedback prompt lifetime
 const MEAL_PLANNING_GROUP = "meal-planning"
@@ -289,23 +289,30 @@ export async function runAgentCenteredMealPlanningWorkflow(
     )
 
     const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
-    const persisted = await stepDo(step, "meal-planning-create-plan", () =>
-      store.createActivePlan({
-        planId,
-        chatId: event.payload.chatId,
-        weekStart: week.weekStart,
-        weekEnd: week.weekEnd,
-        timezone,
-        instanceId: event.instanceId,
-        candidate: enriched.candidate,
-        video: enriched.video,
-        evaluation: outcome.propose.evaluation,
-        weeklyInventory: outcome.propose.weeklyInventory,
-        weeklyExceptions: outcome.propose.weeklyExceptions,
-        provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
-        usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage)),
-      }),
-    )
+    let persisted: Awaited<ReturnType<MealPlanningStore["createActivePlan"]>>
+    try {
+      persisted = await stepDo(step, "meal-planning-create-plan", () =>
+        store.createActivePlan({
+          planId,
+          chatId: event.payload.chatId,
+          weekStart: week.weekStart,
+          weekEnd: week.weekEnd,
+          timezone,
+          instanceId: event.instanceId,
+          generationId,
+          candidate: enriched.candidate,
+          video: enriched.video,
+          evaluation: outcome.propose.evaluation,
+          weeklyInventory: outcome.propose.weeklyInventory,
+          weeklyExceptions: outcome.propose.weeklyExceptions,
+          provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
+          usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage)),
+        }),
+      )
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return
+      throw error
+    }
     await stepDo(step, "meal-planning-finish-generation-lease", () =>
       store.finishPlanGeneration(event.payload.chatId, generationId),
     )
@@ -744,8 +751,27 @@ async function liveWeekLoop(
       continue
     }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
-      if (await stepDo(step, `meal-planning-read-generation-${iteration}`, () => store.activePlanGeneration(chatId))) {
-        await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
+      const generationActive = await stepDo(step, `meal-planning-read-generation-${iteration}`, () =>
+        store.activePlanGeneration(chatId),
+      )
+      if (generationActive) {
+        if (payload?.source === "mini-app" && payload.feedbackBatchId && Number.isSafeInteger(payload.baseVersion)) {
+          const claimed = await stepDo(step, `meal-planning-claim-mini-app-batch-${iteration}`, () =>
+            store.claimFeedbackBatchForWorkflow(
+              payload.feedbackBatchId as string,
+              event.instanceId,
+              new Date().toISOString(),
+            ),
+          )
+          if (claimed) {
+            await stepDo(step, `meal-planning-stale-mini-app-batch-${iteration}`, () =>
+              store.markFeedbackBatchStale(claimed.batchId, new Date().toISOString()),
+            )
+          }
+          await notifyMiniAppBatchTerminal(env, step, store, chatId, payload.feedbackBatchId, iteration)
+        } else {
+          await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
+        }
         continue
       }
       let feedbackBatch: FeedbackBatchRecord | undefined

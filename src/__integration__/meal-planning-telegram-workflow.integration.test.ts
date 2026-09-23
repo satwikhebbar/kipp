@@ -543,22 +543,19 @@ describe("agent-centered meal-planning Telegram integration", () => {
     queueInitialPlan(base)
     await handleTelegramWebhook(message("/mealplan this week", 2), env)
     const second = startedWorkflowRun(wf, env)
-    const secondPlanIndex = await waitForMessageText(network, "School week of")
+    await waitForMessageText(network, "School week of")
 
-    // Answering the FIRST prompt later: the clarification registered before any plan
-    // existed carries no generation, so it still resolves and the first session
-    // persists. Its persistence batch commits after the second plan, so
-    // last-commit-wins: the first plan supersedes the second as the active plan.
+    // Answering the FIRST prompt later still resolves the clarification, but the
+    // first workflow has lost its generation lease and cannot overwrite the plan
+    // already persisted by the second workflow.
     queueInitialPlan(base)
     await handleTelegramWebhook(message("7 people", 60, clarifyPromptId), env)
-    await waitForMessageText(network, "School week of", secondPlanIndex)
+    await first.run
 
     const store = createMealPlanningStore(env.MEAL_PLANNING_DB as D1Database)
     const active = await store.activePlan("100")
-    expect(active?.plan.instanceId).toBe("meal-wf-1")
+    expect(active?.plan.instanceId).toBe("meal-wf-2")
 
-    first.step.timeout()
-    await first.run
     second.step.timeout()
     await second.run
   })

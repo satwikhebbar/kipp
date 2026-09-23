@@ -446,6 +446,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile(CHAT)
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "prior-workflow",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
     const priorGrid = Object.fromEntries(
       DAYS.map((day) => [
         day,
@@ -464,6 +469,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekEnd: week.weekEnd,
       timezone: TZ,
       instanceId: "prior-workflow",
+      generationId: "prior-workflow",
       candidate: {
         grid: priorGrid,
         easyBuys: [],
@@ -513,6 +519,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const priorWeek = resolvePlanningWeek(invokedAtMs - 7 * 24 * 60 * 60 * 1000, TZ)
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile(CHAT)
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "prior-week-workflow",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
     const priorGrid = Object.fromEntries(
       DAYS.map((day) => [
         day,
@@ -531,6 +542,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekEnd: priorWeek.weekEnd,
       timezone: TZ,
       instanceId: "prior-week-workflow",
+      generationId: "prior-week-workflow",
       candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
       evaluation: { pass: true, failures: [], measurements: {} } as never,
       weeklyInventory: {
@@ -577,6 +589,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile(CHAT)
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "same-week-workflow",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
     const priorGrid = Object.fromEntries(
       DAYS.map((day) => [
         day,
@@ -595,6 +612,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekEnd: week.weekEnd,
       timezone: TZ,
       instanceId: "same-week-workflow",
+      generationId: "same-week-workflow",
       candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
       evaluation: { pass: true, failures: [], measurements: {} } as never,
       weeklyInventory: { items: [{ name: "peas", status: "available" }], notes: [] },

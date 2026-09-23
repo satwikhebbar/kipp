@@ -190,6 +190,8 @@ export interface CreateActivePlanInput {
   timezone: string
   /** The live Workflow instance id — the webhook's fallthrough pointer (§6). */
   instanceId: string
+  /** Generation lease token; plan creation is rejected when it is absent, expired, or superseded. */
+  generationId: string
   candidate: MealPlanCandidate
   evaluation: MealPlanEvaluation
   weeklyInventory: WeeklyInventory
@@ -922,16 +924,20 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `UPDATE meal_plan SET status = 'replaced', updated_at = ?
              WHERE chat_id = ? AND status = 'active'
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+               AND EXISTS (SELECT 1 FROM meal_plan_generation
+                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
           )
-          .bind(now, input.chatId, input.chatId),
+          .bind(now, input.chatId, input.chatId, input.chatId, input.generationId, now),
         db
           .prepare(
             `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status,
                                     current_version, weekly_inventory_json, weekly_exceptions_json,
                                     created_at, updated_at)
              SELECT ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?
-             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+               AND EXISTS (SELECT 1 FROM meal_plan_generation
+                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
           )
           .bind(
             input.planId,
@@ -945,6 +951,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             now,
             now,
             input.chatId,
+            input.chatId,
+            input.generationId,
+            now,
           ),
         db
           .prepare(
@@ -952,7 +961,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
                                             usage_input_tokens, usage_output_tokens, usage_model, created_at)
              SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?
-             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+               AND EXISTS (SELECT 1 FROM meal_plan_generation
+                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
           )
           .bind(
             input.planId,
@@ -965,21 +976,41 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.usage?.model ?? null,
             now,
             input.chatId,
+            input.chatId,
+            input.generationId,
+            now,
           ),
         db
           .prepare(
-            "UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ? WHERE chat_id = ?",
+            `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ?
+             WHERE chat_id = ?
+               AND EXISTS (SELECT 1 FROM meal_plan_generation
+                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
           )
-          .bind(now, input.chatId),
+          .bind(now, input.chatId, input.chatId, input.generationId, now),
+        db
+          .prepare(
+            `DELETE FROM meal_plan_generation
+             WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+          )
+          .bind(input.chatId, input.generationId, now, input.chatId),
         db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
       ])
       const generationChanged = Number((results[3] as { meta: { changes?: number } }).meta.changes) === 1
       if (!generationChanged) {
+        const lease = await db
+          .prepare(
+            "SELECT 1 FROM meal_plan_generation WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?",
+          )
+          .bind(input.chatId, input.generationId, now)
+          .first()
+        if (!lease) throw new Error(`generation lease missing or expired for chat ${input.chatId}`)
         throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       }
       const previousReplaced = Number((results[0] as { meta: { changes?: number } }).meta.changes) >= 1
       const generation = Number(
-        (results[4] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
+        (results[5] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
       )
       return {
         plan: makePlanRecord(input, now),
@@ -1582,7 +1613,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
   const reviewContexts = backing.reviewContexts
   const sessions = backing.sessions
   const initDataFingerprints = backing.initDataFingerprints
-  const generations = backing.generations
+  const generations = backing.generations as Map<string, MealPlanGenerationRecord>
 
   function throwIfFailing(operation: "createActivePlan" | "promotePlanVersion"): void {
     if (options.failNextOn === operation) {
@@ -1629,6 +1660,16 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       const now = nowIso()
+      const generation = generations.get(input.chatId)
+      if (
+        !generation ||
+        generation.generationId !== input.generationId ||
+        generation.status !== "generating" ||
+        generation.expiresAt <= now
+      ) {
+        if (generation && generation.expiresAt <= now) generations.delete(input.chatId)
+        throw new Error(`generation lease missing or expired for chat ${input.chatId}`)
+      }
       const previous = activePlanForChat(input.chatId)
       if (previous) {
         previous.status = "replaced"
@@ -1652,6 +1693,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       backing.versions.set(versionKey(input.planId, 1), version)
       profile.interactionGeneration += 1
       profile.updatedAt = now
+      generations.delete(input.chatId)
       return { plan, version, generation: profile.interactionGeneration, previousReplaced: previous !== undefined }
     },
 
