@@ -1162,6 +1162,65 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(stalePlans.length).toBe(2)
   })
 
+  it("reports a stale feedback callback before the generation message during replacement", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const store = createMealPlanningStore(d1)
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    let delivered = false
+    const step = {
+      do: vi.fn(async (_name: string, fn: () => unknown) => fn()),
+      waitForEvent: vi.fn(async () => {
+        if (!delivered) {
+          delivered = true
+          const active = await store.activePlan(CHAT)
+          if (!active) throw new Error("initial plan was not created")
+          const promoted = await store.promotePlanVersion({
+            planId: active.plan.planId,
+            chatId: CHAT,
+            baseVersion: 1,
+            candidate: active.version.candidate,
+            evaluation: active.version.evaluation,
+            video: active.version.video,
+            provisionalMealDefinitions: active.version.provisionalMealDefinitions,
+            inventory: {
+              weeklyInventory: active.plan.weeklyInventory,
+              weeklyExceptions: active.plan.weeklyExceptions,
+            },
+            feedbackBatch: { batchId: "stale-callback", items: [{ id: "stale", text: "late feedback" }] },
+          })
+          if (!promoted.ok) throw new Error("replacement plan was not persisted")
+          await store.startPlanGeneration({
+            chatId: CHAT,
+            generationId: "replacement-generation",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          })
+          return {
+            type: "event" as const,
+            payload: { interactionKind: "meal-feedback" as const, source: "telegram-reply" as const, version: 1 },
+          }
+        }
+        vi.setSystemTime(Date.parse(week.weekEnd) + 1)
+        return { type: "timeout" as const }
+      }),
+      sleep: vi.fn(),
+      sleepUntil: vi.fn(),
+    }
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    expect(telegramMessages.some((message) => message.text.includes("already updated"))).toBe(true)
+    expect(telegramMessages.some((message) => message.text.includes("being generated"))).toBe(false)
+  })
+
   it("carries the clarification transcript into the next provider request", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
