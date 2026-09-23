@@ -289,10 +289,9 @@ export async function runAgentCenteredMealPlanningWorkflow(
     )
 
     const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
-    let persisted: Awaited<ReturnType<MealPlanningStore["createActivePlan"]>>
-    try {
-      persisted = await stepDo(step, "meal-planning-create-plan", () =>
-        store.createActivePlan({
+    const created = await stepDo(step, "meal-planning-create-plan", async () => {
+      try {
+        return await store.createActivePlan({
           planId,
           chatId: event.payload.chatId,
           weekStart: week.weekStart,
@@ -307,12 +306,14 @@ export async function runAgentCenteredMealPlanningWorkflow(
           weeklyExceptions: outcome.propose.weeklyExceptions,
           provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
           usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage)),
-        }),
-      )
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return
-      throw error
-    }
+        })
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
+        throw error
+      }
+    })
+    if (!created) return
+    const persisted = created
     await stepDo(step, "meal-planning-finish-generation-lease", () =>
       store.finishPlanGeneration(event.payload.chatId, generationId),
     )
@@ -739,6 +740,10 @@ async function liveWeekLoop(
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK) {
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) continue
+      if (event.instanceId !== active.plan.instanceId) {
+        await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-plan`)
+        continue
+      }
       if (payload.version !== undefined && payload.version < active.plan.currentVersion) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-plan`)
         continue
@@ -753,6 +758,10 @@ async function liveWeekLoop(
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) continue
+      if (event.instanceId !== active.plan.instanceId) {
+        await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-reply`)
+        continue
+      }
       if (payload?.version !== undefined && payload.version < active.plan.currentVersion) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-reply`)
         continue

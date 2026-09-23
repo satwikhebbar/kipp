@@ -382,7 +382,10 @@ async function dispatchRoutedInteraction(
   ) {
     const store = createMealPlanningStore(env.MEAL_PLANNING_DB)
     const active = await store.activePlan(String(chatId))
-    if (active && interaction.version < active.plan.currentVersion) {
+    if (
+      active &&
+      (interaction.workflowId !== active.plan.instanceId || interaction.version < active.plan.currentVersion)
+    ) {
       await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(String(chatId), MEAL_STALE_PLAN, {
         signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS),
       })
