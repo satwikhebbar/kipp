@@ -748,6 +748,38 @@ describe.each([
     ).toBe(false)
   })
 
+  it("falls back to the replaced plan context until the new active plan gets its review button", async () => {
+    const store = await makeStore()
+    await createPlan(store, createInput())
+    await store.upsertMiniAppReviewContext({
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      planId: "plan-1",
+      weekEnd: WEEKS.weekEnd,
+    })
+
+    await createPlan(
+      store,
+      createInput({
+        planId: "plan-2",
+        instanceId: "instance-2",
+        generationId: "generation-2",
+        weekStart: "2026-09-14T00:00:00.000Z",
+        weekEnd: "2026-09-19T23:59:59.000Z",
+      }),
+    )
+
+    expect(await store.resolveMiniAppReviewContext("parent-1")).toMatchObject({ planId: "plan-1" })
+
+    await store.upsertMiniAppReviewContext({
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      planId: "plan-2",
+      weekEnd: "2026-09-19T23:59:59.000Z",
+    })
+    expect(await store.resolveMiniAppReviewContext("parent-1")).toMatchObject({ planId: "plan-2" })
+  })
+
   it("keeps generation leases token-scoped and blocks feedback while generation is active", async () => {
     const store = await makeStore()
     await createPlan(store, createInput())

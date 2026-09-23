@@ -1345,8 +1345,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const row = await db
         .prepare(
           `SELECT telegram_user_id, chat_id, plan_id, week_end, created_at, updated_at
-           FROM meal_plan WHERE telegram_user_id = ? AND status = 'active'
-           ORDER BY updated_at DESC LIMIT 1`,
+           FROM meal_plan WHERE telegram_user_id = ?
+           ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                    updated_at DESC LIMIT 1`,
         )
         .bind(telegramUserId)
         .first()
