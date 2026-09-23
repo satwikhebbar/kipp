@@ -11,7 +11,7 @@ vi.mock("cloudflare:workers", () => {
 })
 
 const mockCreateGenerator = vi.hoisted(() => vi.fn())
-const mockResolveModel = vi.hoisted(() => vi.fn((_p: string, m?: string) => m ?? "deepseek-v4-flash"))
+const mockResolveModel = vi.hoisted(() => vi.fn((_p: string, m?: string) => m ?? "deepseek-flash"))
 vi.mock("../providers", () => ({
   createToolProvider: () => ({
     generate: async (input: {
@@ -728,7 +728,7 @@ describe("PipelineWorkflow", () => {
     expect(notifyMsg).toContain("Est. cost:")
     expect(notifyMsg).toContain("100000 in")
     expect(notifyMsg).toContain("50000 out")
-    expect(notifyMsg).toContain("deepseek-v4-flash")
+    expect(notifyMsg).toContain("deepseek-flash")
   })
 
   it("cumulative cost across revisions appears in revised notification", async () => {
@@ -809,7 +809,7 @@ describe("PipelineWorkflow", () => {
     expect(publishMsg).toContain("Est. cost:")
     expect(publishMsg).toContain("0 in")
     expect(publishMsg).toContain("50 out")
-    expect(publishMsg).toContain("deepseek-v4-flash")
+    expect(publishMsg).toContain("deepseek-flash")
   })
 
   it("restores cumulative cost and latest cost line when a completed revision step is replayed", async () => {
@@ -832,8 +832,8 @@ describe("PipelineWorkflow", () => {
           messages: [],
           costInputTokens: 300,
           costOutputTokens: 130,
-          costLine: "\n\n_Est. cost: ~$0.0000 (upper bound; 300 in / 130 out, deepseek-v4-flash)_",
-          model: "deepseek-v4-flash",
+          costLine: "\n\n_Est. cost: ~$0.0000 (upper bound; 300 in / 130 out, deepseek-flash)_",
+          model: "deepseek-flash",
         }
       }
       return fn()

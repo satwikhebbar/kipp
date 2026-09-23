@@ -5,11 +5,11 @@ import { resolveModel } from "../providers"
 
 describe("computeCost", () => {
   test("known model arithmetic", () => {
-    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "deepseek-v4-flash")
-    expect(cost.totalCostUsd).toBeCloseTo(0.28, 4)
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "deepseek-flash")
+    expect(cost.totalCostUsd).toBeCloseTo(0.9, 4)
     expect(cost.totalInputTokens).toBe(1_000_000)
     expect(cost.totalOutputTokens).toBe(500_000)
-    expect(cost.model).toBe("deepseek-v4-flash")
+    expect(cost.model).toBe("deepseek-flash")
   })
 
   test("unknown model returns null cost", () => {
@@ -19,13 +19,13 @@ describe("computeCost", () => {
   })
 
   test("zero tokens costs zero", () => {
-    const cost = computeCost({ inputTokens: 0, outputTokens: 0 }, "deepseek-v4-flash")
+    const cost = computeCost({ inputTokens: 0, outputTokens: 0 }, "deepseek-flash")
     expect(cost.totalCostUsd).toBeCloseTo(0, 4)
   })
 
   test("rounding with small token counts", () => {
-    const cost = computeCost({ inputTokens: 1, outputTokens: 1 }, "deepseek-v4-flash")
-    expect(cost.totalCostUsd).toBeCloseTo(0.00000042, 8)
+    const cost = computeCost({ inputTokens: 1, outputTokens: 1 }, "deepseek-flash")
+    expect(cost.totalCostUsd).toBeCloseTo(0.0000015, 8)
   })
 
   test("deepseek-chat pricing arithmetic", () => {
@@ -40,6 +40,12 @@ describe("computeCost", () => {
     expect(cost.model).toBe("openai/gpt-5.6-luna")
   })
 
+  test("openai/gpt-6-luna pricing arithmetic", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "openai/gpt-6-luna")
+    expect(cost.totalCostUsd).toBeCloseTo(0.35, 4)
+    expect(cost.model).toBe("openai/gpt-6-luna")
+  })
+
   test("gemini-2.5-flash pricing arithmetic", () => {
     const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "gemini-2.5-flash")
     expect(cost.totalCostUsd).toBeCloseTo(1.55, 4)
@@ -52,7 +58,7 @@ describe("computeCost", () => {
       resolveModel("deepseek"),
       resolveModel("openrouter"),
       resolveModel("gemini"),
-      "deepseek-v4-flash",
+      "deepseek-flash",
     ]
     for (const model of selectableModels) {
       expect(computeCost({ inputTokens: 0, outputTokens: 0 }, model).totalCostUsd).not.toBeNull()
@@ -63,13 +69,13 @@ describe("computeCost", () => {
 describe("computeCostByModel", () => {
   test("prices each model group at its own rate and joins the model labels", () => {
     const cost = computeCostByModel([
-      { inputTokens: 1_000_000, outputTokens: 500_000, model: "openai/gpt-5.6-luna" },
-      { inputTokens: 1_000_000, outputTokens: 500_000, model: "deepseek-v4-flash" },
+      { inputTokens: 1_000_000, outputTokens: 500_000, model: "openai/gpt-6-luna" },
+      { inputTokens: 1_000_000, outputTokens: 500_000, model: "deepseek-flash" },
     ])
-    expect(cost.totalCostUsd).toBeCloseTo(0.8 + 0.28, 4)
+    expect(cost.totalCostUsd).toBeCloseTo(0.35 + 0.9, 4)
     expect(cost.totalInputTokens).toBe(2_000_000)
     expect(cost.totalOutputTokens).toBe(1_000_000)
-    expect(cost.model).toBe("openai/gpt-5.6-luna + deepseek-v4-flash")
+    expect(cost.model).toBe("openai/gpt-6-luna + deepseek-flash")
   })
 
   test("a single group matches computeCost", () => {
@@ -83,11 +89,11 @@ describe("computeCostByModel", () => {
 
   test("an unpriced model nulls the whole estimate", () => {
     const cost = computeCostByModel([
-      { inputTokens: 10, outputTokens: 5, model: "deepseek-v4-flash" },
+      { inputTokens: 10, outputTokens: 5, model: "deepseek-flash" },
       { inputTokens: 10, outputTokens: 5, model: "some-future-model" },
     ])
     expect(cost.totalCostUsd).toBeNull()
-    expect(cost.model).toBe("deepseek-v4-flash + some-future-model")
+    expect(cost.model).toBe("deepseek-flash + some-future-model")
   })
 })
 
@@ -97,12 +103,12 @@ describe("formatCostLine", () => {
       totalInputTokens: 1000,
       totalOutputTokens: 500,
       totalCostUsd: 0.00027,
-      model: "deepseek-v4-flash",
+      model: "deepseek-flash",
     }
     const line = formatCostLine(cost)
     expect(line).toContain("~$0.0003")
     expect(line).toContain("1000 in / 500 out")
-    expect(line).toContain("deepseek-v4-flash")
+    expect(line).toContain("deepseek-flash")
   })
 
   test("unknown model returns no-estimate message", () => {
@@ -119,7 +125,7 @@ describe("formatCostLine", () => {
 
 describe("resolveModel", () => {
   test("explicit model overrides default", () => {
-    expect(resolveModel("deepseek", "deepseek-v4-flash")).toBe("deepseek-v4-flash")
+    expect(resolveModel("deepseek", "deepseek-flash")).toBe("deepseek-flash")
   })
 
   test("unknown provider throws", () => {

@@ -5,14 +5,15 @@ type ModelPricing = { inputCacheMissPer1M: number; outputPer1M: number }
 // Input is always priced at the cache-miss rate, so estimates are honest
 // upper bounds (formatCostLine says so). deepseek-* are DeepSeek-direct
 // prices (LinkedIn/calendar call DeepSeek directly, not via OpenRouter).
-// openai/gpt-5.6-luna and google/gemini-2.5-flash verified 2026-09-08 against
-// the OpenRouter models API. The deepseek rows predate this change and match
-// DeepSeek's direct pricing; api-docs.deepseek.com is client-rendered, so
-// re-confirm them against platform.deepseek.com before relying on a tight
-// estimate.
+// openai/gpt-6-luna verified 2026-09-23 against the OpenRouter model page.
+// deepseek-flash is DeepSeek-V4.1-Flash's exact API model name; its peak
+// cache-miss and output rates were verified 2026-09-23 against the DeepSeek
+// pricing page. Legacy rows remain so historical usage records stay priced.
 const PRICING: Record<string, ModelPricing> = {
+  "deepseek-flash": { inputCacheMissPer1M: 0.3, outputPer1M: 1.2 },
   "deepseek-v4-flash": { inputCacheMissPer1M: 0.14, outputPer1M: 0.28 },
   "deepseek-chat": { inputCacheMissPer1M: 0.27, outputPer1M: 1.1 },
+  "openai/gpt-6-luna": { inputCacheMissPer1M: 0.1, outputPer1M: 0.5 },
   "openai/gpt-5.6-luna": { inputCacheMissPer1M: 0.2, outputPer1M: 1.2 },
   "gemini-2.5-flash": { inputCacheMissPer1M: 0.3, outputPer1M: 2.5 },
 }

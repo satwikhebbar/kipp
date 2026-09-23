@@ -11,7 +11,7 @@ import {
 } from "./llm"
 
 const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions"
-const DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+const DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"
 const DEEPSEEK_DEFAULT_REQUEST_TIMEOUT_MS = 180_000
 const FUNCTION_TOOL_TYPE = "function"
 const MAX_PROVIDER_ERROR_MESSAGE_CHARACTERS = 500
