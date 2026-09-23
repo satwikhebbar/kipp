@@ -45,6 +45,11 @@ describe("Mini App Telegram authentication", () => {
     const { d1 } = createD1TestDb()
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile("chat-42")
+    await store.startPlanGeneration({
+      chatId: "chat-42",
+      generationId: "generation-1",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
     await store.createActivePlan({
       planId: "plan-1",
       chatId: "chat-42",
@@ -52,6 +57,7 @@ describe("Mini App Telegram authentication", () => {
       weekEnd: "2026-09-05T23:59:59.000Z",
       timezone: "Asia/Kolkata",
       instanceId: "instance-1",
+      generationId: "generation-1",
       candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
       evaluation: {
         pass: true,

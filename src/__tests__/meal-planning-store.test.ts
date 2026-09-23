@@ -48,6 +48,7 @@ function createInput(overrides: Partial<CreateActivePlanInput> = {}): CreateActi
     ...WEEKS,
     timezone: "Asia/Kolkata",
     instanceId: "instance-1",
+    generationId: "generation-1",
     candidate: candidate(),
     evaluation: evaluation(),
     weeklyInventory: { items: [], notes: [] },
@@ -74,6 +75,15 @@ async function newStore(backing?: InMemoryMealPlanningBacking): Promise<MealPlan
   const store = createInMemoryMealPlanningStore(backing ? { backing } : {})
   await store.loadOrCreateProfile(CHAT)
   return store
+}
+
+async function createPlan(store: MealPlanningStore, input: CreateActivePlanInput) {
+  await store.startPlanGeneration({
+    chatId: input.chatId,
+    generationId: input.generationId,
+    expiresAt: "2999-01-01T00:00:00.000Z",
+  })
+  return store.createActivePlan(input)
 }
 
 describe("createInMemoryMealPlanningStore", () => {
@@ -120,7 +130,7 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("createActivePlan writes the plan, version 1, and generation 1; previousReplaced is false for the first plan", async () => {
     const store = await newStore()
-    const result = await store.createActivePlan(createInput())
+    const result = await createPlan(store, createInput())
     expect(result.previousReplaced).toBe(false)
     expect(result.generation).toBe(1)
     expect(result.plan.planId).toBe("plan-1")
@@ -140,8 +150,8 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("a second create supersedes the first (serialize-and-supersede), bumping the generation exactly once per plan message", async () => {
     const store = await newStore()
-    await store.createActivePlan(createInput())
-    const second = await store.createActivePlan(createInput({ planId: "plan-2", instanceId: "instance-2" }))
+    await createPlan(store, createInput())
+    const second = await createPlan(store, createInput({ planId: "plan-2", instanceId: "instance-2" }))
     expect(second.previousReplaced).toBe(true)
     expect(second.generation).toBe(2)
 
@@ -155,16 +165,18 @@ describe("createInMemoryMealPlanningStore", () => {
 
     // A different chat's first plan starts its own generation at 1.
     await store.loadOrCreateProfile("chat-2")
-    const other = await store.createActivePlan(createInput({ planId: "plan-3", chatId: "chat-2" }))
+    const other = await createPlan(store, createInput({ planId: "plan-3", chatId: "chat-2" }))
     expect(other.generation).toBe(1)
   })
 
   it("a next-week create replaces the prior week's inventory and exceptions (weekly state does not leak)", async () => {
     const store = await newStore()
-    await store.createActivePlan(
+    await createPlan(
+      store,
       createInput({ weeklyInventory: { items: [{ name: "poha", status: "available" as const }], notes: [] } }),
     )
-    const next = await store.createActivePlan(
+    const next = await createPlan(
+      store,
       createInput({
         planId: "plan-2",
         weekStart: "2026-09-14T00:00:00.000Z",
@@ -180,7 +192,7 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("promotePlanVersion commits a revision: version N+1, current_version advance, generation bump, and the immutable submission batch linked from the new version", async () => {
     const store = await newStore()
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
 
     const inventory = {
       weeklyInventory: { items: [{ name: "poha", status: "available" as const }], notes: ["picked up poha"] },
@@ -203,7 +215,8 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("persists per-version usage and sums it across the plan (cost tracking)", async () => {
     const store = await newStore()
-    await store.createActivePlan(
+    await createPlan(
+      store,
       createInput({ usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" } }),
     )
     expect(await store.sumPlanUsage("plan-1")).toEqual({
@@ -227,7 +240,8 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("sumPlanUsage groups tokens by model so each version is priced at its own rate", async () => {
     const store = await newStore()
-    await store.createActivePlan(
+    await createPlan(
+      store,
       createInput({ usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" } }),
     )
     await store.promotePlanVersion(
@@ -245,7 +259,7 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("sumPlanUsage returns null and versions hydrate null usage when none recorded it (legacy rows)", async () => {
     const store = await newStore()
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     await store.promotePlanVersion(promoteInput())
     expect(await store.sumPlanUsage("plan-1")).toBeNull()
     expect((await store.activePlan(CHAT))?.version.usage).toBeNull()
@@ -253,7 +267,7 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("a stale promote changes nothing: no version row, generation unmoved, current_version unmoved, inventory unmoved, no feedback batch row", async () => {
     const store = await newStore()
-    await store.createActivePlan(createInput({ weeklyInventory: { items: [], notes: ["original"] } }))
+    await createPlan(store, createInput({ weeklyInventory: { items: [], notes: ["original"] } }))
     const first = await store.promotePlanVersion(promoteInput())
     expect(first.ok).toBe(true)
 
@@ -293,7 +307,7 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("a stale-base race (the winner already committed a newer version) resolves stale and leaves no extra version", async () => {
     const store = await newStore()
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     const winner = await store.promotePlanVersion(
       promoteInput({ feedbackBatch: { batchId: "plan-1:v2", items: [{ id: "tg-1", text: "ok" }] } }),
     )
@@ -316,7 +330,7 @@ describe("createInMemoryMealPlanningStore", () => {
     const store = createInMemoryMealPlanningStore()
     await store.loadOrCreateProfile(CHAT)
     await store.loadOrCreateProfile("chat-2")
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
 
     const cross = await store.promotePlanVersion(promoteInput({ chatId: "chat-2" }))
     expect(cross).toEqual({ ok: false, reason: "stale" })
@@ -336,10 +350,10 @@ describe("createInMemoryMealPlanningStore", () => {
       batches: new Map(),
     }
     const store = await newStore(backing)
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
 
     const failing = createInMemoryMealPlanningStore({ backing, failNextOn: "createActivePlan" })
-    await expect(failing.createActivePlan(createInput({ planId: "plan-2", instanceId: "instance-2" }))).rejects.toThrow(
+    await expect(createPlan(failing, createInput({ planId: "plan-2", instanceId: "instance-2" }))).rejects.toThrow(
       "injected batch failure",
     )
 
@@ -358,7 +372,7 @@ describe("createInMemoryMealPlanningStore", () => {
       batches: new Map(),
     }
     const store = await newStore(backing)
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
 
     const failing = createInMemoryMealPlanningStore({ backing, failNextOn: "promotePlanVersion" })
     await expect(
@@ -376,7 +390,7 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("versions are insert-only: a later promotion never mutates an earlier version record", async () => {
     const store = await newStore()
-    const created = await store.createActivePlan(createInput())
+    const created = await createPlan(store, createInput())
     const v1 = { ...created.version }
     await store.promotePlanVersion(promoteInput())
     expect(created.version.version).toBe(1)
@@ -391,7 +405,7 @@ describe("createInMemoryMealPlanningStore", () => {
       batches: new Map(),
     }
     const first = await newStore(backing)
-    await first.createActivePlan(createInput())
+    await createPlan(first, createInput())
 
     const restarted = createInMemoryMealPlanningStore({ backing })
     const active = await restarted.activePlan(CHAT)
@@ -408,7 +422,7 @@ describe("createInMemoryMealPlanningStore", () => {
 
   it("createActivePlan fails when the profile row is missing, never returning a NaN generation", async () => {
     const store = createInMemoryMealPlanningStore()
-    await expect(store.createActivePlan(createInput())).rejects.toThrow("meal_profile row missing for chat chat-1")
+    await expect(createPlan(store, createInput())).rejects.toThrow("meal_profile row missing for chat chat-1")
     expect(await store.activePlan(CHAT)).toBeNull()
   })
 })
@@ -440,7 +454,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(profile.interactionGeneration).toBe(0)
     expect(profile.customPolicies).toHaveLength(7)
 
-    const created = await store.createActivePlan(createInput())
+    const created = await createPlan(store, createInput())
     expect(created.generation).toBe(1)
     expect(created.previousReplaced).toBe(false)
 
@@ -461,7 +475,8 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("persists usage columns through D1, sums them, and reads a null usage row back as null", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
-    const created = await store.createActivePlan(
+    const created = await createPlan(
+      store,
       createInput({ usage: { inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" } }),
     )
     expect(created.version.usage).toEqual({ inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" })
@@ -490,7 +505,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("a legacy version persisted without usage hydrates null and does not skew the sum", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
-    const created = await store.createActivePlan(createInput())
+    const created = await createPlan(store, createInput())
     expect(created.version.usage).toBeNull()
     expect(await store.sumPlanUsage("plan-1")).toBeNull()
 
@@ -509,7 +524,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
 
   it("createActivePlan with a missing profile throws atomically: no plan, no version, no profile row", async () => {
     const { store, db } = createD1Store()
-    await expect(store.createActivePlan(createInput())).rejects.toThrow("meal_profile row missing for chat chat-1")
+    await expect(createPlan(store, createInput())).rejects.toThrow("meal_profile row missing for chat chat-1")
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan")).toBe(0)
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(0)
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_profile")).toBe(0)
@@ -518,12 +533,12 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("createActivePlan with a missing profile does not replace a prior active plan (supersede guarded)", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan WHERE status = 'active'")).toBe(1)
 
     // Simulate the programming-error precondition (profile row deleted).
     db.prepare("DELETE FROM meal_profile WHERE chat_id = ?").run(CHAT)
-    await expect(store.createActivePlan(createInput({ planId: "plan-2" }))).rejects.toThrow(
+    await expect(createPlan(store, createInput({ planId: "plan-2" }))).rejects.toThrow(
       "meal_profile row missing for chat chat-1",
     )
 
@@ -536,7 +551,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("promotePlanVersion with a missing profile throws atomically: no version, no advance, no batch, inventory unmoved", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
-    await store.createActivePlan(createInput({ weeklyInventory: { items: [], notes: ["original"] } }))
+    await createPlan(store, createInput({ weeklyInventory: { items: [], notes: ["original"] } }))
 
     db.prepare("DELETE FROM meal_profile WHERE chat_id = ?").run(CHAT)
     await expect(
@@ -562,7 +577,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("a stale promote returns stale with no state changes", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     const first = await store.promotePlanVersion(promoteInput())
     expect(first.ok).toBe(true)
 
@@ -583,7 +598,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
     await store.loadOrCreateProfile("chat-2")
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     expect(d1Scalar(db, "SELECT interaction_generation FROM meal_profile WHERE chat_id = ?", "chat-2")).toBe(0)
 
     const cross = await store.promotePlanVersion(promoteInput({ chatId: "chat-2" }))
@@ -599,9 +614,9 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("serialize-and-supersede at the D1 level: a second create replaces the first, generation 1 then 2", async () => {
     const { store } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
-    const first = await store.createActivePlan(createInput())
+    const first = await createPlan(store, createInput())
     expect(first.generation).toBe(1)
-    const second = await store.createActivePlan(createInput({ planId: "plan-2" }))
+    const second = await createPlan(store, createInput({ planId: "plan-2" }))
     expect(second.previousReplaced).toBe(true)
     expect(second.generation).toBe(2)
     expect(await store.activePlan(CHAT)).toMatchObject({ plan: { planId: "plan-2", currentVersion: 1 } })
@@ -661,9 +676,42 @@ describe.each([
     },
   ],
 ] as const)("Mini App durable contracts (%s)", (_name, makeStore) => {
+  it("fences plan creation to the current unexpired generation lease", async () => {
+    const store = await makeStore()
+    await createPlan(store, createInput())
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "generation-2",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
+
+    await expect(
+      store.createActivePlan(createInput({ planId: "stale-plan", generationId: "generation-1" })),
+    ).rejects.toThrow("generation lease missing or expired")
+    expect(await store.activePlan(CHAT)).toMatchObject({ plan: { planId: "plan-1", status: "active" } })
+
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "generation-expired",
+      expiresAt: "2020-01-01T00:00:00.000Z",
+    })
+    await expect(
+      store.createActivePlan(createInput({ planId: "expired-plan", generationId: "generation-expired" })),
+    ).rejects.toThrow("generation lease missing or expired")
+    expect(await store.activePlanGeneration(CHAT, "3000-01-01T00:00:00.000Z")).toBeNull()
+
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "generation-3",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
+    await createPlan(store, createInput({ planId: "plan-3", generationId: "generation-3" }))
+    expect(await store.activePlanGeneration(CHAT)).toBeNull()
+  })
+
   it("keeps private chat scope, expires opaque sessions, and rejects replayed init data", async () => {
     const store = await makeStore()
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     const context = await store.upsertMiniAppReviewContext({
       telegramUserId: "parent-1",
       chatId: CHAT,
@@ -702,7 +750,7 @@ describe.each([
 
   it("keeps generation leases token-scoped and blocks feedback while generation is active", async () => {
     const store = await makeStore()
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     await store.startPlanGeneration({
       chatId: CHAT,
       generationId: "generation-1",
@@ -747,7 +795,7 @@ describe.each([
     const store = await makeStore()
     for (let index = 1; index <= MAX_MEAL_PLAN_HISTORY + 2; index++) {
       const planId = `plan-${String(index).padStart(2, "0")}`
-      await store.createActivePlan(createInput({ planId, instanceId: `instance-${planId}` }))
+      await createPlan(store, createInput({ planId, instanceId: `instance-${planId}` }))
     }
 
     const history = await store.listPlanHistory(CHAT)
@@ -760,7 +808,7 @@ describe.each([
 
   it("accepts one version-bound batch idempotently and advances its dispatch lifecycle", async () => {
     const store = await makeStore()
-    await store.createActivePlan(createInput())
+    await createPlan(store, createInput())
     const input = {
       batchId: "batch-1",
       planId: "plan-1",
@@ -801,7 +849,8 @@ describe.each([
 
   it("normalizes valid cell targets and rejects malformed or nonexistent feedback", async () => {
     const store = await makeStore()
-    await store.createActivePlan(
+    await createPlan(
+      store,
       createInput({
         candidate: candidate({
           Mon: {

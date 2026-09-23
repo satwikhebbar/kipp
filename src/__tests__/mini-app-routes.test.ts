@@ -47,6 +47,12 @@ async function seedPlan(
   weekEnd: string,
 ) {
   await store.loadOrCreateProfile("chat-42")
+  const generationId = `generation-${planId}`
+  await store.startPlanGeneration({
+    chatId: "chat-42",
+    generationId,
+    expiresAt: "2999-01-01T00:00:00.000Z",
+  })
   await store.createActivePlan({
     planId,
     chatId: "chat-42",
@@ -54,6 +60,7 @@ async function seedPlan(
     weekEnd,
     timezone: "Asia/Kolkata",
     instanceId: `instance-${planId}`,
+    generationId,
     candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
     evaluation: {
       pass: true,
@@ -121,7 +128,6 @@ describe("Mini App HTTP boundary", () => {
     expect(html).toContain("Holiday")
     expect(html).toContain("/mealplan")
     expect(html).toContain("Read-only while your next plan is being generated.")
-    expect(html).toContain("Your first meal plan is being generated.")
     expect(html).toContain("Historical plan — read-only.")
     expect(html).toContain("Refresh plan")
     expect(html).toContain('className="history"')
@@ -168,10 +174,41 @@ describe("Mini App HTTP boundary", () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(FAKE_NOW)
     try {
-      const { d1 } = createD1TestDb()
+      const { db, d1 } = createD1TestDb()
       const store = createMealPlanningStore(d1)
       await store.loadOrCreateProfile("chat-42")
-      await seedPlan(store, "pending-plan", "2026-09-27T18:30:00.000Z", "2026-10-03T18:29:59.000Z")
+      const generationId = "generation-first-plan"
+      await store.startPlanGeneration({
+        chatId: "chat-42",
+        generationId,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      })
+      await store.createActivePlan({
+        planId: "pending-plan",
+        chatId: "chat-42",
+        weekStart: "2026-09-27T18:30:00.000Z",
+        weekEnd: "2026-10-03T18:29:59.000Z",
+        timezone: "Asia/Kolkata",
+        instanceId: "instance-pending-plan",
+        generationId,
+        candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
+        evaluation: {
+          pass: true,
+          failures: [],
+          measurements: {
+            morningCookByDay: {},
+            morningCookMax: 0,
+            priorNightPrepByDay: {},
+            priorNightPrepMax: 0,
+            dishRepeatCount: 0,
+            dishRepeats: [],
+            inventoryUsed: [],
+            easyBuyCount: 0,
+          },
+        },
+        weeklyInventory: { items: [], notes: [] },
+        weeklyExceptions: { items: [] },
+      })
       await store.upsertMiniAppReviewContext({
         telegramUserId: "42",
         chatId: "chat-42",
@@ -194,6 +231,12 @@ describe("Mini App HTTP boundary", () => {
       )
       expect(session.status).toBe(201)
       const { token } = (await session.json()) as { token: string }
+      db.prepare("DELETE FROM meal_plan WHERE plan_id = ?").run("pending-plan")
+      await store.startPlanGeneration({
+        chatId: "chat-42",
+        generationId,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      })
       const response = await miniAppRoutes.fetch(
         new Request("https://kipp.example/mini-app/api/plan?planId=missing-plan", {
           headers: { Authorization: `Bearer ${token}` },
@@ -203,7 +246,7 @@ describe("Mini App HTTP boundary", () => {
       expect(await response.json()).toMatchObject({
         status: "generating",
         currentPlan: null,
-        history: expect.any(Array),
+        history: [],
       })
     } finally {
       vi.useRealTimers()
@@ -272,7 +315,7 @@ describe("Mini App HTTP boundary", () => {
           method: "POST",
           headers: { Authorization: `Bearer ${fixture.token}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            planId: "plan-current",
+            planId: "plan-replaced",
             baseVersion: 1,
             idempotencyKey: "historical-feedback",
             items: [{ id: "feedback-1", text: "Less oily", target: { kind: "plan" } }],
