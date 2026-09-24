@@ -2,10 +2,9 @@ import type { LLMUsage, WorkflowCost } from "./types"
 
 type ModelPricing = { inputCacheMissPer1M: number; outputPer1M: number }
 
-// Input is always priced at the cache-miss rate, so estimates are honest
-// upper bounds (formatCostLine says so). deepseek-* are DeepSeek-direct
+// Input is priced at the cache-miss rate. deepseek-* are DeepSeek-direct
 // prices (LinkedIn/calendar call DeepSeek directly, not via OpenRouter).
-// openai/gpt-luna-latest verified 2026-09-23 against the OpenRouter model page.
+// ~openai/gpt-luna-latest verified 2026-09-23 against the OpenRouter model page.
 // deepseek-flash is DeepSeek-V4.1-Flash's exact API model name; its peak
 // cache-miss and output rates were verified 2026-09-23 against the DeepSeek
 // pricing page. Legacy rows remain so historical usage records stay priced.
@@ -13,7 +12,7 @@ const PRICING: Record<string, ModelPricing> = {
   "deepseek-flash": { inputCacheMissPer1M: 0.3, outputPer1M: 1.2 },
   "deepseek-v4-flash": { inputCacheMissPer1M: 0.14, outputPer1M: 0.28 },
   "deepseek-chat": { inputCacheMissPer1M: 0.27, outputPer1M: 1.1 },
-  "openai/gpt-luna-latest": { inputCacheMissPer1M: 0.125, outputPer1M: 0.5 },
+  "~openai/gpt-luna-latest": { inputCacheMissPer1M: 0.1, outputPer1M: 0.5 },
   "openai/gpt-6-luna": { inputCacheMissPer1M: 0.1, outputPer1M: 0.5 },
   "openai/gpt-5.6-luna": { inputCacheMissPer1M: 0.2, outputPer1M: 1.2 },
   "gemini-2.5-flash": { inputCacheMissPer1M: 0.3, outputPer1M: 2.5 },
@@ -82,6 +81,6 @@ export function formatCostLine(cost: WorkflowCost, options: { preserveHistorical
       : cost.totalCostUsd
   return (
     `\n\n_Est. cost: ~$${totalCostUsd.toFixed(COST_DECIMAL_PLACES)} ` +
-    `(upper bound; ${cost.totalInputTokens} in / ${cost.totalOutputTokens} out, ${cost.model})_`
+    `(${cost.totalInputTokens} in / ${cost.totalOutputTokens} out, ${cost.model})_`
   )
 }

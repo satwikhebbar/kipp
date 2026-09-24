@@ -36,7 +36,7 @@ const vars = production ? process.env : { ...readKeyValueFile(process.env.DEV_VA
 // legacy LLM_* settings, which may point at a different provider/model.
 const apiKey = vars.OPENROUTER_API_KEY
 const providerName = "openrouter"
-const model = "openai/gpt-luna-latest"
+const model = "~openai/gpt-luna-latest"
 const maxRetries = Number(vars.LLM_MAX_RETRIES || 3)
 const databaseName = vars.MEAL_CATALOG_DB_NAME || (production ? "meal-planning" : "kipp-meal-planning-local")
 const configPath = production ? "wrangler.prod.toml" : "wrangler.local.toml"

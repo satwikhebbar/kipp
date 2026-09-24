@@ -10,7 +10,7 @@ correct.
 The implementation should use these canonical provider model IDs unless the
 provider documentation confirms a different spelling before coding:
 
-- OpenRouter: `openai/gpt-luna-latest`
+- OpenRouter: `~openai/gpt-luna-latest`
 - DeepSeek direct API: `deepseek-flash`
 
 The exact IDs must be confirmed against the provider model catalogs during

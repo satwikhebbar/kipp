@@ -832,7 +832,7 @@ describe("PipelineWorkflow", () => {
           messages: [],
           costInputTokens: 300,
           costOutputTokens: 130,
-          costLine: "\n\n_Est. cost: ~$0.0000 (upper bound; 300 in / 130 out, deepseek-flash)_",
+          costLine: "\n\n_Est. cost: ~$0.0000 (300 in / 130 out, deepseek-flash)_",
           model: "deepseek-flash",
         }
       }

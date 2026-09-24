@@ -42,8 +42,8 @@ All in `src/core/cost.ts` + `src/linkedin/workflow.ts`:
   agent session returns it (`session.usage`).
 - `computeCost(usage, model)` multiplies token counts by a static `PRICING`
   table keyed on the exact model string; input is priced at the cache-miss rate,
-  so the estimate is deliberately an upper bound. `formatCostLine(cost)` renders
-  `_Est. cost: ~$X.XXXX (upper bound; N in / M out, model)_`.
+  so the estimate reflects the cache-miss rate. `formatCostLine(cost)` renders
+  `_Est. cost: ~$X.XXXX (N in / M out, model)_`.
 - The workflow keeps **running** input/output totals in its step state across
   draft → revisions, and every notify message appends the running total's cost
   line: the initial draft message shows the draft's cost, each revised-draft
@@ -76,7 +76,7 @@ Entry `/mealplan` → `MealPlanningWorkflow` →
    `sendPlanAndRegister` again.
 
 All LLM calls use one hard-coded model:
-`MEAL_PLANNER_MODEL = "openai/gpt-luna-latest"` via OpenRouter
+`MEAL_PLANNER_MODEL = "~openai/gpt-luna-latest"` via OpenRouter
 (`agent-workflow.ts:50-51`). The model is **not** in `PRICING`
 (`src/core/cost.ts:5-9`), so `computeCost` would return `null` today if it were
 called.
@@ -151,12 +151,12 @@ model strings:
 |---|---|---|---|---|
 | `deepseek-v4-flash` | 0.14 | 0.28 | local default `LLM_MODEL` (wrangler.toml), DeepSeek-direct | keep; re-verify |
 | `deepseek-chat` | 0.27 | 1.10 | `resolveModel` deepseek fallback, DeepSeek-direct | keep; re-verify |
-| `openai/gpt-luna-latest` | 0.125 | 0.50 | meal planner + catalog + openrouter fallback | **add** |
+| `~openai/gpt-luna-latest` | 0.10 | 0.50 | meal planner + catalog + openrouter fallback | **add** |
 | `gemini-2.5-flash` | 0.30 | 2.50 | `resolveModel` gemini fallback | **add** |
 | `gemini-2.0-flash` | — | — | not referenced anywhere except cost.ts/tests | **remove** |
 
 Verified 2026-09-08 against the OpenRouter models API for the two additions
-(`openai/gpt-luna-latest`: cache-miss `$0.125/1M`, completion `$0.50/1M`; `google/gemini-2.5-flash`: `$0.30/1M` / `$2.50/1M`). The
+(`~openai/gpt-luna-latest`: cache-miss `$0.10/1M`, completion `$0.50/1M`; `google/gemini-2.5-flash`: `$0.30/1M` / `$2.50/1M`). The
 `deepseek-*` rows are **DeepSeek-direct** prices because the LinkedIn/calendar
 flows call DeepSeek directly (`LLM_PROVIDER=deepseek`); do not replace them
 with OpenRouter's marked-up deepseek listings. Re-verify both rows against
@@ -165,7 +165,7 @@ if stale.
 
 Unchanged mechanics: same `ModelPricing` shape and `computeCost` math. Input is
 priced at the cache-miss rate even when a response's prompt tokens include
-cache hits, so the existing "upper bound" caption in `formatCostLine` stays
+cache hits, so the displayed estimate uses the documented cache-miss rate and
 accurate. No new env vars; the `Env.LLM_MODEL` dashboard value remains unknown
 to the table, and the existing "not in pricing table — no cost estimate"
 fallback still degrades gracefully if it ever names an unpriced model.
