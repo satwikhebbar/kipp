@@ -76,7 +76,7 @@ Entry `/mealplan` → `MealPlanningWorkflow` →
    `sendPlanAndRegister` again.
 
 All LLM calls use one hard-coded model:
-`MEAL_PLANNER_MODEL = "openai/gpt-5.6-luna"` via OpenRouter
+`MEAL_PLANNER_MODEL = "openai/gpt-luna-latest"` via OpenRouter
 (`agent-workflow.ts:50-51`). The model is **not** in `PRICING`
 (`src/core/cost.ts:5-9`), so `computeCost` would return `null` today if it were
 called.
@@ -151,13 +151,12 @@ model strings:
 |---|---|---|---|---|
 | `deepseek-v4-flash` | 0.14 | 0.28 | local default `LLM_MODEL` (wrangler.toml), DeepSeek-direct | keep; re-verify |
 | `deepseek-chat` | 0.27 | 1.10 | `resolveModel` deepseek fallback, DeepSeek-direct | keep; re-verify |
-| `openai/gpt-5.6-luna` | 0.20 | 1.20 | meal planner + catalog + openrouter fallback | **add** |
+| `openai/gpt-luna-latest` | 0.125 | 0.50 | meal planner + catalog + openrouter fallback | **add** |
 | `gemini-2.5-flash` | 0.30 | 2.50 | `resolveModel` gemini fallback | **add** |
 | `gemini-2.0-flash` | — | — | not referenced anywhere except cost.ts/tests | **remove** |
 
 Verified 2026-09-08 against the OpenRouter models API for the two additions
-(`openai/gpt-5.6-luna`: prompt `$0.20/1M`, completion `$1.20/1M`, cache read
-`$0.02/1M`; `google/gemini-2.5-flash`: `$0.30/1M` / `$2.50/1M`). The
+(`openai/gpt-luna-latest`: cache-miss `$0.125/1M`, completion `$0.50/1M`; `google/gemini-2.5-flash`: `$0.30/1M` / `$2.50/1M`). The
 `deepseek-*` rows are **DeepSeek-direct** prices because the LinkedIn/calendar
 flows call DeepSeek directly (`LLM_PROVIDER=deepseek`); do not replace them
 with OpenRouter's marked-up deepseek listings. Re-verify both rows against

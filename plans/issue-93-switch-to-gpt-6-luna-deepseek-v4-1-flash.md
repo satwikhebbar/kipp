@@ -10,8 +10,8 @@ correct.
 The implementation should use these canonical provider model IDs unless the
 provider documentation confirms a different spelling before coding:
 
-- OpenRouter: `openai/gpt-6-luna`
-- DeepSeek direct API: `deepseek-v4.1-flash`
+- OpenRouter: `openai/gpt-luna-latest`
+- DeepSeek direct API: `deepseek-flash`
 
 The exact IDs must be confirmed against the provider model catalogs during
 implementation; no compatibility alias should be invented if a provider
@@ -59,16 +59,12 @@ provider validation exposes a concrete incompatibility.
    production-manifest rule: `wrangler.prod.toml` has no runtime `[vars]`
    values to edit; production values remain dashboard-owned.
 
-3. **Roll out the production runtime value.** After provider-ID verification
-   and before declaring the rollout complete, update the existing production
-   `LLM_MODEL` value in the Cloudflare Dashboard to
-   `deepseek-v4.1-flash`. Do not add a `[vars]` block or copy the value into
-   `wrangler.prod.toml`; that manifest remains value-free with `keep_vars =
-   true`. Deploy using the tracked production manifest, then verify the
-   deployed worker/runtime reports or otherwise demonstrably reads
-   `LLM_MODEL=deepseek-v4.1-flash` on the active DeepSeek path. Record the
-   Dashboard update and verification result in the implementation handoff,
-   without exposing credentials or unrelated runtime values in logs.
+3. **Defer production runtime configuration.** Do not update the Cloudflare
+   Dashboard or deploy from this branch. After the pull request lands on
+   `main`, the human owner will update the existing production `LLM_MODEL`
+   value to `deepseek-flash` and deploy using the tracked production manifest.
+   Do not add a `[vars]` block or copy the value into `wrangler.prod.toml`;
+   that manifest remains value-free with `keep_vars = true`.
 
 4. **Refresh cost reporting.** Replace the old model entries in
    `src/core/cost.ts` with the new identifiers and verified rates. Keep
@@ -131,9 +127,9 @@ logging prompts, credentials, or raw provider responses.
   coverage tests prevent an active selectable model from becoming unpriced.
 - Existing persisted usage/cost records remain readable and retain their
   original model labels and estimates.
-- The production Dashboard's existing `LLM_MODEL` value is updated to
-  `deepseek-v4.1-flash`, the deployed runtime is verified to read it, and
-  `wrangler.prod.toml` remains value-free.
+- Production Dashboard configuration and deployment are explicitly deferred
+  until after this branch merges to `main`; `wrangler.prod.toml` remains
+  value-free.
 - No provider routing, tool schema, retry, privacy, workflow state, or
   production secret-handling regressions are introduced.
 - Typecheck, lint, documentation checks, tests, and deployment dry-run pass.

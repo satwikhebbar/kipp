@@ -40,10 +40,10 @@ describe("computeCost", () => {
     expect(cost.model).toBe("openai/gpt-5.6-luna")
   })
 
-  test("openai/gpt-6-luna pricing arithmetic", () => {
-    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "openai/gpt-6-luna")
-    expect(cost.totalCostUsd).toBeCloseTo(0.35, 4)
-    expect(cost.model).toBe("openai/gpt-6-luna")
+  test("openai/gpt-luna-latest pricing arithmetic", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "openai/gpt-luna-latest")
+    expect(cost.totalCostUsd).toBeCloseTo(0.375, 4)
+    expect(cost.model).toBe("openai/gpt-luna-latest")
   })
 
   test("gemini-2.5-flash pricing arithmetic", () => {
@@ -69,13 +69,13 @@ describe("computeCost", () => {
 describe("computeCostByModel", () => {
   test("prices each model group at its own rate and joins the model labels", () => {
     const cost = computeCostByModel([
-      { inputTokens: 1_000_000, outputTokens: 500_000, model: "openai/gpt-6-luna" },
+      { inputTokens: 1_000_000, outputTokens: 500_000, model: "openai/gpt-luna-latest" },
       { inputTokens: 1_000_000, outputTokens: 500_000, model: "deepseek-flash" },
     ])
-    expect(cost.totalCostUsd).toBeCloseTo(0.35 + 0.9, 4)
+    expect(cost.totalCostUsd).toBeCloseTo(0.375 + 0.9, 4)
     expect(cost.totalInputTokens).toBe(2_000_000)
     expect(cost.totalOutputTokens).toBe(1_000_000)
-    expect(cost.model).toBe("openai/gpt-6-luna + deepseek-flash")
+    expect(cost.model).toBe("openai/gpt-luna-latest + deepseek-flash")
   })
 
   test("a single group matches computeCost", () => {
@@ -121,9 +121,20 @@ describe("formatCostLine", () => {
     expect(formatCostLine(cost)).toContain("not in pricing table")
     expect(formatCostLine(cost)).toContain("some-future-model")
   })
+
+  test("fresh legacy DeepSeek estimates use current pricing", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000 }, "deepseek-v4-flash")
+    expect(formatCostLine(cost)).toContain("~$0.9000")
+    expect(formatCostLine(cost, { preserveHistoricalPricing: true })).toContain("~$0.2800")
+  })
 })
 
 describe("resolveModel", () => {
+  test("uses explicit current defaults for DeepSeek and OpenRouter", () => {
+    expect(resolveModel("deepseek")).toBe("deepseek-flash")
+    expect(resolveModel("openrouter")).toBe("openai/gpt-luna-latest")
+  })
+
   test("explicit model overrides default", () => {
     expect(resolveModel("deepseek", "deepseek-flash")).toBe("deepseek-flash")
   })
