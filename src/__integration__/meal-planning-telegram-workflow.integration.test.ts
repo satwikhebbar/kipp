@@ -423,7 +423,7 @@ describe("agent-centered meal-planning Telegram integration", () => {
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
     // Each queued LLM call reports 1000 in / 500 out: v1 usage = extract + session
     // (3000/1500), v2 = its own revision session (2000/1000).
-    expect(active?.version.usage).toEqual({ inputTokens: 2000, outputTokens: 1000, model: "openai/gpt-6-luna" })
+    expect(active?.version.usage).toEqual({ inputTokens: 2000, outputTokens: 1000, model: "openai/gpt-luna-latest" })
     const plans = network.getState().telegramMessages.filter((candidate) => candidate.text.includes("School week of"))
     expect(plans).toHaveLength(2)
     expect(plans[0]?.text).toContain("Est. cost:")

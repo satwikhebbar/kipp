@@ -411,13 +411,13 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.version.version).toBe(1)
     expect(active?.version.requestKind).toBe("initial_plan")
     // Two provider turns (evaluate + propose), one token each, under the meal model.
-    expect(active?.version.usage).toEqual({ inputTokens: 2, outputTokens: 2, model: "openai/gpt-6-luna" })
+    expect(active?.version.usage).toEqual({ inputTokens: 2, outputTokens: 2, model: "openai/gpt-luna-latest" })
     const planId = active?.plan.planId
     if (!planId) throw new Error("expected a persisted plan id")
     expect(await store.sumPlanUsage(planId)).toEqual({
       inputTokens: 2,
       outputTokens: 2,
-      byModel: [{ inputTokens: 2, outputTokens: 2, model: "openai/gpt-6-luna" }],
+      byModel: [{ inputTokens: 2, outputTokens: 2, model: "openai/gpt-luna-latest" }],
     })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
 
@@ -771,7 +771,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.version.requestKind).toBe("revision")
     expect(active?.version.feedbackBatchId).toBe(`${active?.plan.planId}:v2`)
     // The revision's own generation usage is recorded on its version row.
-    expect(active?.version.usage).toEqual({ inputTokens: 2, outputTokens: 2, model: "openai/gpt-6-luna" })
+    expect(active?.version.usage).toEqual({ inputTokens: 2, outputTokens: 2, model: "openai/gpt-luna-latest" })
     // The v2 message reports the cumulative run total (v1 + v2 usage), like LinkedIn drafts.
     const planMessages = telegramMessages.filter((message) => message.text.includes("School week of"))
     expect(planMessages).toHaveLength(2)
