@@ -54,11 +54,11 @@ const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "~openai/gpt-luna-latest"
 const ZERO_USAGE: LLMUsage = { inputTokens: 0, outputTokens: 0 }
-const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, or schedule changes. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and the planner will treat school-lunch as the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
+const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, full school days, or schedule changes. When the parent explicitly says a recurring half-day is a full school day for this week, emit full_day for that day. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and the planner will treat school-lunch as the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
 /** Render week context extraction prompt. */
 export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext, "schedule">): string {
-  return `${WEEK_CONTEXT_EXTRACTION_PROMPT}\nSchedule days: ${context.schedule.days.join(", ")}\nMeal slots: ${context.schedule.slots.map((slot) => slot.id).join(", ")}`
+  return `${WEEK_CONTEXT_EXTRACTION_PROMPT}\nSchedule days: ${context.schedule.days.join(", ")}\nRecurring half days: ${context.schedule.halfDays?.join(", ") || "none"}\nMeal slots: ${context.schedule.slots.map((slot) => slot.id).join(", ")}`
 }
 
 export interface MealPlanningLiveEvent {
@@ -157,6 +157,7 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   const lines = [
     `Household operating context:`,
     `- Schedule days: ${context.schedule.days.join(", ")}`,
+    `- Recurring half days: ${context.schedule.halfDays?.join(", ") || "none"}`,
     `- Slots: ${context.schedule.slots
       .map(
         (s) =>
@@ -906,13 +907,9 @@ async function runRevision(
   // Keep those authoritative items in the follow-up evaluation so the
   // requested cells cannot be silently dropped after the context update.
   const feedbackItems = contextAlreadyUpdated && !feedbackBatch ? [] : submission.items
-  const revisionBaseCandidate = contextAlreadyUpdated
-    ? withoutIneligibleCells(
-        active.version.candidate,
-        { ...active.plan, weeklyExceptions: active.plan.weeklyExceptions },
-        profile,
-      )
-    : active.version.candidate
+  // A stored plan can predate a recurring schedule rule. Start every revision
+  // from the cells still eligible under the household's current schedule.
+  const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)
   const context: MealPlanContext = {
     schedule: profile.schedule,
     profile: profile.profile,
@@ -1002,9 +999,7 @@ async function runRevision(
   const propose = outcome.propose
   // A replan that closes a school day is materially different from the active
   // version even when no remaining-day cell needs changing.
-  if (
-    isNoChangeCandidate(propose.candidate, contextAlreadyUpdated ? active.version.candidate : revisionBaseCandidate)
-  ) {
+  if (isNoChangeCandidate(propose.candidate, active.version.candidate)) {
     if (feedbackBatch)
       await stepDo(step, `meal-planning-consume-mini-app-batch-${occurrence}`, () =>
         store.markFeedbackBatchConsumed(feedbackBatch.batchId, new Date().toISOString()),

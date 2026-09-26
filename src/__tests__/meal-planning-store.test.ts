@@ -12,7 +12,9 @@ import {
   type MealPlanningStore,
   type PromotePlanVersionInput,
   SEED_PROFILE,
+  SEED_SCHEDULE,
   upgradeLegacyHalfDaySnackDefinitions,
+  upgradeLegacyMealSchedule,
 } from "../meal-planning/store"
 import type { MealPlanCandidate, MealPlanEvaluation } from "../meal-planning/types"
 import { createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
@@ -120,12 +122,21 @@ describe("createInMemoryMealPlanningStore", () => {
       "cheat-day",
     ])
     expect(profile.schedule.days).toEqual(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"])
+    expect(profile.schedule.halfDays).toEqual(["Sat"])
     expect(profile.schedule.slots).toHaveLength(5)
     expect(profile.location).toBeNull()
 
     const again = await store.loadOrCreateProfile(CHAT)
     expect(again.profile).toBe(profile.profile)
     expect(again.interactionGeneration).toBe(0)
+  })
+
+  it("upgrades a stored schedule that predates recurring half days", async () => {
+    const store = createInMemoryMealPlanningStore()
+    const profile = await store.loadOrCreateProfile(CHAT)
+    profile.schedule = { days: [...SEED_SCHEDULE.days], slots: [...SEED_SCHEDULE.slots] }
+    expect((await store.loadOrCreateProfile(CHAT)).schedule.halfDays).toEqual(["Sat"])
+    expect(upgradeLegacyMealSchedule({ ...SEED_SCHEDULE, halfDays: [] }).halfDays).toEqual([])
   })
 
   it("createActivePlan writes the plan, version 1, and generation 1; previousReplaced is false for the first plan", async () => {
@@ -448,6 +459,18 @@ function createD1Store(): { store: MealPlanningStore; db: DatabaseSync } {
 }
 
 describe("createMealPlanningStore (D1, real SQL)", () => {
+  it("persists the recurring Saturday rule when loading an existing profile", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    const legacy = { days: SEED_SCHEDULE.days, slots: SEED_SCHEDULE.slots }
+    db.prepare("UPDATE meal_profile SET schedule_json = ? WHERE chat_id = ?").run(JSON.stringify(legacy), CHAT)
+    expect((await store.loadOrCreateProfile(CHAT)).schedule.halfDays).toEqual(["Sat"])
+    const row = db.prepare("SELECT schedule_json FROM meal_profile WHERE chat_id = ?").get(CHAT) as {
+      schedule_json: string
+    }
+    expect(JSON.parse(row.schedule_json).halfDays).toEqual(["Sat"])
+  })
+
   it("runs the migration and the happy path: seed → create v1 → promote v2 with batch → activePlan", async () => {
     const { store, db } = createD1Store()
     const profile = await store.loadOrCreateProfile(CHAT)

@@ -647,6 +647,36 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.failures[0]).toMatchObject({ code: "missing_slot", day: "Mon", slot: "snack2" })
   })
 
+  it("enforces recurring Saturday half days without a weekly exception", () => {
+    const context = baseContext({ schedule: SEED_SCHEDULE, weeklyExceptions: { items: [] } })
+    const candidate = baseCandidate()
+    candidate.grid.Sat = {
+      breakfast: cellFor("breakfast", "paratha"),
+      snack1: cellFor("snack1", "banana"),
+      "home-lunch": cellFor("home-lunch", "rice and beans"),
+    }
+    expect(evaluateMealPlan(candidate, context).pass).toBe(true)
+
+    candidate.grid.Sat.snack2 = cellFor("snack2", "roasted moong")
+    candidate.grid.Sat["school-lunch"] = cellFor("school-lunch", "bottle gourd dal")
+    expect(evaluateMealPlan(candidate, context).failures).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "extra_slot_for_half_day", day: "Sat", slot: "snack2" }),
+        expect.objectContaining({ code: "extra_slot_for_half_day", day: "Sat", slot: "school-lunch" }),
+      ]),
+    )
+
+    context.weeklyExceptions = {
+      items: [{ kind: "full_day", appliesTo: { day: "Sat" }, instruction: "Saturday is a full school day this week" }],
+    }
+    expect(evaluateMealPlan(candidate, context).pass).toBe(true)
+
+    context.weeklyExceptions = { items: [{ kind: "school_closed", appliesTo: { day: "Sat" }, instruction: "Holiday" }] }
+    expect(
+      evaluateMealPlan(candidate, context).failures.some((failure) => failure.code === "extra_slot_for_half_day"),
+    ).toBe(false)
+  })
+
   it("allows a cooked snack1 up to the half-day cap but not on a normal day", () => {
     const context = baseContext({
       weeklyExceptions: {

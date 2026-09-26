@@ -317,6 +317,7 @@ export interface InMemoryMealPlanningStoreOptions {
 
 export const SEED_SCHEDULE: MealSchedule = {
   days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+  halfDays: ["Sat"],
   slots: [
     { id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null },
     { id: "snack1", name: "Snack 1", packed: true, dry: true, maxCookMinutes: 0 },
@@ -324,6 +325,13 @@ export const SEED_SCHEDULE: MealSchedule = {
     { id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null },
     { id: "home-lunch", name: "Home lunch", packed: false, dry: false, maxCookMinutes: null },
   ],
+}
+
+/** Add the starter household's recurring Saturday rule to profiles created before it was stored. */
+export function upgradeLegacyMealSchedule(schedule: MealSchedule): MealSchedule {
+  return schedule.halfDays === undefined && schedule.days.includes("Sat")
+    ? { ...schedule, halfDays: ["Sat"] }
+    : schedule
 }
 
 const SEED_MEAL_INGREDIENTS: Record<string, string[]> = {
@@ -893,17 +901,25 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         .first()
       const profile = parseJson<MealProfile>(String(row?.profile_json), SEED_PROFILE)
       const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(profile)
+      const schedule = parseJson<MealSchedule>(String(row?.schedule_json), SEED_SCHEDULE)
+      const upgradedSchedule = upgradeLegacyMealSchedule(schedule)
       if (upgradedProfile !== profile) {
         await db
           .prepare("UPDATE meal_profile SET profile_json = ?, updated_at = ? WHERE chat_id = ?")
           .bind(JSON.stringify(upgradedProfile), now, chatId)
           .run()
       }
+      if (upgradedSchedule !== schedule) {
+        await db
+          .prepare("UPDATE meal_profile SET schedule_json = ?, updated_at = ? WHERE chat_id = ?")
+          .bind(JSON.stringify(upgradedSchedule), now, chatId)
+          .run()
+      }
       return {
         chatId: String(row?.chat_id),
         profile: upgradedProfile,
         customPolicies: parseJson<CustomPolicy[]>(String(row?.custom_policies_json), []),
-        schedule: parseJson<MealSchedule>(String(row?.schedule_json), SEED_SCHEDULE),
+        schedule: upgradedSchedule,
         location: parseJson<StoredLocation | null>(String(row?.location_json), null),
         interactionGeneration: Number(row?.interaction_generation),
         createdAt: String(row?.created_at),
@@ -1635,8 +1651,13 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const existing = backing.profiles.get(chatId)
       if (existing) {
         const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(existing.profile)
+        const upgradedSchedule = upgradeLegacyMealSchedule(existing.schedule)
         if (upgradedProfile !== existing.profile) {
           existing.profile = upgradedProfile
+          existing.updatedAt = nowIso()
+        }
+        if (upgradedSchedule !== existing.schedule) {
+          existing.schedule = upgradedSchedule
           existing.updatedAt = nowIso()
         }
         return existing

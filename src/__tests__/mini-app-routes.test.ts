@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
 import { createMealPlanningStore } from "../meal-planning/store"
+import type { MealGrid } from "../meal-planning/types"
 import { createD1TestDb } from "./d1-test-db"
 
 function env(): Env {
@@ -47,6 +48,7 @@ async function seedPlan(
   planId: string,
   weekStart: string,
   weekEnd: string,
+  grid: MealGrid = {},
 ) {
   await store.loadOrCreateProfile("chat-42")
   const generationId = `generation-${planId}`
@@ -63,7 +65,7 @@ async function seedPlan(
     timezone: "Asia/Kolkata",
     instanceId: `instance-${planId}`,
     generationId,
-    candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
+    candidate: { grid, easyBuys: [], policyOutcomes: {} },
     evaluation: {
       pass: true,
       failures: [],
@@ -88,10 +90,11 @@ async function authenticatedPlanFixture(
   planId: string,
   weekStart: string,
   weekEnd: string,
+  grid: MealGrid = {},
 ): Promise<{ d1: D1Database; store: ReturnType<typeof createMealPlanningStore>; testEnv: Env; token: string }> {
   const { d1 } = createD1TestDb()
   const store = createMealPlanningStore(d1)
-  await seedPlan(store, planId, weekStart, weekEnd)
+  await seedPlan(store, planId, weekStart, weekEnd, grid)
   await store.upsertMiniAppReviewContext({ telegramUserId: "42", chatId: "chat-42", planId, weekEnd })
   const testEnv = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 } as Env
   const session = await miniAppRoutes.fetch(
@@ -116,6 +119,43 @@ async function planResponse(weekStart: string, weekEnd: string): Promise<Respons
 }
 
 describe("Mini App HTTP boundary", () => {
+  it("shows a recurring half-day marker only when the saved plan has the reduced Saturday shape", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const cell = { dish: "Banana", vegetarian: true, items: ["banana"], cookMinutes: 0, priorNightPrep: false }
+      const { testEnv, token } = await authenticatedPlanFixture(
+        "full-saturday",
+        "2026-09-27T18:30:00.000Z",
+        "2026-10-03T18:29:59.000Z",
+        { Sat: { breakfast: cell, snack1: cell, snack2: cell, "school-lunch": cell, "home-lunch": cell } },
+      )
+      const response = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan", { headers: { Authorization: `Bearer ${token}` } }),
+        testEnv,
+      )
+      const body = (await response.json()) as { plan: { schedule: { halfDays: string[] } } }
+      expect(body.plan.schedule.halfDays).toEqual([])
+
+      const reduced = await authenticatedPlanFixture(
+        "half-saturday",
+        "2026-09-27T18:30:00.000Z",
+        "2026-10-03T18:29:59.000Z",
+        { Sat: { breakfast: cell, snack1: cell, "home-lunch": cell } },
+      )
+      const reducedResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan", {
+          headers: { Authorization: `Bearer ${reduced.token}` },
+        }),
+        reduced.testEnv,
+      )
+      const reducedBody = (await reducedResponse.json()) as { plan: { schedule: { halfDays: string[] } } }
+      expect(reducedBody.plan.schedule.halfDays).toEqual(["Sat"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("serves a data-free Mini App shell with ready, empty, and feedback affordances", async () => {
     const shell = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app"), env())
     expect(shell.status).toBe(200)

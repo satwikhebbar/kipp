@@ -114,6 +114,7 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
   for (const day of DAYS) {
     grid[day] = {}
     for (const slot of Object.keys(SLOT_COOK)) {
+      if (day === "Sat" && (slot === "snack2" || slot === "school-lunch")) continue
       grid[day][slot] = cell(FIXTURE_DISHES[dishIndex++], ["rice"], slot)
     }
   }

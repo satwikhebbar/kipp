@@ -83,6 +83,12 @@ function planDto(
   schedule: Awaited<ReturnType<MealPlanningStore["loadOrCreateProfile"]>>["schedule"],
   readOnly: boolean,
 ) {
+  // Older saved plans may predate a recurring schedule rule. Show the half-day
+  // marker only when that plan actually has the reduced set of meals.
+  const applicableHalfDays = schedule.halfDays?.filter((day) => {
+    const cells = active.version.candidate.grid[day]
+    return !cells?.snack2 && !cells?.["school-lunch"]
+  })
   return {
     planId: active.plan.planId,
     version: active.version.version,
@@ -90,7 +96,7 @@ function planDto(
     weekEnd: active.plan.weekEnd,
     timezone: active.plan.timezone,
     readOnly,
-    schedule,
+    schedule: { ...schedule, halfDays: applicableHalfDays },
     candidate: active.version.candidate,
     weeklyInventory: active.plan.weeklyInventory,
     weeklyExceptions: active.plan.weeklyExceptions,

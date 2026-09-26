@@ -9,6 +9,7 @@ import {
   renderHouseholdContext,
   renderPlanningTimeContext,
   renderRevisionFeedback,
+  renderWeekContextExtractionPrompt,
   runAgentCenteredMealPlanningWorkflow,
 } from "../meal-planning/agent-workflow"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
@@ -48,6 +49,8 @@ it("renders complete structured catalog facts for the planning agent", () => {
     request: { kind: "initial_plan", text: "Plan this week." },
   }
   const rendered = renderHouseholdContext(context)
+  expect(rendered).toContain("Recurring half days: Sat")
+  expect(renderWeekContextExtractionPrompt(context)).toContain("emit full_day")
   expect(rendered).toContain("one JSON record per available catalog meal")
   expect(rendered).toContain('"typicalCookMinutes"')
   expect(rendered).toContain('"priorNightPrep"')
@@ -158,10 +161,12 @@ function seedCandidate(override?: { day: string; slot: string; cell: MealCell })
   const grid: MealPlanSelectionCandidate["grid"] = {}
   for (const [dayIndex, day] of DAYS.entries()) {
     grid[day] = Object.fromEntries(
-      Object.keys(SLOT_COOK).map((slot, slotIndex) => [
-        slot,
-        { mealDefinitionId: fixtureMealIds[dayIndex * Object.keys(SLOT_COOK).length + slotIndex] },
-      ]),
+      Object.keys(SLOT_COOK)
+        .filter((slot) => day !== "Sat" || !["snack2", "school-lunch"].includes(slot))
+        .map((slot, slotIndex) => [
+          slot,
+          { mealDefinitionId: fixtureMealIds[dayIndex * Object.keys(SLOT_COOK).length + slotIndex] },
+        ]),
     )
   }
   // Keep one favourite repeat in the baseline so revision tests can verify

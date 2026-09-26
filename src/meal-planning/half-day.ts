@@ -6,9 +6,18 @@ export const HALF_DAY_SNACK_MAX_COOK_MINUTES = 20
 const HALF_DAY_DROPPED_SLOT_IDS = ["snack2", "school-lunch"]
 
 /** Whether a configured day has the standard half-day schedule. */
-export function isHalfDay(context: Pick<MealPlanContext, "weeklyExceptions">, day: string): boolean {
-  return context.weeklyExceptions.items.some(
-    (exception) => exception.kind === "half_day" && exception.appliesTo?.day === day,
+export function isHalfDay(context: Pick<MealPlanContext, "schedule" | "weeklyExceptions">, day: string): boolean {
+  if (
+    context.weeklyExceptions.items.some(
+      (exception) => exception.kind === "full_day" && exception.appliesTo?.day === day,
+    )
+  )
+    return false
+  return (
+    context.schedule.halfDays?.includes(day) === true ||
+    context.weeklyExceptions.items.some(
+      (exception) => exception.kind === "half_day" && exception.appliesTo?.day === day,
+    )
   )
 }
 

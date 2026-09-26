@@ -30,6 +30,7 @@ export type FailureCode = (typeof FAILURE_CODES)[number]
 export const EXCEPTION_KINDS = [
   "school_closed",
   "half_day",
+  "full_day",
   "schedule_change",
   "capacity_change",
   "occasion",
@@ -61,6 +62,8 @@ export interface MealSlot {
 export interface MealSchedule {
   days: string[]
   slots: MealSlot[]
+  /** Recurring half days in the household schedule, independent of weekly exceptions. */
+  halfDays?: string[]
 }
 
 export interface FoodPreferences {

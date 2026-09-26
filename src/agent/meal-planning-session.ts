@@ -46,7 +46,8 @@ Treat every submitted feedback item as the driver: a cell-scoped item must be ad
 
 ## Planning
 On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. 
-On a half-day, plan exactly breakfast, snack1, and home lunch: omit snack2 and school-lunch. The single snack may use a catalog meal marked halfDaySnack, which is dry, portable, quick to eat in the 10-minute break, and may take up to 20 minutes to cook; never use a halfDaySnack on a normal school day. 
+On a half-day, including every recurring half day listed in the household schedule, plan exactly breakfast, snack1, and home lunch: omit snack2 and school-lunch. The single snack may use a catalog meal marked halfDaySnack, which is dry, portable, quick to eat in the 10-minute break, and may take up to 20 minutes to cook; never use a halfDaySnack on a normal school day.
+An explicit full_day weekly exception restores every normal school-day slot on that day for this week; it overrides a recurring half-day setting without changing the household profile.
 School meals are always vegetarian (no meat); normal packed snacks are dry and not cooked that morning. 
 For home-lunch, select the vegetable curry/subzi as the meal represented in the home-lunch slot. The parent can choose the accompanying staple (plain rice or chapati) and protein dish (dal, kadhi, sambar, or another lentil-based dish) separately for now. A flavored-rice meal such as pulao or tomato rice is an explicit exception and may stand alone.
 Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules.
@@ -331,14 +332,17 @@ export function resolveWeekContextUpdate(
   const days = new Set(context.schedule.days)
   const slots = new Set(context.schedule.slots.map((slot) => slot.id))
   const canonicalException = (exception: (typeof context.weeklyExceptions.items)[number]) =>
-    exception.kind === "half_day"
+    exception.kind === "half_day" || exception.kind === "full_day"
       ? { ...exception, appliesTo: exception.appliesTo?.day ? { day: exception.appliesTo.day } : undefined }
       : exception
   const exceptionKey = (exception: (typeof context.weeklyExceptions.items)[number]) =>
     JSON.stringify({
       kind: exception.kind,
       day: exception.appliesTo?.day,
-      mealSlots: exception.kind === "half_day" ? [] : [...(exception.appliesTo?.mealSlots ?? [])].sort(),
+      mealSlots:
+        exception.kind === "half_day" || exception.kind === "full_day"
+          ? []
+          : [...(exception.appliesTo?.mealSlots ?? [])].sort(),
     })
   const existingExceptions = new Set(context.weeklyExceptions.items.map(exceptionKey))
   const addedExceptions = new Set<string>()
@@ -350,8 +354,22 @@ export function resolveWeekContextUpdate(
       throw new ToolHandlerError("exception references an unknown meal slot", "invalid-state")
     if (exception.kind === "school_closed" && !day)
       throw new ToolHandlerError("school_closed requires an applicable day", "invalid-state")
-    if (exception.kind === "half_day" && !day)
-      throw new ToolHandlerError("half_day requires an applicable day", "invalid-state")
+    if ((exception.kind === "half_day" || exception.kind === "full_day") && !day)
+      throw new ToolHandlerError(`${exception.kind} requires an applicable day`, "invalid-state")
+    if (exception.kind === "full_day" && !context.schedule.halfDays?.includes(day as string))
+      throw new ToolHandlerError("full_day requires a recurring half-day", "invalid-state")
+    if (
+      day &&
+      (exception.kind === "half_day" || exception.kind === "full_day") &&
+      [...context.weeklyExceptions.items, ...canonicalExceptionAdds].some(
+        (other) =>
+          other !== exception &&
+          other.appliesTo?.day === day &&
+          (other.kind === "half_day" || other.kind === "full_day") &&
+          other.kind !== exception.kind,
+      )
+    )
+      throw new ToolHandlerError("day cannot be both half_day and full_day", "invalid-state")
     const key = exceptionKey(exception)
     if (existingExceptions.has(key) || addedExceptions.has(key))
       throw new ToolHandlerError("week context update duplicates an existing exception", "invalid-state")

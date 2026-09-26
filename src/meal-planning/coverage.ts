@@ -1,4 +1,4 @@
-import { halfDayDroppedSlotIds } from "./half-day"
+import { halfDayDroppedSlotIds, isHalfDay } from "./half-day"
 import type { MealPlanContext, MealSlot } from "./types"
 
 export interface CoverageSet {
@@ -39,13 +39,12 @@ export function computeCoverageSet(context: MealPlanContext): CoverageSet {
   const closed = new Set(closedDays)
 
   const droppedSlots: Array<{ day: string; slotId: string }> = []
-  for (const exception of weeklyExceptions.items) {
-    const day = exception.appliesTo?.day
-    if (exception.kind !== "half_day" || !day) continue
+  for (const day of schedule.days) {
+    if (!isHalfDay(context, day) || closed.has(day)) continue
     // A half-day always means one snack and no packed school lunch. Legacy
     // mealSlots detail from persisted plans never relaxes this standard shape.
     for (const slotId of halfDayDroppedSlotIds(schedule.slots)) {
-      if (!closed.has(day)) droppedSlots.push({ day, slotId })
+      droppedSlots.push({ day, slotId })
     }
   }
   const dropped = new Set(droppedSlots.map((drop) => `${drop.day}\u0000${drop.slotId}`))
