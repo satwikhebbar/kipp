@@ -33,5 +33,7 @@ does not accidentally remove it.
 5. Run `pnpm deploy:check`. It validates the runtime-variable contract, blocks
    unsafe production TOML changes, and performs a Wrangler dry-run.
 
-`pnpm run deploy` runs `deploy:check` before its live upload. Never put a secret in
-the production TOML, repository, test fixtures, or logs.
+`pnpm run deploy` runs `deploy:check`, applies only pending D1 migrations to
+`MEAL_PLANNING_DB` with `--remote`, then uploads the Worker. A migration failure
+stops the upload. `deploy:check` is read-only for the production database. Never
+put a secret in the production TOML, repository, test fixtures, or logs.

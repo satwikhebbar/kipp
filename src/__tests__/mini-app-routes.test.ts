@@ -1,6 +1,8 @@
+import { runInNewContext } from "node:vm"
+import { parseHTML } from "linkedom"
 import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
-import { miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
+import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
 import { createMealPlanningStore } from "../meal-planning/store"
 import { createD1TestDb } from "./d1-test-db"
 
@@ -142,6 +144,40 @@ describe("Mini App HTTP boundary", () => {
     const plan = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app/api/plan"), env())
     expect(plan.status).toBe(403)
     expect(plan.headers.get("cache-control")).toBe("no-store")
+  })
+
+  it("renders history after loading a plan without observing its own history updates", async () => {
+    const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
+    const app = window.document.getElementById("app")
+    if (!app) throw new Error("missing test app")
+    Object.defineProperty(window, "location", { value: { search: "" } })
+    const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
+    client.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          status: "current",
+          plan: { planId: "plan-current" },
+          history: [{ planId: "plan-current", lifecycle: "current", weekStart: "2026-09-27T18:30:00.000Z" }],
+        }),
+      )
+    const script = MINI_APP_SHELL.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+    if (!script) throw new Error("missing Mini App state script")
+    runInNewContext(script, {
+      window,
+      document: window.document,
+      MutationObserver: client.MutationObserver,
+      Response,
+    })
+
+    await client.fetch("/mini-app/api/plan")
+    const card = window.document.createElement("section")
+    card.className = "card"
+    card.innerHTML = '<header class="head"></header>'
+    app.replaceChildren(card)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(app.querySelector(".history button")?.textContent).toContain("Current · 2026-09-27")
+    expect(app.querySelector(".notice")?.textContent).toBe("Current plan — feedback is available.")
   })
 
   it("serves a plan created for next week until its own week ends", async () => {

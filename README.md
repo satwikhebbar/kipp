@@ -389,12 +389,16 @@ Lefthook runs typecheck, lint, and tests before each commit.
 pnpm run deploy
 ```
 
-The live deploy command runs the pre-deployment checks and uploads with
-`wrangler.prod.toml`. Use `pnpm run deploy`, not `pnpm deploy`: the latter is
-pnpm's workspace deployment command. `pnpm deploy:check` runs the same checks
-and a Wrangler dry-run without uploading. After a live upload, verify in the
-Cloudflare Dashboard that **Observability → Redact query string** remains
-enabled. `pnpm dev` uses `wrangler.local.toml`.
+The live deploy command runs the pre-deployment checks, applies any pending
+remote D1 migrations for `MEAL_PLANNING_DB`, and then uploads the Worker with
+`wrangler.prod.toml`. Already applied migrations are skipped, so a deployment
+with no pending migrations leaves the database unchanged. A failed migration
+stops the command before Worker upload. Use `pnpm run deploy`, not `pnpm deploy`:
+the latter is pnpm's workspace deployment command. `pnpm run deploy:check`
+runs the same checks and a Wrangler dry-run without applying migrations or
+uploading. After a live upload, verify in the Cloudflare Dashboard that
+**Observability → Redact query string** remains enabled. `pnpm dev` uses
+`wrangler.local.toml`.
 
 ### Calendar operational runbook
 
