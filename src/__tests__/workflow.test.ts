@@ -687,6 +687,92 @@ describe("PipelineWorkflow", () => {
     expect(firstReviseMessages.some((m) => m.role === "user" && m.content === "actually make it shorter")).toBe(true)
   })
 
+  it("counts a Revise More click and its reply as one revision and keeps the final draft approvable", async () => {
+    const responses = [
+      { text: "draft-0", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-1", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-2", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-3", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-4", usage: { inputTokens: 5, outputTokens: 3 } },
+    ]
+    let callIdx = 0
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    const { fetchMock, linkedinDrafts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    // Four button-driven revisions, each a __revise__ click plus one real reply.
+    for (let n = 0; n < 4; n++) {
+      waitForEvent
+        .mockResolvedValueOnce({ type: "event", payload: { text: "__revise__" } })
+        .mockResolvedValueOnce({ type: "event", payload: { text: `feedback-${n}` } })
+    }
+    waitForEvent.mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        LINKEDIN_ACCESS_TOKEN: "valid-token",
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        LINKEDIN_CLIENT_ID: "client-id",
+        LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
+      },
+    })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    expect(stepDo).toHaveBeenCalledWith("revise-3", expect.any(Function))
+    expect(stepDo).not.toHaveBeenCalledWith("revise-4", expect.any(Function))
+    expect(stepDo).toHaveBeenCalledWith("linkedin-publish-8-0", expect.any(Function))
+    expect(linkedinDrafts).toEqual(["draft-4"])
+  })
+
+  it("declines feedback past the revision limit but still publishes on the final draft approval", async () => {
+    const responses = [
+      { text: "draft-0", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-1", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-2", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-3", usage: { inputTokens: 5, outputTokens: 3 } },
+      { text: "draft-4", usage: { inputTokens: 5, outputTokens: 3 } },
+    ]
+    let callIdx = 0
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    const { fetchMock, telegramTexts, linkedinDrafts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    waitForEvent
+      .mockResolvedValueOnce({ type: "event", payload: { text: "feedback-0" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "feedback-1" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "feedback-2" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "feedback-3" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "feedback-4" } })
+      .mockResolvedValueOnce({ type: "event", payload: { text: "__approve__" } })
+
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        LINKEDIN_ACCESS_TOKEN: "valid-token",
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        LINKEDIN_CLIENT_ID: "client-id",
+        LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
+      },
+    })
+
+    await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
+
+    expect(stepDo).toHaveBeenCalledWith("notify-revision-limit-4", expect.any(Function))
+    expect(stepDo).not.toHaveBeenCalledWith("revise-4", expect.any(Function))
+    expect(telegramTexts.some((t) => t.includes("Revision limit reached"))).toBe(true)
+    expect(linkedinDrafts).toEqual(["draft-4"])
+  })
+
   it("throws TranscriptTooLargeError before any Notion update when the generate transcript is oversized", async () => {
     testRun()
     mockCreateGenerator.mockResolvedValueOnce({
