@@ -132,11 +132,13 @@ describe("Mini App HTTP boundary", () => {
     expect(html).toContain("No easy buys needed this week.")
     expect(html).toContain("Holiday")
     expect(html).toContain("/mealplan")
-    expect(html).toContain("Read-only while your next plan is being generated.")
+    expect(html).toContain("A new plan is being generated.")
     expect(html).toContain("state.currentPlan!==undefined")
-    expect(html).toContain("Historical plan — read-only.")
+    expect(html).toContain('aria-label","Read-only plan')
     expect(html).toContain("Refresh plan")
-    expect(html).toContain('className="history"')
+    expect(html).toContain('aria-label","Choose meal plan week')
+    expect(html).not.toContain("Current plan — feedback is available.")
+    expect(html).not.toContain("History · ")
     expect(html).toContain("dayDate(i).getUTCDate()")
     expect(html).not.toContain('dateLabel(i).split(" ").slice(-1)[0]')
     expect(html).not.toContain("mealplan-")
@@ -146,11 +148,11 @@ describe("Mini App HTTP boundary", () => {
     expect(plan.headers.get("cache-control")).toBe("no-store")
   })
 
-  it("renders history after loading a plan without observing its own history updates", async () => {
+  it("leaves a single week as a simple header without a redundant status", async () => {
     const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
     const app = window.document.getElementById("app")
     if (!app) throw new Error("missing test app")
-    Object.defineProperty(window, "location", { value: { search: "" } })
+    Object.defineProperty(window, "location", { value: { search: "" }, configurable: true })
     const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
     client.fetch = async () =>
       new Response(
@@ -172,12 +174,149 @@ describe("Mini App HTTP boundary", () => {
     await client.fetch("/mini-app/api/plan")
     const card = window.document.createElement("section")
     card.className = "card"
-    card.innerHTML = '<header class="head"></header>'
+    card.innerHTML =
+      '<header class="head"><div class="head-main"><h1 class="title">Week of Sep 28</h1><div class="head-action"><button class="plan-change">Change plan</button></div></div></header>'
     app.replaceChildren(card)
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(app.querySelector(".history button")?.textContent).toContain("Current · 2026-09-27")
-    expect(app.querySelector(".notice")?.textContent).toBe("Current plan — feedback is available.")
+    expect(app.querySelector(".title")?.textContent).toBe("Week of Sep 28")
+    expect(app.querySelector(".week-select")).toBeNull()
+    expect(app.querySelector(".notice")).toBeNull()
+  })
+
+  it("opens historical plans and returns to the current plan without replaying Telegram authentication", async () => {
+    const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
+    const location = new URL("https://kipp.example/mini-app#tgWebAppData=launch-data")
+    Object.defineProperty(window, "location", { value: location, configurable: true })
+    const history = {
+      pushState: vi.fn((_state: unknown, _title: string, url: URL) => {
+        location.href = url.href
+      }),
+    }
+    Object.defineProperty(window, "history", { value: history })
+    const telegram = { WebApp: { initData: "signed-launch-data", ready: vi.fn(), expand: vi.fn() } }
+    Object.defineProperty(window, "Telegram", { value: telegram })
+    const storage = { getItem: vi.fn(() => null) }
+    const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
+    const plan = (planId: string) => ({
+      planId,
+      version: 1,
+      weekStart: planId === "plan-old" ? "2026-09-20T18:30:00.000Z" : "2026-09-27T18:30:00.000Z",
+      timezone: "Asia/Kolkata",
+      schedule: { days: ["Monday"], slots: [{ id: "lunch", name: "Lunch" }] },
+      candidate: { grid: { Monday: { lunch: { dish: "Rice", items: ["Rice"] } } }, easyBuys: [] },
+      weeklyExceptions: { items: [] },
+    })
+    const entries = [
+      { planId: "plan-current", lifecycle: "current", weekStart: "2026-09-27T18:30:00.000Z" },
+      { planId: "plan-old", lifecycle: "historical", weekStart: "2026-09-20T18:30:00.000Z" },
+    ]
+    const calls: string[] = []
+    let generating = false
+    let firstPlanGenerating = false
+    client.fetch = async (input) => {
+      const path = String(input)
+      calls.push(path)
+      if (path === "/mini-app/api/session")
+        return new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
+      const selected = new URL(path, location.origin).searchParams.get("planId")
+      const historical = selected === "plan-old"
+      return new Response(
+        JSON.stringify({
+          status: historical ? "historical" : firstPlanGenerating || generating ? "generating" : "current",
+          plan: historical ? plan("plan-old") : firstPlanGenerating || generating ? undefined : plan("plan-current"),
+          currentPlan: firstPlanGenerating ? null : generating && !historical ? plan("plan-current") : undefined,
+          history: firstPlanGenerating ? [] : entries,
+        }),
+      )
+    }
+    const scripts = [...MINI_APP_SHELL.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
+    expect(scripts).toHaveLength(2)
+    const context = {
+      window,
+      document: window.document,
+      MutationObserver: client.MutationObserver,
+      Event: window.Event,
+      Response,
+      URL,
+      fetch: (...args: Parameters<typeof fetch>) => client.fetch(...args),
+      localStorage: storage,
+    }
+    scripts.forEach((script) => {
+      runInNewContext(script, context)
+    })
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+    await settle()
+    const app = window.document.getElementById("app")
+    const selectedWeek = () => {
+      const select = app?.querySelector(".week-select") as unknown as {
+        value: string
+        querySelectorAll: typeof app.querySelectorAll
+      } | null
+      return [...(select?.querySelectorAll("option") ?? [])].find((option) => option.value === select?.value)
+        ?.textContent
+    }
+    expect(app?.querySelector(".title")?.firstChild?.textContent).toBe("Week of ")
+    expect(selectedWeek()).toBe("Sep 28")
+    expect([...(app?.querySelectorAll(".week-select option") ?? [])].map((option) => option.textContent)).toEqual([
+      "Sep 28",
+      "Sep 21",
+    ])
+    expect(app?.querySelector(".history")).toBeNull()
+    expect(app?.querySelector(".notice")).toBeNull()
+    expect(app?.querySelector(".read-only-indicator")).toBeNull()
+    expect(app?.querySelector(".plan-change")?.hidden).toBe(false)
+    expect(app?.querySelector(".meal button")?.hidden).toBe(false)
+    const choose = (planId: string) => {
+      const select = app?.querySelector(".week-select")
+      if (!select) throw new Error("missing week selector")
+      const options = [...select.querySelectorAll("option")]
+      for (const option of options) option.selected = false
+      const chosen = options.find((option) => option.value === planId)
+      if (!chosen) throw new Error("missing plan option")
+      chosen.selected = true
+      select.dispatchEvent(new window.Event("change"))
+    }
+
+    choose("plan-old")
+    await settle()
+    expect(location.search).toBe("?planId=plan-old")
+    expect(location.hash).toBe("#tgWebAppData=launch-data")
+    expect(selectedWeek()).toBe("Sep 21")
+    expect(app?.querySelector(".notice")).toBeNull()
+    expect(app?.querySelector(".read-only-indicator")?.getAttribute("aria-label")).toBe("Read-only plan")
+    expect(app?.querySelector(".plan-change")?.hidden).toBe(true)
+    expect(app?.querySelector(".meal button")?.hidden).toBe(true)
+
+    choose("plan-current")
+    await settle()
+    expect(location.search).toBe("")
+    expect(selectedWeek()).toBe("Sep 28")
+    expect(app?.querySelector(".read-only-indicator")).toBeNull()
+    expect(app?.querySelector(".meal button")?.hidden).toBe(false)
+    location.search = "?planId=plan-old"
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    expect(selectedWeek()).toBe("Sep 21")
+    generating = true
+    choose("plan-current")
+    await settle()
+    expect(app?.querySelector(".notice")?.textContent).toContain("A new plan is being generated")
+    const callsBeforeRefresh = calls.length
+    app?.querySelector(".refresh-plan")?.click()
+    await settle()
+    expect(calls).toHaveLength(callsBeforeRefresh + 1)
+    firstPlanGenerating = true
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    expect(app?.textContent).toContain("Your first meal plan is being generated")
+    const callsBeforeFirstPlanRefresh = calls.length
+    app?.querySelector(".generating-empty button")?.click()
+    await settle()
+    expect(calls).toHaveLength(callsBeforeFirstPlanRefresh + 1)
+    expect(calls.filter((path) => path === "/mini-app/api/session")).toHaveLength(1)
+    expect(calls).toContain("/mini-app/api/plan?planId=plan-old")
+    expect(history.pushState).toHaveBeenCalledTimes(3)
   })
 
   it("serves a plan created for next week until its own week ends", async () => {
