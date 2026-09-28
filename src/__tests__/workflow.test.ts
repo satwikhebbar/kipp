@@ -344,6 +344,40 @@ describe("PipelineWorkflow", () => {
     expect(patchedStatuses(patches)).toContain("awaiting-feedback-expired")
   })
 
+  it("treats a wait timeout error at the deadline as feedback expiry", async () => {
+    const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
+    let callIdx = 0
+    const startedAt = new Date("2026-07-01T12:00:00Z")
+
+    testRun()
+    mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
+    const { fetchMock, patches } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(startedAt)
+    waitForEvent.mockImplementation(async () => {
+      // Cloudflare throws when the wait expires rather than resolving with a "timeout" event.
+      vi.setSystemTime(new Date(startedAt.getTime() + 12 * 60 * 60 * 1_000))
+      throw new Error("Workflow timed out waiting for event")
+    })
+
+    try {
+      const wf = new PipelineWorkflow({} as never, {} as never)
+      Object.assign(wf, { env: mockEnv() })
+
+      await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(
+        { ...makeEvent(), timestamp: startedAt },
+        makeStep(),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(stepDo).toHaveBeenCalledWith("timeout-0", expect.any(Function))
+    expect(patchedStatuses(patches)).toContain("awaiting-feedback-expired")
+    expect(stepDo).not.toHaveBeenCalledWith(expect.stringContaining("linkedin-publish"), expect.any(Function))
+  })
+
   it("publishes only the clean post while Telegram review shows the conversational response", async () => {
     const conversationResponse =
       'Here is the post around your chosen hook.\n\nOPENING HOOK (chosen)\n"quote"\n\nIMAGE IDEAS\n1. train shot\n\nTHE POST\nMy post body.'

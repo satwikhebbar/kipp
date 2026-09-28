@@ -1,4 +1,4 @@
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
+import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep, type WorkflowStepEvent } from "cloudflare:workers"
 import { appendLinkedInFeedback, createLinkedInConversation, runLinkedInToolSession } from "../agent/linkedin"
 import { promptForActions } from "../core/action-prompt"
 import { assertStepOutputSize } from "../core/conversation"
@@ -391,6 +391,14 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let runningOutputTokens = state.costOutputTokens ?? 0
     let latestCostLine = state.costLine
 
+    const expireFeedback = async (round: number): Promise<PipelineWorkflowOutcome> => {
+      await stepDo(`timeout-${round}`, async () => {
+        const manager = createIdeaManager(createNotionClient(this.env))
+        await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
+      })
+      return { outcome: "feedback-expired" }
+    }
+
     let revisionCount = 0
     let waitIndex = 0
     // Keep waiting until the deadline rather than a fixed event count, so the
@@ -398,24 +406,27 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     while (true) {
       const round = waitIndex++
       const timeoutSeconds = remainingFeedbackTimeoutSeconds(feedbackDeadlineMs)
-      if (timeoutSeconds === 0) {
-        await stepDo(`timeout-${round}`, async () => {
-          const manager = createIdeaManager(createNotionClient(this.env))
-          await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
-        })
-        return { outcome: "feedback-expired" }
-      }
+      if (timeoutSeconds === 0) return expireFeedback(round)
       logRuntime(this.env, {
         workflow: event.instanceId,
         event: "linkedin-feedback-wait",
         outcome: "started",
         details: { round, timeoutSeconds },
       })
-      const reply = await step.waitForEvent<{ text?: string }>(`feedback-${round}`, {
-        type: "telegram-reply",
-        // biome-ignore lint/suspicious/noExplicitAny: WorkflowSleepDuration doesn't accept computed strings
-        timeout: `${timeoutSeconds} seconds` as any,
-      })
+      let reply: WorkflowStepEvent<{ text?: string }>
+      try {
+        reply = await step.waitForEvent<{ text?: string }>(`feedback-${round}`, {
+          type: "telegram-reply",
+          // biome-ignore lint/suspicious/noExplicitAny: WorkflowSleepDuration doesn't accept computed strings
+          timeout: `${timeoutSeconds} seconds` as any,
+        })
+      } catch (err) {
+        // Cloudflare fails the wait with an error when it expires instead of
+        // resolving with a "timeout" event. A failure at the deadline is
+        // feedback expiry; anything earlier is a real error and must propagate.
+        if (remainingFeedbackTimeoutSeconds(feedbackDeadlineMs) > 0) throw err
+        return expireFeedback(round)
+      }
       const text = (reply.payload?.text as string) ?? ((reply as Record<string, unknown>)?.text as string) ?? ""
       logRuntime(this.env, {
         workflow: event.instanceId,
@@ -430,13 +441,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           transcriptCharacters: JSON.stringify(currentMessages).length,
         },
       })
-      if (reply.type === "timeout") {
-        await stepDo(`timeout-${round}`, async () => {
-          const manager = createIdeaManager(createNotionClient(this.env))
-          await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
-        })
-        return { outcome: "feedback-expired" }
-      }
+      if (reply.type === "timeout") return expireFeedback(round)
 
       if (text !== "__approve__" && revisionCount >= MAX_FEEDBACK_ROUNDS) {
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
