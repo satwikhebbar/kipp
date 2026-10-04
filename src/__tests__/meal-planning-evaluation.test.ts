@@ -136,6 +136,30 @@ describe("meal-planning evaluator", () => {
     })
   })
 
+  it.each([
+    "dates",
+    "date",
+    "raisins",
+    "dry coconut",
+    "jaggery",
+    "paneer",
+    "cashews",
+    "almonds",
+    "walnuts",
+    "peanuts",
+    "pistachios",
+    "mixed seeds",
+  ])("rejects a prohibited long-shelf easy buy (%s)", (buy) => {
+    const evaluation = evaluateMealPlan(baseCandidate({ easyBuys: [buy] }), baseContext())
+    expect(failureCodes(evaluation)).toEqual(["easy_buy_not_ordinary"])
+    expect(evaluation.pass).toBe(false)
+  })
+
+  it("accepts ordinary staples and everyday produce as easy buys", () => {
+    const candidate = baseCandidate({ easyBuys: ["carrot", "spinach", "moong dal"] })
+    expect(evaluateMealPlan(candidate, baseContext()).pass).toBe(true)
+  })
+
   it("enforces dietary exclusions", () => {
     const context = baseContext()
     context.profile.pantryBaseline = [...context.profile.pantryBaseline, "peanut", "dairy"]
@@ -1456,6 +1480,22 @@ describe("initial-plan easy-buy reconciliation", () => {
     )
 
     expect(result.candidate?.easyBuys).toEqual([])
+  })
+
+  it("rejects a specialty item that reconciliation would add to the initial easy buys", () => {
+    const dates = homeLunchSubzi("dates-snack", "Dates", ["dates"])
+    const context = baseContext({
+      profile: { ...SEED_PROFILE, mealDefinitions: [dates], pantryBaseline: [] },
+      weeklyInventory: { items: [], notes: [] },
+    })
+    const result = evaluateMealPlanSelection(
+      { grid: { Mon: { "home-lunch": { mealDefinitionId: dates.id } } }, easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+
+    expect(result.candidate?.easyBuys).toEqual(["dates"])
+    expect(result.evaluation.pass).toBe(false)
+    expect(result.evaluation.failures).toContainEqual(expect.objectContaining({ code: "easy_buy_not_ordinary" }))
   })
 
   it("still rejects an explicitly unavailable required ingredient on the initial path", () => {
