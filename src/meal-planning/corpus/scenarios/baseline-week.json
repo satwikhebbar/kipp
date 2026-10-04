@@ -806,7 +806,7 @@
             }
           }
         },
-        "easyBuys": [],
+        "easyBuys": ["dates"],
         "policyOutcomes": {
           "snack-policy": {
             "outcome": "satisfied",
@@ -817,6 +817,9 @@
       "expect": {
         "pass": false,
         "failures": [
+          {
+            "code": "easy_buy_not_ordinary"
+          },
           {
             "code": "non_vegetarian_school_meal",
             "day": "Mon",

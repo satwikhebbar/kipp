@@ -1,5 +1,5 @@
 import { computeCoverageSet } from "./coverage"
-import { reconcileEasyBuys } from "./easy-buys"
+import { findProhibitedEasyBuys, reconcileEasyBuys } from "./easy-buys"
 import { effectiveMealSlot } from "./half-day"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "./hydration"
 import { normalizeIngredient } from "./ingredient-normalization"
@@ -237,6 +237,13 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
         })
       }
     }
+  }
+
+  for (const buy of findProhibitedEasyBuys(candidate.easyBuys)) {
+    failures.push({
+      code: "easy_buy_not_ordinary",
+      detail: `easy buy "${buy}" is a long-shelf or specialty item, not an ordinary grocery item`,
+    })
   }
 
   const morningCookByDay: Record<string, number> = {}
