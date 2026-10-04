@@ -10,6 +10,7 @@ export const FAILURE_CODES = [
   "slot_unsuitable",
   "inventory_item_unknown",
   "inventory_item_unavailable",
+  "easy_buy_not_ordinary",
   "use_early_ignored",
   "dish_repeated",
   "missing_policy_outcome",
