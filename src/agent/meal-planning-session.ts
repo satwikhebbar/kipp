@@ -42,7 +42,7 @@ For an initial_plan, build one complete school-week grid covering exactly the sc
 For a revision, the active plan is authoritative: submit a patch containing only the cells you are changing. Never repeat an unchanged cell or reconstruct it from a catalog id. The server recalculates easyBuys from the resulting plan; do not add, retain, or delete shopping-list items. Omit policyOutcomes unless you are replacing the whole value. 
 When it is a revision, keep the elapsed days' dishes unchanged unless the feedback explicitly targets them; apply changes from today onward. If a parent reports a concrete week-state fact such as an ingredient running out, a holiday, a half day, or a schedule change, call update_week_context first. It accepts only the affected inventory items and exception additions. 
 Set replan false unless the parent explicitly asks to change the plan too. If replan is true, the workflow will apply the update and start a fresh revision with that context; do not submit a candidate in the same action. 
-Treat every submitted feedback item as the driver: a cell-scoped item must be addressed in that cell, an unbound item against the plan as a whole. If unbound feedback does not identify what should improve — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat it as satisfied by a rationale.
+Treat every submitted feedback item as the driver. Its target and any cell scope are server-owned and cannot be changed in propose_plan. A plan-wide item may change cells across days when the parent's text gives a concrete action and meal/day or destination; if it is vague — for example, "make this better" — ask one concise clarification about the decision that matters (speed, nutrition, packing dryness, preference, or inventory). Do not make an arbitrary change or treat vague feedback as satisfied by a rationale.
 
 ## Planning
 On a normal school day, breakfast, two snacks, packed school lunch, and home lunch are distinct slots: school lunch is packed for school, while home lunch is a separate later meal after the child returns and does not count toward the morning cook budget. 
@@ -125,7 +125,7 @@ export async function runMealPlanningAgentSession(
     [MEAL_PLANNING_TOOL.PROPOSE]: {
       name: MEAL_PLANNING_TOOL.PROPOSE,
       description:
-        "Terminal action after a passing evaluation. Submit the candidate, optional feedback scope interpretations, and optional short justification; the workflow supplies inventory and exceptions.",
+        "Terminal action after a passing evaluation. Submit the candidate, an optional exact echo of authoritative feedback, and an optional short justification; feedback targets/scopes cannot be interpreted or widened here. The workflow supplies inventory and exceptions.",
       input: isRevisionPatch ? proposePlanRevisionWireInputSchema : proposePlanWireInputSchema,
       output: acceptedOutputSchema,
       privacy: "private",
@@ -137,17 +137,10 @@ export async function runMealPlanningAgentSession(
           : mealPlanSelectionCandidateFromWire(input.candidate, policyIds)
         const authoritative = options.context.feedbackItems ?? []
         const submitted: FeedbackItem[] = input.feedbackItems ?? []
-        // The model never needs to echo feedback items back: scoped items are
-        // covered by the authoritative set alone. A submission may only attach
-        // a scope interpretation to a free-text item (one that has no parsed
-        // scope), and only by its exact text — never by inventing or rewriting.
-        assertInterpretationsOnly(authoritative, submitted)
-        const submittedByText = new Map(submitted.map((item) => [item.text, item]))
-        const evaluationFeedback = authoritative.map((raw) => {
-          if (raw.scope) return raw
-          const interpretation = submittedByText.get(raw.text)
-          return interpretation?.scope ? { ...raw, scope: interpretation.scope } : raw
-        })
+        // Feedback targets and scopes are server-owned. An optional model echo
+        // cannot widen an unbound plan request or alter a Mini App cell target.
+        assertFeedbackEchoOnly(authoritative, submitted)
+        const evaluationFeedback = authoritative
         // Re-validate against the authoritative week state plus the candidate's
         // easy-buys, exactly as evaluate_meal_plan did — never against a
         // re-emitted echo the model may have drifted from the source of truth.
@@ -249,7 +242,7 @@ export async function runMealPlanningAgentSession(
           : initialAllowedTools,
       nextInstruction: (executedTools) =>
         executedTools.includes(MEAL_PLANNING_TOOL.EVALUATE) && latestEvaluation?.pass
-          ? "Evaluation passed. Call exactly one terminal tool now: propose_plan to submit the evaluated candidate, or needs_clarification only if a real unresolved decision remains. Do not answer with prose. propose_plan receives candidate, optional feedback scope interpretations, and an optional short justification; inventory and exceptions are already held by the workflow."
+          ? "Evaluation passed. Call exactly one terminal tool now: propose_plan to submit the evaluated candidate, or needs_clarification only if a real unresolved decision remains. Do not answer with prose. propose_plan receives candidate, an optional exact feedback echo, and an optional short justification; feedback targets/scopes are fixed by the workflow, which also holds inventory and exceptions."
           : undefined,
       // A full Mon–Sat candidate is a large nested schema; the model often needs
       // an extra evaluate-revise turn, so grant more turns than the default
@@ -284,12 +277,9 @@ export async function runMealPlanningAgentSession(
 }
 
 /**
- * Rejects a feedback submission that invents or rewrites items: each submitted
- * item must match an authoritative item's text exactly, must not be a
- * duplicate, and must not alter or drop an authoritative scope (a scope may be
- * attached only when the authoritative item carries none).
+ * Optional feedback echoes must preserve the server-owned text and scope.
  */
-function assertInterpretationsOnly(authoritative: FeedbackItem[], submitted: FeedbackItem[]): void {
+function assertFeedbackEchoOnly(authoritative: FeedbackItem[], submitted: FeedbackItem[]): void {
   const seen = new Set<string>()
   for (const item of submitted) {
     const raw = authoritative.find((candidate) => candidate.text === item.text)
@@ -299,7 +289,7 @@ function assertInterpretationsOnly(authoritative: FeedbackItem[], submitted: Fee
         "invalid-state",
       )
     seen.add(item.text)
-    if (raw.scope && (!item.scope || !scopeEqual(raw.scope, item.scope)))
+    if (!scopeEqual(raw.scope, item.scope))
       throw new ToolHandlerError("proposed feedback items must keep the authoritative scope unchanged", "invalid-state")
   }
 }

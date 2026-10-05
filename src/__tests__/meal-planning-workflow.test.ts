@@ -102,7 +102,7 @@ it("tells the planner that half-day snack candidates are conditional", () => {
   expect(MEAL_PLANNING_AGENT_PROMPT).toContain("plan exactly breakfast, snack1, and home lunch")
 })
 
-it("renders scoped and unbound revision feedback without storage ids", () => {
+it("renders scoped and plan-wide revision feedback without storage ids", () => {
   expect(
     renderRevisionFeedback([
       { id: "fb-cell", text: "Use a simpler dish.", scope: { day: "Tue", slot: "school-lunch" } },
@@ -110,7 +110,7 @@ it("renders scoped and unbound revision feedback without storage ids", () => {
       { id: "fb-unbound", text: "Use less oil." },
     ]),
   ).toBe(
-    "- Feedback for Tue school-lunch: Use a simpler dish.\n- Feedback for every meal on Thu: Make the day lighter.\n- Unbound feedback: Use less oil.",
+    "- Feedback for Tue school-lunch: Use a simpler dish.\n- Feedback for every meal on Thu: Make the day lighter.\n- Plan-wide feedback: Use less oil.",
   )
 })
 
@@ -783,9 +783,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       deepseekResponse([
         {
           name: "propose_plan",
-          input: proposeInput(revised, [
-            { id: "tg-200", text: "Mon snack: prefer idli", scope: { day: "Mon", slot: "snack1" } },
-          ]),
+          input: proposeInput(revised, [{ id: "tg-200", text: "Mon snack: prefer idli" }]),
         },
       ]),
     ])
@@ -1042,18 +1040,14 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       deepseekResponse([
         {
           name: "propose_plan",
-          input: proposeInput(revised, [
-            { id: "tg-200", text: "Mon snack: prefer idli", scope: { day: "Mon", slot: "snack1" } },
-          ]),
+          input: proposeInput(revised, [{ id: "tg-200", text: "Mon snack: prefer idli" }]),
         },
       ]),
       deepseekResponse([{ name: "evaluate_meal_plan", input: revisedAgain }]),
       deepseekResponse([
         {
           name: "propose_plan",
-          input: proposeInput(revisedAgain, [
-            { id: "tg-201", text: "Tue snack: prefer poha", scope: { day: "Tue", slot: "snack1" } },
-          ]),
+          input: proposeInput(revisedAgain, [{ id: "tg-201", text: "Tue snack: prefer poha" }]),
         },
       ]),
     ])

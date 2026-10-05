@@ -715,6 +715,67 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.failures[0]).toMatchObject({ code: "unscoped_cell_changed", day: "Wed", slot: "breakfast" })
   })
 
+  it("allows a concrete plan-wide Telegram move across source and destination days", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [
+        { id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null },
+        { id: "home-lunch", name: "Home lunch", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    const recentPlan = gridFrom([
+      ["Mon", "school-lunch", "tomato rice"],
+      ["Mon", "home-lunch", "bhindi fry"],
+      ["Tue", "school-lunch", "aloo paratha"],
+      ["Tue", "home-lunch", "pumpkin subzi"],
+    ])
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "school-lunch", "aloo paratha"],
+        ["Mon", "home-lunch", "pumpkin subzi"],
+        ["Tue", "school-lunch", "tomato rice"],
+        ["Tue", "home-lunch", "bhindi fry"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const context = baseContext({
+      schedule,
+      profile: {
+        ...baseContext().profile,
+        foodPreferences: { favourites: [], avoid: [] },
+        pantryBaseline: ["tomato rice", "bhindi fry", "aloo paratha", "pumpkin subzi"],
+      },
+      customPolicies: [],
+      weeklyExceptions: { items: [] },
+      recentPlan,
+      priorWeekPlan: null,
+      request: { kind: "revision", text: "Replace Monday's lunches and move the original meals to Tuesday." },
+      feedbackItems: [
+        {
+          id: "tg-1",
+          text: "Replace Monday's lunches with Aloo Paratha and Pumpkin Subzi and move Tomato Rice and Bhindi Fry to Tuesday.",
+          target: { kind: "plan" },
+        },
+      ],
+    })
+
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual([])
+  })
+
+  it("does not let vague plan-wide feedback authorize arbitrary revision changes", () => {
+    const context = baseContext({
+      request: { kind: "revision", text: "Make this better." },
+      feedbackItems: [{ id: "tg-vague", text: "Make this better.", target: { kind: "plan" } }],
+    })
+    context.recentPlan = baseCandidate().grid
+    const candidate = baseCandidate()
+    candidate.grid.Mon.breakfast = cellFor("breakfast", "banana")
+
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unscoped_cell_changed")
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+  })
+
   it("flags feedback that no changed cell or outcome rationale addresses", () => {
     const context = baseContext({
       request: { kind: "revision", text: "Fix the Tuesday school lunch." },

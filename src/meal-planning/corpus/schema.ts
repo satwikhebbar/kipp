@@ -123,6 +123,12 @@ export const feedbackItemSchema: z.ZodType<FeedbackItem> = z
   .object({
     id: z.string().min(1),
     text: z.string().min(1),
+    target: z
+      .discriminatedUnion("kind", [
+        z.object({ kind: z.literal("plan") }).strict(),
+        z.object({ kind: z.literal("cell"), day: z.string(), slot: z.string() }).strict(),
+      ])
+      .optional(),
     scope: z.object({ day: z.string().optional(), slot: z.string().optional() }).strict().optional(),
   })
   .strict()

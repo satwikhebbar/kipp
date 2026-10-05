@@ -9,8 +9,8 @@ export interface Submission {
 export type SubmissionSource = "telegram-reply" | "telegram-text"
 
 /**
- * Coerces one Telegram text message into the canonical one-item submission
- * payload (`{ items: [{ id: "tg-<messageId>", text }] }`, unbound). Pure and
+ * Coerces one Telegram text message into the canonical one-item plan-wide
+ * submission payload (`{ items: [{ id: "tg-<messageId>", text, target }] }`). Pure and
  * deterministic — everything downstream (session context, `propose_plan`
  * coverage validation, the `feedback_batch` row) consumes only this shape, so
  * iteration 2 swaps the Telegram producer for the mini-app's structured
@@ -18,5 +18,5 @@ export type SubmissionSource = "telegram-reply" | "telegram-text"
  */
 export function coerceSubmission(text: string, source: SubmissionSource, messageId: number): Submission {
   const prefix = source.startsWith("telegram") ? "tg" : source
-  return { items: [{ id: `${prefix}-${messageId}`, text }] }
+  return { items: [{ id: `${prefix}-${messageId}`, text, target: { kind: "plan" } }] }
 }

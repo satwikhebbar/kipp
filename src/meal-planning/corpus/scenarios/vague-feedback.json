@@ -391,7 +391,8 @@
     "feedbackItems": [
       {
         "id": "tg-90",
-        "text": "Make this better"
+        "text": "Make this better",
+        "target": { "kind": "plan" }
       }
     ]
   },
@@ -595,7 +596,8 @@
         }
       },
       "expect": {
-        "pass": true
+        "pass": false,
+        "failures": [{ "code": "unaddressed_feedback" }]
       }
     },
     {
@@ -807,7 +809,7 @@
     }
   ],
   "behavior": {
-    "expectsClarification": false,
+    "expectsClarification": true,
     "expectedPolicyOutcomes": {}
   }
 }
