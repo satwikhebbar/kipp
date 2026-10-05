@@ -118,7 +118,7 @@ export function renderRevisionFeedback(items: FeedbackItem[]): string {
       if (scope?.day && scope.slot) return `- Feedback for ${scope.day} ${scope.slot}: ${item.text}`
       if (scope?.day) return `- Feedback for every meal on ${scope.day}: ${item.text}`
       if (scope?.slot) return `- Feedback for every ${scope.slot}: ${item.text}`
-      return `- Unbound feedback: ${item.text}`
+      return `- Plan-wide feedback: ${item.text}`
     })
     .join("\n")
 }

@@ -197,7 +197,7 @@ export interface PlanRequest {
 export interface FeedbackItem {
   id: string
   text: string
-  /** The Mini App's explicit review target; Telegram text feedback remains unbound. */
+  /** Server-owned target: plan-wide for Telegram and explicit plan reviews, cell for Mini App cell reviews. */
   target?: FeedbackTarget
   scope?: { day?: string; slot?: string }
 }

@@ -71,6 +71,7 @@ describe("meal-planning corpus health", () => {
 
   it("every scenario has at least one pass:true candidate", () => {
     for (const scenario of scenarios) {
+      if (scenario.behavior?.expectsClarification) continue
       expect(
         scenario.candidates.some((candidate) => candidate.expect.pass),
         `${scenario.id} has no pass:true candidate`,

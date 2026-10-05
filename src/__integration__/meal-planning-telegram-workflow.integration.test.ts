@@ -58,7 +58,10 @@ function queueRevision(
       {
         id: "propose-rev",
         name: "propose_plan",
-        input: { candidate: mealPlanSelectionPatchToWire(candidate), feedbackItems: [feedback] },
+        input: {
+          candidate: mealPlanSelectionPatchToWire(candidate),
+          feedbackItems: [{ id: feedback.id, text: feedback.text }],
+        },
       },
     ],
     usage: LLM_USAGE,

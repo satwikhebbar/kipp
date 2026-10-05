@@ -4,6 +4,7 @@ import { effectiveMealSlot } from "./half-day"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "./hydration"
 import { normalizeIngredient } from "./ingredient-normalization"
 import type {
+  FeedbackItem,
   MealCell,
   MealGrid,
   MealPlanCandidate,
@@ -120,6 +121,33 @@ function cellsEqual(a: MealCell, b: MealCell): boolean {
 function inFeedbackScope(scope: { day?: string; slot?: string }, day: string, slotId: string): boolean {
   if (!scope.day || scope.day !== day) return false
   return scope.slot === undefined || scope.slot === slotId
+}
+
+/** A plan target authorizes a revision only when the parent's text names a concrete change. */
+function isConcretePlanFeedback(item: FeedbackItem, context: MealPlanContext): boolean {
+  if (item.scope || item.target?.kind === "cell") return false
+  const text = item.text.toLowerCase()
+  if (/\b(?:make\s+(?:this|it)\s+better|(?:something|anything)\s+better)\b/.test(text)) return false
+  const action =
+    /\b(?:replace|move|moving|swap|switch|shift|use|serve|put|add|remove|include|omit|change|prefer|choose)\b/.test(
+      text,
+    )
+  const destination = /\b(?:with|to|for|instead|from|on|into|another|other)\b/.test(text)
+  const mealOrDay =
+    /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/.test(
+      text,
+    )
+  const dish = Object.values(context.recentPlan ?? {}).some((slots) =>
+    Object.values(slots).some((cell) => text.includes(cell.dish.toLowerCase())),
+  )
+  const selectedOption = /\b(?:prefer|choose|use|serve|put)\s+(?:the\s+)?[a-z][a-z -]*/.test(text)
+  const specificPreference =
+    /\b(?:less|more|lighter|faster|simpler|healthier|spicier)\b/.test(text) ||
+    /\b(?:too|less|more)\s+(?:oily|spicy|heavy|slow|wet|dry)\b/.test(text)
+  return (
+    (action && ((mealOrDay && destination) || dish || (mealOrDay && selectedOption))) ||
+    (mealOrDay && specificPreference)
+  )
 }
 
 /** Locale-independent total ordering for two optional strings (empty sorts first). */
@@ -368,8 +396,10 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
 
   const feedbackItems = context.feedbackItems ?? []
   if (request.kind === "revision" && context.recentPlan) {
+    const concretePlanFeedback = feedbackItems.some((item) => isConcretePlanFeedback(item, context))
     for (const { day, slotId } of revisionChangedCells) {
-      const scoped = feedbackItems.some((item) => item.scope && inFeedbackScope(item.scope, day, slotId))
+      const scoped =
+        concretePlanFeedback || feedbackItems.some((item) => item.scope && inFeedbackScope(item.scope, day, slotId))
       if (!scoped) {
         failures.push({
           code: "unscoped_cell_changed",
@@ -380,12 +410,13 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       }
     }
     for (const item of feedbackItems) {
-      const addressedByCell = revisionChangedCells.some(
-        ({ day, slotId }) => item.scope && inFeedbackScope(item.scope, day, slotId),
-      )
-      const addressedByRationale = Object.values(candidate.policyOutcomes).some((outcome) =>
-        outcome.rationale.includes(item.id),
-      )
+      const concrete = isConcretePlanFeedback(item, context)
+      const addressedByCell = concrete
+        ? revisionChangedCells.length > 0
+        : revisionChangedCells.some(({ day, slotId }) => item.scope && inFeedbackScope(item.scope, day, slotId))
+      const addressedByRationale =
+        (concrete || item.scope) &&
+        Object.values(candidate.policyOutcomes).some((outcome) => outcome.rationale.includes(item.id))
       if (!addressedByCell && !addressedByRationale) {
         failures.push({
           code: "unaddressed_feedback",

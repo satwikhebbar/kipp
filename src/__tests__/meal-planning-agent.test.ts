@@ -336,6 +336,99 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal?.kind).toBe("needs_clarification")
   })
 
+  it("rejects a model-added cell scope for authoritative plan-wide feedback", async () => {
+    const raw = [{ id: "tg-1", text: "Move Monday lunch to Tuesday", target: { kind: "plan" as const } }]
+    const provider = providerWith(
+      evaluateResponse(passingCandidate()),
+      proposeResponse(
+        proposeInput(passingCandidate(), [
+          { id: "tg-1", text: raw[0].text, scope: { day: "Mon", slot: "home-lunch" } },
+        ]),
+      ),
+      clarifyResponse({
+        message: "Please confirm which lunch should move.",
+        reasonCodes: [],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: raw[0].text }], {
+      context: context({ request: { kind: "revision", text: raw[0].text }, feedbackItems: raw }),
+    })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification" })
+  })
+
+  it("rejects a model that widens an authoritative Mini App cell scope", async () => {
+    const raw = [
+      {
+        id: "mini-1",
+        text: "Use poha instead",
+        target: { kind: "cell" as const, day: "Mon", slot: "breakfast" },
+        scope: { day: "Mon", slot: "breakfast" },
+      },
+    ]
+    const provider = providerWith(
+      evaluateResponse(passingCandidate()),
+      proposeResponse(
+        proposeInput(passingCandidate(), [
+          { id: "mini-1", text: raw[0].text, scope: { day: "Tue", slot: "breakfast" } },
+        ]),
+      ),
+      clarifyResponse({
+        message: "Please confirm the requested change.",
+        reasonCodes: [],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: raw[0].text }], {
+      context: context({ request: { kind: "revision", text: raw[0].text }, feedbackItems: raw }),
+    })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification" })
+  })
+
+  it("accepts a concrete plan-wide move through both evaluation and proposal", async () => {
+    const base = passingCandidate()
+    base.grid.Mon["school-lunch"] = cell("tomato rice", ["rice"], "school-lunch")
+    base.grid.Mon["home-lunch"] = cell("bhindi fry", ["rice"], "home-lunch")
+    base.grid.Tue["school-lunch"] = cell("aloo paratha", ["rice"], "school-lunch")
+    base.grid.Tue["home-lunch"] = cell("pumpkin subzi", ["rice"], "home-lunch")
+    const candidate = structuredClone(base)
+    candidate.grid.Mon["school-lunch"] = cell("aloo paratha", ["rice"], "school-lunch")
+    candidate.grid.Mon["home-lunch"] = cell("pumpkin subzi", ["rice"], "home-lunch")
+    candidate.grid.Tue["school-lunch"] = cell("tomato rice", ["rice"], "school-lunch")
+    candidate.grid.Tue["home-lunch"] = cell("bhindi fry", ["rice"], "home-lunch")
+    const feedback = [
+      {
+        id: "tg-move",
+        text: "Replace Monday's lunches with Aloo Paratha and Pumpkin Subzi and move Tomato Rice and Bhindi Fry to Tuesday.",
+        target: { kind: "plan" as const },
+      },
+    ]
+    const ctx = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback[0].text },
+        recentPlan: base.grid,
+        feedbackItems: feedback,
+      }),
+      candidate,
+    )
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback[0].id, text: feedback[0].text }])),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback[0].text }], {
+      context: ctx,
+    })
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "propose_plan", evaluation: { pass: true } })
+    expect(provider.generate).toHaveBeenCalledTimes(2)
+  })
+
   it("accepts a revision propose_plan when every raw feedback item is represented", async () => {
     const raw = [{ id: "tg-1", text: "Wed lunch: too oily" }]
     const provider = providerWith(

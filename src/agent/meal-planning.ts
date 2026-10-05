@@ -432,9 +432,7 @@ export const PROPOSE_JUSTIFICATION_MAX_CHARACTERS = 500
 export const proposePlanWireInputSchema = z
   .object({
     candidate: mealPlanSelectionWireCandidateSchema,
-    // The model may only attach a scope interpretation to unscoped feedback;
-    // inventory, exceptions, and the feedback source itself stay authoritative
-    // in the workflow context and are never echoed by the terminal call.
+    // Optional echo only; the server-owned target and scope stay in workflow context.
     feedbackItems: z.array(feedbackItemSchema).optional(),
     // Debug aid only. The session truncates this before retaining it, so a
     // verbose explanation never costs the model another terminal turn.
