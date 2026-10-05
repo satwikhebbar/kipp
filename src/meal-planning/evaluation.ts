@@ -144,10 +144,55 @@ function isConcretePlanFeedback(item: FeedbackItem, context: MealPlanContext): b
   const specificPreference =
     /\b(?:less|more|lighter|faster|simpler|healthier|spicier)\b/.test(text) ||
     /\b(?:too|less|more)\s+(?:oily|spicy|heavy|slow|wet|dry)\b/.test(text)
+  const namedDays =
+    text.match(/\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g) ?? []
+  const namedMeals = text.match(/\b(?:breakfast|snack|lunch|dinner)\b/g) ?? []
+  const explicitSwap =
+    /\b(?:swap|switch|trade)\b/.test(text) && (new Set(namedDays).size >= 2 || new Set(namedMeals).size >= 2)
   return (
+    explicitSwap ||
     (action && ((mealOrDay && destination) || dish || (mealOrDay && selectedOption))) ||
     (mealOrDay && specificPreference)
   )
+}
+
+/** A concrete plan-wide request is addressed only when a changed cell touches a named day or dish. */
+function concreteFeedbackMatchesChangedCell(
+  item: FeedbackItem,
+  changedCell: { day: string; slotId: string },
+  candidate: MealPlanCandidate,
+  context: MealPlanContext,
+): boolean {
+  const text = item.text.toLowerCase()
+  const currentDish = candidate.grid[changedCell.day]?.[changedCell.slotId]?.dish
+  const currentDishMatches = currentDish !== undefined && text.includes(currentDish.toLowerCase())
+  const priorDish = context.recentPlan?.[changedCell.day]?.[changedCell.slotId]?.dish
+  const priorDishMatches = priorDish !== undefined && text.includes(priorDish.toLowerCase())
+  const namedDays =
+    text.match(/\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g) ?? []
+  const dayNames: Record<string, string> = {
+    mon: "mon",
+    monday: "mon",
+    tue: "tue",
+    tuesday: "tue",
+    wed: "wed",
+    wednesday: "wed",
+    thu: "thu",
+    thursday: "thu",
+    fri: "fri",
+    friday: "fri",
+    sat: "sat",
+    saturday: "sat",
+  }
+  const dayMatches = namedDays.some((day) => changedCell.day.toLowerCase().startsWith(dayNames[day]))
+  const namedMeals = text.match(/\b(?:breakfast|snack\s*[12]?|lunch|dinner)\b/g) ?? []
+  const slotMatches = namedMeals.some((meal) => {
+    const normalizedMeal = meal.replace(/\s+/g, "")
+    return changedCell.slotId.toLowerCase().includes(normalizedMeal)
+  })
+  if (namedDays.length > 0 && namedMeals.length > 0) return dayMatches && slotMatches
+  if (namedDays.length > 0) return dayMatches
+  return dayMatches || currentDishMatches || priorDishMatches
 }
 
 /** Locale-independent total ordering for two optional strings (empty sorts first). */
@@ -412,7 +457,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     for (const item of feedbackItems) {
       const concrete = isConcretePlanFeedback(item, context)
       const addressedByCell = concrete
-        ? revisionChangedCells.length > 0
+        ? revisionChangedCells.some((cell) => concreteFeedbackMatchesChangedCell(item, cell, candidate, context))
         : revisionChangedCells.some(({ day, slotId }) => item.scope && inFeedbackScope(item.scope, day, slotId))
       const addressedByRationale =
         (concrete || item.scope) &&

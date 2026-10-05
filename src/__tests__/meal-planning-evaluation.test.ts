@@ -763,6 +763,52 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual([])
   })
 
+  it("requires a concrete plan-wide request to match a changed day or dish", () => {
+    const recentPlan = gridFrom([
+      ["Mon", "breakfast", "poha"],
+      ["Tue", "breakfast", "banana"],
+    ])
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "poha"],
+        ["Tue", "breakfast", "banana"],
+        ["Wed", "breakfast", "oats"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const context = baseContext({
+      recentPlan,
+      request: { kind: "revision", text: "Replace Tuesday breakfast with oats." },
+      feedbackItems: [{ id: "tg-specific", text: "Replace Tuesday breakfast with oats.", target: { kind: "plan" } }],
+    })
+
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+  })
+
+  it("recognizes an explicit swap between named days as concrete plan-wide feedback", () => {
+    const recentPlan = gridFrom([
+      ["Mon", "breakfast", "poha"],
+      ["Tue", "breakfast", "banana"],
+    ])
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "banana"],
+        ["Tue", "breakfast", "poha"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const context = baseContext({
+      recentPlan,
+      customPolicies: [],
+      request: { kind: "revision", text: "Swap Monday and Tuesday breakfast." },
+      feedbackItems: [{ id: "tg-swap", text: "Swap Monday and Tuesday breakfast.", target: { kind: "plan" } }],
+    })
+
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("unaddressed_feedback")
+  })
+
   it("does not let vague plan-wide feedback authorize arbitrary revision changes", () => {
     const context = baseContext({
       request: { kind: "revision", text: "Make this better." },
