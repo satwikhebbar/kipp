@@ -232,7 +232,10 @@ export interface MealPlanContext {
   customPolicies: CustomPolicy[]
   weeklyInventory: WeeklyInventory
   weeklyExceptions: WeeklyExceptions
+  /** Current week's base grid for revision diff and feedback scope checks. */
   recentPlan?: MealGrid | null
+  /** Plan from the immediately preceding week, when one exists; distinct from the revision base. */
+  priorWeekPlan?: MealGrid | null
   request: PlanRequest
   feedbackItems?: FeedbackItem[]
   urgentUseByDay?: string

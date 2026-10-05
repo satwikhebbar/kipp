@@ -38,7 +38,7 @@ import {
 import { coerceSubmission, type Submission } from "./submissions"
 import type { FeedbackItem, FeedbackTarget, MealDefinition, MealPlanCandidate, MealPlanContext } from "./types"
 import { enrichLunchVideos } from "./video"
-import { resolvePlanningWeek } from "./week"
+import { previousPlanningWeekStart, resolvePlanningWeek } from "./week"
 import type { MealPlanningWorkflowParams } from "./workflow"
 
 const MEAL_PLANNING_TIMEZONE_DEFAULT = "Asia/Kolkata"
@@ -203,13 +203,23 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   }
   lines.push(`- Request kind: ${context.request.kind}`)
   if (context.recentPlan) {
-    lines.push(`- Recent plan (change only the cells feedback targets):`)
+    lines.push(`- Current plan (change only the cells feedback targets):`)
     for (const [day, cells] of Object.entries(context.recentPlan)) {
       for (const [slot, cell] of Object.entries(cells)) {
         lines.push(
           `    ${day} ${slot}: ${cell.dish} (items: ${cell.items.join(", ")}; cook ${cell.cookMinutes} min; prior-night prep: ${cell.priorNightPrep ? "yes" : "no"})`,
         )
       }
+    }
+  }
+  if (context.priorWeekPlan) {
+    lines.push(`- Previous week's dishes (avoid repeating cooked meals unless exempt):`)
+    for (const [day, cells] of Object.entries(context.priorWeekPlan)) {
+      lines.push(
+        `    ${day}: ${Object.entries(cells)
+          .map(([slot, cell]) => `${slot}: ${cell.dish}`)
+          .join(", ")}`,
+      )
     }
   }
   return lines.join("\n")
@@ -249,6 +259,9 @@ export async function runAgentCenteredMealPlanningWorkflow(
   try {
     const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText)
     const recent = await stepDo(step, "meal-planning-read-recent", () => store.activePlan(event.payload.chatId))
+    const priorWeek = await stepDo(step, "meal-planning-read-prior-week", () =>
+      store.latestPlanForWeek(event.payload.chatId, previousPlanningWeekStart(week.weekStart, timezone)),
+    )
 
     // Week-scoped facts belong to the target week only. The active plan may still
     // target a previous week (it is only replaced when the new plan is created),
@@ -262,7 +275,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
       customPolicies: profile.customPolicies,
       weeklyInventory: sameWeekPlan?.plan.weeklyInventory ?? { items: [], notes: [] },
       weeklyExceptions: sameWeekPlan?.plan.weeklyExceptions ?? { items: [] },
-      recentPlan: recent?.version.candidate.grid ?? null,
+      priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
       // Provisional meals are owned by a plan version. They may be reused by a
       // revision of that plan, but must never leak into a new initial plan.
       provisionalMealDefinitions: [],
@@ -910,6 +923,12 @@ async function runRevision(
   // A stored plan can predate a recurring schedule rule. Start every revision
   // from the cells still eligible under the household's current schedule.
   const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)
+  const priorWeek = await stepDo(step, `meal-planning-read-prior-week-${occurrence}`, () =>
+    store.latestPlanForWeek(
+      event.payload.chatId,
+      previousPlanningWeekStart(active.plan.weekStart, active.plan.timezone),
+    ),
+  )
   const context: MealPlanContext = {
     schedule: profile.schedule,
     profile: profile.profile,
@@ -917,6 +936,7 @@ async function runRevision(
     weeklyInventory: active.plan.weeklyInventory,
     weeklyExceptions: active.plan.weeklyExceptions,
     recentPlan: revisionBaseCandidate.grid,
+    priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
     request: { kind: "revision", text: submission.items.map((item) => item.text).join(" ") },
     feedbackItems,
     provisionalMealDefinitions: active.version.provisionalMealDefinitions,

@@ -514,14 +514,17 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(deepseekBodies[0]?.messages.at(-1)?.content).toContain("none")
   })
 
-  it("resets week-scoped inventory and holidays when the target week changes", async () => {
+  it.each([
+    [7, true],
+    [14, false],
+  ])("resets week-scoped context and compares only the immediately prior week (%i days ago)", async (daysAgo, hasPriorWeek) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
     vi.setSystemTime(invokedAtMs)
     const { d1 } = createD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
-    const priorWeek = resolvePlanningWeek(invokedAtMs - 7 * 24 * 60 * 60 * 1000, TZ)
+    const priorWeek = resolvePlanningWeek(invokedAtMs - daysAgo * 24 * 60 * 60 * 1000, TZ)
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile(CHAT)
     await store.startPlanGeneration({
@@ -573,7 +576,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     const firstPrompt = deepseekBodies[0]?.messages.at(-1)?.content ?? ""
-    expect(firstPrompt).toContain("old week dish")
+    expect(firstPrompt.includes("old week dish")).toBe(hasPriorWeek)
+    expect(firstPrompt.includes("Previous week's dishes")).toBe(hasPriorWeek)
     expect(firstPrompt).toContain("Weekly inventory: none")
     expect(firstPrompt).not.toContain("Weekly exceptions:")
     expect(firstPrompt).not.toContain("idli batter")
@@ -638,6 +642,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const firstPrompt = deepseekBodies[0]?.messages.at(-1)?.content ?? ""
     expect(firstPrompt).toContain("Weekly inventory: peas")
     expect(firstPrompt).toContain("Weekly exceptions:")
+    expect(firstPrompt).not.toContain("Previous week's dishes")
 
     const active = await store.activePlan(CHAT)
     expect(active?.plan.weeklyInventory.items).toEqual([{ name: "peas", status: "available" }])

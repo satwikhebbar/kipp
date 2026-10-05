@@ -6,6 +6,15 @@ export interface ResolvedPlanningWeek {
   weekEnd: string
 }
 
+/** Monday midnight for the immediately preceding school week in the same timezone. */
+export function previousPlanningWeekStart(weekStart: string, timezone: string): string {
+  const monday = localDateAt(Date.parse(weekStart), timezone)
+  const previousMonday = addDays(monday, -DAYS_PER_WEEK)
+  const start = zonedDateTimeToMillis(previousMonday, "00:00", timezone)
+  if (start === null) throw new Error(`cannot resolve week start for ${previousMonday}`)
+  return new Date(start).toISOString()
+}
+
 const SCHOOL_DAY_END_SECONDS = 59 // plan §6: week_end = Saturday 23:59:59 local
 const MILLISECONDS_PER_SECOND = 1_000
 const SCHOOL_DAY_END_OFFSET_MS = SCHOOL_DAY_END_SECONDS * MILLISECONDS_PER_SECOND

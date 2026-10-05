@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { resolvePlanningWeek } from "../meal-planning/week"
+import { previousPlanningWeekStart, resolvePlanningWeek } from "../meal-planning/week"
 
 const TZ = "Asia/Kolkata" // UTC+05:30
 const CURRENT_WEEK_START = "2026-09-06T18:30:00.000Z" // Mon 2026-09-07 00:00 IST
@@ -90,5 +90,15 @@ describe("resolvePlanningWeek", () => {
       weekStart: NEXT_WEEK_START,
       weekEnd: NEXT_WEEK_END,
     })
+  })
+})
+
+describe("previousPlanningWeekStart", () => {
+  it("returns the immediately preceding Monday in the profile timezone", () => {
+    expect(previousPlanningWeekStart(NEXT_WEEK_START, TZ)).toBe(CURRENT_WEEK_START)
+  })
+
+  it("accounts for a daylight saving change between Mondays", () => {
+    expect(previousPlanningWeekStart("2026-03-09T04:00:00.000Z", "America/New_York")).toBe("2026-03-02T05:00:00.000Z")
   })
 })

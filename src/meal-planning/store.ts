@@ -270,6 +270,8 @@ export interface MealPlanningStore {
   finishPlanGeneration(chatId: string, generationId: string, failed?: boolean): Promise<boolean>
   activePlanGeneration(chatId: string, now?: string): Promise<MealPlanGenerationRecord | null>
   activePlan(chatId: string): Promise<ActivePlanRecord | null>
+  /** Latest plan for this chat and exact school week, including replaced plans. */
+  latestPlanForWeek(chatId: string, weekStart: string): Promise<ActivePlanRecord | null>
   listPlanHistory(chatId: string): Promise<ActivePlanRecord[]>
   planById(chatId: string, planId: string): Promise<ActivePlanRecord | null>
   /** Reads the active plan's live instance pointer (whether or not its week has ended). */
@@ -1281,6 +1283,19 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       return mealPlanFromRow(row)
     },
 
+    async latestPlanForWeek(chatId, weekStart) {
+      const row = await db
+        .prepare(
+          `${PLAN_WITH_VERSION_SELECT}
+           WHERE p.chat_id = ? AND p.week_start = ?
+           ORDER BY p.created_at DESC, p.plan_id DESC
+           LIMIT 1`,
+        )
+        .bind(chatId, weekStart)
+        .first()
+      return row ? mealPlanFromRow(row) : null
+    },
+
     async listPlanHistory(chatId) {
       const result = await db
         .prepare(
@@ -1851,6 +1866,17 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       if (!version) return null
       return { plan, version }
+    },
+
+    async latestPlanForWeek(chatId, weekStart) {
+      const plan = [...backing.plans.values()]
+        .filter((item) => item.chatId === chatId && item.weekStart === weekStart)
+        .sort(
+          (left, right) => right.createdAt.localeCompare(left.createdAt) || right.planId.localeCompare(left.planId),
+        )[0]
+      if (!plan) return null
+      const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
+      return version ? { plan, version } : null
     },
 
     async listPlanHistory(chatId) {
