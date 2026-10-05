@@ -6,6 +6,7 @@ import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   FeedbackItem,
   MealCell,
+  MealDefinition,
   MealGrid,
   MealPlanCandidate,
   MealPlanContext,
@@ -19,6 +20,26 @@ import type {
 
 const MAX_PRIOR_NIGHT_PREP_PER_DAY = 2
 const DEFAULT_URGENT_USE_BY_DAY = "Tue"
+
+/** Normalize a dish name for case- and whitespace-insensitive comparisons. */
+function normalizeDishName(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ")
+}
+
+/** Resolve catalog primary names and aliases to one normalized dish identity. */
+function makeDishIdentity(definitions: MealDefinition[]): (name: string) => string {
+  const canonicalByName = new Map<string, string>()
+  for (const definition of definitions) {
+    const canonical = normalizeDishName(definition.name)
+    for (const name of [definition.name, ...(definition.aliases ?? [])]) {
+      canonicalByName.set(normalizeDishName(name), canonical)
+    }
+  }
+  return (name) => {
+    const normalized = normalizeDishName(name)
+    return canonicalByName.get(normalized) ?? normalized
+  }
+}
 
 interface GridCellRef {
   day: string
@@ -226,6 +247,10 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   }
 
   const clearExclusionTokens = new Set(profile.dietaryExclusions.map(normalizeIngredient))
+  const dishIdentity = makeDishIdentity([
+    ...(profile.mealDefinitions ?? []),
+    ...(context.provisionalMealDefinitions ?? []),
+  ])
   const unavailableItems = new Set(
     weeklyInventory.items.filter((item) => item.status === "unavailable").map((item) => normalizeIngredient(item.name)),
   )
@@ -237,10 +262,12 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     ...candidate.easyBuys.map(normalizeIngredient),
   ])
   const priorWeekDishes = new Set(
-    Object.values(context.priorWeekPlan ?? {}).flatMap((slots) => Object.values(slots).map((cell) => cell.dish)),
+    Object.values(context.priorWeekPlan ?? {}).flatMap((slots) =>
+      Object.values(slots).map((cell) => dishIdentity(cell.dish)),
+    ),
   )
-  const favourites = new Set(profile.foodPreferences.favourites)
-  const requestedRepeats = new Set(context.requestedRepeats ?? [])
+  const favourites = new Set(profile.foodPreferences.favourites.map(dishIdentity))
+  const requestedRepeats = new Set((context.requestedRepeats ?? []).map(dishIdentity))
   const persistentPolicies = context.customPolicies.filter((policy) => policy.scope === "persistent")
 
   const presentCells = new Set(refs.map((ref) => `${ref.day}\u0000${ref.slotId}`))
@@ -364,10 +391,13 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   }
 
   const weekDishCounts = new Map<string, number>()
+  const dishLabels = new Map<string, string>()
   const candidateDishes = new Set<string>()
   for (const ref of refs) {
-    candidateDishes.add(ref.cell.dish)
-    weekDishCounts.set(ref.cell.dish, (weekDishCounts.get(ref.cell.dish) ?? 0) + 1)
+    const dishKey = dishIdentity(ref.cell.dish)
+    candidateDishes.add(dishKey)
+    dishLabels.set(dishKey, dishLabels.get(dishKey) ?? ref.cell.dish)
+    weekDishCounts.set(dishKey, (weekDishCounts.get(dishKey) ?? 0) + 1)
   }
   const repeatedDishes = new Set<string>()
   for (const [dish, count] of weekDishCounts) {
@@ -377,7 +407,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   if (request.kind === "revision") {
     for (const { day, slotId } of revisionDishChangedCells) {
       const after = candidate.grid[day]?.[slotId]
-      if (after) crossWeekCandidateDishes.add(after.dish)
+      if (after) crossWeekCandidateDishes.add(dishIdentity(after.dish))
     }
   } else {
     for (const dish of candidateDishes) crossWeekCandidateDishes.add(dish)
@@ -389,13 +419,19 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   const snackSlotIds = new Set(schedule.slots.filter((slot) => slot.dry).map((slot) => slot.id))
   const snackOnlyDishes = new Set<string>()
   for (const ref of refs) {
-    if (!snackSlotIds.has(ref.slotId)) snackOnlyDishes.delete(ref.cell.dish)
-    else snackOnlyDishes.add(ref.cell.dish)
+    const dishKey = dishIdentity(ref.cell.dish)
+    if (!snackSlotIds.has(ref.slotId)) snackOnlyDishes.delete(dishKey)
+    else snackOnlyDishes.add(dishKey)
   }
   for (const dish of priorWeekDishes) {
-    if (crossWeekCandidateDishes.has(dish) && !snackOnlyDishes.has(dish)) repeatedDishes.add(dish)
+    if (crossWeekCandidateDishes.has(dishIdentity(dish)) && !snackOnlyDishes.has(dishIdentity(dish))) {
+      repeatedDishes.add(dishIdentity(dish))
+    }
   }
-  const dishRepeats = [...repeatedDishes].filter((dish) => !favourites.has(dish) && !requestedRepeats.has(dish)).sort()
+  const dishRepeats = [...repeatedDishes]
+    .filter((dish) => !favourites.has(dish) && !requestedRepeats.has(dish))
+    .map((dish) => dishLabels.get(dish) ?? dish)
+    .sort()
   for (const dish of dishRepeats) {
     failures.push({
       code: "dish_repeated",
@@ -407,7 +443,7 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
       if (count > 2) {
         failures.push({
           code: "dish_repeated",
-          detail: `dish "${dish}" appears ${count} times; relevant variety allows at most two appearances`,
+          detail: `dish "${dishLabels.get(dish) ?? dish}" appears ${count} times; relevant variety allows at most two appearances`,
         })
       }
     }

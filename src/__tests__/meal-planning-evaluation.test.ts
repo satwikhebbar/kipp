@@ -50,6 +50,12 @@ function gridFrom(rows: Array<[string, string, string]>): MealGrid {
   return grid
 }
 
+function setCellItems(grid: MealGrid, day: string, slot: string, items: string[]): void {
+  const cell = grid[day]?.[slot]
+  if (!cell) throw new Error(`missing test cell ${day} ${slot}`)
+  cell.items = items
+}
+
 function baseContext(overrides: Partial<MealPlanContext> = {}): MealPlanContext {
   return {
     schedule: {
@@ -257,9 +263,20 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(repeated)).toEqual(["dish_repeated"])
     expect(repeated.measurements.dishRepeats).toEqual(["paratha"])
 
+    const mixedCaseGrid = gridFrom([
+      ["Mon", "breakfast", "paratha"],
+      ["Tue", "breakfast", "PARATHA"],
+    ])
+    setCellItems(mixedCaseGrid, "Tue", "breakfast", ["wheat flour"])
+    const mixedCaseCandidate = {
+      ...candidate,
+      grid: mixedCaseGrid,
+    }
+    expect(failureCodes(evaluateMealPlan(mixedCaseCandidate, context))).toEqual(["dish_repeated"])
+
     const favourite = baseContext({
       schedule: context.schedule,
-      profile: { ...context.profile, foodPreferences: { favourites: ["paratha"], avoid: [] } },
+      profile: { ...context.profile, foodPreferences: { favourites: [" PARATHA "], avoid: [] } },
       customPolicies: [],
     })
     expect(evaluateMealPlan(candidate, favourite).pass).toBe(true)
@@ -271,6 +288,64 @@ describe("meal-planning evaluator", () => {
       requestedRepeats: ["paratha"],
     })
     expect(evaluateMealPlan(candidate, requested).pass).toBe(true)
+  })
+
+  it("matches favorite primary names and aliases case-insensitively", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const definition = {
+      id: "aloo-paratha",
+      name: "Aloo Paratha",
+      aliases: ["Paratha"],
+      principalIngredients: ["potato", "wheat flour"],
+      vegetarian: true as const,
+      suitableSlots: ["breakfast"],
+      typicalCookMinutes: 15,
+      priorNightPrep: "optional" as const,
+      requiredIngredients: ["potato", "wheat flour"],
+      optionalIngredients: [],
+      status: "established" as const,
+    }
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "Aloo Paratha"],
+        ["Tue", "breakfast", " ALOO PARATHA "],
+      ]),
+      easyBuys: ["potato"],
+      policyOutcomes: {},
+    }
+    setCellItems(candidate.grid, "Mon", "breakfast", ["wheat flour", "potato"])
+    setCellItems(candidate.grid, "Tue", "breakfast", ["wheat flour", "potato"])
+    const context = baseContext({
+      schedule,
+      profile: {
+        ...baseContext().profile,
+        mealDefinitions: [definition],
+        foodPreferences: { favourites: [" PARATHA "], avoid: [] },
+      },
+      customPolicies: [],
+      priorWeekPlan: { Mon: { breakfast: cellFor("breakfast", "aloo paratha") } },
+    })
+    expect(evaluateMealPlan(candidate, context).pass).toBe(true)
+
+    const aliasGrid = gridFrom([
+      ["Mon", "breakfast", "Paratha"],
+      ["Tue", "breakfast", " PARATHA "],
+    ])
+    setCellItems(aliasGrid, "Mon", "breakfast", ["wheat flour", "potato"])
+    setCellItems(aliasGrid, "Tue", "breakfast", ["wheat flour", "potato"])
+    const aliasCandidate: MealPlanCandidate = {
+      ...candidate,
+      grid: aliasGrid,
+    }
+    const primaryFavoriteContext = {
+      ...context,
+      profile: { ...context.profile, foodPreferences: { favourites: [" ALOO PARATHA "], avoid: [] } },
+      priorWeekPlan: { Mon: { breakfast: cellFor("breakfast", "Aloo Paratha") } },
+    }
+    expect(evaluateMealPlan(aliasCandidate, primaryFavoriteContext).pass).toBe(true)
   })
 
   it("caps favourite dish repeats at two appearances when relevant variety is active", () => {
@@ -337,7 +412,7 @@ describe("meal-planning evaluator", () => {
       schedule,
       profile,
       customPolicies: [],
-      priorWeekPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
+      priorWeekPlan: { Mon: { breakfast: cellFor("breakfast", " PARATHA ") } },
     })
     const overlappingEval = evaluateMealPlan(candidate, overlapping)
     expect(failureCodes(overlappingEval)).toEqual(["dish_repeated"])
@@ -345,7 +420,7 @@ describe("meal-planning evaluator", () => {
 
     const overlappingExempt = baseContext({
       schedule,
-      profile: { ...profile, foodPreferences: { favourites: ["paratha"], avoid: [] } },
+      profile: { ...profile, foodPreferences: { favourites: [" PARATHA "], avoid: [] } },
       customPolicies: [],
       priorWeekPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
     })
