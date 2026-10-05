@@ -301,7 +301,7 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual(["dish_repeated"])
   })
 
-  it("does not flag dishes that appear only in the recent plan, only overlaps with the candidate", () => {
+  it("does not flag dishes that appear only in the prior week, only overlaps with the candidate", () => {
     const schedule = {
       days: ["Mon", "Tue"],
       slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
@@ -324,7 +324,7 @@ describe("meal-planning evaluator", () => {
       schedule,
       profile,
       customPolicies: [],
-      recentPlan: {
+      priorWeekPlan: {
         Mon: { breakfast: cellFor("breakfast", "ghee rice") },
         Tue: { breakfast: cellFor("breakfast", "paneer paratha") },
       },
@@ -337,7 +337,7 @@ describe("meal-planning evaluator", () => {
       schedule,
       profile,
       customPolicies: [],
-      recentPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
+      priorWeekPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
     })
     const overlappingEval = evaluateMealPlan(candidate, overlapping)
     expect(failureCodes(overlappingEval)).toEqual(["dish_repeated"])
@@ -347,12 +347,43 @@ describe("meal-planning evaluator", () => {
       schedule,
       profile: { ...profile, foodPreferences: { favourites: ["paratha"], avoid: [] } },
       customPolicies: [],
-      recentPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
+      priorWeekPlan: { Mon: { breakfast: cellFor("breakfast", "paratha") } },
     })
     expect(evaluateMealPlan(candidate, overlappingExempt).pass).toBe(true)
   })
 
-  it("lets a snack-slot dish repeat from the recent plan but still flags cooked-meal repeats", () => {
+  it("skips the cross-week repeat check when the immediately previous week has no plan", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const candidate: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "breakfast", "paratha"],
+        ["Tue", "breakfast", "banana"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const context = baseContext({
+      schedule,
+      profile: { ...baseContext().profile, foodPreferences: { favourites: [], avoid: [] } },
+      customPolicies: [],
+      priorWeekPlan: null,
+    })
+    const noPreviousWeek = evaluateMealPlan(candidate, context)
+    expect(noPreviousWeek.pass).toBe(true)
+    expect(noPreviousWeek.measurements.dishRepeats).toEqual([])
+
+    const withPreviousWeek = evaluateMealPlan(candidate, {
+      ...context,
+      priorWeekPlan: gridFrom([["Mon", "breakfast", "paratha"]]),
+    })
+    expect(failureCodes(withPreviousWeek)).toEqual(["dish_repeated"])
+    expect(withPreviousWeek.measurements.dishRepeats).toEqual(["paratha"])
+  })
+
+  it("lets a snack-slot dish repeat from the prior week but still flags cooked-meal repeats", () => {
     const schedule = {
       days: ["Mon", "Tue"],
       slots: [
@@ -370,7 +401,7 @@ describe("meal-planning evaluator", () => {
       profile,
       customPolicies: [],
       weeklyExceptions: { items: [] },
-      recentPlan: {
+      priorWeekPlan: {
         Mon: { snack1: cellFor("snack1", "banana"), "home-lunch": cellFor("home-lunch", "rice and beans") },
         Tue: { snack1: cellFor("snack1", "banana") },
       },
@@ -431,6 +462,71 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.measurements.dishRepeats).toEqual([])
   })
 
+  it("allows moving two dishes within a revision while checking a distinct prior week", () => {
+    const schedule = {
+      days: ["Mon", "Tue"],
+      slots: [
+        { id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null },
+        { id: "home-lunch", name: "Home lunch", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    const base = gridFrom([
+      ["Mon", "school-lunch", "tomato rice"],
+      ["Mon", "home-lunch", "bhindi fry"],
+      ["Tue", "school-lunch", "aloo paratha"],
+      ["Tue", "home-lunch", "pumpkin subzi"],
+    ])
+    const moved: MealPlanCandidate = {
+      grid: gridFrom([
+        ["Mon", "school-lunch", "aloo paratha"],
+        ["Mon", "home-lunch", "pumpkin subzi"],
+        ["Tue", "school-lunch", "tomato rice"],
+        ["Tue", "home-lunch", "bhindi fry"],
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const context = baseContext({
+      schedule,
+      profile: {
+        ...baseContext().profile,
+        foodPreferences: { favourites: [], avoid: [] },
+        pantryBaseline: ["tomato rice", "bhindi fry", "aloo paratha", "pumpkin subzi"],
+      },
+      customPolicies: [],
+      recentPlan: base,
+      request: { kind: "revision", text: "Move Monday's lunches to Tuesday and swap the meals." },
+      feedbackItems: [
+        { id: "fb-mon", text: "Swap Monday's lunches.", scope: { day: "Mon" } },
+        { id: "fb-tue", text: "Move the original meals to Tuesday.", scope: { day: "Tue" } },
+      ],
+      weeklyExceptions: { items: [] },
+    })
+
+    const withoutHistory = evaluateMealPlan(moved, { ...context, priorWeekPlan: null })
+    expect(withoutHistory.pass).toBe(true)
+    expect(withoutHistory.measurements.dishRepeats).toEqual([])
+
+    const withHistory = {
+      ...context,
+      priorWeekPlan: gridFrom([["Mon", "home-lunch", "bhindi fry"]]),
+    }
+    const repeated = evaluateMealPlan(moved, withHistory)
+    expect(failureCodes(repeated)).toEqual(["dish_repeated"])
+    expect(repeated.measurements.dishRepeats).toEqual(["bhindi fry"])
+    expect(
+      evaluateMealPlan(moved, {
+        ...withHistory,
+        profile: { ...context.profile, foodPreferences: { favourites: ["bhindi fry"], avoid: [] } },
+      }).pass,
+    ).toBe(true)
+    expect(evaluateMealPlan(moved, { ...withHistory, requestedRepeats: ["bhindi fry"] }).pass).toBe(true)
+
+    const duplicate = structuredClone(moved)
+    duplicate.grid.Tue["home-lunch"] = cellFor("home-lunch", "tomato rice")
+    expect(evaluateMealPlan(duplicate, context).measurements.dishRepeats).toEqual(["tomato rice"])
+  })
+
   it("keeps a scoped non-dish edit to a carried-over meal free of dish_repeated", () => {
     const schedule = {
       days: ["Mon", "Tue"],
@@ -473,7 +569,7 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.measurements.dishRepeats).toEqual([])
   })
 
-  it("flags a changed revision cell that newly repeats a recent-plan dish", () => {
+  it("flags a changed revision cell that duplicates a dish within the candidate week", () => {
     const schedule = {
       days: ["Mon", "Tue"],
       slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],
@@ -554,7 +650,7 @@ describe("meal-planning evaluator", () => {
     expect(evaluateMealPlan(candidate, context).pass).toBe(true)
   })
 
-  it("flags an out-of-scope changed revision cell that newly repeats a recent-plan dish", () => {
+  it("flags an out-of-scope changed revision cell that duplicates a dish within the candidate week", () => {
     const schedule = {
       days: ["Mon", "Tue"],
       slots: [{ id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null }],

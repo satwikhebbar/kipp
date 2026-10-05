@@ -163,8 +163,8 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     ...profile.pantryBaseline.map(normalizeIngredient),
     ...candidate.easyBuys.map(normalizeIngredient),
   ])
-  const recentDishes = new Set(
-    Object.values(context.recentPlan ?? {}).flatMap((slots) => Object.values(slots).map((cell) => cell.dish)),
+  const priorWeekDishes = new Set(
+    Object.values(context.priorWeekPlan ?? {}).flatMap((slots) => Object.values(slots).map((cell) => cell.dish)),
   )
   const favourites = new Set(profile.foodPreferences.favourites)
   const requestedRepeats = new Set(context.requestedRepeats ?? [])
@@ -300,14 +300,14 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
   for (const [dish, count] of weekDishCounts) {
     if (count > 1) repeatedDishes.add(dish)
   }
-  const recentRepeatDishes = new Set<string>()
+  const crossWeekCandidateDishes = new Set<string>()
   if (request.kind === "revision") {
     for (const { day, slotId } of revisionDishChangedCells) {
       const after = candidate.grid[day]?.[slotId]
-      if (after) recentRepeatDishes.add(after.dish)
+      if (after) crossWeekCandidateDishes.add(after.dish)
     }
   } else {
-    for (const dish of candidateDishes) recentRepeatDishes.add(dish)
+    for (const dish of candidateDishes) crossWeekCandidateDishes.add(dish)
   }
   // Escape hatch for cross-week variety: a fruit or dry snack that appears only in snack slots may
   // repeat from the previous week. This is deliberately narrow (snack slots only, cross-week only):
@@ -319,8 +319,8 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     if (!snackSlotIds.has(ref.slotId)) snackOnlyDishes.delete(ref.cell.dish)
     else snackOnlyDishes.add(ref.cell.dish)
   }
-  for (const dish of recentDishes) {
-    if (recentRepeatDishes.has(dish) && !snackOnlyDishes.has(dish)) repeatedDishes.add(dish)
+  for (const dish of priorWeekDishes) {
+    if (crossWeekCandidateDishes.has(dish) && !snackOnlyDishes.has(dish)) repeatedDishes.add(dish)
   }
   const dishRepeats = [...repeatedDishes].filter((dish) => !favourites.has(dish) && !requestedRepeats.has(dish)).sort()
   for (const dish of dishRepeats) {

@@ -458,6 +458,41 @@ function createD1Store(): { store: MealPlanningStore; db: DatabaseSync } {
   return { store: createMealPlanningStore(d1), db }
 }
 
+it.each([
+  ["in-memory", () => createInMemoryMealPlanningStore()],
+  ["D1", () => createD1Store().store],
+])("%s selects the latest plan for an exact week and skips a week off", async (_name, makeStore) => {
+  const store = makeStore()
+  await store.loadOrCreateProfile(CHAT)
+  const earlier = "2026-09-14T00:00:00.000Z"
+  const current = "2026-09-21T00:00:00.000Z"
+  expect(await store.latestPlanForWeek(CHAT, earlier)).toBeNull()
+  await createPlan(store, createInput({ planId: "plan-1" }))
+  await createPlan(store, createInput({ planId: "plan-2", weekStart: earlier }))
+  await createPlan(store, createInput({ planId: "plan-3", weekStart: earlier }))
+  await createPlan(store, createInput({ planId: "plan-4", weekStart: current }))
+  expect((await store.latestPlanForWeek(CHAT, earlier))?.plan.planId).toBe("plan-3")
+  expect((await store.latestPlanForWeek(CHAT, WEEKS.weekStart))?.plan.planId).toBe("plan-1")
+  expect((await store.latestPlanForWeek(CHAT, current))?.plan.planId).toBe("plan-4")
+  expect(await store.latestPlanForWeek(CHAT, "2026-09-28T00:00:00.000Z")).toBeNull()
+})
+
+it.each([
+  ["in-memory", () => createInMemoryMealPlanningStore()],
+  ["D1", () => createD1Store().store],
+])("%s returns the current version of a replaced plan from the exact prior week", async (_name, makeStore) => {
+  const store = makeStore()
+  await store.loadOrCreateProfile(CHAT)
+  await createPlan(store, createInput({ planId: "prior-week-plan" }))
+  const promoted = await store.promotePlanVersion(promoteInput({ planId: "prior-week-plan", baseVersion: 1 }))
+  expect(promoted.ok).toBe(true)
+  await createPlan(store, createInput({ planId: "current-week-plan", weekStart: "2026-09-14T00:00:00.000Z" }))
+  expect(await store.latestPlanForWeek(CHAT, WEEKS.weekStart)).toMatchObject({
+    plan: { planId: "prior-week-plan", status: "replaced", currentVersion: 2 },
+    version: { version: 2, candidate: { grid: { Mon: { breakfast: { dish: "poha" } } } } },
+  })
+})
+
 describe("createMealPlanningStore (D1, real SQL)", () => {
   it("persists the recurring Saturday rule when loading an existing profile", async () => {
     const { store, db } = createD1Store()

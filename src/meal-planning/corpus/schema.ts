@@ -150,6 +150,7 @@ export const mealPlanContextSchema: z.ZodType<MealPlanContext> = z
     weeklyInventory: weeklyInventorySchema,
     weeklyExceptions: weeklyExceptionsSchema,
     recentPlan: mealGridSchema.nullable().optional(),
+    priorWeekPlan: mealGridSchema.nullable().optional(),
     request: planRequestSchema,
     feedbackItems: z.array(feedbackItemSchema).optional(),
     urgentUseByDay: z.string().min(1).optional(),

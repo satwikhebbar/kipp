@@ -829,7 +829,7 @@
       }
     },
     {
-      "label": "replan-thu-repeats",
+      "label": "replan-thu-moved-dish",
       "plan": {
         "grid": {
           "Mon": {
@@ -1022,12 +1022,8 @@
         "policyOutcomes": {}
       },
       "expect": {
-        "pass": false,
-        "failures": [
-          {
-            "code": "dish_repeated"
-          }
-        ]
+        "pass": true,
+        "failures": []
       }
     }
   ],
