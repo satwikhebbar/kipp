@@ -371,6 +371,7 @@ describe("createInMemoryMealPlanningStore", () => {
     const active = await failing.activePlan(CHAT)
     expect(active?.plan.planId).toBe("plan-1")
     expect(active?.version.version).toBe(1)
+    expect(await failing.listPlanHistory(CHAT)).toMatchObject([{ plan: { planId: "plan-1", status: "active" } }])
     const profile = await failing.loadOrCreateProfile(CHAT)
     expect(profile.interactionGeneration).toBe(1)
   })
@@ -881,11 +882,20 @@ describe.each([
     ).toMatchObject({ ok: true, batch: { status: "accepted" } })
   })
 
-  it("hydrates current and replaced plans through chat-scoped history reads", async () => {
+  it("hydrates the latest plan for each week through chat-scoped history reads", async () => {
     const store = await makeStore()
     for (let index = 1; index <= MAX_MEAL_PLAN_HISTORY + 2; index++) {
       const planId = `plan-${String(index).padStart(2, "0")}`
-      await createPlan(store, createInput({ planId, instanceId: `instance-${planId}` }))
+      const weekStart = new Date(Date.UTC(2026, 0, index)).toISOString()
+      await createPlan(
+        store,
+        createInput({
+          planId,
+          instanceId: `instance-${planId}`,
+          weekStart,
+          weekEnd: new Date(Date.UTC(2026, 0, index + 5, 23, 59, 59)).toISOString(),
+        }),
+      )
     }
 
     const history = await store.listPlanHistory(CHAT)
@@ -894,6 +904,27 @@ describe.each([
     expect(history.at(-1)).toMatchObject({ plan: { planId: "plan-03", status: "replaced" }, version: { version: 1 } })
     expect(await store.planById(CHAT, "plan-03")).toMatchObject({ plan: { status: "replaced" } })
     expect(await store.planById("other-chat", "plan-03")).toBeNull()
+  })
+
+  it("shows one newest plan per week and retains other weeks after regeneration", async () => {
+    const store = await makeStore()
+    await createPlan(store, createInput({ planId: "old-october", weekStart: "2026-10-05T00:00:00.000Z" }))
+    await createPlan(store, createInput({ planId: "september", weekStart: "2026-09-28T00:00:00.000Z" }))
+    await createPlan(
+      store,
+      createInput({ planId: "new-october", weekStart: "2026-10-05T00:00:00.000Z", instanceId: "new-october" }),
+    )
+
+    const history = await store.listPlanHistory(CHAT)
+    expect(history.map(({ plan }) => [plan.planId, plan.weekStart, plan.status])).toEqual([
+      ["new-october", "2026-10-05T00:00:00.000Z", "active"],
+      ["september", "2026-09-28T00:00:00.000Z", "replaced"],
+    ])
+    // Replacement keeps immutable records available for exact-week reads and stale links.
+    expect(await store.latestPlanForWeek(CHAT, "2026-10-05T00:00:00.000Z")).toMatchObject({
+      plan: { planId: "new-october", status: "active" },
+    })
+    expect(await store.planById(CHAT, "old-october")).toMatchObject({ plan: { status: "replaced" } })
   })
 
   it("accepts one version-bound batch idempotently and advances its dispatch lifecycle", async () => {

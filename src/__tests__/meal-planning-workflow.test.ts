@@ -1137,6 +1137,65 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(telegramMessages.some((text) => text.includes("couldn't reach"))).toBe(true)
   })
 
+  it("keeps the saved same-week plan active when a replacement provider request fails", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "prior-generation",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
+    await store.createActivePlan({
+      planId: "prior-same-week-plan",
+      chatId: CHAT,
+      weekStart: week.weekStart,
+      weekEnd: week.weekEnd,
+      timezone: TZ,
+      instanceId: "prior-workflow",
+      generationId: "prior-generation",
+      candidate: { grid: {}, easyBuys: [], policyOutcomes: {} } as never,
+      evaluation: { pass: true, failures: [], measurements: {} } as never,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+    })
+
+    const telegramMessages: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).includes("api.deepseek.com") || String(url).includes("openrouter.ai/api/v1"))
+          throw new Error("upstream down")
+        const body = JSON.parse((init?.body as string) ?? "{}") as { text: string }
+        telegramMessages.push(body.text)
+        return jsonResponse({ ok: true, result: { message_id: 1 } })
+      }),
+    )
+
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    await runAgentCenteredMealPlanningWorkflow(
+      { ...makeEnv(namespace, d1), LLM_MAX_RETRIES: "0" },
+      mealEvent(invokedAtMs),
+      step as never,
+    )
+
+    expect(await store.activePlan(CHAT)).toMatchObject({
+      plan: { planId: "prior-same-week-plan", status: "active", currentVersion: 1 },
+      version: { version: 1 },
+    })
+    expect(await store.listPlanHistory(CHAT)).toMatchObject([
+      { plan: { planId: "prior-same-week-plan", status: "active" } },
+    ])
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan")).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+    expect(telegramMessages.some((text) => text.includes("couldn't reach"))).toBe(true)
+  })
+
   it("delivers two distinct notifications in one instance under name-memoized steps", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")

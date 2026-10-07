@@ -1288,7 +1288,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         .prepare(
           `${PLAN_WITH_VERSION_SELECT}
            WHERE p.chat_id = ? AND p.week_start = ?
-           ORDER BY p.created_at DESC, p.plan_id DESC
+           ORDER BY p.created_at DESC, p.rowid DESC
            LIMIT 1`,
         )
         .bind(chatId, weekStart)
@@ -1301,6 +1301,12 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         .prepare(
           `${PLAN_WITH_VERSION_SELECT}
            WHERE p.chat_id = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM meal_plan newer
+               WHERE newer.chat_id = p.chat_id AND newer.week_start = p.week_start
+                 AND (newer.created_at > p.created_at
+                      OR (newer.created_at = p.created_at AND newer.rowid > p.rowid))
+             )
            ORDER BY CASE WHEN p.status = 'active' THEN 0 ELSE 1 END,
                     p.updated_at DESC, p.created_at DESC, p.plan_id DESC
            LIMIT ?`,
@@ -1869,19 +1875,26 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async latestPlanForWeek(chatId, weekStart) {
-      const plan = [...backing.plans.values()]
-        .filter((item) => item.chatId === chatId && item.weekStart === weekStart)
-        .sort(
-          (left, right) => right.createdAt.localeCompare(left.createdAt) || right.planId.localeCompare(left.planId),
-        )[0]
+      let plan: MealPlanRecord | undefined
+      for (const candidate of backing.plans.values()) {
+        if (candidate.chatId !== chatId || candidate.weekStart !== weekStart) continue
+        if (!plan || candidate.createdAt >= plan.createdAt) plan = candidate
+      }
       if (!plan) return null
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       return version ? { plan, version } : null
     },
 
     async listPlanHistory(chatId) {
-      return [...backing.plans.values()]
-        .filter((plan) => plan.chatId === chatId)
+      const latestByWeek = new Map<string, MealPlanRecord>()
+      for (const plan of backing.plans.values()) {
+        if (plan.chatId !== chatId) continue
+        const current = latestByWeek.get(plan.weekStart)
+        if (!current || plan.createdAt >= current.createdAt) {
+          latestByWeek.set(plan.weekStart, plan)
+        }
+      }
+      return [...latestByWeek.values()]
         .sort(
           (left, right) =>
             Number(left.status !== "active") - Number(right.status !== "active") ||

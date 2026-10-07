@@ -502,7 +502,7 @@ describe("Mini App HTTP boundary", () => {
     }
   })
 
-  it("serves a replaced plan as historical and rejects feedback for it", async () => {
+  it("opens the newest same-week plan for a replaced plan link and rejects feedback for the replaced plan", async () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(FAKE_NOW)
     try {
@@ -518,15 +518,16 @@ describe("Mini App HTTP boundary", () => {
         planId: "plan-current",
         weekEnd: "2026-10-03T18:29:59.000Z",
       })
-      const historical = await miniAppRoutes.fetch(
+      const historicalLink = await miniAppRoutes.fetch(
         new Request("https://kipp.example/mini-app/api/plan?planId=plan-replaced", {
           headers: { Authorization: `Bearer ${fixture.token}` },
         }),
         fixture.testEnv,
       )
-      expect(await historical.json()).toMatchObject({
-        status: "historical",
-        plan: { planId: "plan-replaced", readOnly: true },
+      expect(await historicalLink.json()).toMatchObject({
+        status: "current",
+        plan: { planId: "plan-current", readOnly: false },
+        history: [{ planId: "plan-current", lifecycle: "current" }],
       })
 
       const feedback = await miniAppRoutes.fetch(

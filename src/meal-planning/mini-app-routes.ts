@@ -127,7 +127,11 @@ async function readPlanDto(
   const history = await store.listPlanHistory(session.chatId)
   const generation = await store.activePlanGeneration(session.chatId)
   const requestedPlanId = new URL(request.url).searchParams.get("planId")?.trim() || session.planId
-  const selected = await store.planById(session.chatId, requestedPlanId)
+  const storedSelection = await store.planById(session.chatId, requestedPlanId)
+  const selected = storedSelection
+    ? (history.find((entry) => entry.plan.planId === storedSelection.plan.planId) ??
+      (await store.latestPlanForWeek(session.chatId, storedSelection.plan.weekStart)))
+    : null
   const active = history.find((entry) => entry.plan.status === "active") ?? null
   const historyDto = history.map((entry) => historyEntry(entry, entry.plan.status !== "active" || generation !== null))
   if (!selected) {
