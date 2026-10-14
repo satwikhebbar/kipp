@@ -59,7 +59,15 @@ export function createEasyBuyClassifier(
       const nonOrdinaryEasyBuys: NonOrdinaryEasyBuy[] = []
       candidates.forEach((item, index) => {
         const answer = result.answers[`easy_buy_${index}`]
-        if (answer?.type !== "noul") return
+        // A missing or non-`noul` answer never judged the item; treat it as
+        // uncertain so an unverified easy buy can never persist.
+        if (answer?.type !== "noul") {
+          nonOrdinaryEasyBuys.push({
+            item,
+            detail: `easy buy "${item}" could not be confirmed as an ordinary grocery item`,
+          })
+          return
+        }
         if (answer.noul <= 1 - threshold) {
           nonOrdinaryEasyBuys.push({
             item,

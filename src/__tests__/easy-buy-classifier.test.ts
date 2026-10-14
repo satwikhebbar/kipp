@@ -59,6 +59,24 @@ describe("easy-buy classifier", () => {
     expect(result.nonOrdinaryEasyBuys.map((entry) => entry.item)).toEqual(["unsure", "banned", "coinflip"])
   })
 
+  it("treats a missing or non-noul answer as an uncertain rejection, not an ordinary item", async () => {
+    const withAnswers = (answers: Record<string, DecisionAnswer>): DecisionsClient => ({
+      async decide() {
+        return {
+          id: "gen-dec",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 3, outputTokens: 0, costUsd: 0.001 },
+        }
+      },
+    })
+    const missing = createEasyBuyClassifier(withAnswers({}))
+    expect((await missing.classify(["carrot"])).nonOrdinaryEasyBuys.map((entry) => entry.item)).toEqual(["carrot"])
+    const wrongType = createEasyBuyClassifier(withAnswers({ easy_buy_0: { type: "choice", choice: "ordinary" } }))
+    expect((await wrongType.classify(["spinach"])).nonOrdinaryEasyBuys.map((entry) => entry.item)).toEqual(["spinach"])
+  })
+
   it("honors a caller threshold override", async () => {
     const classifier = createEasyBuyClassifier(decisionsReturning([0.7]), { threshold: 0.6 })
     const result = await classifier.classify(["curd"])

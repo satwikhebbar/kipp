@@ -267,6 +267,38 @@ describe("bounded meal-planning agent session", () => {
     expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
   })
 
+  it("classifies a candidate's easy buys once across evaluate and propose", async () => {
+    let decideCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decideCalls += 1
+        const answers = Object.fromEntries(
+          Object.keys(questions).map((id) => [id, { type: "noul" as const, noul: 0.99 }]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const candidate: MealPlanCandidate = {
+      ...passingCandidate(),
+      grid: gridWith("Mon", "breakfast", cell("paratha", ["ghee"], "breakfast")),
+    }
+    const provider = providerWith(evaluateResponse(candidate), proposeResponse(proposeInput(candidate)))
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "propose_plan" })
+    expect(decideCalls).toBe(1)
+    expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
+  })
+
   it("truncates an overlong debug justification without rejecting the terminal proposal", async () => {
     const provider = providerWith(
       evaluateResponse(passingCandidate()),
