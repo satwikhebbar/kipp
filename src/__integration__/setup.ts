@@ -264,6 +264,30 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
       return respond(response)
     }
 
+    // OpenRouter Decisions endpoint: answer every question affirmatively so a
+    // scripted planning run treats its easy buys as ordinary. Failure paths are
+    // covered by the decisions-client and classifier unit tests.
+    if (urlStr.includes("openrouter.ai/api/alpha/decisions")) {
+      const body = JSON.parse((opts?.body as string) ?? "{}") as { questions?: Record<string, { type?: string }> }
+      const answers = Object.fromEntries(
+        Object.entries(body.questions ?? {}).map(([id, question]) => [
+          id,
+          question.type === "choice"
+            ? { type: "choice", choice: "", probabilities: {} }
+            : question.type === "score"
+              ? { type: "score", score: 0, probabilities: {} }
+              : { type: "noul", noul: 0.99 },
+        ]),
+      )
+      return respond({
+        id: "gen-dec-fake",
+        model: "openai/gpt-6-luna-decisions",
+        provider: "OpenAI",
+        answers,
+        usage: { input_tokens: 1, output_tokens: 0, cost: 0.000001 },
+      })
+    }
+
     if (config?.rssFeedUrl && urlStr.includes(config.rssFeedUrl)) {
       return respond(config.rssFeedXml ?? "<?xml version='1.0'?><rss><channel></channel></rss>")
     }

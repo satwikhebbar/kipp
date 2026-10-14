@@ -1,4 +1,9 @@
-import { evaluateMealPlanSelection, evaluateMealPlanSelectionPatch } from "../meal-planning/evaluation"
+import type { EasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
+import {
+  evaluateMealPlan,
+  evaluateMealPlanSelection,
+  evaluateMealPlanSelectionPatch,
+} from "../meal-planning/evaluation"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
 import type {
   FailureCode,
@@ -8,12 +13,14 @@ import type {
   MealPlanContext,
   MealPlanEvaluation,
   MealPlanSelectionCandidate,
+  MealPlanSelectionEvaluation,
   MealPlanSelectionPatch,
   ResolvedWeekContextUpdate,
   WeeklyExceptions,
   WeeklyInventory,
 } from "../meal-planning/types"
 import type { ToolConversationMessage, ToolProviderClient } from "../providers"
+import type { DecisionUsage } from "../providers/openrouter-decisions"
 import { type AgentSessionResult, persistableAgentMessages } from "../runtime/agent-session"
 import { runTools } from "../runtime/tool-runner"
 import { ToolHandlerError, type ToolRegistry } from "../runtime/tools"
@@ -76,6 +83,10 @@ export interface MealPlanningAgentSessionOptions {
   retainReasoning?: boolean
   /** Ingredient naming locale; defaults to India. */
   ingredientLocale?: string
+  /** Semantic easy-buy classifier; when absent, only deterministic easy-buy validation runs. */
+  easyBuyClassifier?: EasyBuyClassifier
+  /** Dev-only diagnostic: observes one Decisions call's returned usage and cost. */
+  onDecisionUsage?: (usage: DecisionUsage) => void
   /** Development-only diagnostics for provider turns. */
   onProviderTurnStart?: (turn: number, messages: readonly ToolConversationMessage[]) => void
   onProviderTurn?: (turn: number, messages: readonly ToolConversationMessage[], durationMs: number) => void
@@ -97,7 +108,21 @@ export type MealPlanningTerminalOutcome =
   | { kind: "update_week_context"; update: ResolvedWeekContextUpdate }
   | { kind: "needs_clarification"; message: string; reasonCodes: FailureCode[] }
 
-export type MealPlanningAgentSessionResult = AgentSessionResult<MealPlanningTerminalOutcome>
+export type MealPlanningAgentSessionResult = AgentSessionResult<MealPlanningTerminalOutcome> & {
+  /** Usage and returned cost of every Decisions request this session made. */
+  decisionUsage: DecisionUsage
+}
+
+const ZERO_DECISION_USAGE: DecisionUsage = { inputTokens: 0, outputTokens: 0, costUsd: 0 }
+
+/** Sums two Decisions usage records, including the endpoint-returned cost. */
+function addDecisionUsage(left: DecisionUsage, right: DecisionUsage): DecisionUsage {
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    costUsd: left.costUsd + right.costUsd,
+  }
+}
 
 /** Runs one capped meal-planning agent session with deterministic evaluator-gated persistence handoffs. */
 export async function runMealPlanningAgentSession(
@@ -112,7 +137,30 @@ export async function runMealPlanningAgentSession(
   // full-candidate callers, while production revisions always use patches.
   const isRevisionPatch = options.context.request.kind === "revision" && options.revisionBaseCandidate !== undefined
   const canUpdateWeekContext = options.context.request.kind === "revision" && options.allowWeekContextUpdate !== false
-  const evaluationTool = createEvaluateMealPlanTool(options.context, options.revisionBaseCandidate)
+  let decisionUsage = ZERO_DECISION_USAGE
+  // Runs one batched semantic easy-buy classification against the hydrated
+  // candidate and folds any rejected/uncertain items back through the pure
+  // evaluator, so failures sort and dedupe exactly as the deterministic ones.
+  const classifyEasyBuys = async (
+    selection: MealPlanSelectionEvaluation,
+    context: MealPlanContext,
+  ): Promise<MealPlanSelectionEvaluation> => {
+    const classifier = options.easyBuyClassifier
+    // Only spend a Decisions request once the deterministic checks pass; a
+    // plan that already fails them is blocked regardless.
+    if (!classifier || !selection.candidate || !selection.evaluation.pass) return selection
+    const { nonOrdinaryEasyBuys, usage } = await classifier.classify(selection.candidate.easyBuys)
+    decisionUsage = addDecisionUsage(decisionUsage, usage)
+    options.onDecisionUsage?.(usage)
+    if (nonOrdinaryEasyBuys.length === 0) return selection
+    return {
+      ...selection,
+      evaluation: evaluateMealPlan(selection.candidate, context, { nonOrdinaryEasyBuys }),
+    }
+  }
+  const evaluationTool = createEvaluateMealPlanTool(options.context, options.revisionBaseCandidate, (selection) =>
+    classifyEasyBuys(selection, options.context),
+  )
   const registry: ToolRegistry = {
     [MEAL_PLANNING_TOOL.EVALUATE]: {
       ...evaluationTool,
@@ -155,7 +203,7 @@ export async function runMealPlanningAgentSession(
         // `unaddressed_feedback` check is the coverage gate (with codes the
         // model can act on), replacing any session-side echo requirement.
         const evaluationContext = { ...options.context, feedbackItems: evaluationFeedback }
-        const selectionEvaluation =
+        let selectionEvaluation =
           isRevisionPatch && options.revisionBaseCandidate
             ? evaluateMealPlanSelectionPatch(
                 candidate as MealPlanSelectionPatch,
@@ -163,6 +211,7 @@ export async function runMealPlanningAgentSession(
                 evaluationContext,
               )
             : evaluateMealPlanSelection(candidate as MealPlanSelectionCandidate, evaluationContext)
+        selectionEvaluation = await classifyEasyBuys(selectionEvaluation, evaluationContext)
         if (!selectionEvaluation.candidate)
           throw new ToolHandlerError(
             "proposed plan could not be hydrated",
@@ -280,6 +329,7 @@ export async function runMealPlanningAgentSession(
     toolNames: result.toolNames,
     toolExecutions: result.toolExecutions,
     usage: result.usage,
+    decisionUsage,
   }
 }
 

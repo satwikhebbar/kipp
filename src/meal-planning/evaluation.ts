@@ -135,7 +135,14 @@ function compareOptional(a: string | undefined, b: string | undefined): number {
  * never user-facing prose. Owns only rules with structured, reliable
  * semantics (see the meal-planning evaluation corpus plan, section 6).
  */
-export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlanContext): MealPlanEvaluation {
+export function evaluateMealPlan(
+  candidate: MealPlanCandidate,
+  context: MealPlanContext,
+  options: {
+    /** Easy buys the semantic classifier judged not ordinary; merged with the deterministic token list. */
+    nonOrdinaryEasyBuys?: readonly { item: string; detail: string }[]
+  } = {},
+): MealPlanEvaluation {
   const failures: MealPlanFailure[] = []
   const { schedule, profile, weeklyInventory, request } = context
   const coverage = computeCoverageSet(context)
@@ -239,12 +246,15 @@ export function evaluateMealPlan(candidate: MealPlanCandidate, context: MealPlan
     }
   }
 
-  for (const buy of findProhibitedEasyBuys(candidate.easyBuys)) {
-    failures.push({
-      code: "easy_buy_not_ordinary",
-      detail: `easy buy "${buy}" is a long-shelf or specialty item, not an ordinary grocery item`,
-    })
-  }
+  // Deterministic whole-word matches first; the classifier's semantic verdicts
+  // cover categories the token list cannot enumerate. Deduped by item so an
+  // item flagged by both produces a single failure.
+  const prohibitedEasyBuys = new Map<string, string>()
+  for (const buy of findProhibitedEasyBuys(candidate.easyBuys))
+    prohibitedEasyBuys.set(buy, `easy buy "${buy}" is a long-shelf or specialty item, not an ordinary grocery item`)
+  for (const { item, detail } of options.nonOrdinaryEasyBuys ?? [])
+    if (!prohibitedEasyBuys.has(item)) prohibitedEasyBuys.set(item, detail)
+  for (const detail of prohibitedEasyBuys.values()) failures.push({ code: "easy_buy_not_ordinary", detail })
 
   const morningCookByDay: Record<string, number> = {}
   const priorNightPrepByDay: Record<string, number> = {}

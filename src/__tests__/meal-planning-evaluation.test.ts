@@ -160,6 +160,24 @@ describe("meal-planning evaluator", () => {
     expect(evaluateMealPlan(candidate, baseContext()).pass).toBe(true)
   })
 
+  it("accepts ordinary produce that merely contains a prohibited stem", () => {
+    const candidate = baseCandidate({ easyBuys: ["seedless grapes"] })
+    expect(evaluateMealPlan(candidate, baseContext()).pass).toBe(true)
+  })
+
+  it("merges classifier non-ordinary easy buys and dedupes deterministic rejections", () => {
+    const candidate = baseCandidate({ easyBuys: ["dates", "dried apricots"] })
+    const evaluation = evaluateMealPlan(candidate, baseContext(), {
+      nonOrdinaryEasyBuys: [
+        { item: "dried apricots", detail: 'easy buy "dried apricots" is a long-shelf or specialty item' },
+        { item: "dates", detail: 'easy buy "dates" is a long-shelf or specialty item' },
+      ],
+    })
+    expect(failureCodes(evaluation)).toEqual(["easy_buy_not_ordinary", "easy_buy_not_ordinary"])
+    expect(evaluation.failures.filter((failure) => failure.detail.includes("dried apricots"))).toHaveLength(1)
+    expect(evaluation.pass).toBe(false)
+  })
+
   it("enforces dietary exclusions", () => {
     const context = baseContext()
     context.profile.pantryBaseline = [...context.profile.pantryBaseline, "peanut", "dairy"]

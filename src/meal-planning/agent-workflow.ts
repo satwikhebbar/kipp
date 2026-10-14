@@ -11,9 +11,11 @@ import { createInteractionRouter, type InteractionRegistration } from "../core/i
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowInteractionKind } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage, type ToolProviderRequestEvent } from "../providers"
+import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
 import { logRuntime } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
 import { computeCoverageSet } from "./coverage"
+import { createEasyBuyClassifier } from "./easy-buy-classifier"
 import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -131,9 +133,14 @@ function addUsage(left: LLMUsage, right: LLMUsage): LLMUsage {
   }
 }
 
-/** Records one generated plan version's token usage under the meal-planner model. */
-function makeVersionUsage(usage: LLMUsage): VersionUsage {
-  return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model: MEAL_PLANNER_MODEL }
+/** Records one generated plan version's token usage under the meal-planner model, plus any reported classifier cost. */
+function makeVersionUsage(usage: LLMUsage, decisionsCostUsd = 0): VersionUsage {
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    model: MEAL_PLANNER_MODEL,
+    decisionsCostUsd,
+  }
 }
 
 /** Renders neutral temporal facts so the planner can resolve relative dates against its active school week. */
@@ -306,7 +313,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
           weeklyInventory: outcome.propose.weeklyInventory,
           weeklyExceptions: outcome.propose.weeklyExceptions,
           provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
-          usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage)),
+          usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage), planning.decisionsCostUsd),
         })
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
@@ -482,14 +489,15 @@ async function runPlanningSession(
     allowWeekContextUpdate?: boolean
     occurrence: string
   },
-): Promise<{ outcome: PlanningOutcome; usage: LLMUsage }> {
+): Promise<{ outcome: PlanningOutcome; usage: LLMUsage; decisionsCostUsd: number }> {
   const notifyPrefix = `meal-planning-notify-${options.occurrence}`
   const sessionDeadline = Date.now() + MEAL_PLANNING_TTL_MS
   let usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
+  let decisionsCostUsd = 0
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
     if (Date.now() > sessionDeadline) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-deadline`)
-      return { outcome: { kind: "abandoned" }, usage }
+      return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
     const session = await stepDo(step, `meal-planning-agent-session-${options.occurrence}-${turn}`, async () => {
       try {
@@ -500,10 +508,16 @@ async function runPlanningSession(
           Number(env.LLM_MAX_RETRIES || "3"),
           { onRequestEvent: (requestEvent) => logProviderRequestEvent(env, event.instanceId, requestEvent) },
         )
+        const easyBuyClassifier = createEasyBuyClassifier(
+          createOpenRouterDecisionsClient(env.OPENROUTER_API_KEY, undefined, {
+            onRequestEvent: (requestEvent) => logProviderRequestEvent(env, event.instanceId, requestEvent),
+          }),
+        )
         return await runMealPlanningAgentSession(provider, options.messages, {
           context: options.context,
           revisionBaseCandidate: options.revisionBaseCandidate,
           allowWeekContextUpdate: options.allowWeekContextUpdate,
+          easyBuyClassifier,
           onProviderTurnStart: (turn, messages) => logAgentTurnStart(env, event.instanceId, turn, messages),
           onProviderTurn: (turn, messages, durationMs) =>
             logAgentTurn(env, event.instanceId, turn, messages, durationMs),
@@ -523,14 +537,26 @@ async function runPlanningSession(
     })
     if (session === null) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
-      return { outcome: { kind: "abandoned" }, usage }
+      return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
     usage = addUsage(usage, session.usage)
+    decisionsCostUsd += session.decisionUsage.costUsd
     options.messages = session.messages
+    if (session.decisionUsage.inputTokens || session.decisionUsage.costUsd)
+      logRuntime(env, {
+        workflow: event.instanceId,
+        event: "meal-planning-easy-buy-classification",
+        outcome: "succeeded",
+        details: {
+          inputTokens: session.decisionUsage.inputTokens,
+          outputTokens: session.decisionUsage.outputTokens,
+          costUsd: session.decisionUsage.costUsd,
+        },
+      })
     logAgentSession(env, event.instanceId, session)
     if (!session.completed || !session.terminal) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
-      return { outcome: { kind: "abandoned" }, usage }
+      return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
     const terminal = session.terminal
     if (terminal.kind === "needs_clarification") {
@@ -543,17 +569,17 @@ async function runPlanningSession(
           options.isRevision ? MEAL_FEEDBACK_NOT_APPLIED : MEAL_PLANNING_CANCELED,
           `${notifyPrefix}-clarification-timeout`,
         )
-        return { outcome: { kind: "abandoned" }, usage }
+        return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
       }
       options.messages.push({ role: "user", text: reply })
       continue
     }
     if (terminal.kind === "update_week_context")
-      return { outcome: { kind: "week_context_updated", update: terminal.update }, usage }
-    return { outcome: { kind: "proposed", propose: terminal }, usage }
+      return { outcome: { kind: "week_context_updated", update: terminal.update }, usage, decisionsCostUsd }
+    return { outcome: { kind: "proposed", propose: terminal }, usage, decisionsCostUsd }
   }
   await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-exhausted`)
-  return { outcome: { kind: "abandoned" }, usage }
+  return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
 }
 
 /** Sends a force-reply clarification prompt and returns only the matching free-text reply (or null on timeout). */
@@ -643,7 +669,12 @@ async function sendPlanAndRegister(
   const costLine = await stepDo(step, `meal-planning-plan-cost-${occurrence}`, async () => {
     if (!version.usage || !env.MEAL_PLANNING_DB) return ""
     const usageTotal = await createMealPlanningStore(env.MEAL_PLANNING_DB).sumPlanUsage(plan.planId)
-    return usageTotal ? formatCostLine(computeCostByModel(usageTotal.byModel), { preserveHistoricalPricing: true }) : ""
+    if (!usageTotal) return ""
+    const cost = computeCostByModel(usageTotal.byModel)
+    // The classifier's reported cost is a flat USD sum the pricing table cannot
+    // reproduce, so it is added to the priced planner total before formatting.
+    const totalCostUsd = cost.totalCostUsd === null ? null : cost.totalCostUsd + usageTotal.decisionsCostUsd
+    return formatCostLine({ ...cost, totalCostUsd }, { preserveHistoricalPricing: true })
   })
   const message = `${renderPlanLaunchMessage(plan)}${costLine}`
   const reviewUrl = miniAppLaunchUrl(env.MINI_APP_ORIGIN)
@@ -882,7 +913,7 @@ function submissionFromPayload(payload: MealPlanningLiveEvent | undefined): Subm
   return coerceSubmission(payload.text, source, payload.messageId ?? 0)
 }
 
-/** Runs one feedback-driven revision: session → no-change gate → CAS promotion → new plan message. Returns the new plan-message generation on success, null otherwise. `priorUsage` carries usage across the context-update recursion so a promoted version records every session in the round. */
+/** Runs one feedback-driven revision: session → no-change gate → CAS promotion → new plan message. Returns the new plan-message generation on success, null otherwise. `priorUsage`/`priorDecisionsCostUsd` carry usage across the context-update recursion so a promoted version records every session in the round. */
 async function runRevision(
   env: Env,
   step: WorkflowStep,
@@ -895,6 +926,7 @@ async function runRevision(
   contextAlreadyUpdated = false,
   feedbackBatch?: FeedbackBatchRecord,
   priorUsage: LLMUsage = ZERO_USAGE,
+  priorDecisionsCostUsd = 0,
 ): Promise<number | null> {
   const occurrence = `revision-${iteration}`
   const notifyPrefix = `meal-planning-notify-${occurrence}`
@@ -937,6 +969,7 @@ async function runRevision(
   })
   const outcome = planning.outcome
   const roundUsage = addUsage(priorUsage, planning.usage)
+  const roundDecisionsCostUsd = priorDecisionsCostUsd + planning.decisionsCostUsd
   if (outcome.kind === "week_context_updated") {
     const updatedContext = outcome.update
     const persisted = await stepDo(step, `meal-planning-update-week-context-${occurrence}`, () =>
@@ -990,6 +1023,7 @@ async function runRevision(
       true,
       feedbackBatch,
       roundUsage,
+      roundDecisionsCostUsd,
     )
   }
   if (outcome.kind !== "proposed") {
@@ -1019,7 +1053,7 @@ async function runRevision(
       video: enriched.video,
       evaluation: propose.evaluation,
       provisionalMealDefinitions: propose.provisionalMealDefinitions,
-      usage: makeVersionUsage(roundUsage),
+      usage: makeVersionUsage(roundUsage, roundDecisionsCostUsd),
       inventory: {
         weeklyInventory: propose.weeklyInventory,
         weeklyExceptions: propose.weeklyExceptions,

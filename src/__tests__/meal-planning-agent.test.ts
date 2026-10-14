@@ -7,6 +7,7 @@ import {
 } from "../agent/meal-planning"
 import { MEAL_PLANNING_AGENT_PROMPT, runMealPlanningAgentSession } from "../agent/meal-planning-session"
 import { loadScenarios } from "../meal-planning/corpus/load"
+import { createEasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
 import { evaluateMealPlan } from "../meal-planning/evaluation"
 import type {
   MealCell,
@@ -18,6 +19,7 @@ import type {
 } from "../meal-planning/types"
 import type { ToolProviderClient } from "../providers"
 import { strictToolDeclaration } from "../providers/llm"
+import type { DecisionsClient } from "../providers/openrouter-decisions"
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const SLOT_COOK: Record<string, number> = { breakfast: 15, snack1: 0, snack2: 0, "school-lunch": 20, "home-lunch": 20 }
@@ -228,6 +230,41 @@ describe("bounded meal-planning agent session", () => {
     expect(result.completed).toBe(true)
     expect(result.terminal).toMatchObject({ kind: "propose_plan" })
     if (result.terminal?.kind === "propose_plan") expect(result.terminal.evaluation.pass).toBe(true)
+  })
+
+  it("rides the semantic classifier's easy-buy failure through the session", async () => {
+    const candidate: MealPlanCandidate = {
+      ...passingCandidate(),
+      grid: gridWith("Mon", "breakfast", cell("paratha", ["dried apricots"], "breakfast")),
+    }
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        const answers = Object.fromEntries(
+          Object.keys(questions).map((id) => [id, { type: "noul" as const, noul: 0.1 }]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      clarifyResponse({
+        message: "Those are not ordinary groceries; which staples should I add?",
+        reasonCodes: ["easy_buy_not_ordinary"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["easy_buy_not_ordinary"] })
+    expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
   })
 
   it("truncates an overlong debug justification without rejecting the terminal proposal", async () => {
