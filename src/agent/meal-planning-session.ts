@@ -1,4 +1,4 @@
-import type { EasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
+import type { EasyBuyClassification, EasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
 import {
   evaluateMealPlan,
   evaluateMealPlanSelection,
@@ -138,6 +138,11 @@ export async function runMealPlanningAgentSession(
   const isRevisionPatch = options.context.request.kind === "revision" && options.revisionBaseCandidate !== undefined
   const canUpdateWeekContext = options.context.request.kind === "revision" && options.allowWeekContextUpdate !== false
   let decisionUsage = ZERO_DECISION_USAGE
+  // A candidate is classified once during evaluate_meal_plan and again during
+  // propose_plan; memoize the resolved verdict by its easy-buy list so the
+  // second pass reuses the first instead of paying for another Decisions
+  // request (and never depends on a second stochastic draw).
+  const classificationCache = new Map<string, EasyBuyClassification>()
   // Runs one batched semantic easy-buy classification against the hydrated
   // candidate and folds any rejected/uncertain items back through the pure
   // evaluator, so failures sort and dedupe exactly as the deterministic ones.
@@ -149,9 +154,15 @@ export async function runMealPlanningAgentSession(
     // Only spend a Decisions request once the deterministic checks pass; a
     // plan that already fails them is blocked regardless.
     if (!classifier || !selection.candidate || !selection.evaluation.pass) return selection
-    const { nonOrdinaryEasyBuys, usage } = await classifier.classify(selection.candidate.easyBuys)
-    decisionUsage = addDecisionUsage(decisionUsage, usage)
-    options.onDecisionUsage?.(usage)
+    const key = [...selection.candidate.easyBuys].sort().join("\u0000")
+    let classification = classificationCache.get(key)
+    if (!classification) {
+      classification = await classifier.classify(selection.candidate.easyBuys)
+      classificationCache.set(key, classification)
+      decisionUsage = addDecisionUsage(decisionUsage, classification.usage)
+      options.onDecisionUsage?.(classification.usage)
+    }
+    const { nonOrdinaryEasyBuys } = classification
     if (nonOrdinaryEasyBuys.length === 0) return selection
     return {
       ...selection,
