@@ -4,6 +4,7 @@ import type {
   MealPlanCandidate,
   MealPlanContext,
   MealPlanSelectionCandidate,
+  MealPlanSelectionEvaluation,
   MealPlanSelectionPatch,
 } from "../meal-planning/types"
 import { EXCEPTION_KINDS, FAILURE_CODES, INVENTORY_STATUSES, POLICY_OUTCOMES } from "../meal-planning/types"
@@ -461,8 +462,17 @@ export const needsClarificationInputSchema = z
 
 const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).strict()
 
-/** Creates the deterministic candidate-evaluation tool for one bounded meal-planning session. */
-export function createEvaluateMealPlanTool(context: MealPlanContext, revisionBase?: MealPlanCandidate): ToolDefinition {
+/**
+ * Creates the candidate-evaluation tool for one bounded meal-planning session.
+ * `applyClassification` optionally augments the deterministic evaluation with
+ * async semantic checks (for example, the batched easy-buy classifier) before
+ * the evaluation is returned to the model.
+ */
+export function createEvaluateMealPlanTool(
+  context: MealPlanContext,
+  revisionBase?: MealPlanCandidate,
+  applyClassification?: (selection: MealPlanSelectionEvaluation) => Promise<MealPlanSelectionEvaluation>,
+): ToolDefinition {
   const isRevision = revisionBase !== undefined
   const policyIds = context.customPolicies.map((policy) => policy.id)
   return {
@@ -478,9 +488,10 @@ export function createEvaluateMealPlanTool(context: MealPlanContext, revisionBas
       const internalCandidate = isRevision
         ? mealPlanSelectionPatchFromWire(candidate as MealPlanSelectionWirePatch, policyIds)
         : mealPlanSelectionCandidateFromWire(candidate as MealPlanSelectionWireCandidate, policyIds)
-      return revisionBase
-        ? evaluateMealPlanSelectionPatch(internalCandidate as MealPlanSelectionPatch, revisionBase, context).evaluation
-        : evaluateMealPlanSelection(internalCandidate as MealPlanSelectionCandidate, context).evaluation
+      const selection = revisionBase
+        ? evaluateMealPlanSelectionPatch(internalCandidate as MealPlanSelectionPatch, revisionBase, context)
+        : evaluateMealPlanSelection(internalCandidate as MealPlanSelectionCandidate, context)
+      return (applyClassification ? await applyClassification(selection) : selection).evaluation
     },
   }
 }

@@ -234,6 +234,7 @@ describe("createInMemoryMealPlanningStore", () => {
       inputTokens: 100,
       outputTokens: 20,
       byModel: [{ inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" }],
+      decisionsCostUsd: 0,
     })
 
     const promoted = await store.promotePlanVersion(
@@ -244,9 +245,33 @@ describe("createInMemoryMealPlanningStore", () => {
       inputTokens: 140,
       outputTokens: 25,
       byModel: [{ inputTokens: 140, outputTokens: 25, model: "openai/gpt-5.6-luna" }],
+      decisionsCostUsd: 0,
     })
     const active = await store.activePlan(CHAT)
-    expect(active?.version.usage).toEqual({ inputTokens: 40, outputTokens: 5, model: "openai/gpt-5.6-luna" })
+    expect(active?.version.usage).toEqual({
+      inputTokens: 40,
+      outputTokens: 5,
+      model: "openai/gpt-5.6-luna",
+      decisionsCostUsd: 0,
+    })
+  })
+
+  it("sums the classifier's reported cost across versions independently of the priced model", async () => {
+    const store = await newStore()
+    await createPlan(
+      store,
+      createInput({
+        usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna", decisionsCostUsd: 0.002 },
+      }),
+    )
+    await store.promotePlanVersion(
+      promoteInput({
+        usage: { inputTokens: 40, outputTokens: 5, model: "openai/gpt-5.6-luna", decisionsCostUsd: 0.003 },
+      }),
+    )
+    const total = await store.sumPlanUsage("plan-1")
+    expect(total?.decisionsCostUsd).toBeCloseTo(0.005)
+    expect(total?.byModel).toEqual([{ inputTokens: 140, outputTokens: 25, model: "openai/gpt-5.6-luna" }])
   })
 
   it("sumPlanUsage groups tokens by model so each version is priced at its own rate", async () => {
@@ -265,6 +290,7 @@ describe("createInMemoryMealPlanningStore", () => {
         { inputTokens: 40, outputTokens: 5, model: "deepseek-v4-flash" },
         { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" },
       ],
+      decisionsCostUsd: 0,
     })
   })
 
@@ -538,27 +564,44 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       store,
       createInput({ usage: { inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" } }),
     )
-    expect(created.version.usage).toEqual({ inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" })
+    expect(created.version.usage).toEqual({
+      inputTokens: 200,
+      outputTokens: 30,
+      model: "openai/gpt-5.6-luna",
+      decisionsCostUsd: 0,
+    })
     expect(await store.sumPlanUsage("plan-1")).toEqual({
       inputTokens: 200,
       outputTokens: 30,
       byModel: [{ inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" }],
+      decisionsCostUsd: 0,
     })
     expect(d1Scalar(db, "SELECT usage_model FROM meal_plan_version WHERE plan_id = ? AND version = 1", "plan-1")).toBe(
       "openai/gpt-5.6-luna",
     )
 
     const promoted = await store.promotePlanVersion(
-      promoteInput({ usage: { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" } }),
+      promoteInput({
+        usage: { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna", decisionsCostUsd: 0.004 },
+      }),
     )
     expect(promoted.ok).toBe(true)
     expect(await store.sumPlanUsage("plan-1")).toEqual({
       inputTokens: 250,
       outputTokens: 40,
       byModel: [{ inputTokens: 250, outputTokens: 40, model: "openai/gpt-5.6-luna" }],
+      decisionsCostUsd: 0.004,
     })
+    expect(
+      d1Scalar(db, "SELECT decisions_cost_usd FROM meal_plan_version WHERE plan_id = ? AND version = 2", "plan-1"),
+    ).toBeCloseTo(0.004)
     const active = await store.activePlan(CHAT)
-    expect(active?.version.usage).toEqual({ inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" })
+    expect(active?.version.usage).toEqual({
+      inputTokens: 50,
+      outputTokens: 10,
+      model: "openai/gpt-5.6-luna",
+      decisionsCostUsd: 0.004,
+    })
   })
 
   it("a legacy version persisted without usage hydrates null and does not skew the sum", async () => {
@@ -578,6 +621,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       inputTokens: 50,
       outputTokens: 10,
       byModel: [{ inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" }],
+      decisionsCostUsd: 0,
     })
   })
 

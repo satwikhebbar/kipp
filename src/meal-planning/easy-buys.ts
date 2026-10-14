@@ -5,8 +5,9 @@ import type { MealPlanCandidate, MealPlanContext } from "./types"
  * Long-shelf and specialty categories the weekly easy-buys list must never
  * contain. The complement (ordinary staples, everyday produce, neighborhood
  * grocery items) is open, so this is a small, stable negative set. Entries are
- * singular stems matched against the normalized ingredient form, so plural and
- * qualified spellings ("mixed seeds", "dry dates") are caught too.
+ * singular stems matched as whole words against the normalized ingredient form,
+ * so "mixed seeds" is caught while "seedless grapes" is not. Unlisted
+ * categories ("dried apricots") are left to the semantic easy-buy classifier.
  */
 export const PROHIBITED_EASY_BUY_TOKENS = [
   "date",
@@ -22,11 +23,16 @@ export const PROHIBITED_EASY_BUY_TOKENS = [
   "seed",
 ] as const
 
+/** Word-boundary matcher per stem; the trailing `s?` tolerates a plural not at the end of the phrase. */
+const PROHIBITED_EASY_BUY_PATTERNS = PROHIBITED_EASY_BUY_TOKENS.map(
+  (token) => new RegExp(`(?:^| )${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}s?(?= |$)`),
+)
+
 /** Returns the entries of an easy-buys list that are prohibited specialty items, in input order. */
 export function findProhibitedEasyBuys(easyBuys: readonly string[]): string[] {
   return easyBuys.filter((buy) => {
     const normalized = normalizeIngredient(buy)
-    return PROHIBITED_EASY_BUY_TOKENS.some((banned) => normalized.includes(banned))
+    return PROHIBITED_EASY_BUY_PATTERNS.some((pattern) => pattern.test(normalized))
   })
 }
 
