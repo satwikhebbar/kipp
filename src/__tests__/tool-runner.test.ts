@@ -35,6 +35,42 @@ describe("runTools", () => {
     expect(result.toolExecutions).toEqual([{ tool: "echo", outcome: "succeeded" }])
   })
 
+  it("accumulates reported cost across tool turns and makes the total unavailable if a turn omits it", async () => {
+    const response = (reportedCostUsd: number | undefined) => ({
+      toolCalls: [{ id: "echo", name: "echo", input: { value: "next" } }],
+      usage: {
+        inputTokens: 10,
+        outputTokens: 2,
+        ...(reportedCostUsd === undefined ? {} : { reportedCostUsd }),
+      },
+    })
+    const complete = await runTools(
+      {
+        generate: vi
+          .fn()
+          .mockResolvedValueOnce(response(0.001))
+          .mockResolvedValueOnce({ text: "done", usage: { inputTokens: 5, outputTokens: 1, reportedCostUsd: 0.002 } }),
+      },
+      registry,
+      { allowedTools: ["echo"] },
+      [{ role: "user", text: "start" }],
+    )
+    expect(complete.usage.reportedCostUsd).toBe(0.003)
+
+    const incomplete = await runTools(
+      {
+        generate: vi
+          .fn()
+          .mockResolvedValueOnce(response(0.001))
+          .mockResolvedValueOnce({ text: "done", usage: { inputTokens: 5, outputTokens: 1 } }),
+      },
+      registry,
+      { allowedTools: ["echo"] },
+      [{ role: "user", text: "start" }],
+    )
+    expect(incomplete.usage.reportedCostUsd).toBeNull()
+  })
+
   it("summarizes guard failures without exposing tool input or output", async () => {
     const generate = vi
       .fn()

@@ -23,6 +23,21 @@ describe("computeCost", () => {
     expect(cost.totalCostUsd).toBeCloseTo(0, 4)
   })
 
+  test("uses OpenRouter's reported amount instead of pricing tokens", () => {
+    const cost = computeCost(
+      { inputTokens: 1_000_000, outputTokens: 500_000, reportedCostUsd: 0.1234 },
+      "deepseek-flash",
+    )
+    expect(cost.totalCostUsd).toBe(0.1234)
+    expect(cost.costKind).toBe("reported")
+  })
+
+  test("does not estimate when requested reported cost is unavailable", () => {
+    const cost = computeCost({ inputTokens: 1_000_000, outputTokens: 500_000, reportedCostUsd: null }, "deepseek-flash")
+    expect(cost.totalCostUsd).toBeNull()
+    expect(cost.costKind).toBe("unavailable")
+  })
+
   test("rounding with small token counts", () => {
     const cost = computeCost({ inputTokens: 1, outputTokens: 1 }, "deepseek-flash")
     expect(cost.totalCostUsd).toBeCloseTo(0.0000015, 8)
@@ -95,6 +110,15 @@ describe("computeCostByModel", () => {
     expect(cost.totalCostUsd).toBeNull()
     expect(cost.model).toBe("deepseek-flash + some-future-model")
   })
+
+  test("a missing reported amount in one group makes the combined reported total unavailable", () => {
+    const cost = computeCostByModel([
+      { inputTokens: 1_000_000, outputTokens: 500_000, reportedCostUsd: 0.2, model: "openai/gpt-5.6-luna" },
+      { inputTokens: 1_000_000, outputTokens: 500_000, reportedCostUsd: null, model: "openai/gpt-5.6-luna" },
+    ])
+    expect(cost.totalCostUsd).toBeNull()
+    expect(cost.costKind).toBe("unavailable")
+  })
 })
 
 describe("formatCostLine", () => {
@@ -109,6 +133,21 @@ describe("formatCostLine", () => {
     expect(line).toContain("~$0.0003")
     expect(line).toContain("1000 in / 500 out")
     expect(line).toContain("deepseek-flash")
+  })
+
+  test("reported amounts use an actual cost label", () => {
+    const cost = computeCost({ inputTokens: 12, outputTokens: 3, reportedCostUsd: 0.0042 }, "openai/gpt-5.6-luna")
+    expect(formatCostLine(cost)).toContain("Cost: $0.0042")
+    expect(formatCostLine(cost)).not.toContain("Est. cost")
+  })
+
+  test("unavailable combined cost does not format a partial amount", () => {
+    const cost = computeCostByModel([
+      { inputTokens: 10, outputTokens: 5, reportedCostUsd: 0.01, model: "openai/gpt-5.6-luna" },
+      { inputTokens: 10, outputTokens: 5, reportedCostUsd: null, model: "openai/gpt-5.6-luna" },
+    ])
+    expect(formatCostLine(cost)).toContain("Cost unavailable")
+    expect(formatCostLine(cost)).not.toContain("$0.0100")
   })
 
   test("unknown model returns no-estimate message", () => {
