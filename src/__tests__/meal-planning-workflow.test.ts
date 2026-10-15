@@ -420,6 +420,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       inputTokens: 2,
       outputTokens: 2,
       model: "~openai/gpt-luna-latest",
+      reportedCostUsd: null,
       decisionsCostUsd: 0,
     })
     const planId = active?.plan.planId
@@ -427,14 +428,14 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(await store.sumPlanUsage(planId)).toEqual({
       inputTokens: 2,
       outputTokens: 2,
-      byModel: [{ inputTokens: 2, outputTokens: 2, model: "~openai/gpt-luna-latest" }],
+      byModel: [{ inputTokens: 2, outputTokens: 2, model: "~openai/gpt-luna-latest", reportedCostUsd: null }],
       decisionsCostUsd: 0,
     })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
 
     const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))
     expect(planMessage).toBeTruthy()
-    expect(planMessage?.text).toContain("Est. cost: ~$0.0000")
+    expect(planMessage?.text).toContain("Cost unavailable: OpenRouter did not report the complete usage cost")
     expect(planMessage?.text).toContain("2 in / 2 out")
     expect(planMessage?.replyMarkup).toBeTruthy()
     expect(registrations).toContainEqual(
@@ -807,6 +808,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       inputTokens: 2,
       outputTokens: 2,
       model: "~openai/gpt-luna-latest",
+      reportedCostUsd: null,
       decisionsCostUsd: 0,
     })
     // The v2 message reports the cumulative run total (v1 + v2 usage), like LinkedIn drafts.

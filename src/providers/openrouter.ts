@@ -40,9 +40,10 @@ function parseUsage(usage: OpenRouterToolResponse["usage"]): LLMUsage {
   return {
     inputTokens: usage?.prompt_tokens ?? 0,
     outputTokens: usage?.completion_tokens ?? 0,
-    ...(typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
-      ? { reportedCostUsd }
-      : {}),
+    reportedCostUsd:
+      typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
+        ? reportedCostUsd
+        : null,
   }
 }
 

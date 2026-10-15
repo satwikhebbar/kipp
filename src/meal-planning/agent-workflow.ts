@@ -126,10 +126,19 @@ export function renderRevisionFeedback(items: FeedbackItem[]): string {
 }
 
 /** Sums two LLM usage records. */
-function addUsage(left: LLMUsage, right: LLMUsage): LLMUsage {
+function addUsage(left: LLMUsage, right: LLMUsage, hasLeftUsage: boolean): LLMUsage {
   return {
     inputTokens: left.inputTokens + right.inputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
+    ...(!hasLeftUsage
+      ? right.reportedCostUsd === undefined
+        ? {}
+        : { reportedCostUsd: right.reportedCostUsd }
+      : left.reportedCostUsd === undefined && right.reportedCostUsd === undefined
+        ? {}
+        : typeof left.reportedCostUsd === "number" && typeof right.reportedCostUsd === "number"
+          ? { reportedCostUsd: left.reportedCostUsd + right.reportedCostUsd }
+          : { reportedCostUsd: null }),
   }
 }
 
@@ -139,6 +148,7 @@ function makeVersionUsage(usage: LLMUsage, decisionsCostUsd = 0): VersionUsage {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     model: MEAL_PLANNER_MODEL,
+    ...(usage.reportedCostUsd === undefined ? {} : { reportedCostUsd: usage.reportedCostUsd }),
     decisionsCostUsd,
   }
 }
@@ -326,7 +336,10 @@ export async function runAgentCenteredMealPlanningWorkflow(
           weeklyInventory: outcome.propose.weeklyInventory,
           weeklyExceptions: outcome.propose.weeklyExceptions,
           provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
-          usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage), planning.decisionsCostUsd),
+          usage: makeVersionUsage(
+            addUsage(extractionUsage ?? ZERO_USAGE, planning.usage, extractionUsage !== null),
+            planning.decisionsCostUsd,
+          ),
         })
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
@@ -401,7 +414,11 @@ async function extractInitialWeekContext(
         toolChoice: "required",
         reasoning: "disabled",
       })
-      usage = { inputTokens: response.usage?.inputTokens ?? 0, outputTokens: response.usage?.outputTokens ?? 0 }
+      usage = {
+        inputTokens: response.usage?.inputTokens ?? 0,
+        outputTokens: response.usage?.outputTokens ?? 0,
+        reportedCostUsd: response.usage?.reportedCostUsd,
+      }
       const call = response.toolCalls?.find((candidate) => candidate.name === "extract_week_context")
       const parsed = weekContextExtractionInputSchema.safeParse(stripNullProperties(call?.input))
       if (!parsed.success) {
@@ -506,6 +523,7 @@ async function runPlanningSession(
   const notifyPrefix = `meal-planning-notify-${options.occurrence}`
   const sessionDeadline = Date.now() + MEAL_PLANNING_TTL_MS
   let usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
+  let hasUsage = false
   let decisionsCostUsd = 0
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
     if (Date.now() > sessionDeadline) {
@@ -552,7 +570,8 @@ async function runPlanningSession(
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
       return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
-    usage = addUsage(usage, session.usage)
+    usage = addUsage(usage, session.usage, hasUsage)
+    hasUsage = true
     decisionsCostUsd += session.decisionUsage.costUsd
     options.messages = session.messages
     if (session.decisionUsage.inputTokens || session.decisionUsage.costUsd)
@@ -988,7 +1007,9 @@ async function runRevision(
     occurrence,
   })
   const outcome = planning.outcome
-  const roundUsage = addUsage(priorUsage, planning.usage)
+  const hasPriorUsage =
+    priorUsage.inputTokens > 0 || priorUsage.outputTokens > 0 || priorUsage.reportedCostUsd !== undefined
+  const roundUsage = addUsage(priorUsage, planning.usage, hasPriorUsage)
   const roundDecisionsCostUsd = priorDecisionsCostUsd + planning.decisionsCostUsd
   if (outcome.kind === "week_context_updated") {
     const updatedContext = outcome.update

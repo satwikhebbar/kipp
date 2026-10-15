@@ -58,6 +58,7 @@ export interface WorkflowCost {
   totalOutputTokens: number
   totalCostUsd: number | null
   model: string
+  costKind?: "reported" | "estimated" | "unavailable" | "unknown-model"
 }
 
 /** Metadata-only shape returned by list/query operations; body is absent. */
@@ -82,7 +83,8 @@ export interface LLMUsage {
   inputTokens: number
   outputTokens: number
   /** Provider-reported USD cost when the provider returns it. */
-  reportedCostUsd?: number
+  /** `null` means the provider was asked for cost but no valid amount was returned. */
+  reportedCostUsd?: number | null
 }
 
 export interface LLMResponse {
