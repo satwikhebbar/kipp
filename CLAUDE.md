@@ -70,12 +70,12 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+Run `pnpm run docs` or `pnpm check`. The `pnpm docs` shorthand opens the npm
+page because this package is named `linkedin-pipeline`.
 
 ```bash
-# Example:
-# npm install
-# npm test
+pnpm run docs
+pnpm check
 ```
 
 ## Architecture Overview

@@ -27,6 +27,11 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Documentation check
+
+Run `pnpm run docs` or `pnpm check`. The `pnpm docs` shorthand opens the npm
+page because this package is named `linkedin-pipeline`.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
