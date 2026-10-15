@@ -453,6 +453,45 @@ describe("DeepSeek provider", () => {
 describe("OpenRouter provider", () => {
   beforeEach(() => mockFetch.mockReset())
 
+  it("requests usage details and returns OpenRouter's reported cost from the generator", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          choices: [{ message: { content: "hello" } }],
+          usage: { prompt_tokens: 2, completion_tokens: 3, cost: 0.0042 },
+        }),
+    })
+    const { createOpenRouterGenerator } = await import("../providers/openrouter")
+    const result = await createOpenRouterGenerator("key", "openai/gpt-6-luna")(userMsg("hi"))
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.usage).toEqual({ include: true })
+    expect(result.usage).toEqual({ inputTokens: 2, outputTokens: 3, reportedCostUsd: 0.0042 })
+  })
+
+  it("omits missing or invalid reported cost without changing token usage", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ choices: [{ message: { content: "hello" } }], usage: { prompt_tokens: 2 } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            choices: [{ message: { content: "hello" } }],
+            usage: { prompt_tokens: 2, completion_tokens: 3, cost: -1 },
+          }),
+      })
+    const { createOpenRouterGenerator } = await import("../providers/openrouter")
+    const generate = createOpenRouterGenerator("key", "openai/gpt-6-luna")
+    expect((await generate(userMsg("hi"))).usage).toEqual({ inputTokens: 2, outputTokens: 0 })
+    expect((await generate(userMsg("hi"))).usage).toEqual({ inputTokens: 2, outputTokens: 3 })
+  })
+
   it("uses the Luna model, OpenRouter reasoning, and preserves native reasoning details across tool turns", async () => {
     mockFetch
       .mockResolvedValueOnce({
@@ -470,7 +509,7 @@ describe("OpenRouter provider", () => {
                 },
               },
             ],
-            usage: { prompt_tokens: 2, completion_tokens: 3 },
+            usage: { prompt_tokens: 2, completion_tokens: 3, cost: 0.0042 },
           }),
       })
       .mockResolvedValueOnce({
@@ -487,6 +526,7 @@ describe("OpenRouter provider", () => {
       toolChoice: "required",
       reasoning: "high",
     })
+    expect(first.usage).toEqual({ inputTokens: 2, outputTokens: 3, reportedCostUsd: 0.0042 })
     await client.generate({
       messages: [
         ...TOOL_TEST_MESSAGES,
@@ -505,6 +545,7 @@ describe("OpenRouter provider", () => {
     const firstBody = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string)
     const secondBody = JSON.parse((mockFetch.mock.calls[1][1] as RequestInit).body as string)
     expect(firstBody).toMatchObject({ model: "~openai/gpt-luna-latest", reasoning: { effort: "high" } })
+    expect(firstBody.usage).toEqual({ include: true })
     expect(firstBody.provider).toEqual({ require_parameters: true })
     expect(firstBody.tools[0].function.strict).toBe(true)
     expect(firstBody.tools[0].function.parameters.required).toEqual(["value"])

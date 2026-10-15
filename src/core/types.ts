@@ -81,6 +81,8 @@ export interface Idea extends IdeaSummary {
 export interface LLMUsage {
   inputTokens: number
   outputTokens: number
+  /** Provider-reported USD cost when the provider returns it. */
+  reportedCostUsd?: number
 }
 
 export interface LLMResponse {
