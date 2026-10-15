@@ -604,6 +604,82 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     })
   })
 
+  it("round-trips reported, unavailable, and legacy cost states through D1 and counts decisions cost once", async () => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(
+      store,
+      createInput({
+        usage: {
+          inputTokens: 200,
+          outputTokens: 30,
+          model: "openai/gpt-5.6-luna",
+          reportedCostUsd: 0.012,
+          decisionsCostUsd: 0.002,
+        },
+      }),
+    )
+    const unavailable = await store.promotePlanVersion(
+      promoteInput({
+        baseVersion: 1,
+        usage: {
+          inputTokens: 50,
+          outputTokens: 10,
+          model: "openai/gpt-5.6-luna",
+          reportedCostUsd: null,
+          decisionsCostUsd: 0.003,
+        },
+      }),
+    )
+    expect(unavailable.ok).toBe(true)
+    const legacy = await store.promotePlanVersion(
+      promoteInput({
+        baseVersion: 2,
+        usage: {
+          inputTokens: 25,
+          outputTokens: 5,
+          model: "openai/gpt-5.6-luna",
+          decisionsCostUsd: 0.004,
+        },
+      }),
+    )
+    expect(legacy.ok).toBe(true)
+
+    expect(
+      d1Scalar(
+        db,
+        "SELECT usage_reported_cost_status FROM meal_plan_version WHERE plan_id = ? AND version = 1",
+        "plan-1",
+      ),
+    ).toBe("reported")
+    expect(
+      d1Scalar(
+        db,
+        "SELECT usage_reported_cost_status FROM meal_plan_version WHERE plan_id = ? AND version = 2",
+        "plan-1",
+      ),
+    ).toBe("unavailable")
+    // Omitting the new columns has the same default state as a pre-migration row.
+    db.prepare(
+      "UPDATE meal_plan_version SET usage_reported_cost_usd = NULL, usage_reported_cost_status = 'legacy' WHERE plan_id = ? AND version = 3",
+    ).run("plan-1")
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.version.usage).toMatchObject({ inputTokens: 25, outputTokens: 5, model: "openai/gpt-5.6-luna" })
+    expect(active?.version.usage?.reportedCostUsd).toBeUndefined()
+    const total = await store.sumPlanUsage("plan-1")
+    expect(total).toMatchObject({
+      inputTokens: 275,
+      outputTokens: 45,
+      byModel: [
+        { inputTokens: 25, outputTokens: 5, model: "openai/gpt-5.6-luna" },
+        { inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna", reportedCostUsd: 0.012 },
+        { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna", reportedCostUsd: null },
+      ],
+    })
+    expect(total?.decisionsCostUsd).toBeCloseTo(0.009)
+  })
+
   it("a legacy version persisted without usage hydrates null and does not skew the sum", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
