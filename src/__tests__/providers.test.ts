@@ -470,7 +470,7 @@ describe("OpenRouter provider", () => {
     expect(result.usage).toEqual({ inputTokens: 2, outputTokens: 3, reportedCostUsd: 0.0042 })
   })
 
-  it("omits missing or invalid reported cost without changing token usage", async () => {
+  it("marks missing or invalid reported cost unavailable without changing token usage", async () => {
     mockFetch
       .mockResolvedValueOnce({
         ok: true,
@@ -488,8 +488,8 @@ describe("OpenRouter provider", () => {
       })
     const { createOpenRouterGenerator } = await import("../providers/openrouter")
     const generate = createOpenRouterGenerator("key", "openai/gpt-6-luna")
-    expect((await generate(userMsg("hi"))).usage).toEqual({ inputTokens: 2, outputTokens: 0 })
-    expect((await generate(userMsg("hi"))).usage).toEqual({ inputTokens: 2, outputTokens: 3 })
+    expect((await generate(userMsg("hi"))).usage).toEqual({ inputTokens: 2, outputTokens: 0, reportedCostUsd: null })
+    expect((await generate(userMsg("hi"))).usage).toEqual({ inputTokens: 2, outputTokens: 3, reportedCostUsd: null })
   })
 
   it("uses the Luna model, OpenRouter reasoning, and preserves native reasoning details across tool turns", async () => {

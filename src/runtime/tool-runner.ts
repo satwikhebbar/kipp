@@ -1,3 +1,4 @@
+import { addReportedCostUsd } from "../core/cost"
 import type { LLMUsage } from "../core/types"
 import type { ToolChoice, ToolConversationMessage, ToolProviderClient, ToolReasoningMode } from "../providers"
 import { ToolGuard, type ToolRegistry, type ToolResult } from "./tools"
@@ -77,6 +78,7 @@ export async function runTools(
   const toolNames: string[] = []
   const toolExecutions: ToolExecutionSummary[] = []
   const usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
+  let hasUsage = false
   // Cumulative across turns: once a tool has succeeded, later failures in the
   // session must not revoke the tools the model already unlocked.
   const successfulTools: string[] = []
@@ -100,6 +102,8 @@ export async function runTools(
     }
     usage.inputTokens += response.usage.inputTokens ?? 0
     usage.outputTokens += response.usage.outputTokens ?? 0
+    usage.reportedCostUsd = addReportedCostUsd(usage.reportedCostUsd, response.usage.reportedCostUsd, hasUsage)
+    hasUsage = true
     if (!response.toolCalls?.length) {
       if (options.requireHandoff) {
         if (response.text) messages.push({ role: "assistant", text: response.text })

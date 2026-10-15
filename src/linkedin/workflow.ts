@@ -8,7 +8,7 @@ import {
   type ConversationTurnCoordinator,
   createConversationTurn,
 } from "../core/conversation-turn"
-import { computeCost, formatCostLine } from "../core/cost"
+import { addReportedCostUsd, computeCost, formatCostLine } from "../core/cost"
 import { remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../core/feedback-session"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "../core/types"
@@ -300,6 +300,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         chatId,
         costInputTokens: usage.inputTokens,
         costOutputTokens: usage.outputTokens,
+        costReportedUsd: usage.reportedCostUsd,
         costLine,
         model,
       })
@@ -344,6 +345,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let currentMessages = state.messages
     let runningInputTokens = state.costInputTokens ?? 0
     let runningOutputTokens = state.costOutputTokens ?? 0
+    let runningReportedCostUsd: number | null | undefined = state.costReportedUsd
     let latestCostLine = state.costLine
 
     const expireFeedback = async (round: number): Promise<PipelineWorkflowOutcome> => {
@@ -582,6 +584,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const cumulativeUsage: LLMUsage = {
           inputTokens: runningInputTokens + stepUsage.inputTokens,
           outputTokens: runningOutputTokens + stepUsage.outputTokens,
+          reportedCostUsd: addReportedCostUsd(runningReportedCostUsd, stepUsage.reportedCostUsd, true),
         }
         const cost = computeCost(cumulativeUsage, model)
         const costLine = formatCostLine(cost)
@@ -591,6 +594,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           messages: session.messages,
           costInputTokens: cumulativeUsage.inputTokens,
           costOutputTokens: cumulativeUsage.outputTokens,
+          costReportedUsd: cumulativeUsage.reportedCostUsd,
           costLine,
           model,
         })
@@ -601,6 +605,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       currentMessages = revised.messages
       runningInputTokens = revised.costInputTokens
       runningOutputTokens = revised.costOutputTokens
+      runningReportedCostUsd = revised.costReportedUsd
       latestCostLine = revised.costLine
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
