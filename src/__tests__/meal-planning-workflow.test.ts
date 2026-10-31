@@ -17,6 +17,7 @@ import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../m
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 import { createD1TestDb, d1Count } from "./d1-test-db"
+import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const SLOT_COOK: Record<string, number> = { breakfast: 15, snack1: 0, snack2: 0, "school-lunch": 20, "home-lunch": 20 }
@@ -334,7 +335,7 @@ function createFakeStep(events: MealPlanningLiveEvent[], endTime: number) {
       // Advance the mocked clock to week end so the live loop's `week_end`
       // check terminates on the next iteration.
       vi.setSystemTime(endTime)
-      return { type: "timeout" as const }
+      throw workflowTimeoutError()
     }),
     sleep: vi.fn(),
     sleepUntil: vi.fn(),
@@ -356,7 +357,7 @@ function createMemoizingStep(events: MealPlanningLiveEvent[], endTime: number) {
       const next = queue.shift()
       if (next) return { type: "event" as const, payload: next }
       vi.setSystemTime(endTime)
-      return { type: "timeout" as const }
+      throw workflowTimeoutError()
     }),
     sleep: vi.fn(),
     sleepUntil: vi.fn(),
@@ -390,6 +391,52 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  it("handles daily idle timeouts and late replay without regenerating or changing the saved plan", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const { telegramMessages, deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+    const cache = new Map<string, unknown>()
+    const timedOut = new Set<string>()
+    const durations: number[] = []
+    const step = {
+      do: vi.fn(async (name: string, fn: () => unknown) => {
+        if (!cache.has(name)) cache.set(name, structuredClone(await fn()))
+        return structuredClone(cache.get(name))
+      }),
+      waitForEvent: vi.fn(async (name: string, options: { timeout: string }) => {
+        if (!timedOut.has(name)) {
+          const seconds = Number.parseInt(options.timeout, 10)
+          durations.push(seconds)
+          vi.setSystemTime(Date.now() + seconds * 1000)
+          timedOut.add(name)
+        }
+        throw workflowTimeoutError()
+      }),
+    }
+    const env = makeEnv(namespace, d1)
+    const event = mealEvent(invokedAtMs)
+    await runAgentCenteredMealPlanningWorkflow(env, event, step as never)
+    const store = createMealPlanningStore(d1)
+    const saved = await store.activePlan(CHAT)
+    expect(durations.length).toBeGreaterThan(1)
+    expect(durations.every((seconds) => seconds <= 86_400)).toBe(true)
+    expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(week.weekEnd))
+    vi.setSystemTime(Date.now() + 8 * 86_400_000)
+    await runAgentCenteredMealPlanningWorkflow(env, event, step as never)
+    expect(await store.activePlan(CHAT)).toEqual(saved)
+    expect(deepseekBodies).toHaveLength(2)
+    expect(telegramMessages.filter((message) => message.text.includes("School week of"))).toHaveLength(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
   })
 
   it("persists plan v1, sends the plan message with a feedback button, and parks until week end", async () => {
@@ -871,7 +918,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
             },
           }
         vi.setSystemTime(Date.parse(week.weekEnd))
-        return { type: "timeout" as const }
+        throw workflowTimeoutError()
       }),
       sleep: vi.fn(),
       sleepUntil: vi.fn(),
@@ -1279,7 +1326,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           }
         }
         vi.setSystemTime(Date.parse(week.weekEnd) + 1)
-        return { type: "timeout" as const }
+        throw workflowTimeoutError()
       }),
       sleep: vi.fn(),
       sleepUntil: vi.fn(),

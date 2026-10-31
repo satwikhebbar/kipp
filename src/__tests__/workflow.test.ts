@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { TranscriptTooLargeError } from "../core/conversation"
 import type { Env } from "../core/types"
+import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
 vi.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -321,6 +322,64 @@ describe("PipelineWorkflow", () => {
     expect(linkedinDrafts).toEqual(["My draft content"])
   })
 
+  it("restores a previously approved publication on replay after the feedback deadline", async () => {
+    testRun()
+    mockCreateGenerator.mockResolvedValueOnce({ text: "Approved draft", usage: { inputTokens: 5, outputTokens: 3 } })
+    const { fetchMock, linkedinDrafts, patches, telegramTexts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    const cache = new Map<string, unknown>()
+    stepDo.mockImplementation(async (name: string, fn: () => unknown) => {
+      if (!cache.has(name)) cache.set(name, structuredClone(await fn()))
+      return structuredClone(cache.get(name))
+    })
+    waitForEvent.mockResolvedValue({ type: "telegram-reply", payload: { text: "__approve__" } })
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, {
+      env: {
+        ...mockEnv(),
+        ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
+        LINKEDIN_ACCESS_TOKEN: "valid-token",
+        LINKEDIN_AUTHOR_URN: "urn:li:person:123",
+        LINKEDIN_CLIENT_ID: "client-id",
+        LINKEDIN_CLIENT_SECRET: "client-secret",
+        DEPLOYMENT_ENV: "development",
+      },
+    })
+    const event = makeEvent()
+    const runner = wf as unknown as { run: (event: unknown, step: unknown) => Promise<{ outcome: string }> }
+    const first = await runner.run(event, makeStep())
+    expect(first.outcome).toBe("published")
+    const messages = telegramTexts.length
+    const patchCount = patches.length
+    const clock = vi.spyOn(Date, "now").mockReturnValue(event.timestamp.getTime() + 2 * 86_400_000)
+    try {
+      expect(await runner.run(event, makeStep())).toEqual(first)
+      expect(linkedinDrafts).toEqual(["Approved draft"])
+      expect(mockCreateGenerator).toHaveBeenCalledTimes(1)
+      expect(telegramTexts).toHaveLength(messages)
+      expect(patches).toHaveLength(patchCount)
+      expect(patchedStatuses(patches)).not.toContain("awaiting-feedback-expired")
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  it("does not mark approval expired when waiting fails for an unexpected reason", async () => {
+    testRun()
+    mockCreateGenerator.mockResolvedValueOnce({ text: "Draft", usage: { inputTokens: 5, outputTokens: 3 } })
+    const { fetchMock, patches, linkedinDrafts } = buildFetch([BASE_PAGE])
+    vi.stubGlobal("fetch", fetchMock)
+    const failure = new Error("workflow storage unavailable")
+    waitForEvent.mockRejectedValueOnce(failure)
+    const wf = new PipelineWorkflow({} as never, {} as never)
+    Object.assign(wf, { env: mockEnv() })
+    await expect(
+      (wf as unknown as { run: (e: unknown, s: unknown) => Promise<unknown> }).run(makeEvent(), makeStep()),
+    ).rejects.toBe(failure)
+    expect(patchedStatuses(patches)).not.toContain("awaiting-feedback-expired")
+    expect(linkedinDrafts).toHaveLength(0)
+  })
+
   it("times out when no feedback received, marking idea as expired", async () => {
     const responses = [{ text: "My draft content", usage: { inputTokens: 5, outputTokens: 3 } }]
     let callIdx = 0
@@ -329,7 +388,7 @@ describe("PipelineWorkflow", () => {
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
     const { fetchMock, patches } = buildFetch([BASE_PAGE])
     vi.stubGlobal("fetch", fetchMock)
-    waitForEvent.mockResolvedValue({ type: "timeout" })
+    waitForEvent.mockRejectedValue(workflowTimeoutError())
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: mockEnv() })
@@ -766,7 +825,7 @@ describe("PipelineWorkflow", () => {
 
     testRun()
     mockCreateGenerator.mockImplementation(async () => responses[callIdx++])
-    waitForEvent.mockResolvedValue({ type: "timeout" })
+    waitForEvent.mockRejectedValue(workflowTimeoutError())
     const { fetchMock, patches, telegramTexts } = buildFetch([noChatPage])
     vi.stubGlobal("fetch", fetchMock)
 
@@ -870,7 +929,7 @@ describe("PipelineWorkflow", () => {
     })
     const retryingStep = {
       do: sendStep,
-      waitForEvent: vi.fn().mockResolvedValue({ type: "timeout" }),
+      waitForEvent: vi.fn().mockRejectedValue(workflowTimeoutError()),
       sleep: vi.fn(),
       sleepUntil: vi.fn(),
     }

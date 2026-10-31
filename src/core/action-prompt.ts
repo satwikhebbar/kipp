@@ -3,6 +3,7 @@ import { createTelegramClient } from "../integrations/telegram"
 import { logRuntime } from "../runtime/logging"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import type { Env, WorkflowInteractionKind } from "./types"
+import { waitForWorkflowEvent } from "./workflow-events"
 
 export type ActionPromptOutcome =
   | { type: "timeout" }
@@ -54,7 +55,6 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
     chatId,
     version,
     name,
-    message,
     actions,
     keyboard = true,
     ttlMs,
@@ -65,30 +65,30 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
   if (keyboard && actions.length > 1 && actions.some(([label]) => label.length > maxLabelChars))
     throw new Error(`Action labels must be at most ${maxLabelChars} characters`)
   let stage: ActionPromptStage = "notify"
-  const prepared = actions.map(([label, kind]) => ({
-    label,
-    kind,
-    interactionId: crypto.randomUUID(),
-    callbackToken: keyboard ? crypto.randomUUID() : undefined,
-  }))
   try {
-    const sent = await step.do(`${name}-notify`, () =>
-      createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
+    const sent = await step.do(`${name}-notify`, async () => {
+      const prepared = actions.map(([label, kind]) => ({
+        label,
+        kind,
+        interactionId: crypto.randomUUID(),
+        callbackToken: keyboard ? crypto.randomUUID() : undefined,
+      }))
+      const message = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
         chatId,
-        message,
+        options.message,
         keyboard
           ? {
               replyMarkup: {
                 inline_keyboard: [
-                  prepared
-                    .filter((action) => action.callbackToken)
-                    .map((action) => ({ text: action.label, callback_data: action.callbackToken })),
+                  prepared.map((action) => ({ text: action.label, callback_data: action.callbackToken ?? "" })),
                 ],
               },
             }
           : { replyMarkup: { force_reply: true } },
-      ),
-    )
+      )
+      return { messageId: message.messageId, prepared, expiresAt: Date.now() + ttlMs }
+    })
+    const prepared = sent.prepared
     stage = "register"
     await step.do(`${name}-register`, async () => {
       const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
@@ -101,14 +101,14 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
             kind: action.kind,
             callbackToken: action.callbackToken,
             botMessageId: sent.messageId,
-            expiresAt: Date.now() + ttlMs,
+            expiresAt: sent.expiresAt,
             ...(interactionGroup ? { interactionGroup } : {}),
           } satisfies InteractionRegistration),
         ),
       )
     })
     stage = "wait"
-    const reply = await step.waitForEvent<{ text?: string; interactionId?: string }>(`${name}-wait`, {
+    const reply = await waitForWorkflowEvent<{ text?: string; interactionId?: string }>(step, `${name}-wait`, {
       type: "telegram-reply",
       timeout: "15 minutes" as never,
     })

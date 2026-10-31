@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
-import type { Env } from "../core/types"
+import { promptForActions } from "../core/action-prompt"
+import { type Env, INTERACTION_KIND } from "../core/types"
 import type { ToolConversationMessage } from "../providers"
+import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
 vitest.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -163,8 +165,52 @@ function workflowEvent(requestText = "Call Jamie on 2026-07-28 at 7pm") {
 
 function createStep(...events: Array<{ type: string; payload?: { text: string; interactionId?: string } }>) {
   const waitForEvent = vitest.fn()
-  for (const event of events) waitForEvent.mockResolvedValueOnce(event)
+  for (const event of events) {
+    if (event.type === "timeout") waitForEvent.mockRejectedValueOnce(workflowTimeoutError())
+    else waitForEvent.mockResolvedValueOnce(event)
+  }
   return { do: vitest.fn(async (_name: string, fn: () => unknown) => fn()), waitForEvent }
+}
+
+/** Restores serialized step results, while allowing a second runner to resume a parked wait. */
+function replayStep(events: Array<{ type: string; payload?: { text: string; interactionId?: string } }> = []) {
+  const cache = new Map<string, unknown>()
+  const waits = new Map<string, unknown>()
+  const queue = [...events]
+  let announceParked: () => void = () => undefined
+  const parked = new Promise<void>((resolve) => {
+    announceParked = resolve
+  })
+  let release: (error: Error) => void = () => undefined
+  let replaying = false
+  const step = {
+    do: vitest.fn(async (name: string, fn: () => unknown) => {
+      if (!cache.has(name)) cache.set(name, structuredClone(await fn()))
+      return structuredClone(cache.get(name))
+    }),
+    waitForEvent: vitest.fn(async (name: string) => {
+      if (waits.has(name)) return structuredClone(waits.get(name))
+      const event = queue.shift()
+      if (event) {
+        waits.set(name, structuredClone(event))
+        return event
+      }
+      if (replaying) throw workflowTimeoutError()
+      announceParked()
+      return new Promise<never>((_resolve, reject) => {
+        release = reject
+      })
+    }),
+  }
+  return {
+    step,
+    parked,
+    replay: () => {
+      replaying = true
+    },
+    finish: () => release(workflowTimeoutError()),
+    cache,
+  }
 }
 
 function telegramMock() {
@@ -200,6 +246,198 @@ describe("agent-centered CalendarWorkflow", () => {
   afterEach(() => {
     vitest.useRealTimers()
     vitest.unstubAllGlobals()
+  })
+
+  it.each([
+    ["one-off", ONE_OFF, false],
+    ["recurring", RECURRING, false],
+    ["conflict alternative", ONE_OFF, true],
+    ["recurring adjustments", RECURRING, true],
+  ] as const)("replays a completed %s write after plan expiry without another write or failure", async (_label, candidate, choice) => {
+    const telegram = telegramMock()
+    if (choice) {
+      mockBusyIntervals.mockResolvedValue([{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }])
+      queueChoice(candidate)
+    } else queueReady(candidate)
+    const harness = replayStep(
+      choice
+        ? [
+            {
+              type: "event",
+              payload: {
+                text:
+                  candidate.kind === "recurring"
+                    ? "__calendar-recurrence-adjustments__"
+                    : "__calendar-conflict-alternative__",
+              },
+            },
+          ]
+        : [],
+    )
+    const initial = run(harness.step)
+    await harness.parked
+    const providerCalls = mockGenerate.mock.calls.length
+    const reads = mockBusyIntervals.mock.calls.length
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    // Expire the plan while the optional Edit wait is outstanding, then rebuild
+    // the workflow with fresh locals and serialized, cached durable results.
+    vitest.setSystemTime(Date.now() + 20 * 60_000)
+    harness.replay()
+    await run(harness.step)
+    harness.finish()
+    await initial
+    expect(mockGenerate).toHaveBeenCalledTimes(providerCalls)
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(reads)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+    expect(telegram).toHaveBeenCalledTimes(choice ? 2 : 1)
+    const decisions = [...harness.cache.values()].filter(
+      (value) => value && typeof value === "object" && "authorization" in value,
+    ) as Array<{ ledger: { records: Array<{ status: string }>; options: Array<{ status: string }> } }>
+    expect(decisions).toHaveLength(1)
+    expect(
+      [...decisions[0].ledger.records, ...decisions[0].ledger.options].some((record) => record.status === "used"),
+    ).toBe(true)
+  })
+
+  it("replays clarification and authorization recovery after creation without a late no-decision message", async () => {
+    queueQuestion("Which date?")
+    queueReady(ONE_OFF)
+    mockBusyIntervals
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new MockGoogleCalendarError("disconnected", "authorization"))
+      .mockResolvedValue([])
+    queueReady(ONE_OFF)
+    const telegram = telegramMock()
+    const harness = replayStep([
+      { type: "event", payload: { text: "30 October" } },
+      { type: "event", payload: { text: "__calendar-retry__" } },
+    ])
+    const initial = run(harness.step)
+    await harness.parked
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    const providerCalls = mockGenerate.mock.calls.length
+    vitest.setSystemTime(Date.now() + 20 * 60_000)
+    harness.replay()
+    await run(harness.step)
+    harness.finish()
+    await initial
+    expect(mockGenerate).toHaveBeenCalledTimes(providerCalls)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(telegram).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    ONE_OFF,
+    RECURRING,
+  ])("replays an update after expiry without repeating either mutation ($kind)", async (candidate) => {
+    queueReady(candidate)
+    queueReady(candidate)
+    const telegram = telegramMock()
+    const harness = replayStep([
+      { type: "event", payload: { text: "__calendar-edit__" } },
+      { type: "event", payload: { text: "Keep the same time" } },
+    ])
+    const initial = run(harness.step)
+    await harness.parked
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    vitest.setSystemTime(Date.now() + 20 * 60_000)
+    harness.replay()
+    await run(harness.step)
+    harness.finish()
+    await initial
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(telegram).toHaveBeenCalledTimes(3)
+  })
+
+  it("restores exact action IDs after replay, including choices with the same action kind", async () => {
+    const telegram = telegramMock()
+    const registrations: Array<{ interactionId: string; callbackToken: string; expiresAt: number }> = []
+    const env = environment()
+    env.INTERACTION_ROUTER = {
+      idFromName: () => "chat",
+      get: () => ({
+        fetch: async (_url: unknown, init: RequestInit) => {
+          registrations.push(JSON.parse(init.body as string))
+          return new Response(JSON.stringify({ ok: true }))
+        },
+      }),
+    } as unknown as Env["INTERACTION_ROUTER"]
+    const cache = new Map<string, unknown>()
+    const step = {
+      do: vitest.fn(async (name: string, fn: () => unknown) => {
+        if (!cache.has(name)) cache.set(name, structuredClone(await fn()))
+        return structuredClone(cache.get(name))
+      }),
+      waitForEvent: vitest.fn().mockRejectedValueOnce(workflowTimeoutError()),
+    }
+    const options = {
+      env,
+      step: step as never,
+      instanceId: "wf",
+      chatId: "123",
+      version: 1,
+      name: "choices",
+      message: "Pick one",
+      ttlMs: 900_000,
+      actions: [
+        ["First", INTERACTION_KIND.CALENDAR_CONFLICT_ALTERNATIVE],
+        ["Second", INTERACTION_KIND.CALENDAR_CONFLICT_ALTERNATIVE],
+      ] as Array<[string, typeof INTERACTION_KIND.CALENDAR_CONFLICT_ALTERNATIVE]>,
+    }
+    await expect(promptForActions(options)).resolves.toEqual({ type: "timeout" })
+    const original = registrations[1]
+    vitest.setSystemTime(Date.now() + 20 * 60_000)
+    step.waitForEvent.mockResolvedValueOnce({
+      type: "telegram-reply",
+      payload: { text: "__calendar-conflict-alternative__", interactionId: original.interactionId },
+    })
+    await expect(promptForActions(options)).resolves.toEqual({
+      type: "action",
+      kind: INTERACTION_KIND.CALENDAR_CONFLICT_ALTERNATIVE,
+      actionIndex: 1,
+    })
+    expect(telegram).toHaveBeenCalledTimes(1)
+    expect(registrations).toHaveLength(2)
+    expect(registrations[1]).toEqual(original)
+  })
+
+  it("accepts an Edit inside its confirmation window after the original plan authorization expires", async () => {
+    queueQuestion("Which date?")
+    queueReady(ONE_OFF)
+    queueReady(ONE_OFF)
+    const start = Date.now()
+    const step = createStep()
+    step.waitForEvent
+      .mockImplementationOnce(async () => {
+        vitest.setSystemTime(start + 2 * 60_000)
+        return { type: "telegram-reply", payload: { text: "28 July" } }
+      })
+      .mockImplementationOnce(async () => {
+        // Event was created at minute 2: this Edit is still inside its own
+        // fifteen-minute window, although the original plan expired at minute 15.
+        vitest.setSystemTime(start + 16 * 60_000)
+        return { type: "telegram-reply", payload: { text: "__calendar-edit__" } }
+      })
+      .mockResolvedValueOnce({ type: "telegram-reply", payload: { text: "Keep this time" } })
+      .mockRejectedValueOnce(workflowTimeoutError())
+    await run(step)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("still rejects a genuinely expired plan that has never been authorized or written", async () => {
+    queueReady(ONE_OFF)
+    const step = createStep()
+    step.do.mockImplementation(async (name: string, fn: () => unknown) => {
+      const result = await fn()
+      if (name === "calendar-agent-session-0") vitest.setSystemTime(Date.now() + 16 * 60_000)
+      return result
+    })
+    await run(step)
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockBusyIntervals).toHaveBeenCalledTimes(1)
   })
 
   it("revalidates and writes one exact one-off plan", async () => {
@@ -482,6 +720,24 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(sentTexts).not.toContain(
       "The calendar agent didn't return a scheduling decision. Please retry your request.",
     )
+  })
+
+  it("reports a later update failure without claiming the original creation failed", async () => {
+    queueReady(ONE_OFF)
+    queueReady(ONE_OFF)
+    mockUpdateManagedEvent.mockRejectedValueOnce(new MockGoogleCalendarError("unavailable", "transient"))
+    const telegram = telegramMock()
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-edit__" } },
+        { type: "event", payload: { text: "Keep the same time" } },
+      ),
+    )
+    const texts = telegram.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string).text as string)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(texts.some((text) => text.startsWith("Added:"))).toBe(true)
+    expect(texts.at(-1)).toContain("couldn't complete that calendar update")
+    expect(texts.some((text) => text.includes("couldn't create"))).toBe(false)
   })
 
   it("compensates a newly created recurring parent when reconciliation fails", async () => {

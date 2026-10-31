@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
+import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import { mealPlanSelectionCandidateToWire, mealPlanSelectionPatchToWire } from "../agent/meal-planning"
 import type { Env } from "../core/types"
 import type { MealCell, MealPlanCandidate, MealPlanSelectionCandidate } from "../meal-planning/types"
@@ -216,14 +217,16 @@ function callback(token: string, updateId = 10): Request {
 
 function liveStep() {
   const queue: Array<MealPlanningLiveEvent | { type: "timeout" }> = []
+  let rejectWait: ((reason: Error) => void) | undefined
   let waiter: ((value: { type: string; payload?: MealPlanningLiveEvent }) => void) | undefined
   return {
     do: vitest.fn(async (_name: string, fn: () => unknown) => fn()),
     waitForEvent: vitest.fn(async () => {
       const next = queue.shift()
       if (next && "payload" in next) return { type: "event", payload: next.payload }
-      if (next) return { type: "timeout" }
-      return new Promise((resolve) => {
+      if (next) throw workflowTimeoutError()
+      return new Promise((resolve, reject) => {
+        rejectWait = reject
         waiter = resolve
       })
     }),
@@ -240,9 +243,8 @@ function liveStep() {
       // Advance past any plan's week end so the live loop's `week_end` check ends on its next cycle.
       vitest.setSystemTime(Date.now() + 8 * 86_400_000)
       if (waiter) {
-        const resolve = waiter
         waiter = undefined
-        resolve({ type: "timeout" })
+        rejectWait?.(workflowTimeoutError())
       } else queue.push({ type: "timeout" })
     },
     isWaiting: () => Boolean(waiter),
@@ -261,10 +263,10 @@ function memoStep() {
       return result
     }),
     waitForEvent: vitest.fn(async () => {
-      if (ended) return { type: "timeout" }
+      if (ended) throw workflowTimeoutError()
       ended = true
       vitest.setSystemTime(Date.now() + 8 * 86_400_000)
-      return { type: "timeout" }
+      throw workflowTimeoutError()
     }),
     sleep: vitest.fn(),
     sleepUntil: vitest.fn(),

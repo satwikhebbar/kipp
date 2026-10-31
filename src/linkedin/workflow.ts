@@ -5,6 +5,7 @@ import { assertStepOutputSize } from "../core/conversation"
 import { computeCost, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "../core/types"
+import { waitForWorkflowEvent } from "../core/workflow-events"
 import { createGitHubClient } from "../integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integrations/linkedin"
 import { createNotionClient } from "../integrations/notion"
@@ -393,7 +394,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let latestCostLine = state.costLine
 
     for (let i = 0; i < MAX_FEEDBACK_ROUNDS; i++) {
-      const timeoutSeconds = remainingFeedbackTimeoutSeconds(feedbackDeadlineMs)
+      const timeoutSeconds = await stepDo(`feedback-remaining-${i}`, async () =>
+        remainingFeedbackTimeoutSeconds(feedbackDeadlineMs),
+      )
       if (timeoutSeconds === 0) {
         await stepDo(`timeout-${i}`, async () => {
           const manager = createIdeaManager(createNotionClient(this.env))
@@ -407,12 +410,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         outcome: "started",
         details: { round: i, timeoutSeconds },
       })
-      const reply = await step.waitForEvent<{ text?: string }>(`feedback-${i}`, {
+      const reply = await waitForWorkflowEvent<{ text?: string }>(step, `feedback-${i}`, {
         type: "telegram-reply",
         // biome-ignore lint/suspicious/noExplicitAny: WorkflowSleepDuration doesn't accept computed strings
         timeout: `${timeoutSeconds} seconds` as any,
       })
-      const text = (reply.payload?.text as string) ?? ((reply as Record<string, unknown>)?.text as string) ?? ""
+      const text = reply.payload?.text ?? ""
       logRuntime(this.env, {
         workflow: event.instanceId,
         event: "linkedin-feedback-wait",

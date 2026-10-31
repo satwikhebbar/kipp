@@ -1,4 +1,8 @@
+import { readFile } from "node:fs/promises"
+import { createRequire } from "node:module"
+import { URL as NodeURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
+import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import type { Env } from "../core/types"
 import type { ToolConversationMessage } from "../providers"
 
@@ -229,6 +233,7 @@ function env(overrides?: Partial<Env>): Env {
 function liveWorkflowBinding() {
   const created: Array<{ id: string; params: unknown }> = []
   const events: unknown[] = []
+  let rejectWait: ((reason: Error) => void) | undefined
   let waiter: ((event: unknown) => void) | undefined
   return {
     create: vitest.fn(async (params: unknown) => {
@@ -246,16 +251,17 @@ function liveWorkflowBinding() {
       }),
     })),
     waitForEvent: () =>
-      new Promise((resolve) => {
+      new Promise((resolve, reject) => {
+        rejectWait = reject
         const queued = events.shift()
-        if (queued) resolve(queued)
+        if ((queued as { type?: string })?.type === "timeout") reject(workflowTimeoutError())
+        else if (queued) resolve(queued)
         else waiter = resolve
       }),
     timeout: () => {
       if (waiter) {
-        const resolve = waiter
         waiter = undefined
-        resolve({ type: "timeout" })
+        rejectWait?.(workflowTimeoutError())
       } else events.push({ type: "timeout" })
     },
     isWaiting: () => Boolean(waiter),
@@ -939,4 +945,68 @@ describe("agent-centered Calendar Telegram integration", () => {
 
     expect(calendar.getReceivedEvents()).toHaveLength(1)
   })
+})
+
+describe("Cloudflare Workflows event timeout contract", () => {
+  it("normalizes an actual runtime timeout and receives actual event payloads", async () => {
+    // Use Wrangler's bundled runtime so this checks the same implementation as local dev.
+    const require = createRequire(import.meta.url)
+    const runtimeRequire = createRequire(require.resolve("wrangler/package.json"))
+    const { Miniflare } = runtimeRequire("miniflare") as {
+      Miniflare: new (
+        options: unknown,
+      ) => {
+        dispatchFetch(url: string): Promise<Response>
+        dispose(): Promise<void>
+      }
+    }
+    const { transform } = runtimeRequire("esbuild") as {
+      transform(source: string, options: unknown): Promise<{ code: string }>
+    }
+    const adapter = await readFile(new NodeURL("../core/workflow-events.ts", import.meta.url), "utf8")
+    const source = `${adapter}
+      import { WorkflowEntrypoint } from "cloudflare:workers";
+      export class TimeoutProbe extends WorkflowEntrypoint {
+        async run(event, step) {
+          return waitForWorkflowEvent(step, "probe", {type: "probe-event", timeout: "1 second"});
+        }
+      }
+      export default {
+        async fetch(request, env) {
+          const url = new URL(request.url);
+          if (url.pathname === "/start") {
+            const instance = await env.PROBE.create({id: url.searchParams.get("id")});
+            if (url.searchParams.has("deliver")) await instance.sendEvent({type: "probe-event", payload: {text: "hello"}});
+            return Response.json({id: instance.id});
+          }
+          return Response.json(await (await env.PROBE.get(url.searchParams.get("id"))).status());
+        }
+      };
+    `
+    const { code } = await transform(source, { loader: "ts", format: "esm", target: "es2022" })
+    const runtime = new Miniflare({
+      modules: true,
+      script: code,
+      compatibilityDate: "2026-07-08",
+      workflows: { PROBE: { name: "timeout-probe", className: "TimeoutProbe" } },
+    })
+    try {
+      for (const [id, deliver, expected] of [
+        ["timeout-case", false, { type: "timeout" }],
+        ["event-case", true, { type: "event", payload: { text: "hello" } }],
+      ] as const) {
+        expect((await runtime.dispatchFetch(`http://probe/start?id=${id}${deliver ? "&deliver=1" : ""}`)).ok).toBe(true)
+        let status: { status?: string; output?: unknown; error?: unknown } = {}
+        const deadline = Date.now() + 10_000
+        do {
+          status = await (await runtime.dispatchFetch(`http://probe/status?id=${id}`)).json()
+          if (status.status === "complete" || status.status === "errored") break
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        } while (Date.now() < deadline)
+        expect(status, JSON.stringify(status)).toMatchObject({ status: "complete", output: expected })
+      }
+    } finally {
+      await runtime.dispose()
+    }
+  }, 20_000)
 })

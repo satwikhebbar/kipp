@@ -14,6 +14,7 @@ import type { CalendarEvaluationContext } from "./evaluation"
 import { evaluateCalendarCandidate } from "./evaluation"
 import {
   type CalendarPlan,
+  type CalendarPlanAuthorization,
   type CalendarPlanLedger,
   consumeCalendarOption,
   consumeCalendarPlan,
@@ -30,6 +31,7 @@ const MILLISECONDS_PER_MINUTE = 60_000
 const CALENDAR_INTERACTION_TTL_MS = CALENDAR_INTERACTION_TTL_MINUTES * MILLISECONDS_PER_MINUTE
 const MAX_CALENDAR_INTERACTION_TURNS = 8
 const CALENDAR_FAILURE = "I couldn't create that calendar block. Please try again shortly."
+const CALENDAR_UPDATE_FAILURE = "I couldn't complete that calendar update. Please check the event before trying again."
 const CALENDAR_AGENT_UNAVAILABLE = "I couldn't reach the calendar agent. Please try again shortly."
 const CALENDAR_AGENT_NO_DECISION = "The calendar agent didn't return a scheduling decision. Please retry your request."
 const CALENDAR_CANCELLED = "Cancelled. No calendar event was created."
@@ -85,7 +87,7 @@ export async function runAgentCenteredCalendarWorkflow(
   let messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `Current instant: ${new Date().toISOString()}\nCalendar time zone: ${timeZone}\nUser request: ${event.payload.requestText}`,
+      text: `Current instant: ${new Date(expiresAt - CALENDAR_INTERACTION_TTL_MS).toISOString()}\nCalendar time zone: ${timeZone}\nUser request: ${event.payload.requestText}`,
     },
   ]
   let ledger = createCalendarPlanLedger()
@@ -103,6 +105,9 @@ export async function runAgentCenteredCalendarWorkflow(
     const currentAgentVersion = ++agentVersion
     const calendar = createGoogleCalendarClient(env)
     try {
+      const turnExpiresAt = editing
+        ? await step.do(`calendar-agent-edit-expiry-${turn}`, async () => Date.now() + CALENDAR_INTERACTION_TTL_MS)
+        : expiresAt
       const sessionStep = (await step.do(`calendar-agent-session-${turn}`, (async () => {
         const sessionLedger = structuredClone(ledger)
         const provider = createToolProvider(
@@ -116,7 +121,7 @@ export async function runAgentCenteredCalendarWorkflow(
             withoutCreatedBaseline(await calendar.getBusyIntervals(timeMin, timeMax), baseline),
           ledger: sessionLedger,
           version: currentAgentVersion,
-          expiresAt,
+          expiresAt: turnExpiresAt,
           timeZone,
         }
         const session = await runCalendarAgentSession(provider, messages, { calendar, evaluation })
@@ -158,6 +163,7 @@ export async function runAgentCenteredCalendarWorkflow(
           sessionStep.session.failureReason === "missing-required-handoff"
             ? CALENDAR_AGENT_NO_DECISION
             : CALENDAR_AGENT_UNAVAILABLE,
+          `session-${turn}`,
         )
         return
       }
@@ -179,7 +185,10 @@ export async function runAgentCenteredCalendarWorkflow(
           continue
         }
 
-        const options = authorizedOptions(ledger, terminal.interaction.optionIds, currentAgentVersion)
+        const optionIds = terminal.interaction.optionIds
+        const options = await calendarDecision(step, `calendar-agent-options-authorize-${turn}`, () =>
+          authorizedOptions(ledger, optionIds, currentAgentVersion),
+        )
         if (!options) {
           if (calendarWriteOccurred) return
           logRuntime(env, {
@@ -188,7 +197,7 @@ export async function runAgentCenteredCalendarWorkflow(
             outcome: "failed",
             failureCategory: "invalid-calendar-options",
           })
-          await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION)
+          await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `options-authorize-${turn}`)
           return
         }
         const replacementKind = options.some((option) => option.plan.kind === "recurring")
@@ -213,7 +222,7 @@ export async function runAgentCenteredCalendarWorkflow(
           continue
         }
         if (response.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL) {
-          await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED)
+          await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED, `options-cancel-${turn}`)
           return
         }
         const selected = options[response.actionIndex]
@@ -231,9 +240,14 @@ export async function runAgentCenteredCalendarWorkflow(
           messages.push({ role: "user", text: replacement })
           continue
         }
-        const consumed = consumeCalendarOption(ledger, selected.optionId, currentAgentVersion)
+        const decision = await consumeInStep(step, `calendar-agent-option-consume-${turn}`, ledger, (snapshot) =>
+          consumeCalendarOption(snapshot, selected.optionId, currentAgentVersion),
+        )
+        ledger = decision.ledger
+        const consumed = decision.authorization
         if (!consumed.ok) {
-          await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION)
+          if (calendarWriteOccurred) return
+          await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `option-consume-${turn}`)
           return
         }
         if (
@@ -244,13 +258,15 @@ export async function runAgentCenteredCalendarWorkflow(
             consumed.plan,
             baseline,
             timeZone,
-            expiresAt,
+            turnExpiresAt,
           ))
         ) {
           messages.push(availabilityChangedMessage())
           continue
         }
-        const correction = await writePlanAndConfirm(
+        await writePlan(env, step, event, consumed.plan, editing, turn)
+        calendarWriteOccurred = true
+        const correction = await confirmPlanAndWaitForEdit(
           env,
           step,
           event,
@@ -267,10 +283,12 @@ export async function runAgentCenteredCalendarWorkflow(
         continue
       }
 
-      const authorized = inspectCalendarPlan(ledger, terminal.planId, currentAgentVersion)
+      const authorized = await calendarDecision(step, `calendar-agent-plan-authorize-${turn}`, () =>
+        inspectCalendarPlan(ledger, terminal.planId, currentAgentVersion),
+      )
       if (!authorized.ok) {
         if (calendarWriteOccurred) return
-        await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION)
+        await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `plan-authorize-${turn}`)
         return
       }
       if (
@@ -281,19 +299,33 @@ export async function runAgentCenteredCalendarWorkflow(
           authorized.plan,
           baseline,
           timeZone,
-          expiresAt,
+          turnExpiresAt,
         ))
       ) {
         messages.push(availabilityChangedMessage())
         continue
       }
-      const consumed = consumeCalendarPlan(ledger, terminal.planId, currentAgentVersion)
+      const decision = await consumeInStep(step, `calendar-agent-plan-consume-${turn}`, ledger, (snapshot) =>
+        consumeCalendarPlan(snapshot, terminal.planId, currentAgentVersion),
+      )
+      ledger = decision.ledger
+      const consumed = decision.authorization
       if (!consumed.ok) {
-        await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION)
+        if (calendarWriteOccurred) return
+        await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `plan-consume-${turn}`)
         return
       }
-      const correction = await writePlanAndConfirm(env, step, event, consumed.plan, editing, ++interactionVersion, turn)
+      await writePlan(env, step, event, consumed.plan, editing, turn)
       calendarWriteOccurred = true
+      const correction = await confirmPlanAndWaitForEdit(
+        env,
+        step,
+        event,
+        consumed.plan,
+        editing,
+        ++interactionVersion,
+        turn,
+      )
       if (!correction) return
       interactionVersion++
       baseline = consumed.plan
@@ -320,12 +352,43 @@ export async function runAgentCenteredCalendarWorkflow(
           ? { details: { httpStatus: error.status ?? -1, retryCount: error.retryCount } }
           : {}),
       })
-      await notify(env, step, event.payload.chatId, CALENDAR_FAILURE)
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        calendarWriteOccurred ? CALENDAR_UPDATE_FAILURE : CALENDAR_FAILURE,
+        `failure-${turn}`,
+      )
       return
     }
   }
 
-  await notify(env, step, event.payload.chatId, "I still need clearer scheduling details. Please start a new request.")
+  await notify(
+    env,
+    step,
+    event.payload.chatId,
+    "I still need clearer scheduling details. Please start a new request.",
+    "turn-limit",
+  )
+}
+
+/** Persists a decision so replay never repeats a wall-clock authorization check. */
+async function calendarDecision<T>(step: WorkflowStep, name: string, decide: () => T): Promise<T> {
+  return (await step.do(name, (async () => decide()) as never)) as T
+}
+
+/** Returns consumed ledger state alongside the decision so both are restored on replay. */
+async function consumeInStep(
+  step: WorkflowStep,
+  name: string,
+  ledger: CalendarPlanLedger,
+  consume: (snapshot: CalendarPlanLedger) => CalendarPlanAuthorization,
+): Promise<{ ledger: CalendarPlanLedger; authorization: CalendarPlanAuthorization }> {
+  return calendarDecision(step, name, () => {
+    const snapshot = structuredClone(ledger)
+    const authorization = consume(snapshot)
+    return { ledger: snapshot, authorization }
+  })
 }
 
 /** Prompts once for Calendar reconnection without treating expected authorization state as a workflow exception. */
@@ -350,7 +413,7 @@ async function promptForAuthorizationRecovery(
   )
   const accepted = retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY
   const cancelled = retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_CANCEL
-  if (cancelled) await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED)
+  if (cancelled) await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED, `reconnect-cancel-${turn}`)
   logRuntime(env, {
     workflow: event.instanceId,
     event: "calendar-authorization-retry",
@@ -429,16 +492,15 @@ function withoutCreatedBaseline(
   return busy.filter((interval) => !owned.has(`${Date.parse(interval.start)}:${Date.parse(interval.end)}`))
 }
 
-/** Writes one exact authorized plan, then performs confirmation-only recovery without repeating the mutation. */
-async function writePlanAndConfirm(
+/** Writes one exact authorized plan through a durable mutation step. */
+async function writePlan(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<CalendarWorkflowParams>,
   plan: CalendarPlan,
   editing: boolean,
-  version: number,
   turn: number,
-): Promise<string | null> {
+): Promise<void> {
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
   await step.do(`calendar-agent-${editing ? "update" : "create"}-${turn}`, async () => {
     const calendar = createGoogleCalendarClient(env)
@@ -492,7 +554,18 @@ async function writePlanAndConfirm(
     outcome: "succeeded",
     details: { operation: editing ? "update" : "create", kind: plan.kind },
   })
+}
 
+/** Confirms a completed write and optionally collects a correction. Expiry is a normal completion. */
+async function confirmPlanAndWaitForEdit(
+  env: Env,
+  step: WorkflowStep,
+  event: WorkflowEvent<CalendarWorkflowParams>,
+  plan: CalendarPlan,
+  editing: boolean,
+  version: number,
+  turn: number,
+): Promise<string | null> {
   const message = confirmationMessage(plan, editing)
   const label = plan.kind === "recurring" ? "Edit entire series" : "Edit"
   let edit: CalendarActionResponse
@@ -654,8 +727,8 @@ function logAgentSession(
 }
 
 /** Sends one deterministic workflow notification through a durable step. */
-async function notify(env: Env, step: WorkflowStep, chatId: string, message: string): Promise<void> {
-  await step.do(`calendar-agent-notify-${crypto.randomUUID()}`, () =>
+async function notify(env: Env, step: WorkflowStep, chatId: string, message: string, name: string): Promise<void> {
+  await step.do(`calendar-agent-notify-${name}`, () =>
     createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message),
   )
 }

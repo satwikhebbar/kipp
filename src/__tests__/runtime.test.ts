@@ -1,7 +1,10 @@
+import type { WorkflowStep } from "cloudflare:workers"
 import { describe, expect, it, vi } from "vitest"
 import { z } from "zod"
+import { waitForWorkflowEvent } from "../core/workflow-events"
 import { logRuntime } from "../runtime/logging"
 import { ToolGuard, ToolHandlerError, type ToolRegistry } from "../runtime/tools"
+import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
 const registry: ToolRegistry = {
   echo: {
@@ -111,5 +114,33 @@ describe("runtime logging", () => {
       details: { validationPaths: "title.source,localDate.value" },
     })
     log.mockRestore()
+  })
+})
+
+describe("workflow event wait adapter", () => {
+  it.each([
+    workflowTimeoutError(),
+    Object.assign(workflowTimeoutError(), { name: "WorkflowTimeoutError" }),
+  ])("normalizes a thrown runtime timeout (%s)", async (error) => {
+    const step = { waitForEvent: vi.fn().mockRejectedValue(error) } as unknown as WorkflowStep
+    await expect(waitForWorkflowEvent(step, "reply", { type: "telegram-reply", timeout: "1 second" })).resolves.toEqual(
+      { type: "timeout" },
+    )
+  })
+
+  it("preserves the payload even when the caller's event type is named timeout", async () => {
+    const step = {
+      waitForEvent: vi.fn().mockResolvedValue({ type: "timeout", payload: { text: "real user event" } }),
+    } as unknown as WorkflowStep
+    await expect(waitForWorkflowEvent(step, "reply", { type: "timeout" })).resolves.toEqual({
+      type: "event",
+      payload: { text: "real user event" },
+    })
+  })
+
+  it("propagates unexpected errors rather than treating any failure as expiry", async () => {
+    const error = new Error("storage timed out")
+    const step = { waitForEvent: vi.fn().mockRejectedValue(error) } as unknown as WorkflowStep
+    await expect(waitForWorkflowEvent(step, "reply", { type: "telegram-reply" })).rejects.toBe(error)
   })
 })

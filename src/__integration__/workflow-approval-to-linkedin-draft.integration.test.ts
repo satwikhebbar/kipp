@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
+import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import type { Env } from "../core/types"
 import { PipelineWorkflow } from "../linkedin/workflow"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeStep, type FakeNotionPage } from "./setup"
@@ -238,7 +239,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     const step = makeStep()
     step.waitForEvent
       .mockResolvedValueOnce({ type: "event", payload: { text: "Shorten" } })
-      .mockResolvedValueOnce({ type: "timeout" })
+      .mockRejectedValueOnce(workflowTimeoutError())
 
     const wf = new PipelineWorkflow({} as never, {} as never)
     Object.assign(wf, { env: { ...baseEnv(), LINKEDIN_ACCESS_TOKEN: "", LINKEDIN_AUTHOR_URN: "" } })

@@ -9,6 +9,7 @@ import {
 import { computeCostByModel, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowInteractionKind } from "../core/types"
+import { waitForWorkflowEvent } from "../core/workflow-events"
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage, type ToolProviderRequestEvent } from "../providers"
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
@@ -309,8 +310,8 @@ export async function runAgentCenteredMealPlanningWorkflow(
       enrichLunchVideos(env, outcome.propose.candidate),
     )
 
-    const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
     const created = await stepDo(step, "meal-planning-create-plan", async () => {
+      const planId = `mealplan-${event.payload.chatId}-${crypto.randomUUID()}`
       try {
         return await store.createActivePlan({
           planId,
@@ -504,11 +505,21 @@ async function runPlanningSession(
   },
 ): Promise<{ outcome: PlanningOutcome; usage: LLMUsage; decisionsCostUsd: number }> {
   const notifyPrefix = `meal-planning-notify-${options.occurrence}`
-  const sessionDeadline = Date.now() + MEAL_PLANNING_TTL_MS
+  const sessionDeadline = await stepDo(
+    step,
+    `meal-planning-session-deadline-${options.occurrence}`,
+    async () => Date.now() + MEAL_PLANNING_TTL_MS,
+  )
   let usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
   let decisionsCostUsd = 0
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
-    if (Date.now() > sessionDeadline) {
+    if (
+      await stepDo(
+        step,
+        `meal-planning-session-expired-${options.occurrence}-${turn}`,
+        async () => Date.now() > sessionDeadline,
+      )
+    ) {
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-deadline`)
       return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
@@ -626,12 +637,21 @@ async function promptForClarification(
       interactionGroup: MEAL_PLANNING_GROUP,
     } satisfies InteractionRegistration)
   })
-  const deadline = Date.now() + MEAL_CLARIFICATION_TTL_MS
+  const deadline = await stepDo(
+    step,
+    `meal-planning-clarify-deadline-${occurrence}-${turn}`,
+    async () => Date.now() + MEAL_CLARIFICATION_TTL_MS,
+  )
   let attempt = 0
   for (;;) {
-    const remaining = deadline - Date.now()
+    const remaining = await stepDo(
+      step,
+      `meal-planning-clarify-remaining-${occurrence}-${turn}-${attempt}`,
+      async () => deadline - Date.now(),
+    )
     if (remaining <= 0) return null
-    const response = await step.waitForEvent<MealPlanningLiveEvent>(
+    const response = await waitForWorkflowEvent<MealPlanningLiveEvent>(
+      step,
       `meal-planning-clarify-wait-${occurrence}-${turn}-${attempt}`,
       {
         type: "telegram-reply",
@@ -769,13 +789,17 @@ async function liveWeekLoop(
   // bumped by every persistence batch and carried on every post-persist registration.
   let generation = planGeneration
   for (let iteration = 0; ; iteration++) {
-    const remaining = weekEndMs - Date.now()
+    const remaining = await stepDo(
+      step,
+      `meal-planning-live-remaining-${iteration}`,
+      async () => weekEndMs - Date.now(),
+    )
     if (remaining <= 0) return
     const timeoutSeconds = Math.max(
       1,
       Math.ceil(Math.min(remaining, MEAL_LIVE_WAIT_CHUNK_MS) / MILLISECONDS_PER_SECOND),
     )
-    const response = await step.waitForEvent<MealPlanningLiveEvent>(`meal-planning-live-wait-${iteration}`, {
+    const response = await waitForWorkflowEvent<MealPlanningLiveEvent>(step, `meal-planning-live-wait-${iteration}`, {
       type: "telegram-reply",
       timeout: `${timeoutSeconds} seconds` as never,
     })
