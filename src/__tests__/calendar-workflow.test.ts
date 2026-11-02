@@ -233,7 +233,7 @@ async function run(step: ReturnType<typeof createStep>, requestText?: string): P
 }
 
 /** Starts a new edit run against the saved context from the completed generation. */
-async function editSaved(text: string, step = createStep(), openPrompt = false) {
+function savedEdit(text: string, openPrompt = false) {
   const registration = [...testRouter.registrations].reverse().find((r) => r.kind === INTERACTION_KIND.CALENDAR_EDIT)
   if (!registration) throw new Error("Missing saved edit registration")
   const sessionId = (registration.edit as { sessionId: string }).sessionId
@@ -247,6 +247,12 @@ async function editSaved(text: string, step = createStep(), openPrompt = false) 
       edit: { sessionId, userId: "42", text, openPrompt },
     },
   }
+  return { event, workflow }
+}
+
+/** Executes a separate edit using the latest registered baseline. */
+async function editSaved(text: string, step = createStep(), openPrompt = false) {
+  const { event, workflow } = savedEdit(text, openPrompt)
   await workflow.run(event as never, step as never)
   return { event, step, workflow }
 }
@@ -269,6 +275,56 @@ describe("agent-centered CalendarWorkflow", () => {
   afterEach(() => {
     vitest.useRealTimers()
     vitest.unstubAllGlobals()
+  })
+
+  it.each([
+    "notify",
+    "register",
+    "wait",
+  ])("propagates an authorization prompt interruption during %s", async (stage) => {
+    const interruption = new Error("Aborting engine: User called pause")
+    const step = {
+      do: vitest.fn(async (name: string, fn: () => unknown) => {
+        if (name === `reconnect-${stage}`) throw interruption
+        return fn()
+      }),
+      waitForEvent: vitest.fn().mockRejectedValue(interruption),
+    }
+    await expect(
+      promptForActions({
+        env: environment(),
+        step: step as never,
+        instanceId: "auth-probe",
+        chatId: "123",
+        version: 1,
+        name: "reconnect",
+        message: "Reconnect then retry",
+        ttlMs: 900_000,
+        actions: [["Retry", INTERACTION_KIND.CALENDAR_RETRY]],
+      }),
+    ).rejects.toBe(interruption)
+  })
+
+  it.each([
+    "other-user",
+    "other-chat",
+    "unknown-session",
+  ])("rejects a saved Calendar edit from %s without consuming the owner's context", async (attempt) => {
+    queueReady(ONE_OFF)
+    await run(createStep())
+    const { event, workflow } = savedEdit("Move this to 8pm")
+    const step = createStep()
+    const denied = structuredClone(event)
+    if (attempt === "other-user") denied.payload.edit.userId = "99"
+    if (attempt === "other-chat") denied.payload.chatId = "another-chat"
+    if (attempt === "unknown-session") denied.payload.edit.sessionId = "missing"
+    await workflow.run(denied as never, step as never)
+    expect(mockGenerate).toHaveBeenCalledTimes(2)
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+    expect(step.do.mock.calls.map(([name]) => name)).not.toContain("calendar-edit-claim")
+    queueReady(ONE_OFF)
+    await workflow.run(event as never, createStep() as never)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
   })
 
   it.each([
@@ -498,6 +554,81 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
     finish()
     await first
+  })
+
+  it.each(["expired", "replaced"])("rejects context %s between load and lock acquisition", async (change) => {
+    queueReady(ONE_OFF)
+    await run(createStep())
+    const step = createStep()
+    step.do.mockImplementation(async (name, fn) => {
+      if (name === "calendar-edit-claim") {
+        if (change === "expired") vitest.setSystemTime(Date.now() + 16 * 60_000)
+        else {
+          const { createInteractionRouter } = await import("../core/interaction-router-client")
+          await createInteractionRouter(testRouter.namespace, "123").saveEditContext({
+            sessionId: "newer-baseline",
+            resourceId: "calendar:calendar-workflow-1",
+            userId: "42",
+            expiresAt: Date.now() + 60_000,
+            context: { replacement: true },
+          })
+        }
+      }
+      return fn()
+    })
+    await editSaved("Move it", step)
+    expect(mockGenerate).toHaveBeenCalledTimes(2)
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+    const { createInteractionRouter } = await import("../core/interaction-router-client")
+    expect(
+      await createInteractionRouter(testRouter.namespace, "123").claimEdit(
+        "calendar:calendar-workflow-1",
+        "next",
+        "calendar",
+      ),
+    ).toEqual({ ok: true })
+  })
+
+  it.each([
+    "calendar-agent-edit-context-0",
+    "calendar-agent-save-edit-context-0",
+    "calendar-agent-confirmation-0-notify",
+    "calendar-agent-confirmation-0-register",
+  ])("recovers an edit interrupted before %s without repeating the saved mutation", async (boundary) => {
+    queueReady(ONE_OFF)
+    queueReady(ONE_OFF)
+    await run(createStep())
+    const telegram = telegramMock()
+    const harness = replayStep()
+    const execute = harness.step.do.getMockImplementation()
+    if (!execute) throw new Error("missing step implementation")
+    let announce: () => void = () => undefined
+    const interrupted = new Promise<void>((resolve) => {
+      announce = resolve
+    })
+    let suspending = true
+    harness.step.do.mockImplementation(async (name, fn) => {
+      if (suspending && name === boundary) {
+        announce()
+        return new Promise<never>(() => undefined)
+      }
+      return execute(name, fn)
+    })
+    const { event, workflow } = savedEdit("Keep this time")
+    void workflow.run(event as never, harness.step as never)
+    await interrupted
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    suspending = false
+    await workflow.run(event as never, harness.step as never)
+    expect(mockGenerate).toHaveBeenCalledTimes(4)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(telegram).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(telegram.mock.calls)).not.toMatch(/couldn't|didn't return/)
+    expect(testRouter.registrations.filter((r) => r.kind === INTERACTION_KIND.CALENDAR_EDIT)).toHaveLength(2)
+    // The recovered confirmation has working edit authority and releases its lock.
+    await editSaved("", createStep(), true)
+    expect(mockGenerate).toHaveBeenCalledTimes(4)
   })
 
   it("still rejects a genuinely expired plan that has never been authorized or written", async () => {

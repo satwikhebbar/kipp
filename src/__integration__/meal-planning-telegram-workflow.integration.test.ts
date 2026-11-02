@@ -1,3 +1,7 @@
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { createRequire } from "node:module"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
 import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import { mealPlanSelectionCandidateToWire, mealPlanSelectionPatchToWire } from "../agent/meal-planning"
@@ -732,4 +736,288 @@ describe("agent-centered meal-planning Telegram integration", () => {
     ).toBe(1)
     expect((await store.activePlan("100"))?.plan.currentVersion).toBe(1)
   })
+})
+
+describe("meal edit recovery in the actual Workflow runtime", () => {
+  it.each([
+    "meal-planning-promote-revision-0",
+    "meal-planning-send-plan-revision-0",
+    "meal-planning-register-feedback-revision-0",
+    "uncheckpointed-promotion",
+  ])("restores persisted D1, batch and feedback state across reboot at %s", async (scenario) => {
+    const require = createRequire(import.meta.url)
+    const runtimeRequire = createRequire(require.resolve("wrangler/package.json"))
+    const { Miniflare } = runtimeRequire("miniflare") as {
+      Miniflare: new (
+        options: unknown,
+      ) => {
+        dispatchFetch(url: string, init?: RequestInit): Promise<Response>
+        getD1Database(binding: string): Promise<{ exec(sql: string): Promise<unknown> }>
+        dispose(): Promise<void>
+      }
+    }
+    const { build } = runtimeRequire("esbuild") as {
+      build(options: unknown): Promise<{ outputFiles: Array<{ text: string }> }>
+    }
+    const checkpointLost = scenario === "uncheckpointed-promotion"
+    const boundary = checkpointLost ? "meal-planning-promote-revision-0" : scenario
+    const base = selectionCandidate(seedCandidate())
+    const patch = { grid: { Mon: { snack1: { mealDefinitionId: SEED_MEAL_IDS["vegetable cutlet"] } } } }
+    const feedback = { id: "mini-1", text: "Use vegetable cutlet.", scope: { day: "Mon", slot: "snack1" } }
+    const providerResponses = [
+      {
+        toolCalls: [{ id: "evaluate", name: "evaluate_meal_plan", input: mealPlanSelectionCandidateToWire(base) }],
+        usage: LLM_USAGE,
+      },
+      {
+        toolCalls: [
+          { id: "propose", name: "propose_plan", input: { candidate: mealPlanSelectionCandidateToWire(base) } },
+        ],
+        usage: LLM_USAGE,
+      },
+      {
+        toolCalls: [{ id: "evaluate-edit", name: "evaluate_meal_plan", input: mealPlanSelectionPatchToWire(patch) }],
+        usage: LLM_USAGE,
+      },
+      {
+        toolCalls: [
+          {
+            id: "propose-edit",
+            name: "propose_plan",
+            input: { candidate: mealPlanSelectionPatchToWire(patch), feedbackItems: [feedback] },
+          },
+        ],
+        usage: LLM_USAGE,
+      },
+    ]
+    let providerCalls = 0
+    const notifications: Array<{
+      text: string
+      options?: { replyMarkup?: { inline_keyboard: Array<Array<{ callback_data: string }>> } }
+    }> = []
+    const checkpoints: string[] = []
+    const entries: string[] = []
+    const source = `
+      import { MealPlanningWorkflow } from "./src/meal-planning/workflow";
+      import { InteractionRouterDO } from "./src/core/interaction-router";
+      import { createMealPlanningStore, SEED_PROFILE, SEED_MEAL_IDS } from "./src/meal-planning/store";
+      export {InteractionRouterDO};
+      const OriginalDate = Date;
+      const probeNow = ${Date.parse("2026-09-07T03:30:00.000Z")};
+      globalThis.Date = class extends OriginalDate {
+        constructor(...args) { super(...(args.length ? args : [probeNow])); }
+        static now() { return probeNow; }
+      };
+      SEED_PROFILE.mealDefinitions = SEED_PROFILE.mealDefinitions.map(def => ({...def,
+        suitableSlots:["breakfast","snack1","snack2","school-lunch","home-lunch"],
+        packedFood:{suitable:true,dry:true},typicalCookMinutes:0,priorNightPrep:"none",requiredIngredients:["rice"]}));
+      SEED_PROFILE.foodPreferences = {...SEED_PROFILE.foodPreferences,favourites:Object.keys(SEED_MEAL_IDS).slice(0,30)};
+      export class MealProbe extends MealPlanningWorkflow {
+        async run(event, step) {
+          await fetch("https://probe/entry",{method:"POST",body:event.instanceId});
+          const wrapped = {
+            do: async (name, ...args) => {
+              if (event.payload.edit && name === ${JSON.stringify(boundary)}) {
+                if (${checkpointLost}) {
+                  const fn = args.pop();
+                  return step.do(name,{retries:{limit:2,delay:"1 second",backoff:"constant"}},async (...fnArgs) => {
+                    const result = await fn(...fnArgs);
+                    if (!this.env.PROBE_RECOVERING) {
+                      await fetch("https://probe/checkpoint",{method:"POST",body:name});
+                      throw new Error("Injected lost checkpoint after D1 commit");
+                    }
+                    return result;
+                  });
+                }
+                await fetch("https://probe/checkpoint",{method:"POST",body:name});
+                await step.waitForEvent("interruption",{type:"continue",timeout:"1 hour"});
+              }
+              return step.do(name,...args);
+            },
+            waitForEvent:(...args)=>step.waitForEvent(...args)
+          };
+          return super.run(event,wrapped);
+        }
+      }
+      export default {async fetch(request,env) {
+        const url = new URL(request.url);
+        const id = url.searchParams.get("id") || "generation";
+        const store = createMealPlanningStore(env.MEAL_PLANNING_DB);
+        const router = env.INTERACTION_ROUTER.get(env.INTERACTION_ROUTER.idFromName("telegram-chat:100"));
+        if (url.pathname.startsWith("/router/")) return router.fetch(new Request("http://router/"+url.pathname.slice(8),request));
+        if (url.pathname === "/state") return Response.json({
+          active:await store.activePlan("100"),batch:await store.feedbackBatch("recovery-batch"),profile:await store.loadOrCreateProfile("100"),
+          versions:await env.MEAL_PLANNING_DB.prepare("SELECT version FROM meal_plan_version ORDER BY version").all(),
+        });
+        if (url.pathname === "/generate") {
+          await env.MEAL_PLANNING_WORKFLOW.create({id,params:{chatId:"100",telegramMessageId:1,requestText:"",invokedAtMs:Date.now()}});
+          return Response.json({ok:true});
+        }
+        if (url.pathname === "/edit") {
+          const active = await store.activePlan("100");
+          const accepted = await store.acceptFeedbackBatch({batchId:"recovery-batch",planId:active.plan.planId,chatId:"100",baseVersion:1,
+            workflowInstanceId:"generation",idempotencyKey:"recovery",items:[{text:"Use vegetable cutlet.",target:{kind:"cell",day:"Mon",slot:"snack1"}}]});
+          if (!accepted.ok) throw new Error("batch not accepted");
+          await store.markFeedbackBatchDelivered("recovery-batch");
+          await env.MEAL_PLANNING_WORKFLOW.create({id,params:{chatId:"100",telegramMessageId:2,requestText:"",invokedAtMs:Date.now(),
+            edit:{planInstanceId:"generation",userId:"42",feedback:{interactionKind:"meal-feedback-submission",source:"mini-app",feedbackBatchId:"recovery-batch",baseVersion:1}}}});
+          return Response.json({ok:true});
+        }
+        const instance = await env.MEAL_PLANNING_WORKFLOW.get(id);
+        if (url.pathname === "/pause") await instance.pause();
+        if (url.pathname === "/resume") await instance.resume();
+        if (url.pathname === "/continue") await instance.sendEvent({type:"continue",payload:{}});
+        return Response.json(await instance.status());
+      }};
+    `
+    const { outputFiles } = await build({
+      stdin: { contents: source, resolveDir: process.cwd(), loader: "ts" },
+      bundle: true,
+      write: false,
+      format: "esm",
+      target: "es2022",
+      external: ["cloudflare:workers"],
+      plugins: [
+        {
+          name: "external-services",
+          setup(plugin: {
+            onResolve(options: { filter: RegExp }, callback: (args: { path: string }) => unknown): void
+            onLoad(options: { filter: RegExp; namespace: string }, callback: (args: { path: string }) => unknown): void
+          }) {
+            plugin.onResolve({ filter: /\/(providers|integrations\/telegram)$/ }, ({ path }) => ({
+              path: path.endsWith("providers") ? "providers" : "telegram",
+              namespace: "boundary",
+            }))
+            plugin.onLoad({ filter: /.*/, namespace: "boundary" }, ({ path }) => ({
+              loader: "js",
+              contents:
+                path === "providers"
+                  ? 'export function createToolProvider() {return {generate:async (request)=>(await fetch("https://probe/provider",{method:"POST",body:JSON.stringify(request)})).json()};}'
+                  : 'export function createTelegramClient() {return {sendMessage:async(chatId,text,options)=>(await fetch("https://probe/telegram",{method:"POST",body:JSON.stringify({chatId,text,options})})).json()};}',
+            }))
+          },
+        },
+      ],
+    })
+    const persistence = await mkdtemp(join(tmpdir(), "kipp-meal-recovery-"))
+    const options = {
+      modules: true,
+      script: outputFiles[0].text,
+      compatibilityDate: "2026-07-08",
+      bindings: {
+        TELEGRAM_BOT_TOKEN: "test",
+        TELEGRAM_ALLOWED_USER_ID: "42",
+        TIMEZONE: "Asia/Kolkata",
+        LOG_LEVEL: "error",
+        LLM_MAX_RETRIES: "0",
+        PROBE_RECOVERING: "",
+      },
+      workflows: { MEAL_PLANNING_WORKFLOW: { name: "meal-recovery", className: "MealProbe" } },
+      durableObjects: { INTERACTION_ROUTER: { className: "InteractionRouterDO", useSQLite: true } },
+      d1Databases: { MEAL_PLANNING_DB: "meal-db" },
+      d1Persist: join(persistence, "d1"),
+      workflowsPersist: join(persistence, "workflows"),
+      durableObjectsPersist: join(persistence, "router"),
+      outboundService: async (request: Request) => {
+        if (new URL(request.url).hostname !== "probe") throw new Error(`unexpected external request ${request.url}`)
+        const path = new URL(request.url).pathname
+        if (path === "/entry") {
+          entries.push(await request.text())
+          return new Response("ok")
+        }
+        if (path === "/checkpoint") {
+          checkpoints.push(await request.text())
+          return new Response("ok")
+        }
+        if (path === "/telegram") {
+          notifications.push((await request.json()) as { text: string })
+          return Response.json({ messageId: notifications.length })
+        }
+        if (path === "/provider") {
+          const response = providerResponses[providerCalls++]
+          if (!response) throw new Error("unexpected repeated provider call")
+          return Response.json(response)
+        }
+        throw new Error(`unexpected external request ${request.url}`)
+      },
+    }
+    let runtime = new Miniflare(options)
+    /** Reads the real workflow status. */
+    async function status(id: string): Promise<string> {
+      return ((await (await runtime.dispatchFetch(`http://probe/status?id=${id}`)).json()) as { status: string }).status
+    }
+    /** Reads the saved plan, batch and message generation from D1. */
+    async function state() {
+      return (await (await runtime.dispatchFetch("http://probe/state")).json()) as {
+        active: { plan: { currentVersion: number }; version: { candidate: MealPlanCandidate } }
+        batch: { status: string }
+        profile: { interactionGeneration: number }
+        versions: { results: Array<{ version: number }> }
+      }
+    }
+    /** Waits for an observable boundary rather than inferring an event wait from status. */
+    async function waitFor(check: () => Promise<boolean>): Promise<void> {
+      const deadline = Date.now() + 10_000
+      while (!(await check())) {
+        if (Date.now() > deadline)
+          throw new Error(`meal runtime boundary not reached: ${scenario}; ${JSON.stringify(await state())}`)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+    }
+    try {
+      const d1 = await runtime.getD1Database("MEAL_PLANNING_DB")
+      for (const file of (await readdir("migrations")).filter((name) => name.endsWith(".sql")).sort()) {
+        await d1.exec((await readFile(join("migrations", file), "utf8")).replace(/--[^\n]*/g, "").replace(/\n/g, " "))
+      }
+      expect((await runtime.dispatchFetch("http://probe/generate")).ok).toBe(true)
+      await waitFor(async () => (await status("generation")) === "complete")
+      expect((await state()).active.plan.currentVersion).toBe(1)
+      expect((await runtime.dispatchFetch("http://probe/edit?id=edit-recovery")).ok).toBe(true)
+      await waitFor(async () => checkpoints.length > 0)
+      const promoted = checkpointLost || !scenario.includes("promote")
+      expect((await state()).batch.status).toBe(promoted ? "consumed" : "processing")
+      expect((await state()).active.plan.currentVersion).toBe(promoted ? 2 : 1)
+      await runtime.dispatchFetch("http://probe/pause?id=edit-recovery")
+      await waitFor(async () => (await status("edit-recovery")) === "paused")
+      await runtime.dispose()
+      options.bindings.PROBE_RECOVERING = "true"
+      runtime = new Miniflare(options)
+      expect(await status("edit-recovery")).toBe("paused")
+      const claim = await runtime.dispatchFetch("http://probe/router/edit/claim", {
+        method: "POST",
+        body: JSON.stringify({ resourceId: "meal:generation", workflowId: "competitor", domain: "meal" }),
+      })
+      expect(await claim.json()).toEqual({ ok: false })
+      await runtime.dispatchFetch("http://probe/resume?id=edit-recovery")
+      await waitFor(async () => entries.filter((id) => id === "edit-recovery").length === 2)
+      if (!checkpointLost) await runtime.dispatchFetch("http://probe/continue?id=edit-recovery")
+      await waitFor(async () => (await status("edit-recovery")) === "complete")
+      const recovered = await state()
+      expect(providerCalls).toBe(4)
+      expect(recovered.active.plan.currentVersion).toBe(2)
+      expect(recovered.active.version.candidate.grid.Mon.snack1.dish).toBe("vegetable cutlet")
+      expect(recovered.batch.status).toBe("consumed")
+      expect(recovered.profile.interactionGeneration).toBe(2)
+      expect(recovered.versions.results).toEqual([{ version: 1 }, { version: 2 }])
+      expect(notifications.filter((m) => m.text.includes("School week of"))).toHaveLength(2)
+      expect(notifications.map((m) => m.text).join(" ")).not.toMatch(/couldn't|not applied|out of date/i)
+      const token = notifications.at(-1)?.options?.replyMarkup?.inline_keyboard[0][0].callback_data
+      expect(token).toBeTruthy()
+      const feedbackReply = await runtime.dispatchFetch("http://probe/router/resolve", {
+        method: "POST",
+        body: JSON.stringify({ callbackToken: token, telegramUpdateId: 99 }),
+      })
+      expect(await feedbackReply.json()).toMatchObject({
+        interaction: { kind: "meal-feedback", edit: {}, workflowId: "generation", version: 2 },
+      })
+      const released = await runtime.dispatchFetch("http://probe/router/edit/claim", {
+        method: "POST",
+        body: JSON.stringify({ resourceId: "meal:generation", workflowId: "competitor", domain: "meal" }),
+      })
+      expect(await released.json()).toEqual({ ok: true })
+    } finally {
+      await runtime.dispose()
+      await rm(persistence, { recursive: true, force: true })
+    }
+  }, 30_000)
 })

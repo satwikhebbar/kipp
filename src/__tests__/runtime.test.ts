@@ -1,7 +1,7 @@
 import type { WorkflowStep } from "cloudflare:workers"
 import { describe, expect, it, vi } from "vitest"
 import { z } from "zod"
-import { waitForWorkflowEvent } from "../core/workflow-events"
+import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-events"
 import { logRuntime } from "../runtime/logging"
 import { ToolGuard, ToolHandlerError, type ToolRegistry } from "../runtime/tools"
 import { workflowTimeoutError } from "./fixtures/workflow-timeout"
@@ -118,6 +118,25 @@ describe("runtime logging", () => {
 })
 
 describe("workflow event wait adapter", () => {
+  it.each([
+    "User called pause",
+    "User called restart",
+    "User called terminate",
+    "Grace period complete",
+  ])("preserves the runtime interruption signal (%s)", async (reason) => {
+    const error = new Error(`Aborting engine: ${reason}`)
+    expect(isWorkflowInterruption(error)).toBe(true)
+    const step = { waitForEvent: vi.fn().mockRejectedValue(error) } as unknown as WorkflowStep
+    await expect(waitForWorkflowEvent(step, "reply", { type: "telegram-reply" })).rejects.toBe(error)
+  })
+  it.each([
+    new Error("User called pause"),
+    new Error("Aborting engine: storage timed out"),
+    new Error("Execution timed out after 1000ms"),
+    "Aborting engine: User called pause",
+  ])("does not classify ordinary failures or strings as runtime interruption (%s)", (error) => {
+    expect(isWorkflowInterruption(error)).toBe(false)
+  })
   it.each([
     workflowTimeoutError(),
     Object.assign(workflowTimeoutError(), { name: "WorkflowTimeoutError" }),

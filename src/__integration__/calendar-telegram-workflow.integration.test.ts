@@ -1,5 +1,7 @@
-import { readFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { createRequire } from "node:module"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { URL as NodeURL } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vitest"
 import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
@@ -974,7 +976,506 @@ describe("agent-centered Calendar Telegram integration", () => {
   })
 })
 
-describe("Cloudflare Workflows event timeout contract", () => {
+describe("Cloudflare Workflows runtime contracts", () => {
+  it.each([
+    "calendar-agent-save-edit-context-0",
+    "calendar-agent-confirmation-0-notify",
+    "calendar-agent-confirmation-0-register",
+    "uncheckpointed-create",
+    "uncheckpointed-update",
+    "uncheckpointed-confirmation",
+    "oauth-recovery",
+  ])("recovers the production Calendar workflow across runtime reboot: %s", async (scenario) => {
+    const require = createRequire(import.meta.url)
+    const runtimeRequire = createRequire(require.resolve("wrangler/package.json"))
+    const { Miniflare } = runtimeRequire("miniflare") as {
+      Miniflare: new (
+        options: unknown,
+      ) => {
+        dispatchFetch(url: string, init?: RequestInit): Promise<Response>
+        dispose(): Promise<void>
+      }
+    }
+    const { build } = runtimeRequire("esbuild") as {
+      build(options: unknown): Promise<{ outputFiles: { text: string }[] }>
+    }
+    const oauth = scenario === "oauth-recovery"
+    const checkpointLost = scenario.startsWith("uncheckpointed-")
+    const generationOnly = oauth || scenario === "uncheckpointed-create" || scenario === "uncheckpointed-confirmation"
+    const boundary =
+      scenario === "uncheckpointed-confirmation"
+        ? "calendar-agent-confirmation-0-notify"
+        : checkpointLost
+          ? `calendar-agent-${generationOnly ? "create" : "update"}-0`
+          : oauth
+            ? "calendar-agent-edit-context-1"
+            : scenario
+    const candidate = {
+      kind: "one_off",
+      proposal: {
+        title: "Runtime recovery probe",
+        localDate: new Date(Date.now() + 5 * 86_400_000).toISOString().slice(0, 10),
+        startTime: "19:00",
+        durationMinutes: 30,
+        dateIsExplicit: true,
+        timeIsExplicit: true,
+        classification: "ordinary",
+        needsClarification: false,
+      },
+    }
+    const providerBodies: unknown[] = []
+    const mutations: Array<{ operation: string; body: Record<string, unknown> }> = []
+    const savedEvents = new Map<string, Record<string, unknown>>()
+    const notifications: Array<{
+      text: string
+      options?: { replyMarkup?: { inline_keyboard: Array<Array<{ callback_data: string }>> } }
+    }> = []
+    const entries: string[] = []
+    const checkpoints: string[] = []
+    let refreshAttempts = 0
+    const boundaryModules: Record<string, string> = {
+      providers: `export function createToolProvider() { return {generate: async (request) => (await fetch("https://probe/provider", {method:"POST", body:JSON.stringify(request)})).json()}; }`,
+      "integrations/telegram": `export function createTelegramClient() { return {sendMessage: async (chatId, text, options) => (await fetch("https://probe/telegram", {method:"POST", body:JSON.stringify({chatId,text,options})})).json()}; }`,
+    }
+    const source = `
+      import { CalendarWorkflow } from "./src/calendar/workflow";
+      import { InteractionRouterDO } from "./src/core/interaction-router";
+      import { TokenVaultDO } from "./src/core/token-vault";
+      import { createTokenVault } from "./src/core/token-vault-client";
+      export {TokenVaultDO};
+      const now = Date.now;
+      Date.now = () => now() + Number(globalThis.PROBE_CLOCK_OFFSET || 0);
+      export class ProbeRouter extends InteractionRouterDO {
+        constructor(ctx, env) { super(ctx, env); this.probeState = ctx; }
+        async fetch(request) {
+          if (new URL(request.url).pathname === "/latest") return Response.json(this.probeState.storage.sql.exec("SELECT session_id FROM edit_contexts WHERE active = 1").toArray());
+          return super.fetch(request);
+        }
+      }
+      export class RecoveryProbe extends CalendarWorkflow {
+        async run(event, step) {
+          globalThis.PROBE_CLOCK_OFFSET = this.env.PROBE_CLOCK_OFFSET;
+          await fetch("https://probe/entry", {method:"POST", body:event.instanceId});
+          const wrapped = {
+            do: async (name, ...args) => {
+              if (event.payload.probeBoundary === name && ${checkpointLost}) {
+                const fn = args.pop();
+                return step.do(name, {retries:{limit:2,delay:"1 second",backoff:"constant"}}, async (...fnArgs) => {
+                  const result = await fn(...fnArgs);
+                  if (!this.env.PROBE_RECOVERING) {
+                    await fetch("https://probe/checkpoint", {method:"POST", body:event.instanceId});
+                    throw new Error("Injected response/checkpoint loss after write");
+                  }
+                  return result;
+                });
+              }
+              if (event.payload.probeBoundary === name) {
+                await fetch("https://probe/checkpoint", {method:"POST", body:event.instanceId});
+                await step.waitForEvent("injected-interruption", {type:"continue", timeout:"1 hour"});
+              }
+              return step.do(name, ...args);
+            },
+            waitForEvent: (...args) => step.waitForEvent(...args)
+          };
+          return super.run(event, wrapped);
+        }
+      }
+      export default { async fetch(request, env) {
+        globalThis.PROBE_CLOCK_OFFSET = env.PROBE_CLOCK_OFFSET;
+        const url = new URL(request.url);
+        const id = url.searchParams.get("id") || "generation";
+        const router = env.INTERACTION_ROUTER.get(env.INTERACTION_ROUTER.idFromName("telegram-chat:chat"));
+        if (url.pathname.startsWith("/router/")) return router.fetch(new Request("http://router/" + url.pathname.slice(8), request));
+        if (url.pathname === "/generate" || url.pathname === "/authorize") {
+          const expired = ${oauth} && url.pathname === "/generate";
+          await createTokenVault(env, "google-calendar").writeTokens({access_token:"test-token",refresh_token:"refresh",expires_in:3600,created_at:new Date(Date.now() - (expired ? 7200000 : 0)).toISOString()});
+          if (url.pathname === "/authorize") {
+            await (await env.CALENDAR_WORKFLOW.get(id)).sendEvent({type:"telegram-reply",payload:{text:"__calendar-retry__"}});
+            return Response.json({ok:true});
+          }
+          await env.CALENDAR_WORKFLOW.create({id,params:{chatId:"chat",telegramMessageId:1,requestText:"Create recovery probe",setupOrigin:"https://kipp.example",probeBoundary:${JSON.stringify(generationOnly ? boundary : null)}}});
+          return Response.json({ok:true});
+        }
+        if (url.pathname === "/edit") {
+          const [context] = await (await router.fetch("http://router/latest", {method:"POST",body:"{}"})).json();
+          await env.CALENDAR_WORKFLOW.create({id, params:{chatId:"chat",telegramMessageId:2,requestText:"",probeBoundary:${JSON.stringify(boundary)},edit:{sessionId:context.session_id,userId:"42",text:"Keep this time",openPrompt:false}}});
+          return Response.json({sessionId:context.session_id});
+        }
+        const instance = await env.CALENDAR_WORKFLOW.get(id);
+        if (url.pathname === "/pause") await instance.pause();
+        if (url.pathname === "/resume") await instance.resume();
+        if (url.pathname === "/continue") await instance.sendEvent({type:"continue",payload:{}});
+        return Response.json(await instance.status());
+      }};
+    `
+    const { outputFiles } = await build({
+      stdin: { contents: source, resolveDir: process.cwd(), loader: "ts" },
+      bundle: true,
+      write: false,
+      format: "esm",
+      target: "es2022",
+      external: ["cloudflare:workers"],
+      plugins: [
+        {
+          name: "external-service-boundaries",
+          setup(plugin: {
+            onResolve(options: { filter: RegExp }, callback: (args: { path: string }) => unknown): void
+            onLoad(options: { filter: RegExp; namespace: string }, callback: (args: { path: string }) => unknown): void
+          }) {
+            plugin.onResolve({ filter: /\/(providers|integrations\/telegram)$/ }, ({ path }) => ({
+              path: path.endsWith("providers") ? "providers" : "integrations/telegram",
+              namespace: "boundary",
+            }))
+            plugin.onLoad({ filter: /.*/, namespace: "boundary" }, ({ path }) => ({
+              contents: boundaryModules[path],
+              loader: "js",
+            }))
+          },
+        },
+      ],
+    })
+    const persistence = await mkdtemp(join(tmpdir(), "kipp-edit-recovery-"))
+    const options = {
+      modules: true,
+      script: outputFiles[0].text,
+      compatibilityDate: "2026-07-08",
+      bindings: {
+        TELEGRAM_ALLOWED_USER_ID: "42",
+        TELEGRAM_BOT_TOKEN: "test",
+        TIMEZONE: "Asia/Kolkata",
+        LOG_LEVEL: "error",
+        GOOGLE_CALENDAR_CLIENT_ID: "test-client",
+        GOOGLE_CALENDAR_CLIENT_SECRET: "test-secret",
+        TOKEN_ENCRYPTION_KEY_IDS: "test",
+        TOKEN_ENCRYPTION_KEY_test: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        PROBE_CLOCK_OFFSET: "0",
+        PROBE_RECOVERING: "",
+      },
+      workflows: { CALENDAR_WORKFLOW: { name: "recovery-probe", className: "RecoveryProbe" } },
+      durableObjects: {
+        INTERACTION_ROUTER: { className: "ProbeRouter", useSQLite: true },
+        TOKEN_VAULT: { className: "TokenVaultDO", useSQLite: true },
+      },
+      workflowsPersist: join(persistence, "workflows"),
+      durableObjectsPersist: join(persistence, "router"),
+      outboundService: async (request: Request) => {
+        const url = new URL(request.url)
+        if (url.hostname === "oauth2.googleapis.com") {
+          refreshAttempts++
+          return Response.json({ error: "invalid_grant" }, { status: 400 })
+        }
+        if (url.hostname === "www.googleapis.com") {
+          if (url.pathname.endsWith("/freeBusy")) return Response.json({ calendars: { primary: { busy: [] } } })
+          if (request.method === "GET") {
+            const saved = savedEvents.get(url.pathname.split("/").at(-1) ?? "")
+            return Response.json(saved ?? {}, { status: saved ? 200 : 404 })
+          }
+          const body = (await request.json()) as Record<string, unknown>
+          mutations.push({ operation: request.method === "POST" ? "create" : "update", body })
+          if (request.method === "POST" && savedEvents.has(String(body.id))) return new Response(null, { status: 409 })
+          savedEvents.set(String(body.id), body)
+          return Response.json(body)
+        }
+        if (url.hostname !== "probe") throw new Error(`unexpected external request ${request.url}`)
+        const path = url.pathname
+        if (path === "/entry") {
+          entries.push(await request.text())
+          return new Response("ok")
+        }
+        if (path === "/checkpoint") {
+          checkpoints.push(await request.text())
+          return new Response("ok")
+        }
+        const body = (await request.json()) as { messages: ToolConversationMessage[]; text: string }
+        if (path === "/provider") {
+          providerBodies.push(body)
+          const last = body.messages.at(-1)
+          const evaluated = last?.role === "tool" && last.name === "evaluate_calendar_candidate"
+          const planId = evaluated ? toolResult(body.messages, "evaluate_calendar_candidate").planId : undefined
+          return Response.json({
+            toolCalls: [
+              {
+                id: String(providerBodies.length),
+                name: evaluated ? (planId ? "ready_to_create" : "needs_user_input") : "evaluate_calendar_candidate",
+                input: evaluated
+                  ? planId
+                    ? { planId }
+                    : { message: "Reconnect calendar.", reasonCodes: ["missing_time"], interaction: { kind: "reply" } }
+                  : candidate,
+              },
+            ],
+            usage: {},
+          })
+        }
+        if (path === "/telegram") {
+          notifications.push(body)
+          return Response.json({ messageId: notifications.length })
+        }
+        throw new Error(`unexpected external request ${request.url}`)
+      },
+    }
+    let runtime = new Miniflare(options)
+    /** Polls observable runtime state with a bounded deadline. */
+    async function waitFor(check: () => Promise<boolean>): Promise<void> {
+      const deadline = Date.now() + 10_000
+      while (!(await check())) {
+        if (Date.now() > deadline) throw new Error(`runtime recovery probe did not reach expected state: ${scenario}`)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+    }
+    /** Reads the current status from the real workflow binding. */
+    async function status(id: string): Promise<string> {
+      return ((await (await runtime.dispatchFetch(`http://probe/status?id=${id}`)).json()) as { status: string }).status
+    }
+    const id = generationOnly ? "generation" : "edit-recovery"
+    try {
+      expect((await runtime.dispatchFetch("http://probe/generate")).ok).toBe(true)
+      if (oauth) {
+        await waitFor(async () => notifications.some((m) => m.text.includes("Reconnect, then tap Retry")))
+        expect(savedEvents.size).toBe(0)
+        expect(refreshAttempts).toBeGreaterThan(0)
+        // Reboot while the production authorization prompt is waiting, then reconnect.
+        await runtime.dispatchFetch("http://probe/pause?id=generation")
+        await waitFor(async () => (await status("generation")) === "paused")
+        await runtime.dispose()
+        runtime = new Miniflare(options)
+        expect(await status("generation")).toBe("paused")
+        await runtime.dispatchFetch("http://probe/resume?id=generation")
+        await waitFor(async () => entries.filter((entry) => entry === "generation").length === 2)
+        expect((await runtime.dispatchFetch("http://probe/authorize")).ok).toBe(true)
+      }
+      let sessionId: string | undefined
+      if (!generationOnly) {
+        await waitFor(async () => (await status("generation")) === "complete")
+        const edit = await runtime.dispatchFetch(`http://probe/edit?id=${id}`)
+        expect(edit.ok, await edit.clone().text()).toBe(true)
+        sessionId = ((await edit.json()) as { sessionId: string }).sessionId
+      }
+      await waitFor(async () => checkpoints.includes(id))
+      expect(savedEvents.size).toBe(1)
+      const providerCount = providerBodies.length
+      const mutationCount = mutations.length
+      const notificationCount = notifications.length
+      await runtime.dispatchFetch(`http://probe/pause?id=${id}`)
+      await waitFor(async () => (await status(id)) === "paused")
+      await runtime.dispose()
+      options.bindings.PROBE_RECOVERING = "true"
+      // OAuth generation resumes beyond the original authorization/plan deadline.
+      options.bindings.PROBE_CLOCK_OFFSET = oauth ? String(16 * 60_000) : "0"
+      runtime = new Miniflare(options)
+      expect(await status(id)).toBe("paused")
+      if (!generationOnly) {
+        const claim = await runtime.dispatchFetch("http://probe/router/edit/claim", {
+          method: "POST",
+          body: JSON.stringify({ resourceId: "calendar:generation", workflowId: "competitor", domain: "calendar" }),
+        })
+        expect(await claim.json()).toEqual({ ok: false })
+      }
+      await runtime.dispatchFetch(`http://probe/resume?id=${id}`)
+      await waitFor(async () => entries.filter((entry) => entry === id).length === (oauth ? 3 : 2))
+      if (!checkpointLost) await runtime.dispatchFetch(`http://probe/continue?id=${id}`)
+      await waitFor(async () => (await status(id)) === "complete")
+      expect(providerBodies).toHaveLength(providerCount)
+      expect(savedEvents.size).toBe(1)
+      const writeRetried = checkpointLost && scenario !== "uncheckpointed-confirmation"
+      expect(mutations).toHaveLength(mutationCount + (writeRetried ? 1 : 0))
+      if (writeRetried) expect(mutations.at(-1)).toEqual(mutations.at(-2))
+      if (scenario === "uncheckpointed-confirmation") expect(notifications.at(-1)).toEqual(notifications.at(-2))
+      expect(notifications).toHaveLength(scenario.includes("register") ? notificationCount : notificationCount + 1)
+      expect(notifications.map((m) => m.text).join(" ")).not.toMatch(/couldn't|didn't return/)
+      const latestContexts = (await (
+        await runtime.dispatchFetch("http://probe/router/latest", { method: "POST", body: "{}" })
+      ).json()) as Array<{ session_id: string }>
+      expect(latestContexts).toEqual([{ session_id: expect.any(String) }])
+      expect(latestContexts[0].session_id).not.toBe(sessionId)
+      const token = notifications.at(-1)?.options?.replyMarkup?.inline_keyboard[0][0].callback_data
+      expect(token).toBeTruthy()
+      const resolved = await runtime.dispatchFetch("http://probe/router/resolve", {
+        method: "POST",
+        body: JSON.stringify({ callbackToken: token, telegramUpdateId: 99 }),
+      })
+      expect(await resolved.json()).toMatchObject({
+        interaction: { workflowId: id, edit: { sessionId: latestContexts[0].session_id } },
+      })
+      const released = await runtime.dispatchFetch("http://probe/router/edit/claim", {
+        method: "POST",
+        body: JSON.stringify({ resourceId: "calendar:generation", workflowId: "competitor", domain: "calendar" }),
+      })
+      expect(await released.json()).toEqual({ ok: true })
+    } finally {
+      await runtime.dispose()
+      await rm(persistence, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it("deduplicates edit delivery and recovers a terminated edit's SQLite lock in the actual runtime", async () => {
+    const require = createRequire(import.meta.url)
+    const runtimeRequire = createRequire(require.resolve("wrangler/package.json"))
+    const { Miniflare } = runtimeRequire("miniflare") as {
+      Miniflare: new (
+        options: unknown,
+      ) => {
+        dispatchFetch(url: string, init?: RequestInit): Promise<Response>
+        dispose(): Promise<void>
+      }
+    }
+    const { build } = runtimeRequire("esbuild") as {
+      build(options: unknown): Promise<{ outputFiles: { text: string }[] }>
+    }
+    const source = `
+      import { WorkflowEntrypoint } from "cloudflare:workers";
+      import { startEditWorkflow } from "./src/core/edit-workflow";
+      import { InteractionRouterDO } from "./src/core/interaction-router";
+      export class ProbeRouter extends InteractionRouterDO {
+        constructor(ctx, env) { super(ctx, env); this.probeState = ctx; }
+        async fetch(request) {
+          if (new URL(request.url).pathname === "/probe-owner") {
+            const row = this.probeState.storage.sql.exec("SELECT workflow_id FROM edit_locks WHERE resource_id = ?", "event").toArray()[0];
+            return Response.json({owner: row?.workflow_id ?? null});
+          }
+          return super.fetch(request);
+        }
+      }
+      export class EditProbe extends WorkflowEntrypoint {
+        async run(event, step) {
+          const router = this.env.ROUTER.get(this.env.ROUTER.idFromName("chat"));
+          const claim = await step.do("claim", async () => {
+            const response = await router.fetch("http://router/edit/claim", {
+              method: "POST", body: JSON.stringify({resourceId: "event", workflowId: event.instanceId, domain: "calendar"})
+            });
+            return response.json();
+          });
+          if (!claim.ok) throw new Error("lock unavailable");
+          await step.waitForEvent("feedback", {type: "feedback", timeout: "1 hour"});
+          return {completed: true};
+        }
+      }
+      export default {
+        async fetch(request, env) {
+          const url = new URL(request.url);
+          const id = url.searchParams.get("id");
+          if (url.pathname === "/start") {
+            return Response.json({id: await startEditWorkflow(env.CALENDAR_WORKFLOW, id, {})});
+          }
+          if (url.pathname === "/start-lost-response") {
+            const binding = {
+              async create(options) {
+                await env.CALENDAR_WORKFLOW.create(options);
+                throw new Error("create response lost");
+              },
+              get(instanceId) { return env.CALENDAR_WORKFLOW.get(instanceId); }
+            };
+            return Response.json({id: await startEditWorkflow(binding, id, {})});
+          }
+          if (url.pathname === "/terminate") {
+            await (await env.CALENDAR_WORKFLOW.get(id)).terminate();
+            return Response.json({ok: true});
+          }
+          if (url.pathname === "/deliver") {
+            await (await env.CALENDAR_WORKFLOW.get(id)).sendEvent({type: "feedback", payload: {}});
+            return Response.json({ok: true});
+          }
+          if (url.pathname === "/status") {
+            return Response.json(await (await env.CALENDAR_WORKFLOW.get(id)).status());
+          }
+          return env.ROUTER.get(env.ROUTER.idFromName("chat")).fetch(
+            new Request("http://router" + url.pathname, request)
+          );
+        }
+      };
+    `
+    const { outputFiles } = await build({
+      stdin: { contents: source, resolveDir: process.cwd(), loader: "ts" },
+      bundle: true,
+      write: false,
+      format: "esm",
+      target: "es2022",
+      external: ["cloudflare:workers"],
+    })
+    const runtime = new Miniflare({
+      modules: true,
+      script: outputFiles[0].text,
+      compatibilityDate: "2026-07-08",
+      workflows: { CALENDAR_WORKFLOW: { name: "edit-probe", className: "EditProbe" } },
+      durableObjects: { ROUTER: { className: "ProbeRouter", useSQLite: true } },
+    })
+    /** Waits for the actual runtime to settle into the requested workflow state. */
+    async function waitForStatus(id: string, expected: string): Promise<void> {
+      const deadline = Date.now() + 10_000
+      let status: { status?: string } = {}
+      do {
+        status = await (await runtime.dispatchFetch(`http://probe/status?id=${id}`)).json()
+        if (status.status === expected || status.status === "errored") break
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      } while (Date.now() < deadline)
+      expect(status, JSON.stringify(status)).toMatchObject({ status: expected })
+    }
+    /** Exercises the production router through its real Durable Object binding. */
+    async function lockRequest(path: string, workflowId: string): Promise<unknown> {
+      const response = await runtime.dispatchFetch(`http://probe${path}`, {
+        method: "POST",
+        body: JSON.stringify({ resourceId: "event", workflowId, domain: "calendar" }),
+      })
+      expect(response.ok).toBe(true)
+      return response.json()
+    }
+    /** Waits for the workflow itself to acquire its lock before testing exclusion. */
+    async function waitForOwner(id: string): Promise<void> {
+      const deadline = Date.now() + 10_000
+      let owner: unknown
+      do {
+        owner = await lockRequest("/probe-owner", id)
+        if ((owner as { owner: string }).owner === id) break
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      } while (Date.now() < deadline)
+      expect(owner).toEqual({ owner: id })
+    }
+    try {
+      const starts = await Promise.all([
+        runtime.dispatchFetch("http://probe/start?id=first-update"),
+        runtime.dispatchFetch("http://probe/start?id=first-update"),
+      ])
+      for (const response of starts) expect(response.ok).toBe(true)
+      const [first, duplicate] = await Promise.all(starts.map((response) => response.json() as Promise<{ id: string }>))
+      expect(first.id).toMatch(/^edit-[0-9a-f]{64}$/)
+      expect(duplicate.id).toBe(first.id)
+      await waitForOwner(first.id)
+      expect(await lockRequest("/edit/claim", "competing-edit")).toEqual({ ok: false })
+
+      expect((await runtime.dispatchFetch(`http://probe/terminate?id=${first.id}`)).ok).toBe(true)
+      await waitForStatus(first.id, "terminated")
+      const secondResponse = await runtime.dispatchFetch("http://probe/start?id=second-update")
+      expect(secondResponse.ok).toBe(true)
+      const second = (await secondResponse.json()) as { id: string }
+      expect(second.id).not.toBe(first.id)
+      await waitForOwner(second.id)
+
+      expect(await lockRequest("/edit/release", first.id)).toEqual({ ok: true })
+      expect(await lockRequest("/edit/claim", "competing-edit")).toEqual({ ok: false })
+      expect(await lockRequest("/edit/claim", second.id)).toEqual({ ok: true })
+
+      expect((await runtime.dispatchFetch(`http://probe/deliver?id=${second.id}`)).ok).toBe(true)
+      await waitForStatus(second.id, "complete")
+      const retry = await runtime.dispatchFetch("http://probe/start?id=second-update")
+      expect(retry.ok).toBe(true)
+      expect(await retry.json()).toEqual(second)
+      await waitForStatus(second.id, "complete")
+      // A completed run also permits recovery if its final lock release was lost.
+      expect(await lockRequest("/edit/claim", "next-edit")).toEqual({ ok: true })
+      expect(await lockRequest("/edit/release", "next-edit")).toEqual({ ok: true })
+
+      const lost = await runtime.dispatchFetch("http://probe/start-lost-response?id=lost-update")
+      expect(lost.ok).toBe(true)
+      const recovered = (await lost.json()) as { id: string }
+      await waitForOwner(recovered.id)
+      const redelivery = await runtime.dispatchFetch("http://probe/start?id=lost-update")
+      expect(redelivery.ok).toBe(true)
+      expect(await redelivery.json()).toEqual(recovered)
+    } finally {
+      await runtime.dispose()
+    }
+  }, 30_000)
+
   it("normalizes an actual runtime timeout and receives actual event payloads", async () => {
     // Use Wrangler's bundled runtime so this checks the same implementation as local dev.
     const require = createRequire(import.meta.url)

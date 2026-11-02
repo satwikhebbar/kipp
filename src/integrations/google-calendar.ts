@@ -78,10 +78,15 @@ interface ManagedCalendarInstance {
 interface GoogleCalendarEventResponse {
   id?: string
   summary?: string
+  description?: string
+  location?: string
+  visibility?: string
   transparency?: "opaque" | "transparent"
+  recurrence?: string[]
+  reminders?: { useDefault?: boolean; overrides?: Array<{ method?: string; minutes?: number }> }
   extendedProperties?: { private?: Record<string, string> }
-  start?: { dateTime?: string; date?: string }
-  end?: { dateTime?: string; date?: string }
+  start?: { dateTime?: string; date?: string; timeZone?: string }
+  end?: { dateTime?: string; date?: string; timeZone?: string }
   originalStartTime?: { dateTime?: string }
 }
 
@@ -175,6 +180,31 @@ export class GoogleCalendarError extends Error {
   ) {
     super(message)
   }
+}
+
+/** Confirms an uncertain PUT only when all managed fields match the intended write. */
+function matchesManagedUpdate(saved: GoogleCalendarEventResponse, expected: GoogleCalendarEventBody): boolean {
+  const overrides = saved.reminders?.overrides
+  return (
+    saved.id === expected.id &&
+    saved.summary === expected.summary &&
+    (saved.description ?? "") === (expected.description ?? "") &&
+    (saved.location ?? "") === (expected.location ?? "") &&
+    saved.visibility === expected.visibility &&
+    saved.transparency === expected.transparency &&
+    Date.parse(saved.start?.dateTime ?? "") === Date.parse(expected.start.dateTime) &&
+    Date.parse(saved.end?.dateTime ?? "") === Date.parse(expected.end.dateTime) &&
+    saved.start?.timeZone === expected.start.timeZone &&
+    saved.end?.timeZone === expected.end.timeZone &&
+    saved.reminders?.useDefault === false &&
+    overrides?.length === 1 &&
+    overrides[0].method === POPUP_REMINDER_METHOD &&
+    overrides[0].minutes === expected.reminders.overrides[0].minutes &&
+    JSON.stringify(saved.recurrence ?? []) === JSON.stringify(expected.recurrence ?? []) &&
+    Object.entries(expected.extendedProperties.private).every(
+      ([key, value]) => saved.extendedProperties?.private?.[key] === value,
+    )
+  )
 }
 
 /** Reads only Google's bounded machine reason/status token from an error response. */
@@ -405,12 +435,28 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
   }
 
   async function updateManagedEvent(event: ManagedCalendarEvent): Promise<void> {
-    const response = await request(`/calendars/primary/events/${encodeURIComponent(event.id)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(calendarEventBody(event)),
-    })
-    if (!response.ok) throw new GoogleCalendarError("Calendar event could not be updated", "permanent")
+    return putManagedEvent(event, "Calendar event could not be updated")
+  }
+
+  /** Repeats the same PUT safely and verifies its projection after an ambiguous failure. */
+  async function putManagedEvent(event: ManagedCalendarEvent, failureMessage: string): Promise<void> {
+    const path = `/calendars/primary/events/${encodeURIComponent(event.id)}`
+    const body = calendarEventBody(event)
+    try {
+      const response = await request(path, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+      if (!response.ok) throw new GoogleCalendarError(failureMessage, "permanent")
+    } catch (error) {
+      if (error instanceof GoogleCalendarError && error.kind === "transient") {
+        const verification = await request(path, { method: "GET" })
+        if (verification.ok && matchesManagedUpdate((await verification.json()) as GoogleCalendarEventResponse, body))
+          return
+      }
+      throw error
+    }
   }
 
   async function listManagedInstances(parentId: string): Promise<ManagedCalendarInstance[]> {
@@ -443,12 +489,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     end: string,
   ): Promise<void> {
     const instanceEvent: ManagedCalendarEvent = { ...parent, id: instanceId, start, end, recurrence: undefined }
-    const response = await request(`/calendars/primary/events/${encodeURIComponent(instanceId)}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(calendarEventBody(instanceEvent)),
-    })
-    if (!response.ok) throw new GoogleCalendarError("Calendar series exception could not be updated", "permanent")
+    await putManagedEvent(instanceEvent, "Calendar series exception could not be updated")
   }
 
   async function reconcileManagedSeries(

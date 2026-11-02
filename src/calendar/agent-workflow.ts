@@ -3,6 +3,7 @@ import { runCalendarAgentSession } from "../agent/calendar-session"
 import { type ActionPromptOutcome, promptForActions } from "../core/action-prompt"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
+import { isWorkflowInterruption } from "../core/workflow-events"
 import {
   createGoogleCalendarClient,
   GoogleCalendarError,
@@ -338,6 +339,7 @@ export async function runAgentCenteredCalendarWorkflow(
       )
       return
     } catch (error) {
+      if (isWorkflowInterruption(error)) throw error
       if (error instanceof GoogleCalendarError && error.kind === "authorization" && !retryUsed) {
         if (await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn)) {
           retryUsed = true
@@ -613,11 +615,13 @@ async function confirmPlanForEditing(
   let sent: { messageId: number }
   try {
     sent = await step.do(`calendar-agent-confirmation-${turn}-notify`, send)
-  } catch {
+  } catch (error) {
+    if (isWorkflowInterruption(error)) throw error
     // A failed notification must never cause another calendar write.
     try {
       sent = await step.do(`calendar-agent-confirmation-recovery-${turn}-notify`, send)
-    } catch {
+    } catch (error) {
+      if (isWorkflowInterruption(error)) throw error
       return
     }
   }
@@ -694,6 +698,7 @@ export async function runCalendarEditWorkflow(
     )
     return
   }
+  let interrupted = false
   try {
     // Recheck after acquiring the resource lock: another edit may have saved a newer baseline.
     const current = await calendarDecision(step, "calendar-edit-recheck-context", () =>
@@ -709,8 +714,12 @@ export async function runCalendarEditWorkflow(
       step,
       context,
     )
+  } catch (error) {
+    interrupted = isWorkflowInterruption(error)
+    throw error
   } finally {
-    await step.do("calendar-edit-release", () => router.releaseEdit(loaded.resourceId as string, event.instanceId))
+    if (!interrupted)
+      await step.do("calendar-edit-release", () => router.releaseEdit(loaded.resourceId as string, event.instanceId))
   }
 }
 

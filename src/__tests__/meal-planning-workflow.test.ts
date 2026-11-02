@@ -2,6 +2,7 @@ import type { WorkflowEvent } from "cloudflare:workers"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { mealPlanSelectionCandidateToWire, mealPlanSelectionPatchToWire } from "../agent/meal-planning"
 import { MEAL_PLANNING_AGENT_PROMPT } from "../agent/meal-planning-session"
+import { createInteractionRouter } from "../core/interaction-router-client"
 import type { Env } from "../core/types"
 import {
   type MealPlanningLiveEvent,
@@ -413,6 +414,413 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  it.each([
+    "other-user",
+    "other-chat",
+    "other-plan",
+    "foreign-batch",
+  ])("rejects a Mini App edit from %s without changing or claiming its saved batch", async (attempt) => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const env = makeEnv(namespace, d1)
+    const original = mealEvent(invokedAtMs)
+    const base = seedCandidate()
+    const network = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(env, original, createMemoizingStep([], invokedAtMs) as never)
+    const store = createMealPlanningStore(d1)
+    const active = await store.activePlan(CHAT)
+    if (!active) throw new Error("missing saved plan")
+    let batchPlan = active.plan
+    if (attempt === "foreign-batch") {
+      await store.loadOrCreateProfile("other-chat")
+      await store.startPlanGeneration({
+        chatId: "other-chat",
+        generationId: "other-generation",
+        expiresAt: new Date(invokedAtMs + 60_000).toISOString(),
+      })
+      batchPlan = (
+        await store.createActivePlan({
+          planId: "other-plan",
+          chatId: "other-chat",
+          instanceId: "other-instance",
+          generationId: "other-generation",
+          weekStart: active.plan.weekStart,
+          weekEnd: active.plan.weekEnd,
+          timezone: TZ,
+          candidate: active.version.candidate,
+          evaluation: active.version.evaluation,
+          weeklyInventory: active.plan.weeklyInventory,
+          weeklyExceptions: active.plan.weeklyExceptions,
+        })
+      ).plan
+    }
+    expect(
+      (
+        await store.acceptFeedbackBatch({
+          batchId: "isolated-batch",
+          planId: batchPlan.planId,
+          chatId: batchPlan.chatId,
+          baseVersion: 1,
+          workflowInstanceId: batchPlan.instanceId,
+          idempotencyKey: "isolated",
+          items: [{ text: "Change a meal.", target: { kind: "plan" } }],
+        })
+      ).ok,
+    ).toBe(true)
+    await store.markFeedbackBatchDelivered("isolated-batch")
+    const before = await store.feedbackBatch("isolated-batch")
+    const event = {
+      ...original,
+      instanceId: "denied-edit",
+      payload: {
+        ...original.payload,
+        chatId: attempt === "other-chat" ? "other-chat" : CHAT,
+        edit: {
+          planInstanceId: attempt === "other-plan" ? "wrong-plan" : original.instanceId,
+          userId: attempt === "other-user" ? "99" : "42",
+          feedback: {
+            interactionKind: "meal-feedback-submission",
+            source: "mini-app",
+            feedbackBatchId: "isolated-batch",
+            baseVersion: 1,
+          },
+        },
+      },
+    } as WorkflowEvent<MealPlanningWorkflowParams>
+    await runMealPlanningEditWorkflow(env, event, createMemoizingStep([], invokedAtMs) as never)
+    expect(network.deepseekBodies).toHaveLength(2)
+    expect(await store.feedbackBatch("isolated-batch")).toEqual(before)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    expect(network.telegramMessages.filter((m) => m.chatId !== CHAT)).toHaveLength(0)
+  })
+
+  it.each([
+    ["mini-app", "own-write"],
+    ["telegram-reply", "own-write"],
+    ["telegram-reply", "other-operation"],
+    ["telegram-reply", "different-candidate"],
+  ] as const)("handles lost D1 commit responses for %s feedback (%s)", async (source, savedWrite) => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    let loseCommitResponse = false
+    const uncertainD1 = {
+      ...d1,
+      batch: async (statements: D1PreparedStatement[]) => {
+        const results = await d1.batch(statements)
+        if (loseCommitResponse) {
+          loseCommitResponse = false
+          // A different committed operation or payload must not be claimed as this edit.
+          if (savedWrite === "other-operation")
+            db.prepare("UPDATE meal_plan_version SET feedback_batch_id = 'other-operation' WHERE version = 2").run()
+          if (savedWrite === "different-candidate") {
+            const row = db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 2").get() as {
+              candidate_json: string
+            }
+            const saved = JSON.parse(row.candidate_json)
+            saved.grid.Mon.snack1.dish = "a different meal"
+            db.prepare("UPDATE meal_plan_version SET candidate_json = ? WHERE version = 2").run(JSON.stringify(saved))
+          }
+          throw new Error("D1 commit response lost")
+        }
+        return results
+      },
+    } as D1Database
+    const { namespace, registrations } = fakeRouter()
+    const env = makeEnv(namespace, uncertainD1)
+    const original = mealEvent(invokedAtMs)
+    const base = seedCandidate()
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
+    const feedback = {
+      id: source === "mini-app" ? "mini-1" : "telegram-reply-300-1",
+      text: "Use vegetable cutlet.",
+      scope: { day: "Mon", slot: "snack1" },
+    }
+    const network = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(revised, [feedback]) }]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(env, original, createMemoizingStep([], invokedAtMs) as never)
+    const store = createMealPlanningStore(d1)
+    const active = await store.activePlan(CHAT)
+    if (!active) throw new Error("missing saved plan")
+    if (source === "mini-app") {
+      expect(
+        (
+          await store.acceptFeedbackBatch({
+            batchId: "uncertain-batch",
+            planId: active.plan.planId,
+            chatId: CHAT,
+            baseVersion: 1,
+            workflowInstanceId: original.instanceId,
+            idempotencyKey: "uncertain",
+            items: [{ text: feedback.text, target: { kind: "cell", day: "Mon", slot: "snack1" } }],
+          })
+        ).ok,
+      ).toBe(true)
+      await store.markFeedbackBatchDelivered("uncertain-batch")
+    }
+    const event = {
+      ...original,
+      instanceId: "uncertain-edit",
+      payload: {
+        ...original.payload,
+        edit: {
+          planInstanceId: original.instanceId,
+          userId: "42",
+          feedback: {
+            interactionKind: source === "mini-app" ? "meal-feedback-submission" : "meal-feedback-reply",
+            source,
+            ...(source === "mini-app"
+              ? { feedbackBatchId: "uncertain-batch", baseVersion: 1 }
+              : { items: [feedback], messageId: 300 }),
+          },
+        },
+      },
+    } as WorkflowEvent<MealPlanningWorkflowParams>
+    const step = createMemoizingStep([], invokedAtMs)
+    const execute = step.do.getMockImplementation()
+    if (!execute) throw new Error("missing step implementation")
+    step.do.mockImplementation(async (name, fn) => {
+      if (name === "meal-planning-promote-revision-0") loseCommitResponse = true
+      return execute(name, fn)
+    })
+    await runMealPlanningEditWorkflow(env, event, step as never)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(2)
+    expect((await store.activePlan(CHAT))?.version.candidate.grid.Mon.snack1.dish).toBe(
+      savedWrite === "different-candidate" ? "a different meal" : "vegetable cutlet",
+    )
+    expect((await store.loadOrCreateProfile(CHAT)).interactionGeneration).toBe(2)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+    const confirmed = savedWrite === "own-write"
+    expect(registrations.filter((r) => r.kind === "meal-feedback")).toHaveLength(confirmed ? 2 : 1)
+    expect(network.telegramMessages.filter((m) => m.text.includes("School week of"))).toHaveLength(confirmed ? 2 : 1)
+    if (confirmed)
+      expect(network.telegramMessages.map((m) => m.text).join(" ")).not.toMatch(/couldn't|not applied|out of date/i)
+    expect(network.deepseekBodies).toHaveLength(4)
+  })
+
+  it.each([
+    "busy",
+    "provider-failure",
+    "promotion-failure",
+  ])("terminalizes a Mini App batch on %s and prevents duplicate revision on retry", async (failure) => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const env = makeEnv(namespace, d1, { LLM_MAX_RETRIES: "0" })
+    const original = mealEvent(invokedAtMs)
+    const base = seedCandidate()
+    stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(env, original, createFakeStep([], invokedAtMs) as never)
+    const store = createMealPlanningStore(d1)
+    const active = await store.activePlan(CHAT)
+    if (!active) throw new Error("missing saved plan")
+    expect(
+      (
+        await store.acceptFeedbackBatch({
+          batchId: "failed-batch",
+          planId: active.plan.planId,
+          chatId: CHAT,
+          baseVersion: 1,
+          workflowInstanceId: original.instanceId,
+          idempotencyKey: "failed-batch",
+          items: [{ text: "Use idli instead.", target: { kind: "cell", day: "Mon", slot: "snack1" } }],
+        })
+      ).ok,
+    ).toBe(true)
+    await store.markFeedbackBatchDelivered("failed-batch")
+    const router = createInteractionRouter(namespace, CHAT)
+    if (failure === "busy") await router.claimEdit(`meal:${original.instanceId}`, "other-edit", "meal")
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
+    const network = stubNetwork(
+      failure === "promotion-failure"
+        ? [
+            deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+            deepseekResponse([
+              {
+                name: "propose_plan",
+                input: proposeInput(revised, [
+                  { id: "mini-1", text: "Use idli instead.", scope: { day: "Mon", slot: "snack1" } },
+                ]),
+              },
+            ]),
+          ]
+        : [],
+    )
+    const event = {
+      ...original,
+      instanceId: "failed-edit",
+      payload: {
+        ...original.payload,
+        edit: {
+          planInstanceId: original.instanceId,
+          userId: "42",
+          feedback: {
+            interactionKind: "meal-feedback-submission",
+            source: "mini-app",
+            feedbackBatchId: "failed-batch",
+            baseVersion: 1,
+          },
+        },
+      },
+    } as WorkflowEvent<MealPlanningWorkflowParams>
+    const step = createMemoizingStep([], invokedAtMs)
+    const execute = step.do.getMockImplementation()
+    if (!execute) throw new Error("missing step implementation")
+    step.do.mockImplementation(async (name, fn) => {
+      if (failure === "promotion-failure" && name.startsWith("meal-planning-promote-"))
+        throw new Error("D1 unavailable")
+      return execute(name, fn)
+    })
+    await runMealPlanningEditWorkflow(env, event, step as never)
+    expect((await store.feedbackBatch("failed-batch"))?.status).toBe("failed")
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    const requests = network.deepseekBodies.length
+    if (failure === "busy") await router.releaseEdit(`meal:${original.instanceId}`, "other-edit")
+    expect(await router.claimEdit(`meal:${original.instanceId}`, "probe", "meal")).toEqual({ ok: true })
+    await router.releaseEdit(`meal:${original.instanceId}`, "probe")
+    await runMealPlanningEditWorkflow(
+      env,
+      { ...event, instanceId: "batch-redelivery" },
+      createMemoizingStep([], invokedAtMs) as never,
+    )
+    expect(network.deepseekBodies).toHaveLength(requests)
+    expect((await store.feedbackBatch("failed-batch"))?.status).toBe("failed")
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+  })
+
+  it.each([
+    "meal-planning-promote-revision-0",
+    "meal-planning-send-plan-revision-0",
+    "meal-planning-register-feedback-revision-0",
+  ])("resumes a suspended meal edit at %s without failing its batch or repeating promotion", async (boundary) => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace, registrations } = fakeRouter()
+    const env = makeEnv(namespace, d1)
+    const original = mealEvent(invokedAtMs)
+    const base = seedCandidate()
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
+    const network = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([
+        {
+          name: "propose_plan",
+          input: proposeInput(revised, [
+            { id: "mini-1", text: "Use idli instead.", scope: { day: "Mon", slot: "snack1" } },
+          ]),
+        },
+      ]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(env, original, createFakeStep([], invokedAtMs) as never)
+    const store = createMealPlanningStore(d1)
+    const active = await store.activePlan(CHAT)
+    if (!active) throw new Error("missing saved plan")
+    expect(
+      (
+        await store.acceptFeedbackBatch({
+          batchId: "recovery-batch",
+          planId: active.plan.planId,
+          chatId: CHAT,
+          baseVersion: 1,
+          workflowInstanceId: original.instanceId,
+          idempotencyKey: "recovery-batch",
+          items: [{ text: "Use idli instead.", target: { kind: "cell", day: "Mon", slot: "snack1" } }],
+        })
+      ).ok,
+    ).toBe(true)
+    await store.markFeedbackBatchDelivered("recovery-batch")
+    const event = {
+      ...original,
+      instanceId: "suspended-edit",
+      payload: {
+        ...original.payload,
+        edit: {
+          planInstanceId: original.instanceId,
+          userId: "42",
+          feedback: {
+            interactionKind: "meal-feedback-submission",
+            source: "mini-app",
+            feedbackBatchId: "recovery-batch",
+            baseVersion: 1,
+          },
+        },
+      },
+    } as WorkflowEvent<MealPlanningWorkflowParams>
+    const step = createMemoizingStep([], invokedAtMs)
+    const execute = step.do.getMockImplementation()
+    if (!execute) throw new Error("missing step implementation")
+    let suspend = true
+    const signal = new Error("Aborting engine: User called pause")
+    step.do.mockImplementation(async (name, fn) => {
+      if (suspend && name === boundary) throw signal
+      return execute(name, fn)
+    })
+    await expect(runMealPlanningEditWorkflow(env, event, step as never)).rejects.toBe(signal)
+    const promoted = !boundary.includes("promote")
+    expect((await store.feedbackBatch("recovery-batch"))?.status).toBe(promoted ? "consumed" : "processing")
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(promoted ? 2 : 1)
+    const router = createInteractionRouter(namespace, CHAT)
+    expect(await router.claimEdit(`meal:${original.instanceId}`, "competitor", "meal")).toEqual({ ok: false })
+    const requestCount = network.deepseekBodies.length
+    const competingEvent = {
+      ...event,
+      instanceId: "competing-edit",
+      payload: {
+        ...event.payload,
+        edit: {
+          planInstanceId: original.instanceId,
+          userId: "42",
+          feedback: {
+            interactionKind: "meal-feedback-reply",
+            source: "telegram-reply",
+            text: "Change another meal",
+            messageId: 300,
+          },
+        },
+      },
+    } as WorkflowEvent<MealPlanningWorkflowParams>
+    await runMealPlanningEditWorkflow(env, competingEvent, createMemoizingStep([], invokedAtMs) as never)
+    expect(network.deepseekBodies).toHaveLength(requestCount)
+    suspend = false
+    await runMealPlanningEditWorkflow(env, event, step as never)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(2)
+    expect((await store.feedbackBatch("recovery-batch"))?.status).toBe("consumed")
+    expect(network.deepseekBodies).toHaveLength(4)
+    expect(registrations.filter((r) => r.kind === "meal-feedback")).toHaveLength(2)
+    expect(network.telegramMessages.filter((m) => m.text.includes("School week of"))).toHaveLength(2)
+    expect(network.telegramMessages.some((m) => /couldn't|not applied/i.test(m.text))).toBe(false)
+    expect(await router.claimEdit(`meal:${original.instanceId}`, "after-recovery", "meal")).toEqual({ ok: true })
+    await router.releaseEdit(`meal:${original.instanceId}`, "after-recovery")
+    vi.setSystemTime(Date.parse(active.plan.weekEnd) + 1)
+    await runMealPlanningEditWorkflow(env, event, step as never)
+    expect(network.deepseekBodies).toHaveLength(4)
+    expect(network.telegramMessages.filter((m) => m.text.includes("School week of"))).toHaveLength(2)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(2)
   })
 
   it("completes generation without a timer and replays after week end without regenerating", async () => {
@@ -869,7 +1277,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.plan.currentVersion).toBe(2)
     expect(active?.version.version).toBe(2)
     expect(active?.version.requestKind).toBe("revision")
-    expect(active?.version.feedbackBatchId).toBe(`${active?.plan.planId}:v2`)
+    expect(active?.version.feedbackBatchId).toBe("edit-0:revision-0")
     // The revision's own generation usage is recorded on its version row.
     expect(active?.version.usage).toEqual({
       inputTokens: 2,
@@ -1138,7 +1546,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.plan.currentVersion).toBe(3)
     expect(active?.version.version).toBe(3)
     expect(active?.version.requestKind).toBe("revision")
-    expect(active?.version.feedbackBatchId).toBe(`${active?.plan.planId}:v3`)
+    expect(active?.version.feedbackBatchId).toBe("edit-1:revision-0")
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(2)
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(3)
     expect(telegramMessages.filter((message) => message.text.includes("School week of")).length).toBe(3)

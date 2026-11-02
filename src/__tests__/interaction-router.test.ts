@@ -170,6 +170,22 @@ describe("InteractionRouterDO retention", () => {
 describe("persistent edit authority", () => {
   beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(NOW))
 
+  it("keeps unrelated resources and chats independent while an edit holds a lock", async () => {
+    const { namespace } = sqliteInteractionRouter()
+    const first = createInteractionRouter(namespace, "chat-a")
+    const second = createInteractionRouter(namespace, "chat-b")
+    expect(await first.claimEdit("calendar:one", "edit-a", "calendar")).toEqual({ ok: true })
+    const claims = await Promise.all([
+      first.claimEdit("calendar:one", "competing", "calendar"),
+      first.claimEdit("calendar:two", "edit-b", "calendar"),
+      first.claimEdit("meal:one", "edit-meal", "meal"),
+      second.claimEdit("calendar:one", "other-chat", "calendar"),
+    ])
+    expect(claims).toEqual([{ ok: false }, { ok: true }, { ok: true }, { ok: true }])
+    await second.releaseEdit("calendar:one", "edit-a")
+    expect(await first.claimEdit("calendar:one", "competing", "calendar")).toEqual({ ok: false })
+  })
+
   it("enforces chat, user and deadline ownership and never restores an obsolete baseline on replay", async () => {
     const { namespace } = sqliteInteractionRouter()
     const router = createInteractionRouter(namespace, "chat-a")
@@ -238,6 +254,96 @@ describe("persistent edit authority", () => {
       interaction: null,
       reason: "expired",
     })
+  })
+
+  it.each([
+    "queued",
+    "running",
+    "paused",
+    "waiting",
+    "waitingForPause",
+    "unknown",
+    "complete",
+    "errored",
+    "terminated",
+  ])("recovers a lock only when the previous workflow status is terminal (%s)", async (status) => {
+    const binding = {
+      get: async (id: string) => ({ status: async () => ({ status: id === "original" ? status : "running" }) }),
+    }
+    const { namespace } = sqliteInteractionRouter({ MEAL_PLANNING_WORKFLOW: binding } as unknown as Env)
+    const router = createInteractionRouter(namespace, "chat")
+    expect(await router.claimEdit("plan", "original", "meal")).toEqual({ ok: true })
+    const terminal = ["complete", "errored", "terminated"].includes(status)
+    expect(await router.claimEdit("plan", "replacement", "meal")).toEqual({ ok: terminal })
+    await router.releaseEdit("plan", "original")
+    expect(await router.claimEdit("plan", "third", "meal")).toEqual({ ok: !terminal })
+  })
+
+  it.each([
+    "missing-binding",
+    "get-error",
+    "status-error",
+  ])("retains locks when status cannot be established (%s)", async (failure) => {
+    const binding = {
+      get: async () => {
+        if (failure === "get-error") throw new Error("lookup unavailable")
+        return {
+          status: async () => {
+            throw new Error("status unavailable")
+          },
+        }
+      },
+    }
+    const { namespace } = sqliteInteractionRouter(
+      (failure === "missing-binding" ? {} : { CALENDAR_WORKFLOW: binding }) as unknown as Env,
+    )
+    const router = createInteractionRouter(namespace, "chat")
+    await router.claimEdit("event", "original", "calendar")
+    expect(await router.claimEdit("event", "replacement", "calendar")).toEqual({ ok: false })
+    expect(await router.claimEdit("event", "original", "calendar")).toEqual({ ok: true })
+  })
+
+  it("admits one winner when abandoned-lock recovery status lookups overlap", async () => {
+    const resolveStatus: Array<(value: { status: string }) => void> = []
+    const binding = { get: async () => ({ status: () => new Promise((resolve) => resolveStatus.push(resolve)) }) }
+    const { namespace } = sqliteInteractionRouter({ CALENDAR_WORKFLOW: binding } as unknown as Env)
+    const router = createInteractionRouter(namespace, "chat")
+    await router.claimEdit("event", "abandoned", "calendar")
+    const first = router.claimEdit("event", "first", "calendar")
+    const second = router.claimEdit("event", "second", "calendar")
+    await vi.waitFor(() => expect(resolveStatus).toHaveLength(2))
+    resolveStatus[0]({ status: "errored" })
+    expect(await first).toEqual({ ok: true })
+    resolveStatus[1]({ status: "errored" })
+    expect(await second).toEqual({ ok: false })
+    await router.releaseEdit("event", "abandoned")
+    expect(await router.claimEdit("event", "first", "calendar")).toEqual({ ok: true })
+  })
+
+  it("rehydrates context, invalidation, deadlines and locks from the same SQLite database", async () => {
+    const fixture = sqliteInteractionRouter({
+      CALENDAR_WORKFLOW: { get: async () => ({ status: async () => ({ status: "running" }) }) },
+    } as unknown as Env)
+    const router = createInteractionRouter(fixture.namespace, "chat")
+    const original = {
+      sessionId: "v1",
+      resourceId: "event",
+      userId: "42",
+      expiresAt: NOW + 100,
+      context: { version: 1 },
+    }
+    await router.saveEditContext(original)
+    await router.saveEditContext({ ...original, sessionId: "v2", context: { version: 2 } })
+    await router.claimEdit("event", "owner", "calendar")
+    expect(fixture.evict("telegram-chat:chat")).toBe(true)
+    expect((await router.editContext("v1", "42")).context).toBeNull()
+    expect((await router.editContext("v2", "42")).context).toEqual({ version: 2 })
+    expect(await router.claimEdit("event", "competitor", "calendar")).toEqual({ ok: false })
+    await router.saveEditContext(original)
+    expect((await router.editContext("v1", "42")).context).toBeNull()
+    vi.spyOn(Date, "now").mockReturnValue(NOW + 100)
+    expect(fixture.evict("telegram-chat:chat")).toBe(true)
+    expect((await router.editContext("v2", "42")).context).toBeNull()
   })
 
   it("starts one edit for duplicate delivery and propagates a failed create when no run exists", async () => {

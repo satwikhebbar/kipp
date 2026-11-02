@@ -9,7 +9,7 @@ import {
 import { computeCostByModel, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowInteractionKind } from "../core/types"
-import { waitForWorkflowEvent } from "../core/workflow-events"
+import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-events"
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage, type ToolProviderRequestEvent } from "../providers"
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
@@ -35,6 +35,8 @@ import {
   type MealPlanningStore,
   type MealPlanRecord,
   type MealPlanVersionRecord,
+  type PromotePlanVersionInput,
+  type PromotePlanVersionResult,
   type StoredMealProfile,
   type VersionUsage,
 } from "./store"
@@ -776,6 +778,13 @@ export async function runMealPlanningEditWorkflow(
   const store = createStore(env)
   const chatId = event.payload.chatId
   const payload = edit.feedback
+  if (payload.source === "mini-app") {
+    if (!payload.feedbackBatchId) return
+    const batch = await stepDo(step, "meal-edit-load-batch-owner", () =>
+      store.feedbackBatch(payload.feedbackBatchId as string),
+    )
+    if (!batch || batch.chatId !== chatId || batch.workflowInstanceId !== edit.planInstanceId) return
+  }
   const iteration = 0
   const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
   const resourceId = `meal:${edit.planInstanceId}`
@@ -796,6 +805,7 @@ export async function runMealPlanningEditWorkflow(
     await notify(env, step, chatId, MEAL_PLAN_GENERATING, "meal-edit-busy")
     return
   }
+  let interrupted = false
   try {
     const initial = await stepDo(step, "meal-edit-validate-plan", () => store.activePlan(chatId))
     const valid = await step.do("meal-edit-validate-deadline", async () =>
@@ -895,7 +905,8 @@ export async function runMealPlanningEditWorkflow(
       if (!submission) return
       try {
         await runRevision(env, step, event, store, profile, active, submission, iteration, false, feedbackBatch)
-      } catch {
+      } catch (error) {
+        if (isWorkflowInterruption(error)) throw error
         if (feedbackBatch) await failMiniAppBatch(env, step, store, chatId, feedbackBatch.batchId, iteration)
         else await notify(env, step, chatId, MEAL_FEEDBACK_NOT_APPLIED, "meal-edit-failed")
       }
@@ -908,8 +919,11 @@ export async function runMealPlanningEditWorkflow(
       failureCategory: "unrecognized-interaction-kind",
       details: { interactionKind: kind ?? "missing" },
     })
+  } catch (error) {
+    interrupted = isWorkflowInterruption(error)
+    throw error
   } finally {
-    await step.do("meal-edit-release", () => router.releaseEdit(resourceId, event.instanceId))
+    if (!interrupted) await step.do("meal-edit-release", () => router.releaseEdit(resourceId, event.instanceId))
   }
 }
 
@@ -1097,7 +1111,7 @@ async function runRevision(
     enrichLunchVideos(env, propose.candidate),
   )
   const result = await stepDo(step, `meal-planning-promote-${occurrence}`, () =>
-    store.promotePlanVersion({
+    promoteRevisionWithRecovery(store, {
       planId: active.plan.planId,
       chatId: event.payload.chatId,
       baseVersion: active.plan.currentVersion,
@@ -1111,7 +1125,7 @@ async function runRevision(
         weeklyExceptions: propose.weeklyExceptions,
       },
       feedbackBatch: {
-        batchId: feedbackBatch?.batchId ?? `${active.plan.planId}:v${active.plan.currentVersion + 1}`,
+        batchId: feedbackBatch?.batchId ?? `${event.instanceId}:${occurrence}`,
         items: submission.items,
         consumeExisting: Boolean(feedbackBatch),
       },
@@ -1139,6 +1153,38 @@ async function runRevision(
   if (!updated) return null
   await sendPlanAndRegister(env, step, event, profile, updated.plan, result.version, result.generation, occurrence)
   return result.generation
+}
+
+/** Restores a committed revision when its D1 response or durable step checkpoint was lost. */
+async function promoteRevisionWithRecovery(
+  store: MealPlanningStore,
+  input: PromotePlanVersionInput,
+): Promise<PromotePlanVersionResult> {
+  /** Only this operation's still-current, identical revision can be recovered. */
+  async function committedRevision(): Promise<PromotePlanVersionResult | null> {
+    if (!input.feedbackBatch?.batchId) return null
+    const saved = await store.activePlan(input.chatId)
+    if (
+      !saved ||
+      saved.plan.planId !== input.planId ||
+      saved.plan.currentVersion !== input.baseVersion + 1 ||
+      saved.version.feedbackBatchId !== input.feedbackBatch.batchId ||
+      JSON.stringify(saved.version.candidate) !== JSON.stringify(input.candidate)
+    )
+      return null
+    const profile = await store.loadOrCreateProfile(input.chatId)
+    return { ok: true, version: saved.version, generation: profile.interactionGeneration }
+  }
+  let result: PromotePlanVersionResult
+  try {
+    result = await store.promotePlanVersion(input)
+  } catch (error) {
+    if (isWorkflowInterruption(error)) throw error
+    const committed = await committedRevision()
+    if (committed) return committed
+    throw error
+  }
+  return result.ok ? result : ((await committedRevision()) ?? result)
 }
 
 /** Newly ineligible cells are removed deterministically before a revision patch is merged. */

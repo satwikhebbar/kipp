@@ -51,7 +51,66 @@ the workflow API confirms a terminal status. Active, paused, waiting and unknown
 runs retain their locks. Calendar feedback rechecks its baseline after acquiring
 the lock, so a competing successful edit cannot leave stale write authority.
 
+Runtime interruption signals (pause, restart, termination and grace-period
+eviction) propagate through application error handling. A suspended edit keeps
+its lock and does not send a failure notice or mark a Mini App batch failed.
+On recovery, completed durable steps restore their results. A terminated run's
+lock is recovered by a later edit after the terminal-status check above.
+This recovery differs from an explicit Workflow `restart()` operation, which
+resets step history by default.
+
 This change introduces additive SQLite tables and an interaction metadata column
 inside the existing Durable Object. It adds no Worker binding, D1 migration,
 secret, runtime variable or production timer. Calendar ETag protection against
 manual Google Calendar edits remains outside this change.
+
+The Calendar integration suite verifies delivery and lock recovery using actual
+Workerd Workflow instances and the production router in a SQLite Durable Object.
+It covers duplicate delivery, a lost create response, active-run exclusion,
+terminal-run recovery, owner-checked release and redelivery after completion.
+The probe uses no external Calendar or Telegram APIs. Runtime status labels are
+not used to infer that a run has reached its event wait; the test observes lock
+acquisition directly because Miniflare can report an event-blocked run as running.
+
+Additional runtime tests run the production Calendar workflow and agent with
+only provider, Calendar and Telegram service boundaries replaced. They pause
+an edit after its durable write and before context storage, confirmation, or
+feedback registration, dispose the runtime, then boot a fresh runtime over the
+same persisted databases and resume. Assertions verify retained locks, restored
+feedback registration, no misleading failure notice and no repeated provider
+calls, write or completed confirmation. Deterministic tests cover the analogous
+meal-plan promotion/notification boundaries, batch failure and contention,
+uncertain workflow statuses, overlapping lock recovery, context changes before
+lock acquisition and router reconstruction from SQLite.
+
+The runtime recovery suite also uses the production Google adapter and encrypted
+token vault against a simulated Google service. It loses a create or update
+checkpoint after Google accepts the write, then pauses, reboots and resumes the
+Workflow. Retried creates retain their deterministic event ID; retried updates
+retain the same event and body. If every update response is lost, the adapter
+confirms success only after reading back all managed fields and matching the
+intended update, including request ownership. This verifies an uncertain write;
+it does not add ETag protection against external edits.
+
+The authorization regression starts with an expired token and rejected refresh,
+reboots during the reconnect prompt, restores credentials through the production
+vault, and delivers Retry. It then reboots again after creation and resumes past
+the original plan deadline. Creation remains singular, the new Edit registration
+is usable, and no delayed failure is sent. The browser OAuth redirect and Google's
+token exchange remain outside this runtime test.
+
+Meal runtime tests persist and reopen real D1, Workflow and router databases at
+promotion, notification and feedback-registration boundaries. A committed revision
+whose response or checkpoint is lost is recovered only when the current version,
+plan, operation identity and candidate match. Telegram revision operation IDs are
+scoped to the edit instance and revision occurrence; Mini App batches retain their
+server-owned batch ID. Recovery does not promote another version or bump the
+message generation. Mini App batch ownership is checked against the chat and
+original plan instance before claiming a batch or changing its status.
+
+Telegram send acceptance and Workflow checkpointing are not atomic. A lost send
+response or checkpoint can produce a duplicate confirmation on retry. The runtime
+test verifies that recovery repeats no Calendar write and registers usable Edit
+controls, while tests of already-checkpointed sends continue to require no
+duplicate confirmation. Shared action prompts propagate runtime interruptions
+instead of converting them into ordinary interaction failures.

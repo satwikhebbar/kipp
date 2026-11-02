@@ -425,6 +425,101 @@ describe("Google Calendar client", () => {
     expect(fetch).toHaveBeenCalledTimes(4)
   })
 
+  it.each([
+    "create",
+    "update",
+  ] as const)("recovers an accepted %s after every write response is lost", async (operation) => {
+    const saved = new Map<string, unknown>()
+    const writes: string[] = []
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.method === "GET") return response(200, saved.get(EVENT.id))
+      const body = JSON.parse(init.body as string)
+      writes.push(init.body as string)
+      // Google commits the write even though the caller never sees a response.
+      saved.set(body.id, body)
+      throw new TypeError("response lost after commit")
+    })
+    vi.stubGlobal("fetch", fetch)
+    const client = createGoogleCalendarClient(await environment())
+    await expect(
+      operation === "create" ? client.createManagedEvent(EVENT) : client.updateManagedEvent(EVENT),
+    ).resolves.toBeUndefined()
+    expect(saved.size).toBe(1)
+    expect(writes).toHaveLength(3)
+    expect(new Set(writes).size).toBe(1)
+    expect(fetch.mock.calls.at(-1)?.[1].method).toBe("GET")
+  })
+
+  it.each([
+    "summary",
+    "start",
+    "end",
+    "description",
+    "location",
+    "visibility",
+    "transparency",
+    "reminders",
+    "recurrence",
+    "owner",
+  ])("does not confirm an uncertain update when the saved %s differs", async (field) => {
+    let saved: Record<string, unknown> = {}
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.method === "GET") return response(200, saved)
+      saved = JSON.parse(init.body as string)
+      saved[field === "owner" ? "extendedProperties" : field] =
+        field === "owner" ? { private: { "kipp.requestId": "someone-else" } } : "different"
+      throw new TypeError("response lost")
+    })
+    vi.stubGlobal("fetch", fetch)
+    await expect(
+      createGoogleCalendarClient(await environment()).updateManagedEvent({
+        ...EVENT,
+        description: "Agenda",
+        location: "Home",
+        recurrence: ["RRULE:FREQ=WEEKLY;COUNT=2"],
+      }),
+    ).rejects.toMatchObject({ kind: "transient" })
+  })
+
+  it("accepts equivalent UTC timestamps when verifying an uncertain update", async () => {
+    let saved: Record<string, unknown> = {}
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.method === "GET") return response(200, saved)
+      saved = {
+        ...JSON.parse(init.body as string),
+        start: { dateTime: new Date(EVENT.start).toISOString(), timeZone: EVENT.timeZone },
+        end: { dateTime: new Date(EVENT.end).toISOString(), timeZone: EVENT.timeZone },
+      }
+      throw new TypeError("response lost")
+    })
+    vi.stubGlobal("fetch", fetch)
+    await expect(createGoogleCalendarClient(await environment()).updateManagedEvent(EVENT)).resolves.toBeUndefined()
+  })
+
+  it.each([
+    400, 401, 403, 404,
+  ])("does not recover a definitive update rejection (%i) as an uncertain write", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(response(status))
+    vi.stubGlobal("fetch", fetch)
+    await expect(createGoogleCalendarClient(await environment()).updateManagedEvent(EVENT)).rejects.toMatchObject({
+      kind: status === 401 || status === 403 ? "authorization" : "permanent",
+    })
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0][1].method).toBe("PUT")
+  })
+
+  it("keeps an uncertain update failed when the event cannot be found on readback", async () => {
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.method === "GET") return response(404)
+      throw new TypeError("connection lost")
+    })
+    vi.stubGlobal("fetch", fetch)
+    await expect(createGoogleCalendarClient(await environment()).updateManagedEvent(EVENT)).rejects.toMatchObject({
+      kind: "transient",
+    })
+    expect(fetch.mock.calls.map(([, init]) => init.method)).toEqual(["PUT", "PUT", "PUT", "GET"])
+  })
+
   it("returns only primary-calendar busy intervals", async () => {
     const busy = [{ start: EVENT.start, end: EVENT.end }]
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(200, { calendars: { primary: { busy } } })))

@@ -2,6 +2,14 @@ import type { WorkflowStep } from "cloudflare:workers"
 
 export type WorkflowWaitResult<T> = { type: "event"; payload: T } | { type: "timeout"; payload?: undefined }
 
+/** Identifies runtime suspension/termination signals that must escape application recovery. */
+export function isWorkflowInterruption(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /^Aborting engine: (?:User called (?:pause|restart|terminate)|Grace period complete)$/.test(error.message)
+  )
+}
+
 /** Converts only the runtime's event-wait timeout into an explicit application outcome. */
 export async function waitForWorkflowEvent<T>(
   step: WorkflowStep,

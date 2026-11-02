@@ -3,7 +3,7 @@ import { createTelegramClient } from "../integrations/telegram"
 import { logRuntime } from "../runtime/logging"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import type { Env, WorkflowInteractionKind } from "./types"
-import { waitForWorkflowEvent } from "./workflow-events"
+import { isWorkflowInterruption, waitForWorkflowEvent } from "./workflow-events"
 
 export type ActionPromptOutcome =
   | { type: "timeout" }
@@ -125,7 +125,8 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
     return matchedIndex >= 0
       ? { type: "action", kind: prepared[matchedIndex]?.kind as WorkflowInteractionKind, actionIndex: matchedIndex }
       : { type: "reply", text }
-  } catch {
+  } catch (error) {
+    if (isWorkflowInterruption(error)) throw error
     logRuntime(env, {
       workflow: instanceId,
       event: logEventName,
