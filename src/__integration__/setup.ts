@@ -1,7 +1,7 @@
 import { vi } from "vitest"
+import { sqliteInteractionRouter } from "../__tests__/fixtures/interaction-router"
 import { claimInstanceId } from "../core/idea-ingest"
-import { CONSUMED_INTERACTION_RETENTION_MS } from "../core/interaction-router"
-import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
+import type { Env, WorkflowInteractionKind } from "../core/types"
 import { createNotionClient } from "../integrations/notion"
 import { createIdeaManager, type IdeaInput } from "../linkedin/ideas/manager"
 
@@ -460,17 +460,6 @@ export function createFakeIdeaIngest(env: Env): DurableObjectNamespace {
   return namespace as unknown as DurableObjectNamespace
 }
 
-const REVISION_FEEDBACK_KIND = INTERACTION_KIND.REVISION_FEEDBACK
-const PLAIN_TEXT_INTERACTION_KINDS = new Set<string>([
-  REVISION_FEEDBACK_KIND,
-  INTERACTION_KIND.CALENDAR_CLARIFICATION,
-  INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
-  INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
-  INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
-  INTERACTION_KIND.MEAL_CLARIFICATION,
-  INTERACTION_KIND.MEAL_FEEDBACK_REPLY,
-])
-
 export interface FakeInteractionRegistration {
   interactionId: string
   version: number
@@ -481,6 +470,7 @@ export interface FakeInteractionRegistration {
   expiresAt?: number
   interactionGroup?: string
   generation?: number
+  edit?: { sessionId?: string }
 }
 
 export interface FakeInteractionRouter {
@@ -489,93 +479,14 @@ export interface FakeInteractionRouter {
 }
 
 export function createFakeInteractionRouter(): FakeInteractionRouter {
-  type RouterRecord = {
-    interactionId: string
-    version: number
-    workflowId: string
-    kind: string
-    callbackToken?: string
-    botMessageId?: number
-    expiresAt: number
-    interactionGroup?: string
-    generation?: number
-    consumed?: number
-    consumedAt?: number
+  const { namespace } = sqliteInteractionRouter()
+  return {
+    namespace,
+    register: (chatId, registration) => {
+      void namespace.get(namespace.idFromName(`telegram-chat:${chatId}`)).fetch("https://interaction-router/register", {
+        method: "POST",
+        body: JSON.stringify({ ...registration, expiresAt: registration.expiresAt ?? Date.now() + 60_000 }),
+      })
+    },
   }
-  const records = new Map<string, RouterRecord[]>()
-  const invalidate = (
-    list: RouterRecord[],
-    registration: { interactionGroup?: string; generation?: number; version: number },
-  ) => {
-    if (!registration.interactionGroup) return
-    for (const item of list) {
-      if (item.interactionGroup !== registration.interactionGroup || item.consumed) continue
-      if (registration.generation !== undefined) {
-        if (item.generation !== undefined && item.generation < registration.generation) item.consumed = -1
-      } else if (item.version < registration.version) {
-        item.consumed = -1
-      }
-    }
-  }
-  const register = (chatId: number | string, registration: FakeInteractionRegistration) => {
-    const chat = `telegram-chat:${chatId}`
-    const list = records.get(chat) ?? []
-    if (registration.kind === REVISION_FEEDBACK_KIND) {
-      for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
-    }
-    invalidate(list, registration)
-    list.push({ ...registration, expiresAt: registration.expiresAt ?? Date.now() + 60_000 })
-    records.set(chat, list)
-  }
-  const namespace = {
-    idFromName: (name: string) => name as never,
-    get: (id: { toString?: () => string } | string) => ({
-      fetch: async (url: string | Request, init?: RequestInit) => {
-        const chat = typeof id === "string" ? id : (id.toString?.() ?? "")
-        const now = Date.now()
-        const list = (records.get(chat) ?? []).filter(
-          (item) =>
-            item.expiresAt > now && (!item.consumedAt || item.consumedAt > now - CONSUMED_INTERACTION_RETENTION_MS),
-        )
-        records.set(chat, list)
-        const path = new URL(typeof url === "string" ? url : url.url).pathname
-        const body = JSON.parse(init?.body as string) as Record<string, unknown>
-        if (path === "/register") {
-          const registration = body as unknown as RouterRecord
-          if (registration.kind === REVISION_FEEDBACK_KIND) {
-            for (const item of list) if (item.kind === REVISION_FEEDBACK_KIND && !item.consumed) item.consumed = -1
-          }
-          invalidate(list, registration)
-          list.push(registration)
-          return Response.json({ ok: true })
-        }
-        const found = body.callbackToken
-          ? list.find((item) => item.callbackToken === body.callbackToken)
-          : body.replyToMessageId !== undefined
-            ? list.find((item) => item.botMessageId === body.replyToMessageId)
-            : [...list].reverse().find((item) => PLAIN_TEXT_INTERACTION_KINDS.has(item.kind) && !item.consumed)
-        if (!found) return Response.json({ interaction: null })
-        if (found.expiresAt <= Date.now() || found.consumed) return Response.json({ interaction: null })
-        if (found.interactionGroup && found.generation !== undefined) {
-          const max = Math.max(
-            0,
-            ...list
-              .filter((item) => item.interactionGroup === found.interactionGroup && item.generation !== undefined)
-              .map((item) => item.generation as number),
-          )
-          if (found.generation < max) return Response.json({ interaction: null })
-        }
-        found.consumed = body.telegramUpdateId as number
-        found.consumedAt = now
-        return Response.json({
-          interaction: {
-            ...found,
-            telegramUpdateId: body.telegramUpdateId,
-            ...(body.text !== undefined ? { text: body.text } : {}),
-          },
-        })
-      },
-    }),
-  } as unknown as DurableObjectNamespace
-  return { namespace, register }
 }

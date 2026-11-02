@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { startEditWorkflow } from "../core/edit-workflow"
 import { CONSUMED_INTERACTION_RETENTION_MS, InteractionRouterDO } from "../core/interaction-router"
+import { createInteractionRouter } from "../core/interaction-router-client"
+import type { Env } from "../core/types"
 import { INTERACTION_KIND } from "../core/types"
+import { sqliteInteractionRouter } from "./fixtures/interaction-router"
 
 const NOW = 1_000_000
 
@@ -149,7 +153,7 @@ describe("InteractionRouterDO retention", () => {
 
     const response = await router.fetch(post("/resolve", { telegramUpdateId: 1, callbackToken: "old-token" }))
 
-    expect(await response.json()).toEqual({ interaction: null })
+    expect(await response.json()).toEqual({ interaction: null, reason: "stale" })
   })
 
   it("resolves a row whose generation matches the group's highest present generation", async () => {
@@ -160,5 +164,98 @@ describe("InteractionRouterDO retention", () => {
     expect((await response.json()) as { interaction: RouterRow }).toMatchObject({
       interaction: { interactionId: "interaction-1", kind: INTERACTION_KIND.MEAL_FEEDBACK },
     })
+  })
+})
+
+describe("persistent edit authority", () => {
+  beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(NOW))
+
+  it("enforces chat, user and deadline ownership and never restores an obsolete baseline on replay", async () => {
+    const { namespace } = sqliteInteractionRouter()
+    const router = createInteractionRouter(namespace, "chat-a")
+    const original = {
+      sessionId: "v1",
+      resourceId: "event-1",
+      userId: "42",
+      expiresAt: NOW + 100,
+      context: { baseline: "first" },
+    }
+    await router.saveEditContext(original)
+    expect((await router.editContext("v1", "42")).context).toEqual({ baseline: "first" })
+    expect((await router.editContext("v1", "other-user")).context).toBeNull()
+    expect((await createInteractionRouter(namespace, "chat-b").editContext("v1", "42")).context).toBeNull()
+    await router.saveEditContext({ ...original, sessionId: "v2", context: { baseline: "updated" } })
+    await router.saveEditContext(original)
+    expect((await router.editContext("v1", "42")).context).toBeNull()
+    expect((await router.editContext("v2", "42")).context).toEqual({ baseline: "updated" })
+    vi.spyOn(Date, "now").mockReturnValue(NOW + 100)
+    expect((await router.editContext("v2", "42")).context).toBeNull()
+  })
+
+  it("admits only one concurrent edit per resource and recovers locks from terminal runs", async () => {
+    let status = "running"
+    const binding = { get: async () => ({ status: async () => ({ status }) }) }
+    const { namespace } = sqliteInteractionRouter({ CALENDAR_WORKFLOW: binding } as unknown as Env)
+    const router = createInteractionRouter(namespace, "chat-a")
+    const claims = await Promise.all([
+      router.claimEdit("event-1", "first", "calendar"),
+      router.claimEdit("event-1", "second", "calendar"),
+    ])
+    expect(claims).toEqual([{ ok: true }, { ok: false }])
+    await router.releaseEdit("event-1", "second")
+    expect(await router.claimEdit("event-1", "second", "calendar")).toEqual({ ok: false })
+    status = "terminated"
+    expect(await router.claimEdit("event-1", "second", "calendar")).toEqual({ ok: true })
+    await router.releaseEdit("event-1", "second")
+    expect(await router.claimEdit("event-1", "third", "calendar")).toEqual({ ok: true })
+  })
+
+  it("keeps edit actions reusable until expiry while preserving their identity on registration retries", async () => {
+    const { namespace } = sqliteInteractionRouter()
+    const router = createInteractionRouter(namespace, "chat-a")
+    const registration = {
+      interactionId: "edit-1",
+      workflowId: "generation-1",
+      version: 1,
+      kind: INTERACTION_KIND.CALENDAR_EDIT,
+      callbackToken: "token",
+      expiresAt: NOW + 100,
+      edit: { sessionId: "saved" },
+    }
+    await router.register(registration)
+    expect((await router.resolve({ callbackToken: "token", telegramUpdateId: 1 })).interaction?.edit).toEqual({
+      sessionId: "saved",
+    })
+    await router.register(registration)
+    expect((await router.resolve({ callbackToken: "token", telegramUpdateId: 2 })).interaction?.edit).toEqual({
+      sessionId: "saved",
+    })
+    expect((await router.resolve({ callbackToken: "token", telegramUpdateId: 1 })).interaction?.interactionId).toBe(
+      "edit-1",
+    )
+    vi.spyOn(Date, "now").mockReturnValue(NOW + 100)
+    expect(await router.resolve({ callbackToken: "token", telegramUpdateId: 3 })).toEqual({
+      interaction: null,
+      reason: "expired",
+    })
+  })
+
+  it("starts one edit for duplicate delivery and propagates a failed create when no run exists", async () => {
+    const ids = new Set<string>()
+    const binding = {
+      create: vi.fn(async ({ id }: { id: string }) => {
+        if (ids.has(id)) throw new Error("already exists")
+        ids.add(id)
+      }),
+      get: async (id: string) => ({ status: async () => ({ status: ids.has(id) ? "complete" : "unknown" }) }),
+    }
+    const results = await Promise.all([
+      startEditWorkflow(binding as never, "update-1", {}),
+      startEditWorkflow(binding as never, "update-1", {}),
+    ])
+    expect(results[0]).toBe(results[1])
+    expect(ids.size).toBe(1)
+    binding.create.mockRejectedValueOnce(new Error("network failed"))
+    await expect(startEditWorkflow(binding as never, "update-2", {})).rejects.toThrow("network failed")
   })
 })

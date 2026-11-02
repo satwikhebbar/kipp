@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vites
 import { promptForActions } from "../core/action-prompt"
 import { type Env, INTERACTION_KIND } from "../core/types"
 import type { ToolConversationMessage } from "../providers"
+import { sqliteInteractionRouter } from "./fixtures/interaction-router"
 import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
 vitest.mock("cloudflare:workers", () => {
@@ -141,6 +142,9 @@ function queueQuestion(message: string, reasonCodes = ["missing_date"]): void {
   })
 }
 
+let nextEditId = 0
+let testRouter = sqliteInteractionRouter()
+
 function environment(): Env {
   return {
     TELEGRAM_BOT_TOKEN: "bot-token",
@@ -149,10 +153,8 @@ function environment(): Env {
     LLM_MAX_RETRIES: "0",
     TIMEZONE: "Asia/Kolkata",
     GOOGLE_CALENDAR_REDIRECT_ORIGIN: "https://dev.kipp.example/",
-    INTERACTION_ROUTER: {
-      idFromName: () => "calendar-chat",
-      get: () => ({ fetch: async () => new Response(JSON.stringify({ ok: true })) }),
-    },
+    TELEGRAM_ALLOWED_USER_ID: "42",
+    INTERACTION_ROUTER: testRouter.namespace,
   } as unknown as Env
 }
 
@@ -230,10 +232,31 @@ async function run(step: ReturnType<typeof createStep>, requestText?: string): P
   )
 }
 
+/** Starts a new edit run against the saved context from the completed generation. */
+async function editSaved(text: string, step = createStep(), openPrompt = false) {
+  const registration = [...testRouter.registrations].reverse().find((r) => r.kind === INTERACTION_KIND.CALENDAR_EDIT)
+  if (!registration) throw new Error("Missing saved edit registration")
+  const sessionId = (registration.edit as { sessionId: string }).sessionId
+  const workflow = new CalendarWorkflow({} as never, {} as never)
+  Object.assign(workflow, { env: environment() })
+  const event = {
+    ...workflowEvent(),
+    instanceId: `edit-${++nextEditId}`,
+    payload: {
+      ...workflowEvent().payload,
+      edit: { sessionId, userId: "42", text, openPrompt },
+    },
+  }
+  await workflow.run(event as never, step as never)
+  return { event, step, workflow }
+}
+
 describe("agent-centered CalendarWorkflow", () => {
   beforeEach(() => {
     vitest.useFakeTimers()
     vitest.setSystemTime(new Date("2026-07-01T00:00:00.000Z"))
+    nextEditId = 0
+    testRouter = sqliteInteractionRouter()
     mockGenerate.mockReset()
     mockBusyIntervals.mockReset().mockResolvedValue([])
     mockListEvents.mockReset().mockResolvedValue({ events: [], truncated: false })
@@ -274,8 +297,7 @@ describe("agent-centered CalendarWorkflow", () => {
           ]
         : [],
     )
-    const initial = run(harness.step)
-    await harness.parked
+    await run(harness.step)
     const providerCalls = mockGenerate.mock.calls.length
     const reads = mockBusyIntervals.mock.calls.length
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
@@ -284,8 +306,6 @@ describe("agent-centered CalendarWorkflow", () => {
     vitest.setSystemTime(Date.now() + 20 * 60_000)
     harness.replay()
     await run(harness.step)
-    harness.finish()
-    await initial
     expect(mockGenerate).toHaveBeenCalledTimes(providerCalls)
     expect(mockBusyIntervals).toHaveBeenCalledTimes(reads)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
@@ -313,41 +333,14 @@ describe("agent-centered CalendarWorkflow", () => {
       { type: "event", payload: { text: "30 October" } },
       { type: "event", payload: { text: "__calendar-retry__" } },
     ])
-    const initial = run(harness.step)
-    await harness.parked
+    await run(harness.step)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     const providerCalls = mockGenerate.mock.calls.length
     vitest.setSystemTime(Date.now() + 20 * 60_000)
     harness.replay()
     await run(harness.step)
-    harness.finish()
-    await initial
     expect(mockGenerate).toHaveBeenCalledTimes(providerCalls)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
-    expect(telegram).toHaveBeenCalledTimes(3)
-  })
-
-  it.each([
-    ONE_OFF,
-    RECURRING,
-  ])("replays an update after expiry without repeating either mutation ($kind)", async (candidate) => {
-    queueReady(candidate)
-    queueReady(candidate)
-    const telegram = telegramMock()
-    const harness = replayStep([
-      { type: "event", payload: { text: "__calendar-edit__" } },
-      { type: "event", payload: { text: "Keep the same time" } },
-    ])
-    const initial = run(harness.step)
-    await harness.parked
-    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
-    vitest.setSystemTime(Date.now() + 20 * 60_000)
-    harness.replay()
-    await run(harness.step)
-    harness.finish()
-    await initial
-    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
-    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
     expect(telegram).toHaveBeenCalledTimes(3)
   })
 
@@ -403,28 +396,108 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(registrations[1]).toEqual(original)
   })
 
-  it("accepts an Edit inside its confirmation window after the original plan authorization expires", async () => {
+  it("accepts a fresh edit run inside the confirmation window after original authorization expires", async () => {
     queueQuestion("Which date?")
     queueReady(ONE_OFF)
     queueReady(ONE_OFF)
     const start = Date.now()
     const step = createStep()
-    step.waitForEvent
-      .mockImplementationOnce(async () => {
-        vitest.setSystemTime(start + 2 * 60_000)
-        return { type: "telegram-reply", payload: { text: "28 July" } }
-      })
-      .mockImplementationOnce(async () => {
-        // Event was created at minute 2: this Edit is still inside its own
-        // fifteen-minute window, although the original plan expired at minute 15.
-        vitest.setSystemTime(start + 16 * 60_000)
-        return { type: "telegram-reply", payload: { text: "__calendar-edit__" } }
-      })
-      .mockResolvedValueOnce({ type: "telegram-reply", payload: { text: "Keep this time" } })
-      .mockRejectedValueOnce(workflowTimeoutError())
+    step.waitForEvent.mockImplementationOnce(async () => {
+      vitest.setSystemTime(start + 2 * 60_000)
+      return { type: "telegram-reply", payload: { text: "28 July" } }
+    })
     await run(step)
+    expect(step.waitForEvent).toHaveBeenCalledTimes(1)
+    vitest.setSystemTime(start + 16 * 60_000)
+    await editSaved("Keep this time")
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it("completes an Edit prompt without waiting or running the scheduling agent", async () => {
+    queueReady(ONE_OFF)
+    await run(createStep())
+    const calls = mockGenerate.mock.calls.length
+    const { step } = await editSaved("", createStep(), true)
+    expect(step.waitForEvent).not.toHaveBeenCalled()
+    expect(mockGenerate).toHaveBeenCalledTimes(calls)
+    expect(testRouter.registrations.at(-1)?.kind).toBe(INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK)
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+  })
+
+  it("rejects expired feedback and feedback for a baseline replaced by a successful edit", async () => {
+    queueReady(ONE_OFF)
+    queueReady(ONE_OFF)
+    await run(createStep())
+    const { event, workflow } = await editSaved("Keep this time")
+    await workflow.run({ ...event, instanceId: "stale-edit" } as never, createStep() as never)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    vitest.setSystemTime(Date.now() + 16 * 60_000)
+    await editSaved("Move it again")
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockGenerate).toHaveBeenCalledTimes(4)
+  })
+
+  it("rejects an edit from another user before reading context or invoking the agent", async () => {
+    queueReady(ONE_OFF)
+    await run(createStep())
+    const registration = testRouter.registrations.at(-1)
+    const workflow = new CalendarWorkflow({} as never, {} as never)
+    Object.assign(workflow, { env: environment() })
+    await workflow.run(
+      {
+        ...workflowEvent(),
+        payload: {
+          ...workflowEvent().payload,
+          edit: {
+            ...(registration?.edit as { sessionId: string }),
+            userId: "other",
+            openPrompt: false,
+            text: "move it",
+          },
+        },
+      } as never,
+      createStep() as never,
+    )
+    expect(mockGenerate).toHaveBeenCalledTimes(2)
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ONE_OFF,
+    RECURRING,
+  ])("replays a separate edit after expiry without repeating its mutation ($kind)", async (candidate) => {
+    queueReady(candidate)
+    queueReady(candidate)
+    await run(createStep())
+    const harness = replayStep()
+    const { event, workflow } = await editSaved("Keep this time", harness.step)
+    vitest.setSystemTime(Date.now() + 20 * 60_000)
+    harness.replay()
+    await workflow.run(event as never, harness.step as never)
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockGenerate).toHaveBeenCalledTimes(4)
+  })
+
+  it("prevents overlapping calendar edits from writing from the same baseline", async () => {
+    queueReady(ONE_OFF)
+    queueReady(ONE_OFF)
+    await run(createStep())
+    let finish: () => void = () => undefined
+    mockUpdateManagedEvent.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        }),
+    )
+    const first = editSaved("Keep this time")
+    await vitest.waitFor(() => expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1))
+    await editSaved("Move it elsewhere")
+    expect(mockGenerate).toHaveBeenCalledTimes(4)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    finish()
+    await first
   })
 
   it("still rejects a genuinely expired plan that has never been authorized or written", async () => {
@@ -684,13 +757,8 @@ describe("agent-centered CalendarWorkflow", () => {
     queueReady(ONE_OFF)
     queueReady({ ...ONE_OFF, proposal: { ...ONE_OFF.proposal, startTime: "20:00" } })
 
-    await run(
-      createStep(
-        { type: "event", payload: { text: "__calendar-edit__" } },
-        { type: "event", payload: { text: "Move it to 8pm" } },
-        { type: "timeout" },
-      ),
-    )
+    await run(createStep())
+    await editSaved("Move it to 8pm")
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
@@ -705,12 +773,8 @@ describe("agent-centered CalendarWorkflow", () => {
     mockGenerate.mockResolvedValue({ toolCalls: [], usage: {}, text: "I need more information." })
     const telegram = telegramMock()
 
-    await run(
-      createStep(
-        { type: "event", payload: { text: "__calendar-edit__" } },
-        { type: "event", payload: { text: "Move it to 8pm" } },
-      ),
-    )
+    await run(createStep())
+    await editSaved("Move it to 8pm")
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     const sentTexts = telegram.mock.calls.map(
@@ -727,12 +791,8 @@ describe("agent-centered CalendarWorkflow", () => {
     queueReady(ONE_OFF)
     mockUpdateManagedEvent.mockRejectedValueOnce(new MockGoogleCalendarError("unavailable", "transient"))
     const telegram = telegramMock()
-    await run(
-      createStep(
-        { type: "event", payload: { text: "__calendar-edit__" } },
-        { type: "event", payload: { text: "Keep the same time" } },
-      ),
-    )
+    await run(createStep())
+    await editSaved("Move it to 8pm")
     const texts = telegram.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string).text as string)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(texts.some((text) => text.startsWith("Added:"))).toBe(true)
@@ -764,7 +824,7 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(telegram).toHaveBeenCalledTimes(2)
   })
 
-  it("does not resend a delivered confirmation when its Edit wait fails", async () => {
+  it("completes after delivering confirmation without an Edit wait", async () => {
     queueReady(RECURRING)
     const telegram = telegramMock()
     const step = createStep()
@@ -774,6 +834,7 @@ describe("agent-centered CalendarWorkflow", () => {
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(telegram).toHaveBeenCalledTimes(1)
+    expect(step.waitForEvent).not.toHaveBeenCalled()
     expect((telegram.mock.calls[0]?.[1] as { body?: string } | undefined)?.body).toContain("3 occurrences")
   })
 

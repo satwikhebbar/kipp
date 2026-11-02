@@ -50,7 +50,6 @@ const MEAL_PLAN_GENERATION_LEASE_MS = MEAL_PLANNING_TTL_MS + MEAL_PLANNING_TTL_M
 const MEAL_CLARIFICATION_TTL_MS = 900_000 // 15 minutes: clarification prompt lifetime
 const MEAL_FEEDBACK_REPLY_TTL_MS = 900_000 // 15 minutes: feedback prompt lifetime
 const MEAL_PLANNING_GROUP = "meal-planning"
-const MEAL_LIVE_WAIT_CHUNK_MS = 86_400_000 // 24 hours: parked live-loop re-wait chunk
 const MEAL_MAX_SESSION_TURNS = 10
 const MILLISECONDS_PER_SECOND = 1_000
 const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
@@ -237,8 +236,8 @@ export function renderHouseholdContext(context: MealPlanContext): string {
  * Runs the bounded meal-planning workflow: load household state, resolve the
  * target week, run the planning-agent session (with 15-min clarification
  * prompts), persist the plan atomically via the D1 store, send the plan
- * message with a live [Give feedback] button, then park in a week-long live
- * loop that turns every feedback submission into a revision. Evaluator-gated
+ * message with a persistent [Give feedback] button, then complete. Each
+ * feedback submission starts its own bounded revision run. Evaluator-gated
  * persistence: `propose_plan` already requires a passing evaluation, and
  * promotion is CAS-guarded on `current_version` (a stale revision changes
  * nothing and surfaces `meal-stale-plan`).
@@ -351,7 +350,6 @@ export async function runAgentCenteredMealPlanningWorkflow(
       persisted.generation,
       "initial",
     )
-    await liveWeekLoop(env, step, event, store, profile, persisted.plan, persisted.generation)
   } finally {
     if (!generationFinished)
       await stepDo(step, "meal-planning-fail-generation-lease", () =>
@@ -755,7 +753,8 @@ async function sendPlanAndRegister(
     await router.register({
       interactionId: sent.interactionId,
       version: version.version,
-      workflowId: event.instanceId,
+      workflowId: plan.instanceId,
+      edit: {},
       kind: INTERACTION_KIND.MEAL_FEEDBACK,
       callbackToken: sent.callbackToken,
       botMessageId: sent.messageId,
@@ -766,74 +765,92 @@ async function sendPlanAndRegister(
   })
 }
 
-/**
- * Parks the instance until `week_end` (or supersede): waits for `telegram-reply`
- * events in 24-h chunks (re-checking `week_end` each cycle), dispatching on the
- * payload's `interactionKind`. `meal-feedback` button taps open a 15-min
- * force-reply feedback prompt; `meal-feedback-reply` and
- * `meal-feedback-submission` events run a revision. A stale button tap sends
- * `meal-stale-plan`; unrecognized kinds are logged and re-waited.
- */
-async function liveWeekLoop(
+/** Handles one feedback submission in a fresh run; saved plans have no background wait. */
+export async function runMealPlanningEditWorkflow(
   env: Env,
-  step: WorkflowStep,
   event: WorkflowEvent<MealPlanningWorkflowParams>,
-  store: MealPlanningStore,
-  profile: StoredMealProfile,
-  plan: MealPlanRecord,
-  planGeneration: number,
+  step: WorkflowStep,
 ): Promise<void> {
+  const edit = event.payload.edit
+  if (!edit || edit.userId !== env.TELEGRAM_ALLOWED_USER_ID) return
+  const store = createStore(env)
   const chatId = event.payload.chatId
-  const weekEndMs = Date.parse(plan.weekEnd)
-  // Chat-scoped plan-message generation (§6): the current plan message's value,
-  // bumped by every persistence batch and carried on every post-persist registration.
-  let generation = planGeneration
-  for (let iteration = 0; ; iteration++) {
-    const remaining = await stepDo(
-      step,
-      `meal-planning-live-remaining-${iteration}`,
-      async () => weekEndMs - Date.now(),
+  const payload = edit.feedback
+  const iteration = 0
+  const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
+  const resourceId = `meal:${edit.planInstanceId}`
+  const claimed = await step.do("meal-edit-claim", () => router.claimEdit(resourceId, event.instanceId, "meal"))
+  if (!claimed.ok) {
+    if (payload.source === "mini-app" && payload.feedbackBatchId) {
+      const batch = await stepDo(step, "meal-edit-busy-claim-batch", () =>
+        store.claimFeedbackBatchForWorkflow(
+          payload.feedbackBatchId as string,
+          edit.planInstanceId,
+          new Date().toISOString(),
+        ),
+      )
+      if (batch) await failMiniAppBatch(env, step, store, chatId, batch.batchId, iteration)
+      else await notifyMiniAppBatchTerminal(env, step, store, chatId, payload.feedbackBatchId, iteration)
+      return
+    }
+    await notify(env, step, chatId, MEAL_PLAN_GENERATING, "meal-edit-busy")
+    return
+  }
+  try {
+    const initial = await stepDo(step, "meal-edit-validate-plan", () => store.activePlan(chatId))
+    const valid = await step.do("meal-edit-validate-deadline", async () =>
+      Boolean(initial && Date.parse(initial.plan.weekEnd) > Date.now()),
     )
-    if (remaining <= 0) return
-    const timeoutSeconds = Math.max(
-      1,
-      Math.ceil(Math.min(remaining, MEAL_LIVE_WAIT_CHUNK_MS) / MILLISECONDS_PER_SECOND),
-    )
-    const response = await waitForWorkflowEvent<MealPlanningLiveEvent>(step, `meal-planning-live-wait-${iteration}`, {
-      type: "telegram-reply",
-      timeout: `${timeoutSeconds} seconds` as never,
-    })
-    if (response.type === "timeout") continue
-    const payload = response.payload
+    if (!initial || !valid || initial.plan.instanceId !== edit.planInstanceId) {
+      if (payload.source === "mini-app" && payload.feedbackBatchId) {
+        const batch = await stepDo(step, "meal-edit-expired-claim-batch", () =>
+          store.claimFeedbackBatchForWorkflow(
+            payload.feedbackBatchId as string,
+            edit.planInstanceId,
+            new Date().toISOString(),
+          ),
+        )
+        if (batch)
+          await stepDo(step, "meal-edit-expired-stale-batch", () =>
+            store.markFeedbackBatchStale(batch.batchId, new Date().toISOString()),
+          )
+        await notifyMiniAppBatchTerminal(env, step, store, chatId, payload.feedbackBatchId, iteration)
+        return
+      }
+      await notify(env, step, chatId, MEAL_STALE_PLAN, "meal-edit-expired")
+      return
+    }
+    const profile = await stepDo(step, "meal-edit-load-profile", () => store.loadOrCreateProfile(chatId))
+    const generation = profile.interactionGeneration
     const kind = payload?.interactionKind
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK) {
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
-      if (!active) continue
-      if (event.instanceId !== active.plan.instanceId) {
+      if (!active) return
+      if (edit.planInstanceId !== active.plan.instanceId) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-plan`)
-        continue
+        return
       }
       if (payload.version !== undefined && payload.version < active.plan.currentVersion) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-plan`)
-        continue
+        return
       }
       if (await stepDo(step, `meal-planning-read-generation-${iteration}`, () => store.activePlanGeneration(chatId))) {
         await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
-        continue
+        return
       }
       await promptForFeedbackReply(env, step, event, active.plan, generation, iteration)
-      continue
+      return
     }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY || kind === INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION) {
       const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
-      if (!active) continue
-      if (event.instanceId !== active.plan.instanceId) {
+      if (!active) return
+      if (edit.planInstanceId !== active.plan.instanceId) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-reply`)
-        continue
+        return
       }
       if (payload?.version !== undefined && payload.version < active.plan.currentVersion) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-reply`)
-        continue
+        return
       }
       const generationActive = await stepDo(step, `meal-planning-read-generation-${iteration}`, () =>
         store.activePlanGeneration(chatId),
@@ -843,7 +860,7 @@ async function liveWeekLoop(
           const claimed = await stepDo(step, `meal-planning-claim-mini-app-batch-${iteration}`, () =>
             store.claimFeedbackBatchForWorkflow(
               payload.feedbackBatchId as string,
-              event.instanceId,
+              edit.planInstanceId,
               new Date().toISOString(),
             ),
           )
@@ -856,44 +873,33 @@ async function liveWeekLoop(
         } else {
           await notify(env, step, chatId, MEAL_PLAN_GENERATING, `meal-planning-notify-generating-${iteration}`)
         }
-        continue
+        return
       }
       let feedbackBatch: FeedbackBatchRecord | undefined
       if (payload?.source === "mini-app") {
-        if (!payload.feedbackBatchId || !Number.isSafeInteger(payload.baseVersion)) continue
+        if (!payload.feedbackBatchId || !Number.isSafeInteger(payload.baseVersion)) return
         const claimed = await stepDo(step, `meal-planning-claim-mini-app-batch-${iteration}`, () =>
           store.claimFeedbackBatchForWorkflow(
             payload.feedbackBatchId as string,
-            event.instanceId,
+            edit.planInstanceId,
             new Date().toISOString(),
           ),
         )
         if (!claimed) {
           await notifyMiniAppBatchTerminal(env, step, store, chatId, payload.feedbackBatchId, iteration)
-          continue
+          return
         }
         feedbackBatch = claimed
       }
       const submission = feedbackBatch ? { items: feedbackBatch.items } : submissionFromPayload(payload)
-      if (!submission) continue
+      if (!submission) return
       try {
-        const promotedGeneration = await runRevision(
-          env,
-          step,
-          event,
-          store,
-          profile,
-          active,
-          submission,
-          iteration,
-          false,
-          feedbackBatch,
-        )
-        if (promotedGeneration !== null) generation = promotedGeneration
+        await runRevision(env, step, event, store, profile, active, submission, iteration, false, feedbackBatch)
       } catch {
         if (feedbackBatch) await failMiniAppBatch(env, step, store, chatId, feedbackBatch.batchId, iteration)
+        else await notify(env, step, chatId, MEAL_FEEDBACK_NOT_APPLIED, "meal-edit-failed")
       }
-      continue
+      return
     }
     logRuntime(env, {
       workflow: event.instanceId,
@@ -902,6 +908,8 @@ async function liveWeekLoop(
       failureCategory: "unrecognized-interaction-kind",
       details: { interactionKind: kind ?? "missing" },
     })
+  } finally {
+    await step.do("meal-edit-release", () => router.releaseEdit(resourceId, event.instanceId))
   }
 }
 
@@ -965,7 +973,7 @@ async function runRevision(
   priorUsage: LLMUsage = ZERO_USAGE,
   priorDecisionsCostUsd = 0,
 ): Promise<number | null> {
-  const occurrence = `revision-${iteration}`
+  const occurrence = `revision-${iteration}${contextAlreadyUpdated ? "-after-context" : ""}`
   const notifyPrefix = `meal-planning-notify-${occurrence}`
   // The calendar update itself is already persisted.  Its original message is
   // still useful context for the follow-up replan, but it must not become a
@@ -1182,7 +1190,8 @@ async function promptForFeedbackReply(
     await router.register({
       interactionId: crypto.randomUUID(),
       version: plan.currentVersion,
-      workflowId: event.instanceId,
+      workflowId: plan.instanceId,
+      edit: {},
       kind: INTERACTION_KIND.MEAL_FEEDBACK_REPLY,
       botMessageId: sent.messageId,
       expiresAt: Date.now() + MEAL_FEEDBACK_REPLY_TTL_MS,

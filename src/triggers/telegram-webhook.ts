@@ -1,4 +1,5 @@
 import { CALENDAR_HELP } from "../calendar/messages"
+import { startEditWorkflow } from "../core/edit-workflow"
 import { createIdeaIngest } from "../core/idea-ingest"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
@@ -339,7 +340,7 @@ async function handleBoundaryError(env: Env, chatId: number | undefined, err: un
   return new Response("OK")
 }
 
-/** Resolves a routed interaction and sends an event to the workflow instance. */
+/** Resolves an interaction, starting an edit run or delivering to a pending decision wait. */
 async function dispatchRoutedInteraction(
   env: Env,
   chatId: number,
@@ -354,9 +355,16 @@ async function dispatchRoutedInteraction(
   setupOrigin?: string,
 ): Promise<boolean> {
   const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
-  const { interaction } = await router.resolve(input)
+  const { interaction, reason } = await router.resolve(input)
   const inputKind = input.callbackToken ? "callback" : input.replyToMessageId !== undefined ? "reply" : "plain-text"
   if (!interaction) {
+    if (input.callbackToken || (reason && input.replyToMessageId !== undefined)) {
+      await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
+        chatId,
+        "This action has expired, was already used, or was replaced. Please use the latest message or start a new request.",
+      )
+      return true
+    }
     logRuntime(env, { event: "telegram-interaction-route", outcome: "ignored", details: { inputKind } })
     return false
   }
@@ -398,6 +406,43 @@ async function dispatchRoutedInteraction(
       return true
     }
   }
+  if (interaction.edit) {
+    const key = `${chatId}:${interaction.interactionId}:${input.telegramUpdateId}`
+    if (interaction.kind.startsWith("calendar-")) {
+      if (!interaction.edit.sessionId) return true
+      await startEditWorkflow(workflow, key, {
+        chatId: String(chatId),
+        telegramMessageId: input.messageId ?? 0,
+        requestText: interaction.text ?? "",
+        ...(setupOrigin ? { setupOrigin } : {}),
+        edit: {
+          sessionId: interaction.edit.sessionId,
+          userId: String(userId),
+          text: interaction.text,
+          openPrompt: interaction.kind === INTERACTION_KIND.CALENDAR_EDIT && !interaction.text,
+        },
+      })
+    } else {
+      await startEditWorkflow(workflow, key, {
+        chatId: String(chatId),
+        telegramMessageId: input.messageId ?? 0,
+        requestText: "",
+        invokedAtMs: Date.now(),
+        edit: {
+          planInstanceId: interaction.workflowId,
+          userId: String(userId),
+          feedback: {
+            interactionKind: interaction.text ? INTERACTION_KIND.MEAL_FEEDBACK_REPLY : interaction.kind,
+            text: interaction.text,
+            version: interaction.version,
+            messageId: input.messageId,
+            source: "telegram-reply",
+          },
+        },
+      })
+    }
+    return true
+  }
   const instance = await workflow.get(interaction.workflowId)
   const interactionText =
     interaction.text ??
@@ -438,11 +483,8 @@ async function dispatchRoutedInteraction(
 }
 
 /**
- * Level-3 fallthrough (§6): unaddressed plain text reaches the active plan's
- * live workflow instance as a `meal-feedback-submission` event. When the
- * active plan's week has ended or its workflow instance is unreachable (e.g.
- * terminated by an earlier failure), replies with the ended-plan notice instead
- * of letting the delivery failure surface as a generic error.
+ * Level-3 fallthrough (§6): unaddressed plain text starts a separate edit run
+ * for the active saved plan. Expired weeks receive an ended-plan notice.
  */
 async function dispatchMealFallthrough(
   env: Env,
@@ -458,17 +500,23 @@ async function dispatchMealFallthrough(
     return true
   }
   if (pointer.weekEnd > new Date().toISOString()) {
-    const instance = await env.MEAL_PLANNING_WORKFLOW.get(pointer.instanceId)
     try {
-      await instance.sendEvent({
-        type: "telegram-reply",
-        payload: {
-          userId: msg.from.id,
-          text: msg.text,
-          messageId: msg.message_id,
-          telegramUpdateId: msg.message_id,
-          interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
-          source: "telegram-text",
+      const active = await store.activePlan(String(msg.chat.id))
+      await startEditWorkflow(env.MEAL_PLANNING_WORKFLOW, `meal-text:${msg.chat.id}:${msg.message_id}`, {
+        chatId: String(msg.chat.id),
+        telegramMessageId: msg.message_id,
+        requestText: "",
+        invokedAtMs: Date.now(),
+        edit: {
+          planInstanceId: pointer.instanceId,
+          userId: String(msg.from.id),
+          feedback: {
+            text: msg.text,
+            messageId: msg.message_id,
+            version: active?.plan.currentVersion,
+            interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
+            source: "telegram-text",
+          },
         },
       })
     } catch {

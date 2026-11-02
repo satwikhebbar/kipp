@@ -1,6 +1,7 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 import { runCalendarAgentSession } from "../agent/calendar-session"
-import { ActionPromptOperationError, type ActionPromptOutcome, promptForActions } from "../core/action-prompt"
+import { type ActionPromptOutcome, promptForActions } from "../core/action-prompt"
+import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
 import {
   createGoogleCalendarClient,
@@ -77,6 +78,7 @@ export async function runAgentCenteredCalendarWorkflow(
   env: Env,
   event: WorkflowEvent<CalendarWorkflowParams>,
   step: WorkflowStep,
+  editContext?: CalendarEditContext,
 ): Promise<void> {
   logRuntime(env, { workflow: event.instanceId, event: "calendar-workflow-run", outcome: "started" })
   const timeZone = env.TIMEZONE || CALENDAR_TIMEZONE_DEFAULT
@@ -90,16 +92,22 @@ export async function runAgentCenteredCalendarWorkflow(
       text: `Current instant: ${new Date(expiresAt - CALENDAR_INTERACTION_TTL_MS).toISOString()}\nCalendar time zone: ${timeZone}\nUser request: ${event.payload.requestText}`,
     },
   ]
+  if (editContext)
+    messages = [
+      ...editContext.messages,
+      editBaselineMessage(editContext.baseline),
+      { role: "user", text: event.payload.requestText },
+    ]
   let ledger = createCalendarPlanLedger()
   let agentVersion = 0
   let interactionVersion = 0
   let retryUsed = false
-  let editing = false
-  let baseline: CalendarPlan | null = null
+  const editing = Boolean(editContext)
+  const baseline: CalendarPlan | null = editContext?.baseline ?? null
   // A successful write is terminal for scheduling. If a workflow replay or a
   // later Edit turn reaches the agent again and it fails, do not emit a
   // contradictory pre-write "no decision" message.
-  let calendarWriteOccurred = false
+  let calendarWriteOccurred = Boolean(editContext)
 
   for (let turn = 0; turn < MAX_CALENDAR_INTERACTION_TURNS; turn++) {
     const currentAgentVersion = ++agentVersion
@@ -155,7 +163,10 @@ export async function runAgentCenteredCalendarWorkflow(
           sessionStep.session.calendarFailureRetryCount,
         )
       if (!sessionStep.session.completed || !sessionStep.session.terminal) {
-        if (calendarWriteOccurred) return
+        if (calendarWriteOccurred) {
+          await notify(env, step, event.payload.chatId, CALENDAR_UPDATE_FAILURE, `edit-session-${turn}`)
+          return
+        }
         await notify(
           env,
           step,
@@ -266,7 +277,7 @@ export async function runAgentCenteredCalendarWorkflow(
         }
         await writePlan(env, step, event, consumed.plan, editing, turn)
         calendarWriteOccurred = true
-        const correction = await confirmPlanAndWaitForEdit(
+        await confirmPlanForEditing(
           env,
           step,
           event,
@@ -274,13 +285,10 @@ export async function runAgentCenteredCalendarWorkflow(
           editing,
           ++interactionVersion,
           turn,
+          messages,
+          editContext,
         )
-        if (!correction) return
-        interactionVersion++
-        baseline = consumed.plan
-        editing = true
-        messages.push(editBaselineMessage(consumed.plan), { role: "user", text: correction })
-        continue
+        return
       }
 
       const authorized = await calendarDecision(step, `calendar-agent-plan-authorize-${turn}`, () =>
@@ -317,7 +325,7 @@ export async function runAgentCenteredCalendarWorkflow(
       }
       await writePlan(env, step, event, consumed.plan, editing, turn)
       calendarWriteOccurred = true
-      const correction = await confirmPlanAndWaitForEdit(
+      await confirmPlanForEditing(
         env,
         step,
         event,
@@ -325,12 +333,10 @@ export async function runAgentCenteredCalendarWorkflow(
         editing,
         ++interactionVersion,
         turn,
+        messages,
+        editContext,
       )
-      if (!correction) return
-      interactionVersion++
-      baseline = consumed.plan
-      editing = true
-      messages.push(editBaselineMessage(consumed.plan), { role: "user", text: correction })
+      return
     } catch (error) {
       if (error instanceof GoogleCalendarError && error.kind === "authorization" && !retryUsed) {
         if (await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn)) {
@@ -556,8 +562,19 @@ async function writePlan(
   })
 }
 
-/** Confirms a completed write and optionally collects a correction. Expiry is a normal completion. */
-async function confirmPlanAndWaitForEdit(
+export interface CalendarEditContext {
+  baseline: CalendarPlan
+  messages: ToolConversationMessage[]
+  /** Original identity is retained so edits update the exact managed event. */
+  original: Omit<CalendarWorkflowParams, "edit">
+  resourceId: string
+}
+
+const CALENDAR_EDIT_EXPIRED =
+  "This calendar edit window has ended or the event has changed. Please start a new /calendar request."
+
+/** Completes a saved write with a persistent Edit action and no event wait. */
+async function confirmPlanForEditing(
   env: Env,
   step: WorkflowStep,
   event: WorkflowEvent<CalendarWorkflowParams>,
@@ -565,57 +582,135 @@ async function confirmPlanAndWaitForEdit(
   editing: boolean,
   version: number,
   turn: number,
-): Promise<string | null> {
-  const message = confirmationMessage(plan, editing)
-  const label = plan.kind === "recurring" ? "Edit entire series" : "Edit"
-  let edit: CalendarActionResponse
-  try {
-    edit = await calendarPromptForActions(env, step, event, version, `calendar-agent-confirmation-${turn}`, message, [
-      [label, INTERACTION_KIND.CALENDAR_EDIT],
-    ])
-  } catch (error) {
-    if (!(error instanceof ActionPromptOperationError) || error.stage !== "notify") return null
-    logRuntime(env, {
-      workflow: event.instanceId,
-      event: "calendar-confirmation",
-      outcome: "failed",
-      failureCategory: "confirmation-recovery-started",
+  messages: ToolConversationMessage[],
+  previous?: CalendarEditContext,
+): Promise<void> {
+  const router = createInteractionRouter(env.INTERACTION_ROUTER, event.payload.chatId)
+  const prepared = await step.do(`calendar-agent-edit-context-${turn}`, async () => ({
+    sessionId: crypto.randomUUID(),
+    callbackToken: crypto.randomUUID(),
+    expiresAt: Date.now() + CALENDAR_INTERACTION_TTL_MS,
+  }))
+  const original = previous?.original ?? event.payload
+  const resourceId = previous?.resourceId ?? `calendar:${event.instanceId}`
+  await step.do(`calendar-agent-save-edit-context-${turn}`, () =>
+    router.saveEditContext({
+      sessionId: prepared.sessionId,
+      resourceId,
+      userId: env.TELEGRAM_ALLOWED_USER_ID,
+      expiresAt: prepared.expiresAt,
+      context: { baseline: plan, messages, original, resourceId } satisfies CalendarEditContext,
+    }),
+  )
+  const send = () =>
+    createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(event.payload.chatId, confirmationMessage(plan, editing), {
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: plan.kind === "recurring" ? "Edit entire series" : "Edit", callback_data: prepared.callbackToken }],
+        ],
+      },
     })
+  let sent: { messageId: number }
+  try {
+    sent = await step.do(`calendar-agent-confirmation-${turn}-notify`, send)
+  } catch {
+    // A failed notification must never cause another calendar write.
     try {
-      edit = await calendarPromptForActions(
-        env,
-        step,
-        event,
-        version,
-        `calendar-agent-confirmation-recovery-${turn}`,
-        message,
-        [[label, INTERACTION_KIND.CALENDAR_EDIT]],
-      )
+      sent = await step.do(`calendar-agent-confirmation-recovery-${turn}-notify`, send)
     } catch {
-      logRuntime(env, {
-        workflow: event.instanceId,
-        event: "calendar-confirmation",
-        outcome: "failed",
-        failureCategory: "confirmation-delivery-failed",
-      })
-      return null
+      return
     }
   }
-  if (edit.type !== "action" || edit.kind !== INTERACTION_KIND.CALENDAR_EDIT) return null
-  try {
-    return await promptForReply(
+  await step.do(`calendar-agent-confirmation-${turn}-register`, () =>
+    router.register({
+      interactionId: prepared.sessionId,
+      version,
+      workflowId: event.instanceId,
+      kind: INTERACTION_KIND.CALENDAR_EDIT,
+      callbackToken: prepared.callbackToken,
+      botMessageId: sent.messageId,
+      expiresAt: prepared.expiresAt,
+      edit: { sessionId: prepared.sessionId },
+    }),
+  )
+}
+
+/** Runs only in response to Edit or feedback, with persisted ownership and exact event identity. */
+export async function runCalendarEditWorkflow(
+  env: Env,
+  event: WorkflowEvent<CalendarWorkflowParams>,
+  step: WorkflowStep,
+): Promise<void> {
+  const edit = event.payload.edit
+  if (!edit || edit.userId !== env.TELEGRAM_ALLOWED_USER_ID) return
+  const router = createInteractionRouter(env.INTERACTION_ROUTER, event.payload.chatId)
+  const loaded = await calendarDecision(step, "calendar-edit-load-context", () =>
+    router.editContext<CalendarEditContext>(edit.sessionId, edit.userId),
+  )
+  const context = loaded.context
+  if (!context || !loaded.resourceId) {
+    await notify(env, step, event.payload.chatId, CALENDAR_EDIT_EXPIRED, "edit-expired")
+    return
+  }
+  if (edit.openPrompt) {
+    const sent = await step.do("calendar-edit-prompt", async () => {
+      const message = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
+        event.payload.chatId,
+        context.baseline.kind === "recurring"
+          ? "Reply with the correction for the entire recurring series."
+          : "Reply with the correction for this calendar block.",
+        { replyMarkup: { force_reply: true } },
+      )
+      return {
+        messageId: message.messageId,
+        interactionId: crypto.randomUUID(),
+        expiresAt: Math.min(loaded.expiresAt ?? Date.now(), Date.now() + CALENDAR_INTERACTION_TTL_MS),
+      }
+    })
+    await step.do("calendar-edit-register-reply", () =>
+      router.register({
+        interactionId: sent.interactionId,
+        version: 1,
+        workflowId: event.instanceId,
+        kind: INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+        botMessageId: sent.messageId,
+        expiresAt: sent.expiresAt,
+        edit: { sessionId: edit.sessionId },
+      }),
+    )
+    return
+  }
+  if (!edit.text?.trim()) return
+  const claimed = await step.do("calendar-edit-claim", () =>
+    router.claimEdit(loaded.resourceId as string, event.instanceId, "calendar"),
+  )
+  if (!claimed.ok) {
+    await notify(
       env,
       step,
-      event,
-      version + 1,
-      `calendar-agent-edit-${turn}`,
-      plan.kind === "recurring"
-        ? "Reply with the correction for the entire recurring series."
-        : "Reply with the correction for this calendar block.",
-      INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
+      event.payload.chatId,
+      "A calendar edit is already in progress. Please wait for its confirmation.",
+      "edit-busy",
     )
-  } catch {
-    return null
+    return
+  }
+  try {
+    // Recheck after acquiring the resource lock: another edit may have saved a newer baseline.
+    const current = await calendarDecision(step, "calendar-edit-recheck-context", () =>
+      router.editContext<CalendarEditContext>(edit.sessionId, edit.userId),
+    )
+    if (!current.context) {
+      await notify(env, step, event.payload.chatId, CALENDAR_EDIT_EXPIRED, "edit-stale")
+      return
+    }
+    await runAgentCenteredCalendarWorkflow(
+      env,
+      { ...event, payload: { ...context.original, requestText: edit.text } } as WorkflowEvent<CalendarWorkflowParams>,
+      step,
+      context,
+    )
+  } finally {
+    await step.do("calendar-edit-release", () => router.releaseEdit(loaded.resourceId as string, event.instanceId))
   }
 }
 

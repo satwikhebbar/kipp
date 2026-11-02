@@ -44,7 +44,7 @@ vitest.mock("../integrations/google-calendar", () => ({
   GoogleCalendarError: MockGoogleCalendarError,
 }))
 
-import { CalendarWorkflow } from "../calendar/workflow"
+import { CalendarWorkflow, type CalendarWorkflowParams } from "../calendar/workflow"
 import { INTERACTION_KIND } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
@@ -233,15 +233,39 @@ function env(overrides?: Partial<Env>): Env {
 function liveWorkflowBinding() {
   const created: Array<{ id: string; params: unknown }> = []
   const events: unknown[] = []
+  let connected: Env | undefined
+  const runs: Promise<void>[] = []
   let rejectWait: ((reason: Error) => void) | undefined
   let waiter: ((event: unknown) => void) | undefined
   return {
-    create: vitest.fn(async (params: unknown) => {
-      const id = "calendar-wf-1"
-      created.push({ id, params })
+    connect: (env: Env) => {
+      connected = env
+    },
+    settled: async () => Promise.all(runs),
+    create: vitest.fn(async (input: { id?: string; params: CalendarWorkflowParams }) => {
+      const id = input.id ?? "calendar-wf-1"
+      if (created.some((run) => run.id === id)) throw new Error("Workflow already exists")
+      created.push({ id, params: input })
+      if (input.params.edit && connected) {
+        const workflow = new CalendarWorkflow({} as never, {} as never)
+        Object.assign(workflow, { env: connected })
+        runs.push(
+          workflow.run(
+            { instanceId: id, payload: input.params } as never,
+            {
+              do: async (_: string, fn: () => unknown) => fn(),
+              waitForEvent: () =>
+                new Promise((resolve) => {
+                  waiter = resolve
+                }),
+            } as never,
+          ),
+        )
+      }
       return { id }
     }),
     get: vitest.fn(() => ({
+      status: async () => ({ status: "running" }),
       sendEvent: vitest.fn(async (event: unknown) => {
         if (waiter) {
           const resolve = waiter
@@ -271,6 +295,7 @@ function liveWorkflowBinding() {
 }
 
 function startWorkflow(calendar: ReturnType<typeof liveWorkflowBinding>, runtimeEnv: Env): Promise<void> {
+  calendar.connect(runtimeEnv)
   const workflow = new CalendarWorkflow({} as never, {} as never)
   Object.assign(workflow, { env: runtimeEnv })
   const created = calendar.created[0]
@@ -729,14 +754,16 @@ describe("agent-centered Calendar Telegram integration", () => {
     await handleTelegramWebhook(message("/calendar Call Jamie on 2026-07-28 at 7pm"), runtimeEnv)
     const run = startWorkflow(calendar, runtimeEnv)
     const confirmationIndex = await waitForMessageText(network, "Added: Call Jamie")
-    await waitForWorkflowWait(calendar)
+    await run
+    expect(calendar.isWaiting()).toBe(false)
     await handleTelegramWebhook(callback(callbackToken(network, confirmationIndex)), runtimeEnv)
     await waitForMessageText(network, "Reply with the correction")
-    await waitForWorkflowWait(calendar)
+    await calendar.settled()
     await handleTelegramWebhook(message("Move it to 8pm", 2, network.getState().nextMessageId - 1), runtimeEnv)
-    expect(calendar.get).toHaveBeenCalledWith("calendar-wf-1")
+    expect(calendar.created).toHaveLength(3)
+    expect(calendar.get).not.toHaveBeenCalled()
     await waitForMessageText(network, "Updated: Call Jamie")
-    calendar.timeout()
+    await calendar.settled()
     await run
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
@@ -773,10 +800,10 @@ describe("agent-centered Calendar Telegram integration", () => {
     await waitForWorkflowWait(calendar)
     await handleTelegramWebhook(callback(callbackToken(network, firstChoiceIndex)), runtimeEnv)
     const addedIndex = await waitForMessageText(network, "Added: Weekly review", firstChoiceIndex)
-    await waitForWorkflowWait(calendar)
+    await run
     await handleTelegramWebhook(callback(callbackToken(network, addedIndex)), runtimeEnv)
     const firstEditIndex = await waitForMessageText(network, "correction for the entire recurring series", addedIndex)
-    await waitForWorkflowWait(calendar)
+    await calendar.settled()
     await handleTelegramWebhook(
       message("Move the whole series to 8pm", 2, network.getState().nextMessageId - 1),
       runtimeEnv,
@@ -785,20 +812,20 @@ describe("agent-centered Calendar Telegram integration", () => {
     await waitForWorkflowWait(calendar)
     await handleTelegramWebhook(callback(callbackToken(network, secondChoiceIndex)), runtimeEnv)
     const firstUpdateIndex = await waitForMessageText(network, "Updated: Weekly review", secondChoiceIndex)
-    await waitForWorkflowWait(calendar)
+    await calendar.settled()
     await handleTelegramWebhook(callback(callbackToken(network, firstUpdateIndex)), runtimeEnv)
     const secondEditIndex = await waitForMessageText(
       network,
       "correction for the entire recurring series",
       firstUpdateIndex,
     )
-    await waitForWorkflowWait(calendar)
+    await calendar.settled()
     await handleTelegramWebhook(
       message("Move the whole series to 9pm", 3, network.getState().nextMessageId - 1),
       runtimeEnv,
     )
     await waitForMessageText(network, "Updated: Weekly review", secondEditIndex)
-    calendar.timeout()
+    await calendar.settled()
     await run
 
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)

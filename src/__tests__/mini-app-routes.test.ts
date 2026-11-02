@@ -648,6 +648,9 @@ describe("Mini App HTTP boundary", () => {
     )
     const log = vi.spyOn(console, "log").mockImplementation(() => {})
     const workflow = {
+      create: vi.fn(async () => {
+        throw new Error("workflow service unavailable")
+      }),
       get: vi.fn(async () => {
         throw new Error("instance is not active")
       }),
@@ -668,7 +671,7 @@ describe("Mini App HTTP boundary", () => {
             event: "mini-app-feedback-dispatch",
             outcome: "failed",
             failureCategory: "workflow-unreachable",
-            details: expect.objectContaining({ phase: "workflow-get", errorName: "Error" }),
+            details: expect.objectContaining({ phase: "workflow-create", errorName: "Error" }),
           }),
         ]),
       )

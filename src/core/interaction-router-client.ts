@@ -11,10 +11,13 @@ export interface InteractionRegistration {
   interactionGroup?: string
   /** Chat-scoped plan-message generation (§6); carries group invalidation when present. */
   generation?: number
+  /** Starts a new edit run instead of delivering to a waiting generation run. */
+  edit?: { sessionId?: string }
 }
 
 export interface RoutedInteraction extends WorkflowInteraction {
   workflowId: string
+  edit?: { sessionId?: string }
 }
 
 export interface InteractionResolveInput {
@@ -37,6 +40,22 @@ export function createInteractionRouter(namespace: DurableObjectNamespace, chatI
   }
   return {
     register: (registration: InteractionRegistration) => post<{ ok: boolean }>("/register", registration),
-    resolve: (input: InteractionResolveInput) => post<{ interaction: RoutedInteraction | null }>("/resolve", input),
+    resolve: (input: InteractionResolveInput) =>
+      post<{ interaction: RoutedInteraction | null; reason?: "expired" | "stale" }>("/resolve", input),
+    saveEditContext: (context: EditContextRegistration) => post<{ ok: boolean }>("/edit-context", context),
+    editContext: <T>(sessionId: string, userId: string) =>
+      post<{ context: T | null; resourceId?: string; expiresAt?: number }>("/edit-context/get", { sessionId, userId }),
+    claimEdit: (resourceId: string, workflowId: string, domain: "calendar" | "meal") =>
+      post<{ ok: boolean }>("/edit/claim", { resourceId, workflowId, domain }),
+    releaseEdit: (resourceId: string, workflowId: string) =>
+      post<{ ok: boolean }>("/edit/release", { resourceId, workflowId }),
   }
+}
+
+export interface EditContextRegistration {
+  sessionId: string
+  resourceId: string
+  userId: string
+  expiresAt: number
+  context: unknown
 }

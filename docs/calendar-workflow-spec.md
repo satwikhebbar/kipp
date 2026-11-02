@@ -247,13 +247,16 @@ inferred values are labelled—for example, `19:00 (chosen)` or `45 min
   valid; prior buttons are invalidated. This is user-driven, never an automatic
   loop.
 - Do not offer a post-creation Cancel action in v1.
-- After 15 minutes, the workflow discards its pending state. Further calendar
-  management is out of scope.
+- Generation completes after saving the event and registering its confirmation.
+  Edit context remains valid for 15 minutes; expiry is checked when feedback
+  arrives and does not wake a workflow. Further calendar management is out of scope.
 - Protecting against a manual Calendar edit during this short Telegram edit
   window with Calendar ETags is a post-MVP hardening item.
 
-All interactive waits—missing-date clarification, conflict selection,
-replacement time, reconnect/retry, and immediate edit—expire after 15 minutes.
+Pending scheduling waits—missing-date clarification, conflict selection,
+replacement time, and reconnect/retry—expire after 15 minutes. Post-save Edit
+actions and replies use persisted deadlines and start separate runs on demand;
+they do not keep the generation workflow waiting.
 
 ## Reliability and failure rules
 

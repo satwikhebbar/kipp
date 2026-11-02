@@ -11,12 +11,14 @@ import {
   renderRevisionFeedback,
   renderWeekContextExtractionPrompt,
   runAgentCenteredMealPlanningWorkflow,
+  runMealPlanningEditWorkflow,
 } from "../meal-planning/agent-workflow"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 import { createD1TestDb, d1Count } from "./d1-test-db"
+import { sqliteInteractionRouter } from "./fixtures/interaction-router"
 import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -310,19 +312,7 @@ function stubUuidSequence() {
 }
 
 function fakeRouter() {
-  const registrations: Array<Record<string, unknown>> = []
-  const namespace = {
-    idFromName: (name: string) => name as never,
-    get: (_id: unknown) => ({
-      fetch: async (url: string | Request, init?: RequestInit) => {
-        const path = new URL(typeof url === "string" ? url : url.url).pathname
-        const body = JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>
-        if (path === "/register") registrations.push(body)
-        return jsonResponse({ ok: true })
-      },
-    }),
-  } as unknown as DurableObjectNamespace
-  return { namespace, registrations }
+  return sqliteInteractionRouter()
 }
 
 function createFakeStep(events: MealPlanningLiveEvent[], endTime: number) {
@@ -374,6 +364,7 @@ function mealEvent(invokedAtMs: number, requestText = ""): WorkflowEvent<MealPla
 function makeEnv(namespace: DurableObjectNamespace, d1: D1Database, overrides: Partial<Env> = {}): Env {
   return {
     TELEGRAM_BOT_TOKEN: "bot:token",
+    TELEGRAM_ALLOWED_USER_ID: "42",
     LLM_API_KEY: "key",
     LLM_PROVIDER: "deepseek",
     LLM_MODEL: "deepseek-flash",
@@ -387,19 +378,49 @@ function makeEnv(namespace: DurableObjectNamespace, d1: D1Database, overrides: P
   } as unknown as Env
 }
 
+/** Drains scripted feedback into separate memoized edit runs after generation completes. */
+async function generateThenEdit(
+  env: Env,
+  event: WorkflowEvent<MealPlanningWorkflowParams>,
+  source: ReturnType<typeof createFakeStep>,
+) {
+  await runAgentCenteredMealPlanningWorkflow(env, event, source as never)
+  for (let index = 0; index < 10; index++) {
+    let delivered: { payload?: MealPlanningLiveEvent }
+    try {
+      delivered = await source.waitForEvent()
+    } catch {
+      break
+    }
+    if (!delivered.payload) break
+    const step = createMemoizingStep([], Date.now())
+    await runMealPlanningEditWorkflow(
+      env,
+      {
+        ...event,
+        instanceId: `edit-${index}`,
+        payload: {
+          ...event.payload,
+          edit: { planInstanceId: event.instanceId, userId: "42", feedback: delivered.payload },
+        },
+      },
+      step as never,
+    )
+  }
+}
+
 describe("runAgentCenteredMealPlanningWorkflow", () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
 
-  it("handles daily idle timeouts and late replay without regenerating or changing the saved plan", async () => {
+  it("completes generation without a timer and replays after week end without regenerating", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
     const { db, d1 } = createD1TestDb()
     const { namespace } = fakeRouter()
-    const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
     const { telegramMessages, deepseekBodies } = stubNetwork([
       deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
@@ -428,9 +449,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     await runAgentCenteredMealPlanningWorkflow(env, event, step as never)
     const store = createMealPlanningStore(d1)
     const saved = await store.activePlan(CHAT)
-    expect(durations.length).toBeGreaterThan(1)
-    expect(durations.every((seconds) => seconds <= 86_400)).toBe(true)
-    expect(Date.now()).toBeGreaterThanOrEqual(Date.parse(week.weekEnd))
+    expect(durations).toEqual([])
+    expect(step.waitForEvent).not.toHaveBeenCalled()
+    expect(Date.now()).toBe(invokedAtMs)
     vi.setSystemTime(Date.now() + 8 * 86_400_000)
     await runAgentCenteredMealPlanningWorkflow(env, event, step as never)
     expect(await store.activePlan(CHAT)).toEqual(saved)
@@ -439,7 +460,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
   })
 
-  it("persists plan v1, sends the plan message with a feedback button, and parks until week end", async () => {
+  it("persists plan v1, registers feedback, and completes without waiting", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
     vi.setSystemTime(invokedAtMs)
@@ -841,7 +862,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       ]),
     ])
 
-    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     const store = createMealPlanningStore(d1)
     const active = await store.activePlan(CHAT)
@@ -950,7 +971,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       ]),
     ])
 
-    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     const active = await store.activePlan(CHAT)
     const batch = await store.feedbackBatch(batchId)
@@ -996,7 +1017,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       ]),
     ])
 
-    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.currentVersion).toBe(1)
@@ -1050,7 +1071,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       deepseekResponse([{ name: "propose_plan", input: proposeInput(emptyPatch) }]),
     ])
 
-    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.currentVersion).toBe(2)
@@ -1110,7 +1131,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       ]),
     ])
 
-    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     const store = createMealPlanningStore(d1)
     const active = await store.activePlan(CHAT)
@@ -1125,6 +1146,59 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 1, generation: 1 }))
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 2, generation: 2 }))
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 3, generation: 3 }))
+  })
+
+  it("rejects expired, stale and foreign-owner edit runs without invoking the planner", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const env = makeEnv(namespace, d1)
+    const event = mealEvent(invokedAtMs)
+    const base = seedCandidate()
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(env, event, createFakeStep([], invokedAtMs) as never)
+    const feedback = { interactionKind: "meal-feedback-reply" as const, text: "Move lunch", version: 0 }
+    await runMealPlanningEditWorkflow(
+      env,
+      {
+        ...event,
+        instanceId: "stale",
+        payload: { ...event.payload, edit: { planInstanceId: event.instanceId, userId: "42", feedback } },
+      },
+      createFakeStep([], invokedAtMs) as never,
+    )
+    await runMealPlanningEditWorkflow(
+      env,
+      {
+        ...event,
+        instanceId: "foreign",
+        payload: {
+          ...event.payload,
+          edit: { planInstanceId: event.instanceId, userId: "other", feedback: { ...feedback, version: 1 } },
+        },
+      },
+      createFakeStep([], invokedAtMs) as never,
+    )
+    vi.setSystemTime(Date.parse(resolvePlanningWeek(invokedAtMs, TZ).weekEnd))
+    await runMealPlanningEditWorkflow(
+      env,
+      {
+        ...event,
+        instanceId: "expired",
+        payload: {
+          ...event.payload,
+          edit: { planInstanceId: event.instanceId, userId: "42", feedback: { ...feedback, version: 1 } },
+        },
+      },
+      createFakeStep([], Date.now()) as never,
+    )
+    expect(deepseekBodies).toHaveLength(2)
+    expect((await createMealPlanningStore(d1).activePlan(CHAT))?.plan.currentVersion).toBe(1)
   })
 
   it("sends meal-agent-unavailable and persists nothing when the agent fails", async () => {
@@ -1254,7 +1328,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(telegramMessages.some((text) => text.includes("couldn't reach"))).toBe(true)
   })
 
-  it("delivers two distinct notifications in one instance under name-memoized steps", async () => {
+  it("delivers stale notices in independent edit runs with memoized steps", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -1277,7 +1351,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
     ])
 
-    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     const stalePlans = telegramMessages.filter((message) => message.text.includes("already updated"))
     expect(stalePlans.length).toBe(2)
@@ -1336,7 +1410,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
     ])
 
-    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
 
     expect(telegramMessages.some((message) => message.text.includes("already updated"))).toBe(true)
     expect(telegramMessages.some((message) => message.text.includes("being generated"))).toBe(false)

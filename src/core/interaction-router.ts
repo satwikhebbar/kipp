@@ -11,10 +11,12 @@ interface Registration {
   interactionGroup?: string
   /** Chat-scoped plan-message generation (§6); carries group invalidation when present. */
   generation?: number
+  edit?: { sessionId?: string }
 }
 
 interface ResolvedInteraction extends WorkflowInteraction {
   workflowId: string
+  edit?: { sessionId?: string }
 }
 
 type InteractionRow = {
@@ -26,6 +28,7 @@ type InteractionRow = {
   consumed_update_id: number | null
   interaction_group: string | null
   generation: number | null
+  edit_json?: string | null
 }
 
 export const CONSUMED_INTERACTION_RETENTION_MS = 3_600_000 // ponytail: 1 hour
@@ -46,14 +49,17 @@ function json(data: unknown, status = 200): Response {
 
 /**
  * Short-lived, per-chat routing index. The namespace derives one logical
- * object from each chat id; Cloudflare lazily creates or rehydrates it, rather
- * than allocating one for every workflow execution. It stores no message text.
+ * object from each chat id; Cloudflare lazily creates or rehydrates it. Pending
+ * waits retain routing metadata; completed calendar writes also retain bounded
+ * edit context and transcripts until their edit authority expires.
  */
 export class InteractionRouterDO implements DurableObject {
   private readonly ctx: DurableObjectState
+  private readonly env: Env
 
-  constructor(ctx: DurableObjectState, _env: Env) {
+  constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx
+    this.env = env
     // Safe on every cold start; the schema itself remains in this chat's SQLite storage.
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS interactions (
       interaction_id TEXT PRIMARY KEY, version INTEGER NOT NULL, workflow_id TEXT NOT NULL,
@@ -70,6 +76,18 @@ export class InteractionRouterDO implements DurableObject {
     } catch {
       // Existing Durable Object databases already have this optional column.
     }
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE interactions ADD COLUMN edit_json TEXT")
+    } catch {
+      // Existing objects already have this column.
+    }
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS edit_contexts (
+      session_id TEXT PRIMARY KEY, resource_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      expires_at INTEGER NOT NULL, context_json TEXT NOT NULL, active INTEGER NOT NULL
+    )`)
+    this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS edit_locks (
+      resource_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, domain TEXT NOT NULL
+    )`)
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -81,9 +99,99 @@ export class InteractionRouterDO implements DurableObject {
     } catch {
       return new Response("invalid body", { status: 400 })
     }
+    if (url.pathname === "/edit-context") return this.saveEditContext(body)
+    if (url.pathname === "/edit-context/get") return this.getEditContext(body)
+    if (url.pathname === "/edit/claim") return this.claimEdit(body)
+    if (url.pathname === "/edit/release") {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM edit_locks WHERE resource_id = ? AND workflow_id = ?",
+        String(body.resourceId),
+        String(body.workflowId),
+      )
+      return json({ ok: true })
+    }
     if (url.pathname === "/register") return this.register(body)
     if (url.pathname === "/resolve") return this.resolve(body)
     return new Response("Not found", { status: 404 })
+  }
+
+  /** Stores bounded edit authority separately from the completed generation run. */
+  private saveEditContext(body: Record<string, unknown>): Response {
+    const { sessionId, resourceId, userId, expiresAt, context } = body
+    if (
+      typeof sessionId !== "string" ||
+      typeof resourceId !== "string" ||
+      typeof userId !== "string" ||
+      !Number.isFinite(expiresAt)
+    )
+      return new Response("invalid context", { status: 400 })
+    // A replay of an older registration must never reactivate an obsolete baseline.
+    const existing = this.ctx.storage.sql
+      .exec("SELECT session_id FROM edit_contexts WHERE session_id = ?", sessionId)
+      .toArray()
+    if (existing.length || Number(expiresAt) <= Date.now()) return json({ ok: true })
+    this.ctx.storage.sql.exec("UPDATE edit_contexts SET active = 0 WHERE resource_id = ?", resourceId)
+    this.ctx.storage.sql.exec(
+      "INSERT INTO edit_contexts VALUES (?, ?, ?, ?, ?, 1)",
+      sessionId,
+      resourceId,
+      userId,
+      Number(expiresAt),
+      JSON.stringify(context),
+    )
+    this.ctx.storage.sql.exec(
+      "DELETE FROM edit_contexts WHERE expires_at < ?",
+      Date.now() - CONSUMED_INTERACTION_RETENTION_MS,
+    )
+    return json({ ok: true })
+  }
+
+  /** Returns only the current, unexpired baseline owned by this user and chat. */
+  private getEditContext(body: Record<string, unknown>): Response {
+    const row = this.ctx.storage.sql
+      .exec(
+        "SELECT context_json, resource_id, expires_at FROM edit_contexts WHERE session_id = ? AND user_id = ? AND active = 1 AND expires_at > ?",
+        String(body.sessionId),
+        String(body.userId),
+        Date.now(),
+      )
+      .toArray()[0] as { context_json: string; resource_id: string; expires_at: number } | undefined
+    return json(
+      row
+        ? { context: JSON.parse(row.context_json), resourceId: row.resource_id, expiresAt: row.expires_at }
+        : { context: null },
+    )
+  }
+
+  /** Serializes edits to a resource; a terminal workflow cannot leave a permanent lock. */
+  private async claimEdit(body: Record<string, unknown>): Promise<Response> {
+    const resourceId = String(body.resourceId)
+    const workflowId = String(body.workflowId)
+    const domain = body.domain
+    if (domain !== "calendar" && domain !== "meal") return new Response("invalid domain", { status: 400 })
+    const current = this.ctx.storage.sql
+      .exec("SELECT workflow_id, domain FROM edit_locks WHERE resource_id = ?", resourceId)
+      .toArray()[0] as { workflow_id: string; domain: string } | undefined
+    if (current && current.workflow_id !== workflowId) {
+      const binding = current.domain === "calendar" ? this.env.CALENDAR_WORKFLOW : this.env.MEAL_PLANNING_WORKFLOW
+      if (!binding) return json({ ok: false })
+      try {
+        const status = await (await binding.get(current.workflow_id)).status()
+        if (!["complete", "errored", "terminated"].includes(status.status)) return json({ ok: false })
+      } catch {
+        return json({ ok: false })
+      }
+      this.ctx.storage.sql.exec(
+        "DELETE FROM edit_locks WHERE resource_id = ? AND workflow_id = ?",
+        resourceId,
+        current.workflow_id,
+      )
+    }
+    this.ctx.storage.sql.exec("INSERT OR IGNORE INTO edit_locks VALUES (?, ?, ?)", resourceId, workflowId, domain)
+    const owner = this.ctx.storage.sql
+      .exec("SELECT workflow_id FROM edit_locks WHERE resource_id = ?", resourceId)
+      .toArray()[0] as { workflow_id: string } | undefined
+    return json({ ok: owner?.workflow_id === workflowId })
   }
 
   private register(body: Record<string, unknown>): Response {
@@ -105,7 +213,7 @@ export class InteractionRouterDO implements DurableObject {
 
   private saveRegistration(registration: Registration): void {
     this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO interactions (interaction_id, version, workflow_id, kind, callback_token, bot_message_id, expires_at, consumed_update_id, interaction_group, generation) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+      "INSERT OR IGNORE INTO interactions (interaction_id, version, workflow_id, kind, callback_token, bot_message_id, expires_at, consumed_update_id, interaction_group, generation, edit_json) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
       registration.interactionId,
       registration.version,
       registration.workflowId,
@@ -115,6 +223,7 @@ export class InteractionRouterDO implements DurableObject {
       registration.expiresAt,
       registration.interactionGroup ?? null,
       registration.generation ?? null,
+      registration.edit ? JSON.stringify(registration.edit) : null,
     )
   }
 
@@ -177,7 +286,7 @@ export class InteractionRouterDO implements DurableObject {
         : input.plainText !== undefined
           ? this.ctx.storage.sql
               .exec(
-                `SELECT * FROM interactions WHERE kind IN (${PLAIN_TEXT_INTERACTION_KINDS.map(() => "?").join(", ")}) AND consumed_update_id IS NULL ORDER BY rowid DESC LIMIT 1`,
+                `SELECT * FROM interactions WHERE kind IN (${PLAIN_TEXT_INTERACTION_KINDS.map(() => "?").join(", ")}) AND (consumed_update_id IS NULL OR edit_json IS NOT NULL) ORDER BY rowid DESC LIMIT 1`,
                 ...PLAIN_TEXT_INTERACTION_KINDS,
               )
               .toArray()
@@ -201,11 +310,12 @@ export class InteractionRouterDO implements DurableObject {
     const token = typeof body.callbackToken === "string" ? body.callbackToken : undefined
     const replyTo = typeof body.replyToMessageId === "number" ? body.replyToMessageId : undefined
     const plainText = typeof body.text === "string" ? body.text : undefined
-    this.removeExpiredOrOldConsumedInteractions()
     const row = this.findInteraction({ token, replyTo, plainText })
-    if (!row || row.expires_at <= Date.now()) return json({ interaction: null })
-    if (row.consumed_update_id !== null) return json({ interaction: null })
-    if (this.isGenerationInvalidated(row)) return json({ interaction: null })
+    this.removeExpiredOrOldConsumedInteractions()
+    if (!row) return json({ interaction: null })
+    if (row.expires_at <= Date.now()) return json({ interaction: null, reason: "expired" })
+    if (row.consumed_update_id !== null && !row.edit_json) return json({ interaction: null })
+    if (this.isGenerationInvalidated(row)) return json({ interaction: null, reason: "stale" })
     this.claimInteraction(row.interaction_id, numericUpdateId)
     const interaction: ResolvedInteraction = {
       interactionId: row.interaction_id,
@@ -213,6 +323,7 @@ export class InteractionRouterDO implements DurableObject {
       workflowId: row.workflow_id,
       kind: row.kind,
       telegramUpdateId: numericUpdateId,
+      ...(row.edit_json ? { edit: JSON.parse(row.edit_json) as { sessionId?: string } } : {}),
       ...(plainText !== undefined ? { text: plainText } : {}),
     }
     return json({ interaction })

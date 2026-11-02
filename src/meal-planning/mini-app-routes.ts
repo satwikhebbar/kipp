@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { startEditWorkflow } from "../core/edit-workflow"
 import type { Env } from "../core/types"
 import { INTERACTION_KIND } from "../core/types"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
@@ -165,7 +166,7 @@ function errorResponse(error: unknown): Response {
   return jsonResponse({ error: "unavailable" }, HTTP_STATUS.SERVICE_UNAVAILABLE)
 }
 
-/** Dispatches an accepted batch to the server-owned workflow pointer. */
+/** Starts an independent revision for an accepted batch and its server-owned plan pointer. */
 export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): Promise<boolean> {
   const store = env.MEAL_PLANNING_DB ? createMealPlanningStore(env.MEAL_PLANNING_DB) : null
   let phase = "validate"
@@ -193,7 +194,7 @@ export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): 
     return false
   }
   // The Workflow claims only delivered batches. Persist the transition before
-  // the event is visible so a fast Workflow cannot observe an accepted batch.
+  // the edit run starts so a fast Workflow cannot observe an accepted batch.
   phase = "claim-delivery"
   if (!store || !(await store.markFeedbackBatchDelivered(batch.batchId))) {
     logRuntime(env, {
@@ -206,19 +207,22 @@ export async function startFeedbackBatch(batch: FeedbackBatchRecord, env: Env): 
     return false
   }
   try {
-    phase = "workflow-get"
-    const instance = await env.MEAL_PLANNING_WORKFLOW.get(batch.workflowInstanceId)
-    phase = "workflow-send-event"
-    await instance.sendEvent({
-      type: "telegram-reply",
-      payload: {
-        userId: Number(env.TELEGRAM_ALLOWED_USER_ID),
-        text: "__mini_app_feedback__",
-        interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
-        source: "mini-app",
-        feedbackBatchId: batch.batchId,
-        baseVersion: batch.baseVersion,
-        items: batch.items,
+    phase = "workflow-create"
+    await startEditWorkflow(env.MEAL_PLANNING_WORKFLOW, `meal-batch:${batch.batchId}`, {
+      chatId: batch.chatId,
+      telegramMessageId: 0,
+      requestText: "",
+      invokedAtMs: Date.now(),
+      edit: {
+        planInstanceId: batch.workflowInstanceId,
+        userId: env.TELEGRAM_ALLOWED_USER_ID,
+        feedback: {
+          text: "__mini_app_feedback__",
+          interactionKind: INTERACTION_KIND.MEAL_FEEDBACK_SUBMISSION,
+          source: "mini-app",
+          feedbackBatchId: batch.batchId,
+          baseVersion: batch.baseVersion,
+        },
       },
     })
     logRuntime(env, {

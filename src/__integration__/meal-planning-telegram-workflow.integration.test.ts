@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vites
 import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import { mealPlanSelectionCandidateToWire, mealPlanSelectionPatchToWire } from "../agent/meal-planning"
 import type { Env } from "../core/types"
+import { startFeedbackBatch } from "../meal-planning/mini-app-routes"
 import type { MealCell, MealPlanCandidate, MealPlanSelectionCandidate } from "../meal-planning/types"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 
@@ -42,6 +43,7 @@ function queueWeekContextExtraction(): void {
 function queueRevision(
   revised: MealPlanCandidate,
   feedback: { id: string; text: string; scope?: { day: string; slot: string } },
+  echoFeedback = true,
 ): void {
   const candidate = revisionCandidate(revised, feedback)
   queueResponse("evaluate-rev", {
@@ -61,7 +63,7 @@ function queueRevision(
         name: "propose_plan",
         input: {
           candidate: mealPlanSelectionPatchToWire(candidate),
-          feedbackItems: [{ id: feedback.id, text: feedback.text }],
+          ...(echoFeedback ? { feedbackItems: [{ id: feedback.id, text: feedback.text }] } : {}),
         },
       },
     ],
@@ -70,7 +72,11 @@ function queueRevision(
 }
 
 import { createD1TestDb, d1Count } from "../__tests__/d1-test-db"
-import { type MealPlanningLiveEvent, runAgentCenteredMealPlanningWorkflow } from "../meal-planning/agent-workflow"
+import {
+  type MealPlanningLiveEvent,
+  runAgentCenteredMealPlanningWorkflow,
+  runMealPlanningEditWorkflow,
+} from "../meal-planning/agent-workflow"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE } from "../meal-planning/store"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
 import { createFakeInteractionRouter, createFakeNetwork } from "./setup"
@@ -276,22 +282,37 @@ function memoStep() {
 function mealWorkflowBinding() {
   const created: Array<{ id: string; params: unknown }> = []
   const steps = new Map<string, ReturnType<typeof liveStep>>()
+  const runs = new Map<string, Promise<void>>()
+  let connected: Env | undefined
   let counter = 0
   return {
-    create: vitest.fn(async (params: unknown) => {
-      const id = `meal-wf-${++counter}`
-      created.push({ id, params })
+    connect: (env: Env) => {
+      connected = env
+    },
+    create: vitest.fn(async (input: { id?: string; params: MealPlanningWorkflowParams }) => {
+      const id = input.id ?? `meal-wf-${++counter}`
+      if (created.some((run) => run.id === id)) throw new Error("Workflow already exists")
+      created.push({ id, params: input })
+      if (input.params.edit && connected) {
+        const step = liveStep()
+        steps.set(id, step)
+        runs.set(
+          id,
+          runMealPlanningEditWorkflow(connected, { instanceId: id, payload: input.params } as never, step as never),
+        )
+      }
       return { id }
     }),
     get: vitest.fn((instanceId: string) => ({
+      status: async () => ({ status: created.some((run) => run.id === instanceId) ? "running" : "unknown" }),
       sendEvent: vitest.fn(async (event: unknown) => {
         const step = steps.get(instanceId)
-        const payload = (event as { payload: MealPlanningLiveEvent }).payload
         if (!step) throw new Error(`no live step for ${instanceId}`)
-        step.deliver(payload)
+        step.deliver((event as { payload: MealPlanningLiveEvent }).payload)
       }),
     })),
     attach: (id: string, step: ReturnType<typeof liveStep>) => steps.set(id, step),
+    settled: async () => Promise.all([...runs.values()]),
     created,
   }
 }
@@ -326,6 +347,7 @@ function startedWorkflowRun(
   wf: ReturnType<typeof mealWorkflowBinding>,
   env: Env,
 ): { params: MealPlanningWorkflowParams; step: ReturnType<typeof liveStep>; run: Promise<void> } {
+  wf.connect(env)
   const created = wf.created[wf.created.length - 1]
   if (!created) throw new Error("meal workflow was not created")
   const params = (created.params as { params: MealPlanningWorkflowParams }).params
@@ -409,6 +431,8 @@ describe("agent-centered meal-planning Telegram integration", () => {
     expect(firstGenerateMessages.join("\n")).toContain("Dietary exclusions (hard)")
     expect(firstGenerateMessages.join("\n")).toContain("[cheat-day] Friday cheat day")
 
+    await run
+    expect(step.isWaiting()).toBe(false)
     const token = callbackToken(network, planIndex)
     await handleTelegramWebhook(callback(token, 20), env)
     const promptIndex = await waitForMessageText(network, "Reply with your feedback", planIndex)
@@ -446,7 +470,7 @@ describe("agent-centered meal-planning Telegram integration", () => {
     await run
   })
 
-  it("routes unaddressed plain text to the live plan instance as a feedback submission", async () => {
+  it("starts a separate edit run for unaddressed plain text after generation completes", async () => {
     const base = seedCandidate()
     const revised = seedCandidate({ day: "Tue", slot: "snack1", cell: cell("poha", ["rice"], "snack1") })
     const { env, db, network } = runtimeEnv({})
@@ -473,6 +497,49 @@ describe("agent-centered meal-planning Telegram integration", () => {
 
     step.timeout()
     await run
+  })
+
+  it("starts a new revision for an accepted Mini App batch after generation completes", async () => {
+    const base = seedCandidate()
+    const revised = seedCandidate({ day: "Mon", slot: "snack1", cell: cell("idli", ["rice"], "snack1") })
+    const { env, db, network } = runtimeEnv({})
+    const wf = mealWorkflowBinding()
+    env.MEAL_PLANNING_WORKFLOW = wf as never
+    queueInitialPlan(base)
+    await handleTelegramWebhook(message("/mealplan this week"), env)
+    const initial = startedWorkflowRun(wf, env)
+    await initial.run
+    expect(initial.step.isWaiting()).toBe(false)
+    const store = createMealPlanningStore(env.MEAL_PLANNING_DB as D1Database)
+    const active = await store.activePlan("100")
+    if (!active) throw new Error("missing saved plan")
+    const accepted = await store.acceptFeedbackBatch({
+      batchId: "mini-edit-1",
+      planId: active.plan.planId,
+      chatId: "100",
+      baseVersion: 1,
+      workflowInstanceId: active.plan.instanceId,
+      idempotencyKey: "mini-edit-1",
+      items: [{ text: "Mon snack: prefer idli", target: { kind: "cell", day: "Mon", slot: "snack1" } }],
+    })
+    if (!accepted.ok) throw new Error("batch rejected")
+    const batch = await store.feedbackBatch("mini-edit-1")
+    if (!batch) throw new Error("missing accepted batch")
+    queueRevision(
+      revised,
+      { id: batch.items[0].id, text: batch.items[0].text, scope: { day: "Mon", slot: "snack1" } },
+      false,
+    )
+    expect(await startFeedbackBatch(batch, env)).toBe(true)
+    await wf.settled()
+    expect((await store.activePlan("100"))?.plan.currentVersion).toBe(2)
+    expect((await store.feedbackBatch(batch.batchId))?.status).toBe("consumed")
+    expect(wf.created).toHaveLength(2)
+    expect(wf.get).not.toHaveBeenCalled()
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(
+      network.getState().telegramMessages.filter((message) => message.text.includes("School week of")),
+    ).toHaveLength(2)
   })
 
   it("resolves a retried callback exactly once (router single-claim)", async () => {

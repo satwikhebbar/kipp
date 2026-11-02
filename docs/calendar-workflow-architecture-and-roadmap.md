@@ -126,20 +126,23 @@ places rich Calendar data or credentials in model context.
 
 ### Session routing and persistence
 
-Cloudflare Workflows retain agent state and pending request details. A new
-short-lived interaction-router Durable Object is the shared Telegram routing
-layer. It records only:
+Cloudflare Workflows retain agent state while a scheduling decision is pending.
+After a successful write and confirmation, the generation run completes. The
+per-chat interaction-router Durable Object stores the bounded Calendar edit
+context: the exact created plan, original managed-event identity, native
+transcript, owner, and deadline. It stores no OAuth credentials or long-term
+preferences.
 
-- the Telegram chat and bot-message or opaque callback identifier;
-- the target workflow instance;
-- the expected interaction type and current action version; and
-- an expiry timestamp.
+An Edit callback starts a short run that sends and registers a reply prompt,
+then completes. Feedback starts a fresh edit run, loads the current owned
+baseline, and revalidates a new proposal before updating the same event or
+series. A successful update replaces the baseline and exposes a fresh Edit
+action. No workflow wakeup is scheduled for edit expiry.
 
-It intentionally does not store Calendar request payloads, OAuth credentials,
-or long-term preferences. This is not a second persisted reconnect-request
-store: a 15-minute Calendar request remains in its Workflow state. The router
-replaces the LinkedIn-specific GitHub reply-routing dependency while preserving
-LinkedIn behavior.
+Meal-plan generation follows the same lifecycle, using the saved D1 plan and
+version as its edit context. Telegram and Mini App feedback start separate
+revision runs. See [workflow edit lifecycle](./workflow-edit-lifecycle.md) for
+routing, deduplication, concurrency, and deadline behavior.
 
 Router entries expire logically at resolution time. Milestone 1 also performs
 bounded physical cleanup of expired entries and old consumed entries during
