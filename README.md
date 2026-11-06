@@ -367,6 +367,23 @@ Notion, Telegram, and LLM calls hit the real services.
 | `/calendar <request>` | Start a one-off or recurring Calendar conversation. |
 | Calendar buttons or reply | Select an authorized choice, supply clarification, cancel, retry, or edit. |
 
+### Concurrent feedback limitation
+
+Concurrent feedback conversations in the same Telegram chat are unsupported.
+Finish one review or clarification conversation before starting another in that
+chat, including across workflows. Kipp does not enforce this restriction.
+
+Buttons identify their own workflow, but feedback routing is not fully isolated
+between runs. Registering LinkedIn revision feedback replaces earlier pending
+revision-feedback registrations in that chat, so replying to an older draft may
+no longer work. Unthreaded feedback goes to the most recently registered eligible
+interaction rather than asking which conversation the user intended.
+
+This is a Kipp routing limitation, not a Telegram bot restriction. Separate chats
+have separate interaction routers. Supporting independent concurrent feedback
+requires changes to the shared router and workflow registrations.
+Tracked in [#101](https://github.com/satwikhebbar/kipp/issues/101).
+
 ## Testing and quality checks
 
 | Command | Purpose |
