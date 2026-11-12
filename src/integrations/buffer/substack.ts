@@ -8,7 +8,13 @@ export function mapSubstackPost(command: BufferCreateCommand) {
     assets: [],
     ...(command.attachmentUrl ? { metadata: { substack: { linkAttachment: { url: command.attachmentUrl } } } } : {}),
     schedulingType: "automatic",
-    mode: "shareNow",
+    mode:
+      command.timing.kind === "queue"
+        ? "addToQueue"
+        : command.timing.kind === "schedule"
+          ? "customScheduled"
+          : "shareNow",
+    ...(command.timing.kind === "schedule" ? { dueAt: command.timing.dueAt } : {}),
     needsApproval: false,
     saveToDraft: false,
   }

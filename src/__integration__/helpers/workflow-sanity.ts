@@ -83,6 +83,10 @@ const entry = `
       await createTokenVault(env).replaceBufferGrant({accessToken:"synthetic-buffer-token",refreshToken:"synthetic-buffer-refresh",expiresAtMs:Date.now()+86400000,accountId:"buffer-account",scopes:["account:read","posts:read","posts:write","offline_access"]});
       return Response.json({ok:true});
     }
+    if (url.pathname === "/__test/buffer-grant") {
+      const result = await createTokenVault(env).replaceBufferGrant({accessToken:"synthetic-buffer-token",refreshToken:"synthetic-buffer-refresh",expiresAtMs:Date.now()+(url.searchParams.get("nearExpiry") === "true" ? 60000 : 86400000),accountId:url.searchParams.get("account") ?? "buffer-account",scopes:["account:read","posts:read","posts:write","offline_access"]});
+      return Response.json(result);
+    }
     if (url.pathname === "/__test/status") {
       const binding = url.searchParams.get("domain") === "notes" ? env.NOTES_WORKFLOW : url.searchParams.get("domain") === "linkedin" ? env.PIPELINE_WORKFLOW : env.CALENDAR_WORKFLOW;
       return Response.json(await (await binding.get(url.searchParams.get("id"))).status());
@@ -97,7 +101,7 @@ export async function createWorkflowSanity(options: {
   live?: { apiKey: string; model: string; provider?: "deepseek" | "openrouter" }
   notesWritingRetries?: number
   userTurnLimit?: number
-  timeZone?: string
+  timeZone?: string | null
   bufferResult?: (input: WireBody) => WireBody
   notesRouterFault?: "resolve" | "ack"
   loseNotesSubmitCheckpoint?: boolean
@@ -132,6 +136,9 @@ export async function createWorkflowSanity(options: {
     calendarWrites: [] as WireBody[],
     linkedinWrites: [] as WireBody[],
     bufferWrites: [] as WireBody[],
+    bufferRefreshes: 0,
+    bufferDisconnected: false,
+    bufferQueuePaused: false,
     started: [] as Array<{ domain: string; id: string }>,
     registrations: [] as WireBody[],
     boundNotesMessages: [] as number[],
@@ -169,7 +176,7 @@ export async function createWorkflowSanity(options: {
       LLM_API_KEY: "intercepted-model-token",
       OPENROUTER_API_KEY: "intercepted-openrouter-token",
       LLM_MAX_RETRIES: "0",
-      TIMEZONE: options.timeZone ?? "Asia/Kolkata",
+      ...(options.timeZone !== null ? { TIMEZONE: options.timeZone ?? "Asia/Kolkata" } : {}),
       WAIT_FOR_FEEDBACK_HOURS: "12",
       GITHUB_PAT: "synthetic",
       DATA_REPO_OWNER: "test",
@@ -177,6 +184,9 @@ export async function createWorkflowSanity(options: {
       NOTION_API_KEY: "synthetic",
       NOTION_IDEAS_DATA_SOURCE_ID: "test",
       LINKEDIN_AUTHOR_URN: "urn:li:person:synthetic",
+      BUFFER_CLIENT_ID: "synthetic-buffer-client",
+      BUFFER_CLIENT_SECRET: "synthetic-buffer-secret",
+      BUFFER_REDIRECT_ORIGIN: "https://kipp.test",
       BUFFER_SUBSTACK_CHANNEL_ID: "buffer-channel",
       TOKEN_ENCRYPTION_KEY_IDS: "sanity",
       TOKEN_ENCRYPTION_KEY_sanity: Buffer.alloc(32, 7).toString("base64url"),
@@ -197,6 +207,10 @@ export async function createWorkflowSanity(options: {
         if (state.failures.length) throw new Error("Scenario already failed; further outbound calls are blocked")
         if (abort.signal.aborted || Date.now() >= deadline) throw new Error("Scenario wall-clock budget exceeded")
         const url = new URL(request.url)
+        if (url.origin === "https://auth.buffer.com" && url.pathname === "/token") {
+          state.bufferRefreshes++
+          return RuntimeResponse.json({ error: "invalid_grant" }, { status: 400 })
+        }
         const text = request.method === "GET" ? "" : await request.text()
         const body: WireBody = text ? JSON.parse(text) : {}
         if (url.origin === "https://sanity.test" && url.pathname === "/publication-checkpoint") {
@@ -290,9 +304,9 @@ export async function createWorkflowSanity(options: {
                     service: "substack",
                     name: "Test",
                     allowedActions: ["scheduleUpdates"],
-                    isDisconnected: false,
+                    isDisconnected: state.bufferDisconnected,
                     isLocked: false,
-                    isQueuePaused: false,
+                    isQueuePaused: state.bufferQueuePaused,
                   },
                 ],
               },
@@ -312,11 +326,12 @@ export async function createWorkflowSanity(options: {
                           channelId: input.channelId,
                           channelService: "substack",
                           text: input.text,
-                          status: "sent",
-                          shareMode: "shareNow",
+                          status: input.mode === "shareNow" ? "sent" : "scheduled",
+                          shareMode: input.mode,
+                          ...(input.mode !== "shareNow" ? { dueAt: input.dueAt ?? "2030-01-01T13:30:00.000Z" } : {}),
                           schedulingType: "automatic",
-                          isCustomScheduled: false,
-                          sharedNow: true,
+                          isCustomScheduled: input.mode === "customScheduled",
+                          sharedNow: input.mode === "shareNow",
                           externalLink: null,
                           metadata: {
                             linkAttachment:
@@ -416,6 +431,12 @@ export async function createWorkflowSanity(options: {
   return {
     state,
     network,
+    setBufferGrant: async (nearExpiry = false, accountId = "buffer-account") => {
+      const response = await runtime.dispatchFetch(
+        `https://kipp.test/__test/buffer-grant?nearExpiry=${nearExpiry}&account=${encodeURIComponent(accountId)}`,
+      )
+      if (!response.ok) throw new Error("Could not update synthetic Buffer grant")
+    },
     until,
     update,
     message: async (
@@ -483,6 +504,8 @@ export async function createWorkflowSanity(options: {
 
 /** Formats scripted responses exactly as the production DeepSeek client receives them. */
 export function toolResponse(name: string, input: unknown): WireBody {
+  // Legacy scripted drafts omit timing; production/Luna must supply the required schema field.
+  if (name === "submit_note") input = { timing: { kind: "unchanged" }, ...(input as WireBody) }
   return {
     choices: [
       {

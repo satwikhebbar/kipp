@@ -17,6 +17,7 @@ export async function fingerprintCommand(command: BufferCreateCommand): Promise<
     d.channelId,
     d.service,
     command.timing.kind,
+    ...(command.timing.kind === "schedule" ? [command.timing.dueAt, command.timing.timeZone] : []),
   ])
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical))
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(HEX_RADIX).padStart(2, "0")).join("")

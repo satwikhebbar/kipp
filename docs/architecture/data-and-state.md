@@ -57,6 +57,14 @@ or pending same-action redelivery returns the original event. Cleanup is lazy
 at the review deadline plus the existing one-hour grace. This is transport
 recovery for Notes, not support for concurrent Telegram feedback conversations.
 
+Buffer publication JSON now also retains exact normalized timing, attempt ordinal,
+rejection time and consumed Retry delivery IDs. Each prepared/preflight attempt is
+recorded before I/O; dispatch claims are synchronized before create. Only a matching
+authenticated Retry of a definitive no-create rejection can prepare the next attempt.
+Rejected guards can be sealed as superseded before changed content/timing is reviewed.
+Accepted, unknown and unexpected-created outcomes cannot reopen dispatch. This extends
+the existing JSON/attempt records and requires no new SQLite tables or binding migration.
+
 Calendar event content is not copied into the Notion Ideas data source or
 the interaction router. The model can see only user text and the narrow event
 projection explicitly returned by `list_calendar_events`; descriptions,

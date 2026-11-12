@@ -191,3 +191,30 @@ it("maps and verifies exactly the approved embedded card", async () => {
     decodeBufferPost({ ...acceptedPost, metadata: { linkAttachment: { url: "https://different.com" } } }, linked).kind,
   ).toBe("created-unexpected")
 })
+
+it.each(["queue", "schedule"] as const)("maps and verifies %s without changing approved timing", (kind) => {
+  const timed = {
+    ...command,
+    timing:
+      kind === "queue"
+        ? { kind: "queue" as const }
+        : { kind: "schedule" as const, dueAt: "2030-01-01T13:30:00.000Z", timeZone: "Asia/Kolkata" },
+  }
+  const mapped = mapSubstackPost(timed)
+  expect(mapped.mode).toBe(kind === "queue" ? "addToQueue" : "customScheduled")
+  if (kind === "queue") expect(mapped).not.toHaveProperty("dueAt")
+  else expect(mapped).toHaveProperty("dueAt", "2030-01-01T13:30:00.000Z")
+  const returned = {
+    ...acceptedPost,
+    status: "scheduled",
+    shareMode: mapped.mode,
+    sharedNow: false,
+    isCustomScheduled: kind === "schedule",
+    dueAt: "2030-01-01T13:30:00.000Z",
+  }
+  expect(decodeBufferPost(returned, timed)).toMatchObject({ kind: "accepted", dueAt: "2030-01-01T13:30:00.000Z" })
+  expect(decodeBufferPost({ ...returned, shareMode: "shareNow" }, timed).kind).toBe("created-unexpected")
+  if (kind === "schedule")
+    expect(decodeBufferPost({ ...returned, dueAt: "2030-01-01T14:30:00.000Z" }, timed).kind).toBe("created-unexpected")
+  else expect(decodeBufferPost({ ...returned, dueAt: null }, timed)).toMatchObject({ kind: "accepted" })
+})

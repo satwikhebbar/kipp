@@ -294,8 +294,9 @@ type TimingInstruction =
   | { kind: "unchanged" }
   | { kind: "now" }
   | { kind: "queue" }
+  | { kind: "clarify"; question: string }
   | { kind: "schedule"; date: ProposedDate; localTime: string;
-      timeZone?: string }
+      timeZone?: string | null; source?: "initial" | "current" }
 
 type LinkCardAction = "keep" | "use-input" | "remove"
 
@@ -576,7 +577,7 @@ Refresh when the token has less than 60 seconds remaining. Serialize Buffer refr
 
 Keep connectionId stable across same-account reauthorization, distinct from credentialGeneration. A different account changes connectionId, so an old candidate/approval fails destination identity checks. Never retarget an approved channel after reauthorization. Missing configured channel or Buffer-to-Substack disconnection asks for the relevant repair, not a different account.
 
-Reconnect uses Connect Buffer + explicit Retry, with a wait bounded by the earlier of 15 minutes, remaining review deadline and scheduled due time. If identity changed or due time elapsed, require fresh review; no unchanged Retry is eligible. Source: [Buffer OAuth](https://developers.buffer.com/guides/authentication.html).
+Reconnect uses Connect Buffer + explicit Retry. Unchanged Retry expires at the earlier of 15 minutes, remaining review deadline and scheduled due time; fresh revision feedback can use the remaining repair/review window and requires new approval. If identity changed or due time elapsed, require fresh review; no unchanged Retry is eligible. Source: [Buffer OAuth](https://developers.buffer.com/guides/authentication.html).
 
 ### The shared time resolver uses a strict Luxon wrapper
 

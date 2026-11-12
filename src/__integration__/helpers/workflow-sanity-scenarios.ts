@@ -116,7 +116,7 @@ export async function calendarJourney(harness: Harness): Promise<void> {
 export async function notesJourney(harness: Harness): Promise<void> {
   expect(
     await harness.message(
-      "/note I've noticed that smaller releases make feedback easier to act on. Before drafting, ask me which tradeoff I want to highlight. Use this as the card: https://example.com/small-releases",
+      "/note I've noticed that smaller releases make feedback easier to act on. Before drafting, ask me which tradeoff I want to highlight. Use this as the card: https://example.com/small-releases. Add the final Note to my Buffer queue.",
     ),
   ).toBe(200)
   const question = await harness.waitMessage(/\?/)
@@ -131,7 +131,7 @@ export async function notesJourney(harness: Harness): Promise<void> {
     harness.until(() =>
       harness.network.getState().telegramMessages.find((message) => {
         const buttons = message.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
-        return message.messageId > afterId && buttons?.flat().some((button) => button.text === "Publish")
+        return message.messageId > afterId && buttons?.flat().some((button) => button.text === "Add to queue")
           ? message
           : undefined
       }),
@@ -143,16 +143,53 @@ export async function notesJourney(harness: Harness): Promise<void> {
   const review = await findReview(initial.messageId)
   expect(review.text?.trim().length).toBeGreaterThan(0)
   expect(harness.state.bufferWrites).toHaveLength(0)
-  expect(await harness.click(review, /^Publish$/, 90)).toBe(200)
+  expect(await harness.click(review, /^Add to queue$/, 90)).toBe(200)
   await harness.waitStatus("notes")
   expect(harness.state.bufferWrites).toHaveLength(1)
   expect(harness.state.bufferWrites[0]).toMatchObject({
     text: review.text,
-    mode: "shareNow",
+    mode: "addToQueue",
     saveToDraft: false,
     needsApproval: false,
     metadata: { substack: { linkAttachment: { url: "https://example.com/small-releases" } } },
   })
-  await harness.waitMessage(/^Sent to Buffer for publication/)
+  const acceptance = await harness.waitMessage(/^Added to your Buffer queue/)
+  expect(acceptance.text).toContain("2030-01-01 19:00 Asia/Kolkata")
+  expect(harness.state.bufferWrites[0]).not.toHaveProperty("dueAt")
   expect(harness.state.failures).toEqual([])
+}
+
+/** Exercises real timing extraction and preservation, keeping provider account writes simulated. */
+export async function notesScheduledJourney(harness: Harness): Promise<void> {
+  await harness.message(
+    "/note Small releases make feedback easier to act on. Schedule this Note for 2030-01-01 at 9am UTC.",
+  )
+  const findReview = (afterId = 0) =>
+    harness.until(() =>
+      harness.network.getState().telegramMessages.find((message) => {
+        const buttons = message.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
+        return message.messageId > afterId &&
+          (buttons?.flat().some((button) => ["Publish", "Schedule", "Add to queue"].includes(button.text)) ||
+            harness.state.boundNotesMessages.includes(message.messageId))
+          ? message
+          : undefined
+      }),
+    )
+  const initial = await findReview()
+  const initialButtons = initial.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
+  expect(initialButtons?.flat().some((button) => button.text === "Schedule")).toBe(true)
+  expect((await harness.waitMessage(/^Timing:/)).text).toContain("2030-01-01 09:00")
+  await harness.message("Make the opening more concrete. Keep the posting time unchanged.", initial.messageId)
+  const review = await findReview(initial.messageId)
+  await harness.click(review, /^Schedule$/)
+  await harness.waitStatus("notes")
+  expect(harness.state.bufferWrites).toHaveLength(1)
+  expect(harness.state.bufferWrites[0]).toMatchObject({
+    text: review.text,
+    mode: "customScheduled",
+    dueAt: "2030-01-01T09:00:00.000Z",
+    needsApproval: false,
+    saveToDraft: false,
+  })
+  await harness.waitMessage(/^Scheduled with Buffer for 2030-01-01 09:00 /)
 }

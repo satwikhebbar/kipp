@@ -73,10 +73,10 @@ describe("Notes review authority", () => {
     expect(chunks.every((chunk) => chunk.length <= 4000)).toBe(true)
     expect(chunks[1].startsWith("😀")).toBe(true)
   })
-  it("accepts a single HTTP(S) card but rejects unsafe links and later-phase timing", () => {
+  it("accepts one HTTP(S) card and strict timing modes but rejects unsafe links and mixed fields", () => {
     expect(commandSchema.safeParse({ ...noteCommand, attachmentUrl: "https://example.com" }).success).toBe(true)
     expect(commandSchema.safeParse({ ...noteCommand, attachmentUrl: "javascript:alert(1)" }).success).toBe(false)
-    expect(commandSchema.safeParse({ ...noteCommand, timing: { kind: "queue" } }).success).toBe(false)
+    expect(commandSchema.safeParse({ ...noteCommand, timing: { kind: "queue" } }).success).toBe(true)
     expect(commandSchema.safeParse({ ...noteCommand, timing: { kind: "now", dueAt: "later" } }).success).toBe(false)
   })
 })

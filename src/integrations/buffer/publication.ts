@@ -1,12 +1,24 @@
 import { createTokenVault } from "../../core/token-vault-client"
 import type { Env } from "../../core/types"
 import { fingerprintCommand } from "../../notes/review"
-import { type ApprovedPublication, approvedPublicationSchema, type BufferCreateResult } from "../../notes/types"
-import { createBufferPostOnce, discoverBufferDestination, inspectBufferPost } from "./client"
+import { isNoteTimingFuture } from "../../notes/timing"
+import {
+  type ApprovedPublication,
+  approvedPublicationSchema,
+  type BufferCreateResult,
+  notesEventSchema,
+} from "../../notes/types"
+import { BufferDestinationError, createBufferPostOnce, discoverBufferDestination, inspectBufferPost } from "./client"
+
+export const NOTES_REPAIR_WAIT_MS = 900_000
+export const MAX_BUFFER_ATTEMPTS = 3
 
 interface PublicationRecord {
   approved: ApprovedPublication
-  phase: "prepared" | "dispatching" | "finished"
+  phase: "prepared" | "dispatching" | "finished" | "superseded"
+  attemptOrdinal?: number
+  rejectedAtMs?: number
+  retryDeliveries?: Array<{ deliveryId: string; expectedAttemptId: string }>
   attemptId?: string
   result?: BufferCreateResult
   reconciliationAttempted?: boolean
@@ -30,7 +42,13 @@ export class BufferPublicationDO implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405 })
     try {
-      const body = (await request.json()) as { op: string; approved?: unknown; fingerprint?: string }
+      const body = (await request.json()) as {
+        op: string
+        approved?: unknown
+        fingerprint?: string
+        expectedAttemptId?: string
+        authorization?: unknown
+      }
       if (body.op === "prepare") {
         const parsed = approvedPublicationSchema.safeParse(body.approved)
         if (!parsed.success) return new Response("Invalid approval", { status: 400 })
@@ -53,21 +71,102 @@ export class BufferPublicationDO implements DurableObject {
       if (!record || record.approved.fingerprint !== body.fingerprint)
         return new Response("Publication mismatch", { status: 409 })
       if (body.op === "inspect") return Response.json(record.result ?? { kind: "unknown", reason: record.phase })
-      if (body.op !== "submit") return new Response("Not found", { status: 404 })
-      if (!this.live) {
-        this.live = this.submit()
-        const pending = this.live
-        void pending
-          .finally(() => {
-            if (this.live === pending) this.live = null
-          })
-          .catch(() => {})
+      if (body.op === "supersedeRejected") {
+        if (this.live) await this.live
+        const latest = this.read()
+        if (latest?.phase === "superseded") return Response.json({ ok: true })
+        if (latest?.result?.kind !== "rejected" || latest.attemptId !== body.expectedAttemptId)
+          return new Response("Cannot supersede publication", { status: 409 })
+        this.save({
+          ...latest,
+          phase: "superseded",
+          result: { ...latest.result, reason: "superseded", repair: "none" },
+        })
+        await this.ctx.storage.sync()
+        return Response.json({ ok: true })
       }
-      return Response.json(await this.live)
+      if (body.op === "retryRejected") {
+        if (this.live) await this.live
+        const latest = this.read()
+        const authorization = notesEventSchema.safeParse(body.authorization)
+        if (!latest || !authorization.success) return new Response("Invalid Retry", { status: 400 })
+        const action = authorization.data
+        const owner = latest.approved.approval
+        if (
+          action.kind !== "notes-retry" ||
+          action.workflowId !== latest.approved.workflowId ||
+          action.fingerprint !== latest.approved.fingerprint ||
+          action.userId !== owner.userId ||
+          action.chatId !== owner.chatId ||
+          action.version < latest.approved.candidateVersion ||
+          action.receivedAtMs > Date.now() ||
+          action.receivedAtMs >= latest.approved.deadlineMs
+        )
+          return new Response("Invalid Retry", { status: 409 })
+        // A lost RPC response replays the same authorization; it cannot grant another attempt.
+        if (
+          latest.retryDeliveries?.some(
+            (item) => item.deliveryId === action.deliveryId && item.expectedAttemptId === body.expectedAttemptId,
+          )
+        )
+          return Response.json(await this.joinSubmit())
+        if (
+          latest.phase !== "finished" ||
+          latest.result?.kind !== "rejected" ||
+          latest.result.repair === "none" ||
+          latest.result.reason === "destination-changed" ||
+          latest.attemptId !== body.expectedAttemptId ||
+          (latest.attemptOrdinal ?? 1) >= MAX_BUFFER_ATTEMPTS ||
+          Date.now() >= latest.approved.deadlineMs ||
+          Date.now() >= (latest.rejectedAtMs ?? 0) + NOTES_REPAIR_WAIT_MS ||
+          !isNoteTimingFuture(latest.approved.command.timing)
+        )
+          return new Response("Retry is not eligible", { status: 409 })
+        const next: PublicationRecord = {
+          ...latest,
+          phase: "prepared",
+          attemptOrdinal: (latest.attemptOrdinal ?? 1) + 1,
+          attemptId: crypto.randomUUID(),
+          result: undefined,
+          rejectedAtMs: undefined,
+          reconciliationAttempted: false,
+          retryDeliveries: [
+            ...(latest.retryDeliveries ?? []),
+            { deliveryId: action.deliveryId, expectedAttemptId: String(body.expectedAttemptId) },
+          ],
+        }
+        this.ctx.storage.transactionSync(() => {
+          this.save(next)
+          this.ctx.storage.sql.exec(
+            "INSERT INTO attempts VALUES (?, ?, 'prepared', ?, NULL)",
+            String(next.attemptId),
+            Number(next.attemptOrdinal),
+            Date.now(),
+          )
+        })
+        await this.ctx.storage.sync()
+        return Response.json(await this.joinSubmit())
+      }
+      if (body.op !== "submit") return new Response("Not found", { status: 404 })
+      return Response.json(await this.joinSubmit())
     } catch {
       // Storage failure leaves dispatch evidence intact. Never expose provider errors or approved text.
       return Response.json({ kind: "unknown", reason: "publication-storage-unavailable" }, { status: 503 })
     }
+  }
+
+  /** Joins only the current live dispatch; durable records remain authoritative across eviction. */
+  private joinSubmit(): Promise<BufferCreateResult> {
+    if (!this.live) {
+      this.live = this.submit()
+      const pending = this.live
+      void pending
+        .finally(() => {
+          if (this.live === pending) this.live = null
+        })
+        .catch(() => {})
+    }
+    return this.live
   }
 
   private read(): PublicationRecord | undefined {
@@ -87,18 +186,28 @@ export class BufferPublicationDO implements DurableObject {
   }
 
   private async finish(record: PublicationRecord, result: BufferCreateResult): Promise<BufferCreateResult> {
+    const latest = this.read()
+    if (!latest || latest.attemptId !== record.attemptId || latest.phase === "superseded")
+      return latest?.result ?? { kind: "unknown", reason: "stale-attempt" }
+    const persisted: BufferCreateResult =
+      result.kind === "rejected" ? { ...result, attemptId: record.attemptId } : result
     this.ctx.storage.transactionSync(() => {
-      this.save({ ...record, phase: "finished", result })
+      this.save({
+        ...latest,
+        phase: "finished",
+        result: persisted,
+        ...(persisted.kind === "rejected" ? { rejectedAtMs: Date.now() } : {}),
+      })
       if (record.attemptId)
         this.ctx.storage.sql.exec(
           "UPDATE attempts SET state = ?, result_json = ? WHERE attempt_id = ?",
-          result.kind,
-          JSON.stringify(result),
+          persisted.kind,
+          JSON.stringify(persisted),
           record.attemptId,
         )
     })
     await this.ctx.storage.sync()
-    return result
+    return persisted
   }
 
   private async submit(): Promise<BufferCreateResult> {
@@ -110,10 +219,24 @@ export class BufferPublicationDO implements DurableObject {
       return record.result
     }
     if (record.phase !== "prepared") return { kind: "unknown", reason: "dispatch-already-claimed" }
+    if (!record.attemptId) {
+      record.attemptId = crypto.randomUUID()
+      record.attemptOrdinal = 1
+      this.ctx.storage.transactionSync(() => {
+        this.save(record)
+        this.ctx.storage.sql.exec(
+          "INSERT INTO attempts VALUES (?, 1, 'prepared', ?, NULL)",
+          String(record.attemptId),
+          Date.now(),
+        )
+      })
+      await this.ctx.storage.sync()
+    }
     const { approved } = record
-    const reject = (reason: string, repair: "reauthorize" | "configuration" | "none") =>
+    const reject = (reason: string, repair: "reauthorize" | "reconnect-channel" | "configuration" | "none") =>
       this.finish(record, { kind: "rejected", reason, repair })
     if (Date.now() >= approved.deadlineMs) return reject("review-expired", "none")
+    if (!isNoteTimingFuture(approved.command.timing)) return reject("schedule-elapsed", "none")
     let access: Awaited<ReturnType<ReturnType<typeof createTokenVault>["acquireBufferAccess"]>>
     try {
       access = await createTokenVault(this.env).acquireBufferAccess()
@@ -129,26 +252,35 @@ export class BufferPublicationDO implements DurableObject {
     )
       return reject("destination-changed", "configuration")
     try {
-      const current = await discoverBufferDestination(access.accessToken, access.connectionId, destination.channelId)
+      const current = await discoverBufferDestination(
+        access.accessToken,
+        access.connectionId,
+        destination.channelId,
+        approved.command.timing.kind === "queue",
+      )
       if (JSON.stringify(current) !== JSON.stringify(destination)) return reject("destination-changed", "configuration")
-    } catch {
-      return reject("destination-unavailable", "configuration")
+    } catch (error) {
+      return error instanceof BufferDestinationError
+        ? reject(error.reason, error.repair)
+        : reject("destination-unavailable", "configuration")
     }
     if (Date.now() >= approved.deadlineMs) return reject("review-expired", "none")
+    if (!isNoteTimingFuture(approved.command.timing)) return reject("schedule-elapsed", "none")
     // No await between the final phase check and transactional claim.
     const latest = this.read()
     if (!latest) return { kind: "unknown", reason: "missing-publication" }
-    if (latest.phase !== "prepared") return latest.result ?? { kind: "unknown", reason: "dispatch-already-claimed" }
+    if (latest.phase !== "prepared" || latest.attemptId !== record.attemptId)
+      return latest.result ?? { kind: "unknown", reason: "dispatch-already-claimed" }
     record.phase = "dispatching"
-    const attemptId = crypto.randomUUID()
-    record.attemptId = attemptId
+    const attemptId = record.attemptId
     this.ctx.storage.transactionSync(() => {
       this.save(record)
-      this.ctx.storage.sql.exec("INSERT INTO attempts VALUES (?, 1, 'dispatching', ?, NULL)", attemptId, Date.now())
+      this.ctx.storage.sql.exec("UPDATE attempts SET state = 'dispatching' WHERE attempt_id = ?", attemptId)
     })
     // Explicitly persist the claim before the network create. No lease can release it.
     await this.ctx.storage.sync()
     if (Date.now() >= approved.deadlineMs) return reject("review-expired", "none")
+    if (!isNoteTimingFuture(approved.command.timing)) return reject("schedule-elapsed", "none")
     const result = await createBufferPostOnce(access.accessToken, approved.command)
     // Preserve observed ID/result before any reconciliation or Workflow checkpoint.
     if (result.kind === "unknown" && result.postId) {
@@ -190,5 +322,9 @@ export function createBufferPublication(namespace: DurableObjectNamespace, publi
     prepare: (approved: ApprovedPublication) => post<{ ok: boolean }>({ op: "prepare", approved }),
     submit: (fingerprint: string) => post<BufferCreateResult>({ op: "submit", fingerprint }),
     inspect: (fingerprint: string) => post<BufferCreateResult>({ op: "inspect", fingerprint }),
+    retryRejected: (fingerprint: string, expectedAttemptId: string, authorization: unknown) =>
+      post<BufferCreateResult>({ op: "retryRejected", fingerprint, expectedAttemptId, authorization }),
+    supersedeRejected: (fingerprint: string, expectedAttemptId: string) =>
+      post<{ ok: boolean }>({ op: "supersedeRejected", fingerprint, expectedAttemptId }),
   }
 }

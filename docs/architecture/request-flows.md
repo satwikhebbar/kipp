@@ -1,6 +1,6 @@
 # Request flows
 
-## Immediate Notes through Buffer (implemented; awaiting release)
+## Notes through Buffer (implemented; awaiting release)
 
 An authenticated `/note <thoughts>` starts one deterministic Workflow instance
 per Telegram chat/message. The run snapshots the writing prompt, model,
@@ -16,7 +16,12 @@ spending another review round. After exhausted retries, recovery preserves the
 latest valid draft or reports failure if none exists. Telegram displays commentary,
 timing and the literal Note in that order. Publish authority is an opaque action
 bound to the owner, chat, workflow, candidate version, fingerprint and deadline.
-Writing feedback and model output cannot authorize publication.
+Writing feedback and model output cannot authorize publication. The writer supplies
+structured now/queue/schedule intent separately from the Note text. Deterministic
+time resolution uses the source message receipt and explicit/default timezone;
+invalid, missing, ambiguous or elapsed scheduling requires clarification. Prose
+revisions preserve timing. Queue approval delegates the next slot to Buffer; the
+confirmation shows returned `dueAt` without polling or inventing a timestamp.
 
 ```mermaid
 sequenceDiagram
@@ -47,7 +52,12 @@ reuse the retained event. The Workflow rejects stale or duplicate events. A
 publication with an existing dispatch claim never acquires another send lease;
 replay returns its durable evidence. Only an incomplete result with a captured
 post ID permits one bounded lookup of that ID. There is no downstream delivery
-polling or inspection-and-retry interaction. Queueing, exact-time scheduling and explicit repair/Retry are later implementation phases.
+polling or inspection-and-retry interaction. A definitive no-create rejection is
+a separate path: offer repair and explicit Retry of the unchanged payload, with
+fresh owner/action/attempt validation and at most three attempts. The repair wait
+is at most fifteen minutes within the original review deadline and scheduled due time. A
+changed payload seals the rejected guard before fresh review; unknown, dispatching,
+accepted and unexpected-created evidence cannot be superseded into another create.
 
 The Notes transport extension leaves existing provider refresh ownership intact:
 Buffer alone uses vault-coordinated refresh under

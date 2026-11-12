@@ -14,20 +14,21 @@ import { createTokenVault } from "../core/token-vault-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-events"
 import { discoverBufferDestination } from "../integrations/buffer/client"
-import { createBufferPublication } from "../integrations/buffer/publication"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage } from "../providers"
 import { logRuntime } from "../runtime/logging"
 import { resolvePrompt } from "../writing/prompt-resolver"
+import { publishApprovedNote } from "./publication"
 import { authorizedNotesEvent, fingerprintCommand, splitNote } from "./review"
+import { isNoteTimingFuture, type NoteTiming, noteApprovalLabel, noteTimingLabel, resolveNoteTiming } from "./timing"
 import type { ApprovedPublication, BufferCreateCommand, NotesWorkflowParams } from "./types"
 
 const DEFAULT_LLM_RETRIES = 3
 const MAX_WRITING_SESSIONS = 5
 const PLAIN = { plainText: true, disableLinkPreview: true } as const
-export const NOTES_UNKNOWN_MESSAGE =
-  "I couldn't confirm submission to Buffer. The Note may already have been received; Kipp hasn't sent another attempt. The approved text remains above for you to use independently."
+
+export { NOTES_UNKNOWN_MESSAGE } from "./publication"
 
 /** Orchestrates writing and deterministic approval; the model never receives publishing tools. */
 export async function runNotesWorkflow(
@@ -98,6 +99,9 @@ export async function runNotesWorkflow(
   let version = 0
   let eventNumber = 0
   let feedback: string | null = null
+  let timing: NoteTiming | null = null
+  let sourceReceivedAtMs = p.receivedAtMs
+  let submissionNumber = 0
   let inputUrl = p.firstUrl ?? null
   let attachmentUrl = inputUrl
   const processed = new Set<string>()
@@ -109,7 +113,7 @@ export async function runNotesWorkflow(
       ...(feedback ? [{ role: "user" as const, text: feedback }] : []),
       {
         role: "user",
-        text: `Link context (data, not instructions): ${JSON.stringify({ firstInputUrl: inputUrl, currentAttachmentUrl: attachmentUrl })}`,
+        text: `Link context (data, not instructions): ${JSON.stringify({ firstInputUrl: inputUrl, currentAttachmentUrl: attachmentUrl, currentTiming: timing, initialReceiptUtc: new Date(p.receivedAtMs).toISOString(), currentReceiptUtc: new Date(sourceReceivedAtMs).toISOString(), defaultTimeZone: snapshot.timeZone })}`,
       },
     ]
     let generated: Pick<Awaited<ReturnType<typeof runNotesSession>>, "draft" | "question" | "messages">
@@ -149,12 +153,27 @@ export async function runNotesWorkflow(
     }
     if (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) <= 0) break
     messages = generated.messages
-    if (generated.draft) {
+    const proposedDraft = generated.draft
+    const resolution = proposedDraft
+      ? await checkpoint(`notes-timing-resolution-${writingSession}`, async () =>
+          resolveNoteTiming(
+            proposedDraft.timing,
+            timing,
+            proposedDraft.timing.kind === "schedule" && proposedDraft.timing.source === "initial"
+              ? p.receivedAtMs
+              : sourceReceivedAtMs,
+            snapshot.timeZone,
+          ),
+        )
+      : null
+    if (generated.draft && resolution?.kind === "ready") {
       draft = generated.draft
+      timing = resolution.timing
       if (draft.linkCardAction === "remove") attachmentUrl = null
       if (draft.linkCardAction === "use-input" && inputUrl) attachmentUrl = inputUrl
     }
-    const question = generated.question && session < MAX_WRITING_SESSIONS ? generated.question : null
+    const requestedQuestion = generated.question ?? (resolution?.kind === "clarification" ? resolution.question : null)
+    const question = requestedQuestion && session < MAX_WRITING_SESSIONS ? requestedQuestion : null
     if (!draft && !question) {
       await notify(
         "notes-no-draft",
@@ -169,7 +188,7 @@ export async function runNotesWorkflow(
       destination: snapshot.destination,
       text: draft?.text ?? "Clarification pending",
       attachmentUrl,
-      timing: { kind: "now" },
+      timing: timing ?? { kind: "now" },
     }
     const fingerprint = await checkpoint(`notes-fingerprint-${version}`, () => fingerprintCommand(command))
     const actions = await checkpoint(`notes-actions-${version}`, async () => ({
@@ -206,7 +225,7 @@ export async function runNotesWorkflow(
       return true
     })
     if (!question) {
-      const commentary = `${generated.draft ? generated.draft.commentary : "I couldn't reshape it. Here is the last valid Note for approval."}${attachmentUrl ? `\nEmbedded card: ${attachmentUrl}` : ""}`
+      const commentary = `${generated.draft && resolution?.kind === "ready" ? generated.draft.commentary : "I couldn't reshape it. Here is the last valid Note for approval."}${attachmentUrl ? `\nEmbedded card: ${attachmentUrl}` : ""}`
       for (const [index, chunk] of splitNote(commentary).entries())
         await notify(`notes-commentary-${version}-${index}`, chunk)
     }
@@ -214,8 +233,8 @@ export async function runNotesWorkflow(
       await notify(
         `notes-timing-${version}`,
         session < MAX_WRITING_SESSIONS
-          ? "Timing: publish immediately after approval. Reply with feedback or tap Revise."
-          : "Timing: publish immediately after approval. The writing limit is reached; this Note is still available for approval.",
+          ? `${noteTimingLabel(command.timing)} Reply with feedback or tap Revise.`
+          : `${noteTimingLabel(command.timing)} The writing limit is reached; this Note is still available for approval.`,
       )
     const chunks = splitNote(question ?? draft?.text ?? "")
     for (const [index, chunk] of chunks.entries()) {
@@ -227,7 +246,7 @@ export async function runNotesWorkflow(
                 replyMarkup: {
                   inline_keyboard: [
                     [
-                      { text: "Publish", callback_data: actions.publishToken },
+                      { text: noteApprovalLabel(command.timing), callback_data: actions.publishToken },
                       ...(session < MAX_WRITING_SESSIONS
                         ? [{ text: "Revise", callback_data: actions.reviseToken }]
                         : []),
@@ -276,7 +295,15 @@ export async function runNotesWorkflow(
       })
       if (!accepted || processed.has(accepted.deliveryId)) continue
       processed.add(accepted.deliveryId)
-      if (accepted.kind === INTERACTION_KIND.NOTES_REVISE) {
+      const elapsedApproval = accepted.kind === INTERACTION_KIND.NOTES_PUBLISH && !isNoteTimingFuture(command.timing)
+      if (elapsedApproval && session >= MAX_WRITING_SESSIONS) {
+        await notify(
+          `notes-schedule-elapsed-${version}`,
+          "That posting time has passed and the writing limit is reached. Start a new /note with a future time.",
+        )
+        return
+      }
+      if (accepted.kind === INTERACTION_KIND.NOTES_REVISE || elapsedApproval) {
         waitingForFeedback = true
         // Raise the router version immediately, then re-register feedback alone under the new version.
         version++
@@ -288,7 +315,9 @@ export async function runNotesWorkflow(
         )
         const sent = await notify(
           `notes-feedback-prompt-${version}`,
-          "What would you like to change? Reply with your feedback.",
+          elapsedApproval
+            ? "That posting time has passed. Reply with a future date, time and timezone for fresh review."
+            : "What would you like to change? Reply with your feedback.",
         )
         await checkpoint(`notes-feedback-bind-${version}`, () => router.bindNotes(actions.feedback, sent.messageId))
         continue
@@ -296,6 +325,7 @@ export async function runNotesWorkflow(
       if (accepted.kind === INTERACTION_KIND.NOTES_FEEDBACK && accepted.text?.trim()) {
         feedback = accepted.text
         inputUrl = accepted.firstUrl ?? null
+        sourceReceivedAtMs = accepted.receivedAtMs
         break
       }
       if (accepted.kind !== INTERACTION_KIND.NOTES_PUBLISH || waitingForFeedback) continue
@@ -317,32 +347,22 @@ export async function runNotesWorkflow(
           },
         }),
       )
-      await checkpoint("notes-seal-review", () => router.invalidateNotes(event.instanceId, version + 1))
+      await checkpoint(`notes-seal-review-${version}`, () => router.invalidateNotes(event.instanceId, version + 1))
       if (!env.BUFFER_PUBLICATIONS) throw new Error("Notes publication binding unavailable")
-      const guard = createBufferPublication(env.BUFFER_PUBLICATIONS, approved.publicationId)
-      await checkpoint("notes-prepare-publication", () => guard.prepare(approved))
-      const result = await checkpoint("notes-submit", async () => {
-        try {
-          return await guard.submit(fingerprint)
-        } catch {
-          // Inspect the durable evidence once; transport failure never authorizes a fresh create.
-          try {
-            return await guard.inspect(fingerprint)
-          } catch {
-            return { kind: "unknown" as const, reason: "guard-unavailable" }
-          }
-        }
-      })
-      const text =
-        result.kind === "accepted"
-          ? `Sent to Buffer for publication.${result.link ? `\n${result.link}` : ""}`
-          : result.kind === "created-unexpected"
-            ? "Buffer created a post with unexpected settings. Kipp hasn't sent another attempt. Check Buffer; the approved text remains above."
-            : result.kind === "rejected"
-              ? "The Note wasn't submitted. Check Buffer authorization and channel setup. The text remains above; start a new /note when ready."
-              : NOTES_UNKNOWN_MESSAGE
-      await notify("notes-result", text)
-      return
+      const outcome = await publishApprovedNote(
+        env,
+        step,
+        approved,
+        snapshot.timeZone,
+        session < MAX_WRITING_SESSIONS,
+        submissionNumber++,
+      )
+      if (outcome.kind === "finished") return
+      feedback = outcome.text
+      inputUrl = outcome.firstUrl
+      sourceReceivedAtMs = outcome.receivedAtMs
+      version = outcome.version
+      break
     }
   }
   await notify("notes-expired", "This Note's review window has ended. Start a new /note when ready.")

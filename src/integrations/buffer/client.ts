@@ -1,4 +1,5 @@
 import type { BufferCreateCommand, BufferCreateResult, BufferDestination } from "../../notes/types"
+import { HTTP_STATUS } from "../../runtime/http"
 import { mapSubstackPost } from "./substack"
 
 /** Read-only discovery shared by all future Buffer destinations. */
@@ -16,6 +17,15 @@ export interface BufferDiscovery {
   accountId: string
   channels: BufferChannel[]
 }
+/** A read-only destination check can establish a safe pre-create repair requirement. */
+export class BufferDestinationError extends Error {
+  constructor(
+    readonly reason: string,
+    readonly repair: "reauthorize" | "reconnect-channel" | "configuration",
+  ) {
+    super("Buffer destination unavailable")
+  }
+}
 const BUFFER_API_URL = "https://api.buffer.com"
 const BUFFER_REQUEST_TIMEOUT_MS = 20_000
 
@@ -27,6 +37,8 @@ async function query<T>(accessToken: string, document: string, variables = {}): 
     body: JSON.stringify({ query: document, variables }),
     signal: AbortSignal.timeout(BUFFER_REQUEST_TIMEOUT_MS),
   })
+  if (response.status === HTTP_STATUS.UNAUTHORIZED || response.status === HTTP_STATUS.FORBIDDEN)
+    throw new BufferDestinationError("reauthorization-required", "reauthorize")
   if (!response.ok) throw new Error("Buffer account discovery failed")
   const body = (await response.json()) as { data?: T; errors?: unknown[] }
   if (body.errors?.length || !body.data) throw new Error("Buffer account discovery failed")
@@ -101,9 +113,14 @@ export async function discoverBufferDestination(
   accessToken: string,
   connectionId: string,
   channelId: string,
+  requireQueue = false,
 ): Promise<BufferDestination> {
   const discovery = await discoverBuffer(accessToken)
-  if (!validateSubstackChannel(discovery, channelId).ready) throw new Error("Buffer destination unavailable")
+  const configured = discovery.channels.find((channel) => channel.id === channelId)
+  if (configured?.isDisconnected) throw new BufferDestinationError("channel-disconnected", "reconnect-channel")
+  if (!validateSubstackChannel(discovery, channelId).ready)
+    throw new BufferDestinationError("destination-unavailable", "configuration")
+  if (requireQueue && configured?.isQueuePaused) throw new BufferDestinationError("queue-paused", "reconnect-channel")
   const channel = discovery.channels.find((channel) => channel.id === channelId)
   if (!channel) throw new Error("Buffer destination unavailable")
   return {
@@ -128,11 +145,13 @@ export function decodeBufferPost(post: unknown, command: BufferCreateCommand): B
     p.channelId !== command.destination.channelId ||
     p.channelService !== command.destination.service ||
     p.text !== command.text ||
-    p.shareMode !== "shareNow" ||
+    p.shareMode !== mapSubstackPost(command).mode ||
     (p.schedulingType !== null && p.schedulingType !== "automatic") ||
-    p.isCustomScheduled !== false ||
-    p.sharedNow !== true ||
+    p.isCustomScheduled !== (command.timing.kind === "schedule") ||
+    p.sharedNow !== (command.timing.kind === "now") ||
     !["sent", "pending", "scheduled"].includes(String(p.status)) ||
+    (command.timing.kind === "schedule" &&
+      (typeof p.dueAt !== "string" || Date.parse(p.dueAt) !== Date.parse(command.timing.dueAt))) ||
     (command.attachmentUrl ? metadata?.linkAttachment?.url !== command.attachmentUrl : metadata?.linkAttachment != null)
   )
     return { kind: "created-unexpected", postId: p.id, reason: "post-does-not-match-approval" }

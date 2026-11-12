@@ -1,5 +1,6 @@
 import { z } from "zod"
 import { validNoteUrl } from "./links"
+import { publicationTimingSchema } from "./timing"
 
 export const MAX_NOTE_CHARACTERS = 10_000
 
@@ -19,7 +20,7 @@ export const commandSchema = z
     destination: destinationSchema,
     text: z.string().min(1).max(MAX_NOTE_CHARACTERS),
     attachmentUrl: z.string().refine(validNoteUrl).nullable(),
-    timing: z.object({ kind: z.literal("now") }).strict(),
+    timing: publicationTimingSchema,
   })
   .strict()
 export type BufferDestination = z.infer<typeof destinationSchema>
@@ -27,7 +28,12 @@ export type BufferCreateCommand = z.infer<typeof commandSchema>
 export type BufferCreateResult =
   | { kind: "accepted"; postId: string; dueAt?: string; link?: string }
   | { kind: "created-unexpected"; postId: string; reason: string }
-  | { kind: "rejected"; reason: string; repair: "reauthorize" | "reconnect-channel" | "configuration" | "none" }
+  | {
+      kind: "rejected"
+      reason: string
+      repair: "reauthorize" | "reconnect-channel" | "configuration" | "none"
+      attemptId?: string
+    }
   | { kind: "unknown"; reason: string; postId?: string }
 
 export const approvedPublicationSchema = z
@@ -68,7 +74,7 @@ export const notesEventSchema = z
     chatId: z.string().min(1),
     interactionId: z.string().min(1),
     version: z.number().int().positive(),
-    kind: z.enum(["notes-publish", "notes-revise", "notes-feedback"]),
+    kind: z.enum(["notes-publish", "notes-revise", "notes-feedback", "notes-retry"]),
     fingerprint: z.string(),
     telegramUpdateId: z.number().int(),
     receivedAtMs: z.number().finite(),

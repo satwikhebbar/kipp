@@ -1,9 +1,9 @@
 # Connect Buffer
 
 Buffer setup is optional. Existing LinkedIn and Calendar workflows do not need
-Buffer configuration. Phases 1–4 implement immediate `/note` drafting, necessary clarification,
-revisions, one embedded link, exact approval and guarded Buffer submission.
-This awaits release; queueing, scheduled posting and repair/Retry remain later phases.
+Buffer configuration. Phases 1–5 implement `/note` drafting, necessary clarification, revisions,
+one embedded link, immediate/queue/scheduled approval and guarded Buffer submission.
+This awaits release and final restart-boundary verification.
 
 Notes drafting uses `openai/gpt-6-luna` through the existing OpenRouter client
 and `OPENROUTER_API_KEY`, like the meal planner. Its pinned model is independent
@@ -63,8 +63,9 @@ and `BUFFER_PUBLICATIONS` (`BufferPublicationDO`, append-only SQLite migration
 `v4`). Local configuration needs the same bindings. This code change does not
 deploy those resources or provision production Buffer credentials/channel values.
 
-For this slice, send `/note <raw thoughts>` with immediate-publication intent. Review commentary appears first, then timing, then the exact Note in
-plain text. Only the current owner's Publish button authorizes submission;
+Send `/note <raw thoughts>` with optional posting instructions. Review commentary
+appears first, then timing, then the exact Note in
+plain text. Only the current owner's Publish, Add to queue or Schedule button authorizes submission;
 typing “publish” supplies writing feedback. Revise opens a feedback prompt and
 does not call the writer until feedback arrives. The initial generation plus
 four follow-up writing sessions share the existing capped feedback window.
@@ -73,9 +74,30 @@ writing sessions use the same Workflow-step retries as LinkedIn, within the same
 logical session and with fixed input. These retries do not spend another review
 round. If retries are exhausted or the writing limit is reached, the last valid
 Note remains available with fresh controls; without a valid draft, the run ends
-with a failure notice. Clarification messages have no Publish button.
-Timing extraction and queue/scheduling submission arrive together in Phase 5;
-Phase 4 clarification focuses on meaning and facts needed to write the Note.
+with a failure notice. Clarification messages have no approval buttons.
+Posting intent is returned as a separate structured timing proposal by the writer.
+With no posting instruction, publication defaults to immediate; prose-only revisions preserve timing.
+Queue approval delegates the next slot to Buffer. If Buffer returns its assigned
+`dueAt`, the Telegram confirmation shows it using configured `TIMEZONE`, or
+explicit UTC when no valid display zone is configured. Missing `dueAt` still
+confirms acceptance without guessing a time or polling.
+
+For exact schedules, an explicit IANA timezone overrides configured `TIMEZONE`.
+Missing or ambiguous zones, conflicting instructions, DST gaps/overlaps and past
+times require clarification. Code converts a valid wall time to UTC; relative
+dates use the persisted receipt of the message that supplied the instruction.
+The initial and current receipts are supplied separately so an unresolved initial
+request survives later clarification. Rewrites keep the resolved instant. Future
+eligibility is checked at approval, Retry and immediately before dispatch; an
+elapsed schedule never falls back to immediate publication.
+
+Examples:
+
+```text
+/note Small releases make feedback easier to act on.
+/note Small releases make feedback easier to act on. Add this to my queue.
+/note Small releases make feedback easier to act on. Post tomorrow at 9am Asia/Kolkata.
+```
 
 The first valid HTTP(S) URL in the original input becomes the single embedded
 card, including Telegram hyperlinks whose visible label differs from the target.
@@ -92,11 +114,21 @@ authenticated Notes events across forwarding failures. Telegram redelivery
 reuses that event. This does not support concurrent feedback conversations in
 one Telegram chat; LinkedIn and Calendar routing behavior is unchanged.
 
-The publication object persists a dispatch claim before its single Buffer
+The publication object persists a dispatch claim before each authorized Buffer
 create request and stores acceptance separately from Workflow checkpoints.
-Successful acceptance confirms “Sent to Buffer for publication” and ends;
+Successful acceptance confirms immediate publication, queue placement (including
+the assigned time when returned), or the exact accepted schedule, then ends;
 Kipp does not track delivery. A lost or ambiguous response is terminal, with
-no new-create Retry. An unexpected existing post also cannot authorize a new
+no new-create Retry. A definitive pre-create rejection can instead offer Connect
+Buffer or channel/queue repair plus explicit Retry of the unchanged Note. There
+are at most three guarded attempts. Unchanged Retry expires at the earliest of
+fifteen minutes, the original review deadline and the scheduled due time. Fresh
+revision feedback remains bounded by the repair/review window and requires new
+approval of its timing. Reauthorization alone
+never submits. Same-account repair keeps the approved destination; another
+account/channel requires a new `/note` and fresh review. Changing content/timing
+after rejection seals the old guard before fresh approval, leaving old Retry
+buttons inactive. An unexpected existing post also cannot authorize a new
 create. If an exact post ID was captured with incomplete evidence, Kipp can
 make one bounded lookup of that ID; it never searches for matching text.
 Publication evidence has no automatic deletion timer. Draft transcripts use

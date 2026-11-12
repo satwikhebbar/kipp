@@ -64,7 +64,7 @@ runtime_components:
       - interaction_router
   notes_workflow:
     implementation: src/notes/workflow.ts and src/notes/runner.ts
-    status: Immediate Notes with clarification, revisions and one embedded link implemented through Phase 4; awaiting release.
+    status: Notes with clarification, revisions, one card, immediate/queue/scheduled approval and bounded no-create repair implemented through Phase 5; awaiting release.
     owns:
       - deterministic Telegram invocation and snapshotted writing context
       - bounded writing sessions and exact owner/version/fingerprint approval

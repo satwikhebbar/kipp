@@ -1,7 +1,12 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { describe, it } from "vitest"
 import { createWorkflowSanity, SANITY_LIMITS } from "../__integration__/helpers/workflow-sanity"
-import { calendarJourney, linkedInJourney, notesJourney } from "../__integration__/helpers/workflow-sanity-scenarios"
+import {
+  calendarJourney,
+  linkedInJourney,
+  notesJourney,
+  notesScheduledJourney,
+} from "../__integration__/helpers/workflow-sanity-scenarios"
 import { NOTES_MODEL, NOTES_PROVIDER } from "../agent/notes"
 import { resolveModel } from "../providers"
 
@@ -13,17 +18,19 @@ describe.skipIf(!enabled)("live LLM webhook workflow sanity", () => {
     ["linkedin", linkedInJourney],
     ["calendar", calendarJourney],
     ["notes", notesJourney],
+    ["notes scheduled", notesScheduledJourney],
   ] as const) {
     it(
       name,
       async () => {
-        const provider = name === "notes" ? NOTES_PROVIDER : "deepseek"
-        const model = name === "notes" ? NOTES_MODEL : resolveModel(provider, process.env.SANITY_MODEL)
-        const apiKey =
-          name === "notes" ? process.env.OPENROUTER_API_KEY : (process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY)
+        const provider = name.startsWith("notes") ? NOTES_PROVIDER : "deepseek"
+        const model = name.startsWith("notes") ? NOTES_MODEL : resolveModel(provider, process.env.SANITY_MODEL)
+        const apiKey = name.startsWith("notes")
+          ? process.env.OPENROUTER_API_KEY
+          : (process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY)
         if (!apiKey)
           throw new Error(
-            name === "notes"
+            name.startsWith("notes")
               ? "Set OPENROUTER_API_KEY for Notes sanity"
               : "Set DEEPSEEK_API_KEY or LLM_API_KEY to run live workflow sanity",
           )

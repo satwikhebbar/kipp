@@ -288,6 +288,18 @@ Assert user-facing unknown failure retains visible text and offers no inspection
 
 Review immediate/queue/exact-scheduled labels and repair guidance with explicit dates/zones. There is no account mutation or scheduled real Note unless later explicitly authorized.
 
+### Phase 5 verification evidence (12 November 2026)
+
+The writer now returns a required structured timing proposal separately from prose: unchanged, now, queue, exact schedule or necessary timing clarification. notes/timing.ts resolves dates against the persisted initial/current source receipt and explicit/default IANA zone. It rejects missing/ambiguous zones, invalid dates, DST gaps/overlaps and elapsed schedules. Prose-only revisions preserve the resolved instant. Review uses Publish, Add to queue or Schedule for the exact approved mode; approval, Retry and the guard all revalidate future eligibility.
+
+Queue mapping uses addToQueue with no dueAt; Buffer’s returned assigned slot is stored and displayed in the configured zone or explicit UTC. Exact scheduling uses customScheduled with the approved UTC dueAt. Acceptance validates the exact text/card/mode and, for exact schedules, instant. No delivery polling, Kipp scheduled wakeup or invented queue timestamp was added.
+
+notes/publication.ts owns the explicit repair conversation. Definitive no-create preflight failures can offer Connect Buffer, channel/queue repair and Retry, without spending another writing session. The existing publication guard persists numbered attempts and consumed Retry delivery IDs, checks owner/fingerprint/expected attempt and repair/deadline/due-time eligibility, and permits at most three attempts. Lost/duplicate Retry responses cannot allocate another attempt. A changed payload seals the rejected guard before fresh approval. Changed accounts/channels require a new execution; unknown/accepted/unexpected-created evidence cannot reopen dispatch. Existing JSON/attempt tables are extended without a new binding or migration. Workflow interruption signals propagate instead of being checkpointed as terminal submission failures.
+
+Validation passed: 1,032 standard tests (38 gated skips), 118 full integration tests including LinkedIn and Calendar regressions, final Notes subset 28 passing, documentation/lint/type checks, and production build dry-run (1,560.40 KiB raw / 347.90 KiB gzip). The live Luna queue journey passed clarification, drafting, card-preserving revision and queue acceptance in three calls/253 output tokens. The exact-schedule journey passed extraction, timing-preserving revision and approval in two calls/196 tokens. Its first live attempt correctly returned Etc/UTC but a test incorrectly demanded the exact UTC label; the semantic assertion was corrected, a deterministic UTC-alias regression added, then only that live journey rerun successfully. All account endpoints remained simulated. At verification time, no real Note publication, deployment, commit, push or Dolt remote sync had occurred for Phase 5; the author subsequently authorized commit and push.
+
+Beads agent-harness-ve7n records Phase 5; agent-harness-plb3 tracks the remaining Phase 6 restart-boundary and release-readiness work. Editorial prompt study, integrated production-account walkthrough and production provisioning remain separate release gates.
+
 ## Phase 6: Verify restart boundaries and document release prerequisites
 
 Prove that the integrated system retains its authority and mutation evidence under actual runtime interruption. Finish deployment contracts and operator documentation.
@@ -335,7 +347,7 @@ Buffer acceptance is Kipp's completion boundary. Manual inspection of an eventua
 | Editorial prompt and output quality | Deferred author-example study (Beads agent-harness-5bp9); required before claiming editorial/release acceptance, not a prerequisite for mocked infrastructure work |
 | Production setup and deployment provisioning | Development-account OAuth/rotation, channel permissions, three timing modes and both native card types are verified; integrate the production vault/guard and provision deployment values separately |
 
-No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. Phases 1–4 have passed their verification, including bounded live-LLM journeys with mocked account APIs. Phase 5 is next.
+No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. Phases 1–5 have passed their verification, including bounded live-LLM journeys with mocked account APIs. Phase 6 is next.
 
 Queue mode is an approved amendment (10 November 2026) in Phase 5; it does not alter the six-phase order; implementation was subsequently authorized on 10 November 2026. The completed live Buffer spike includes addToQueue acceptance and assigned-time verification.
 

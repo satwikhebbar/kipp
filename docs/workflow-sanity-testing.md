@@ -26,7 +26,8 @@ unit tests remain in place for expiry, authorization, stale actions and recovery
 The separate, opt-in contract suite reuses the LinkedIn and Calendar journeys
 with real DeepSeek, and the Notes journey with GPT-6 Luna through OpenRouter.
 External account APIs remain intercepted. Notes covers necessary clarification,
-a prose revision that retains the first embedded card, and exact publication approval.
+a prose revision that retains the first embedded card and queue intent, queue assigned-time
+confirmation, and a separate exact-schedule extraction/revision/approval journey.
 It evaluates workflow behavior and payloads, rather than exact prose or editorial
 quality. It does not use an LLM to play the user: user replies are scripted, and
 button values come from actual captured Telegram messages.
@@ -72,3 +73,10 @@ live confirmation; do not repeatedly rerun live tests until they pass.
 
 Live-account checks are reserved for capabilities mocks cannot establish, such as
 OAuth setup, provider contract changes and native embedded-card appearance.
+
+Notes runtime fault tests also cover DST/missing-zone clarification, OAuth refresh
+failure followed by same-account repair, paused-queue repair, stale/duplicate Retry,
+three-attempt exhaustion, changed-account refusal and rejected-guard supersession.
+These account interactions are simulated; the production writer and native runtime
+are used. Retry fault tests shorten the Workflow retry delay/ceiling for speed while
+asserting that production writing uses default Workflow-step retries, like LinkedIn.

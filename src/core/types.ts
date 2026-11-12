@@ -125,6 +125,7 @@ export interface WorkflowEvent {
 }
 
 export const INTERACTION_KIND = {
+  NOTES_RETRY: "notes-retry",
   NOTES_PUBLISH: "notes-publish",
   NOTES_REVISE: "notes-revise",
   NOTES_FEEDBACK: "notes-feedback",

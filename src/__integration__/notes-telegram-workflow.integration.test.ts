@@ -1,5 +1,6 @@
 import { expect, it } from "vitest"
 import { createWorkflowSanity, toolResponse } from "./helpers/workflow-sanity"
+import { notesScheduledJourney } from "./helpers/workflow-sanity-scenarios"
 
 const NOTE = "A small release is easier to understand. Keep *the decision* human. 😀"
 const model = () => toolResponse("submit_note", { commentary: "One concrete idea, in the author's voice.", text: NOTE })
@@ -338,6 +339,310 @@ it("reports an initial writing failure only after Workflow retries are exhausted
     expect(h.state.modelCalls).toBe(6)
     expect(h.state.registrations).toHaveLength(0)
     expect(h.state.bufferWrites).toHaveLength(0)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it.each(["Asia/Kolkata", null])("queues a Note and displays Buffer's assigned slot using %s", async (timeZone) => {
+  const h = await createWorkflowSanity({
+    timeZone,
+    loseNotesSubmitCheckpoint: true,
+    model: () => toolResponse("submit_note", { commentary: "A clear point.", text: NOTE, timing: { kind: "queue" } }),
+  })
+  try {
+    await h.message("/note Small releases. Add this to my queue.")
+    const review = await h.waitMessage(/^A small release/)
+    await h.waitMessage(/Timing: next available slot/)
+    await h.click(review, /^Add to queue$/)
+    await h.waitStatus("notes")
+    const confirmation = await h.waitMessage(/^Added to your Buffer queue/)
+    expect(confirmation.text).toContain(timeZone ? "2030-01-01 19:00 Asia/Kolkata" : "2030-01-01 13:30 UTC")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0]).toMatchObject({ mode: "addToQueue", schedulingType: "automatic" })
+    expect(h.state.bufferWrites[0]).not.toHaveProperty("dueAt")
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("schedules an exact UTC instant and preserves it through a prose revision", async () => {
+  const h = await createWorkflowSanity({
+    model: (_body, call) =>
+      toolResponse("submit_note", {
+        commentary: "A clear point.",
+        text: call === 1 ? NOTE : "A revised small release Note.",
+        timing:
+          call === 1
+            ? {
+                kind: "schedule",
+                date: { kind: "absolute", localDate: "2030-01-01" },
+                localTime: "19:00",
+                timeZone: null,
+              }
+            : { kind: "unchanged" },
+      }),
+  })
+  try {
+    await h.message("/note Small releases. Schedule for 2030-01-01 at 7pm.")
+    const first = await h.waitMessage(/^A small release/)
+    await h.waitMessage(/Timing: 2030-01-01 19:00 Asia\/Kolkata/)
+    await h.message("Make the opening more concrete.", first.messageId)
+    const review = await h.waitMessage(/^A revised small/)
+    await h.click(first, /^Schedule$/)
+    expect(h.state.bufferWrites).toHaveLength(0)
+    await h.click(review, /^Schedule$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites[0]).toMatchObject({ mode: "customScheduled", dueAt: "2030-01-01T13:30:00.000Z" })
+    await h.waitMessage(/^Scheduled with Buffer for 2030-01-01 19:00 Asia\/Kolkata/)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it.each([
+  ["2027-03-14", "02:30", "America/New_York", "does not exist"],
+  ["2027-11-07", "01:30", "America/New_York", "occurs twice"],
+  ["2020-01-01", "12:00", "UTC", "has passed"],
+])(
+  "clarifies scheduling %s %s %s without offering approval",
+  async (date, time, zone, question) => {
+    const h = await createWorkflowSanity({
+      model: (_body, call) =>
+        toolResponse("submit_note", {
+          commentary: "One idea.",
+          text: NOTE,
+          timing:
+            call === 1
+              ? { kind: "schedule", date: { kind: "absolute", localDate: date }, localTime: time, timeZone: zone }
+              : { kind: "queue" },
+        }),
+    })
+    try {
+      await h.message(`/note Small releases. Schedule ${date} ${time} ${zone}.`)
+      const clarification = await h.waitMessage(new RegExp(question))
+      expect(clarification.replyMarkup).toBeUndefined()
+      expect(h.state.registrations.some((r) => r.kind === "notes-publish")).toBe(false)
+      await h.message("Use my Buffer queue instead.", clarification.messageId)
+      const review = await h.waitMessage(/^A small release/)
+      await h.click(review, /^Add to queue$/)
+      await h.waitStatus("notes")
+      expect(h.state.bufferWrites).toHaveLength(1)
+      expect(h.state.bufferWrites[0].mode).toBe("addToQueue")
+    } finally {
+      await h.dispose()
+    }
+  },
+  30_000,
+)
+
+it("clarifies missing scheduling timezone but permits queue placement without one", async () => {
+  const h = await createWorkflowSanity({
+    timeZone: null,
+    model: (_body, call) =>
+      toolResponse("submit_note", {
+        commentary: "One idea.",
+        text: NOTE,
+        timing:
+          call === 1
+            ? {
+                kind: "schedule",
+                date: { kind: "absolute", localDate: "2030-01-01" },
+                localTime: "19:00",
+                timeZone: null,
+              }
+            : { kind: "queue" },
+      }),
+  })
+  try {
+    await h.message("/note Small releases. Post 2030-01-01 at 7pm.")
+    const question = await h.waitMessage(/Which timezone/)
+    expect(h.state.bufferWrites).toHaveLength(0)
+    await h.message("Use the queue instead.", question.messageId)
+    const review = await h.waitMessage(/^A small release/)
+    await h.click(review, /^Add to queue$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites[0]).not.toHaveProperty("dueAt")
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("requires explicit Retry after resuming a paused queue and ignores duplicate/stale Retry", async () => {
+  const h = await createWorkflowSanity({
+    userTurnLimit: 8,
+    model: () => toolResponse("submit_note", { commentary: "One idea.", text: NOTE, timing: { kind: "queue" } }),
+  })
+  try {
+    await h.message("/note Small releases. Queue it.")
+    const review = await h.waitMessage(/^A small release/)
+    h.state.bufferQueuePaused = true
+    await h.click(review, /^Add to queue$/)
+    const repair = await h.waitMessage(/Resume your queue in Buffer/)
+    expect(h.state.bufferWrites).toHaveLength(0)
+    h.state.bufferQueuePaused = false
+    expect(h.state.bufferWrites).toHaveLength(0)
+    await h.click(repair, /^Retry$/, 90)
+    await h.waitStatus("notes")
+    await h.click(repair, /^Retry$/, 90)
+    await h.click(repair, /^Retry$/, 91)
+    expect(h.state.bufferWrites).toHaveLength(1)
+    await h.waitMessage(/^Added to your Buffer queue/)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("requests Buffer reauthorization and retries the same approved Note after same-account repair", async () => {
+  const h = await createWorkflowSanity({ model })
+  try {
+    await h.message("/note Small releases.")
+    const review = await h.waitMessage(/^A small release/)
+    await h.setBufferGrant(true)
+    await h.click(review, /^Publish$/)
+    const repair = await h.waitMessage(/Reconnect using Connect Buffer/)
+    expect(h.state.bufferRefreshes).toBe(1)
+    expect(repair.replyMarkup?.inline_keyboard).toEqual([
+      expect.arrayContaining([{ text: "Connect Buffer", url: "https://kipp.test/setup/buffer" }]),
+    ])
+    expect(h.state.bufferWrites).toHaveLength(0)
+    await h.setBufferGrant()
+    await h.click(repair, /^Retry$/)
+    await h.waitStatus("notes")
+    expect(h.state.modelCalls).toBe(1)
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0].text).toBe(NOTE)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("seals a rejected guard before changed timing gets fresh approval", async () => {
+  const h = await createWorkflowSanity({
+    userTurnLimit: 8,
+    model: (_body, call) =>
+      toolResponse("submit_note", {
+        commentary: "One idea.",
+        text: NOTE,
+        timing: call === 1 ? { kind: "now" } : { kind: "queue" },
+      }),
+  })
+  try {
+    await h.message("/note Small releases.")
+    const first = await h.waitMessage(/^A small release/)
+    h.state.bufferDisconnected = true
+    await h.click(first, /^Publish$/)
+    const repair = await h.waitMessage(/Reconnect the Substack channel inside Buffer/)
+    h.state.bufferDisconnected = false
+    await h.message("Put it in my queue instead.", repair.messageId)
+    const revised = await h.waitMessage(/^A small release/, repair.messageId)
+    await h.click(repair, /^Retry$/)
+    expect(h.state.bufferWrites).toHaveLength(0)
+    await h.click(revised, /^Add to queue$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0].mode).toBe("addToQueue")
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("stops offering Retry after three definitive no-create failures", async () => {
+  const h = await createWorkflowSanity({ model, userTurnLimit: 8 })
+  try {
+    await h.message("/note Small releases.")
+    const review = await h.waitMessage(/^A small release/)
+    h.state.bufferDisconnected = true
+    await h.click(review, /^Publish$/)
+    let repair = await h.waitMessage(/Reconnect the Substack channel inside Buffer/)
+    for (let retry = 0; retry < 2; retry++) {
+      await h.click(repair, /^Retry$/)
+      repair = await h.waitMessage(/Reconnect the Substack channel inside Buffer/, repair.messageId)
+    }
+    const buttons = repair.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>>
+    expect(buttons.flat().some((button) => button.text === "Retry")).toBe(false)
+    expect(buttons.flat().some((button) => button.text === "Revise")).toBe(true)
+    expect(h.state.bufferWrites).toHaveLength(0)
+    expect(h.state.modelCalls).toBe(1)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("requires fresh destination review after reauthorization changes the account", async () => {
+  const h = await createWorkflowSanity({ model })
+  try {
+    await h.message("/note Small releases.")
+    const review = await h.waitMessage(/^A small release/)
+    await h.setBufferGrant(true)
+    await h.click(review, /^Publish$/)
+    const repair = await h.waitMessage(/Reconnect using Connect Buffer/)
+    await h.setBufferGrant(false, "another-buffer-account")
+    await h.click(repair, /^Retry$/)
+    await h.waitStatus("notes")
+    await h.waitMessage(/account or channel changed/)
+    expect(h.state.bufferWrites).toHaveLength(0)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("confirms queue acceptance without inventing a slot when dueAt is absent", async () => {
+  const h = await createWorkflowSanity({
+    model: () => toolResponse("submit_note", { commentary: "One idea.", text: NOTE, timing: { kind: "queue" } }),
+    bufferResult: (input) => ({
+      data: {
+        createPost: {
+          __typename: "PostActionSuccess",
+          post: {
+            id: "p",
+            channelId: input.channelId,
+            channelService: "substack",
+            text: input.text,
+            status: "scheduled",
+            shareMode: "addToQueue",
+            schedulingType: "automatic",
+            isCustomScheduled: false,
+            sharedNow: false,
+            dueAt: null,
+            metadata: { linkAttachment: null },
+          },
+        },
+      },
+    }),
+  })
+  try {
+    await h.message("/note Small releases. Queue it.")
+    const review = await h.waitMessage(/^A small release/)
+    await h.click(review, /^Add to queue$/)
+    await h.waitStatus("notes")
+    expect((await h.waitMessage(/^Added to your Buffer queue/)).text).toBe("Added to your Buffer queue.")
+    expect(h.state.bufferWrites).toHaveLength(1)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("runs the scheduled sanity journey with an equivalent UTC zone", async () => {
+  const h = await createWorkflowSanity({
+    model: (_body, call) =>
+      toolResponse("submit_note", {
+        commentary: "One idea.",
+        text: NOTE,
+        timing:
+          call === 1
+            ? {
+                kind: "schedule",
+                date: { kind: "absolute", localDate: "2030-01-01" },
+                localTime: "09:00",
+                timeZone: "Etc/UTC",
+                source: "initial",
+              }
+            : { kind: "unchanged" },
+      }),
+  })
+  try {
+    await notesScheduledJourney(h)
   } finally {
     await h.dispose()
   }
