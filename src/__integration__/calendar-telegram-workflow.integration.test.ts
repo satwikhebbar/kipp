@@ -49,6 +49,8 @@ vitest.mock("../integrations/google-calendar", () => ({
 import { CalendarWorkflow, type CalendarWorkflowParams } from "../calendar/workflow"
 import { INTERACTION_KIND } from "../core/types"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
+import { createWorkflowSanity } from "./helpers/workflow-sanity"
+import { calendarJourney, scriptedCalendar } from "./helpers/workflow-sanity-scenarios"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeWorkflowBinding } from "./setup"
 
 const ONE_OFF = {
@@ -344,6 +346,39 @@ function callbackToken(network: ReturnType<typeof createFakeNetwork>, messageInd
   const keyboard = markup?.inline_keyboard as Array<Array<{ callback_data: string }>>
   return keyboard[0]?.[buttonIndex]?.callback_data as string
 }
+
+describe("Calendar HTTP sanity in workerd", () => {
+  it("handles a Telegram clarification and serializes one IST event through the production client", async () => {
+    const harness = await createWorkflowSanity({ model: scriptedCalendar("2027-07-28", "19:00", true) })
+    try {
+      await calendarJourney(harness)
+    } finally {
+      await harness.dispose()
+    }
+  }, 30_000)
+
+  it.each([
+    ["2027-03-14", "02:30", "nonexistent_local_time"],
+    ["2027-11-07", "01:30", "ambiguous_local_time"],
+  ])(
+    "asks for clarification without a write for %s %s (%s)",
+    async (date, time, code) => {
+      const harness = await createWorkflowSanity({ model: scriptedCalendar(date, time), timeZone: "America/New_York" })
+      try {
+        expect(await harness.message(`/calendar Call Jamie on ${date} at ${time} for 30 minutes`)).toBe(200)
+        await harness.waitMessage(/Please choose another time/)
+        await harness.until(() =>
+          harness.state.registrations.find((registration) => registration.kind === "calendar-clarification"),
+        )
+        expect(harness.state.calendarWrites).toHaveLength(0)
+        expect(JSON.stringify(harness.state.transcript)).toContain(code)
+      } finally {
+        await harness.dispose()
+      }
+    },
+    30_000,
+  )
+})
 
 describe("agent-centered Calendar Telegram integration", () => {
   beforeEach(() => {

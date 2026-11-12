@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest"
 import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import type { Env } from "../core/types"
 import { PipelineWorkflow } from "../linkedin/workflow"
+import { createWorkflowSanity, toolResponse } from "./helpers/workflow-sanity"
+import { linkedInJourney, scriptedLinkedIn } from "./helpers/workflow-sanity-scenarios"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeStep, type FakeNotionPage } from "./setup"
 
 vi.mock("cloudflare:workers", () => {
@@ -106,6 +108,33 @@ function makeEvent() {
 }
 
 describe("workflow-approval-to-linkedin-draft", () => {
+  it("reports model truncation explicitly and blocks further outbound calls without creating a draft", async () => {
+    const harness = await createWorkflowSanity({
+      model: () => ({
+        ...toolResponse("submit_linkedin_response", {}),
+        choices: [{ finish_reason: "length", message: { content: "truncated" } }],
+      }),
+    })
+    try {
+      expect(await harness.message("/generate 1")).toBe(200)
+      await expect(harness.waitMessage(/^\*Draft for idea/)).rejects.toThrow(
+        "Model output was truncated by token limit",
+      )
+      expect(harness.state.modelCalls).toBe(1)
+      expect(harness.state.linkedinWrites).toHaveLength(0)
+    } finally {
+      await harness.dispose()
+    }
+  }, 30_000)
+
+  it("runs Telegram generation, revision and duplicate approval through actual workerd workflows and HTTP clients", async () => {
+    const harness = await createWorkflowSanity({ model: scriptedLinkedIn })
+    try {
+      await linkedInJourney(harness)
+    } finally {
+      await harness.dispose()
+    }
+  }, 30_000)
   it("generates draft, notifies, publishes to LinkedIn, and archives on approval", async () => {
     const { fetch, getState } = createFakeNetwork({
       notionPages: [RAW_PAGE],

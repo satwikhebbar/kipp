@@ -1,4 +1,5 @@
 import { type Options, RRule, type Weekday } from "rrule"
+import { isValidTimeZone } from "../core/time"
 import type { BusyInterval, ManagedCalendarEvent } from "../integrations/google-calendar"
 import {
   CALENDAR_IMPORTANT_REMINDER_MINUTES,
@@ -16,7 +17,7 @@ import {
   localMinutes,
   zonedDateTimeToMillis,
 } from "./scheduling"
-import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./validation"
+import { type CalendarValidationIssue, legacyCalendarIssueMessage, localDateTimeIssue } from "./validation"
 
 export const RECURRENCE_MAX_MONTHS = 6
 const MILLIS_PER_MINUTE = 60_000
@@ -112,7 +113,7 @@ export type RecurrenceAvailability =
       reminderMinutes: number
     }
   | { kind: "conflict" }
-  | { kind: "clarification"; message: string }
+  | { kind: "clarification"; message: string; issues?: CalendarValidationIssue[] }
 
 /** Creates a UTC-valued Date used only as a local civil-date container by rrule. */
 function civilDate(year: number, month: number, day: number): Date {
@@ -347,6 +348,20 @@ export function validateRecurringProposal(proposal: RecurringProposal): string |
   return issue ? legacyCalendarIssueMessage(issue) : null
 }
 
+/** Checks every explicit occurrence so a DST transition cannot shift or drop a requested start. */
+export function validateRecurringTimeIssues(
+  proposal: RecurringProposal,
+  dates: string[],
+  timeZone: string,
+): CalendarValidationIssue[] {
+  if (!isValidTimeZone(timeZone)) return [{ code: "invalid_time_zone", field: "timeZone" }]
+  if (!proposal.timeIsExplicit) return []
+  return dates.flatMap((date) => {
+    const issue = localDateTimeIssue(date, proposal.startTime ?? "", timeZone, "firstDate")
+    return issue ? [issue] : []
+  })
+}
+
 /** Converts one civil date and local time into a same-day zoned occurrence. */
 function occurrenceAt(
   localDate: string,
@@ -411,6 +426,8 @@ export function evaluateRecurrenceAvailability(
   if (validation) return { kind: "clarification", message: validation }
   const expanded = expandRecurrence(proposal)
   if ("clarification" in expanded) return { kind: "clarification", message: expanded.clarification }
+  const issues = validateRecurringTimeIssues(proposal, expanded.dates, timeZone)
+  if (issues.length) return { kind: "clarification", message: legacyCalendarIssueMessage(issues[0]), issues }
   const preferred = proposal.startTime ? localMinutes(proposal.startTime) : null
   const timeCandidates = proposal.timeIsExplicit ? [preferred as number] : candidateMinutes(preferred)
   const timeAt = (minute: number) =>

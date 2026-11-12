@@ -1,0 +1,419 @@
+{
+  "provenance": {
+    "kind": "captured-live-responses-sanitized",
+    "date": "2026-11-10",
+    "redactions": "Account, organization, channel, post and public test Note identifiers replaced; credentials, auth codes, cookies and verifier excluded.",
+    "boundary": "Isolated spike, not production workflow."
+  },
+  "discovery": {
+    "connectedAt": "2026-11-10T16:19:12.913Z",
+    "accountId": "TEST_ACCOUNT",
+    "scopes": [
+      "account:read",
+      "posts:read",
+      "posts:write",
+      "offline_access"
+    ],
+    "expiresAtMs": 1794331151471,
+    "refreshTokenPresent": true,
+    "substackChannels": [
+      {
+        "id": "TEST_SUBSTACK_CHANNEL",
+        "organizationId": "TEST_ORGANIZATION",
+        "service": "substack",
+        "allowedActions": [
+          "reconnectChannel",
+          "manageIntegrations",
+          "removeChannel",
+          "backfillChannel",
+          "viewChannel",
+          "viewCapabilities",
+          "manageCapabilities",
+          "viewInsights",
+          "exportInsights",
+          "interactWithTakeaways",
+          "viewUpdates",
+          "viewPublish",
+          "readUpdates",
+          "manageUpdates",
+          "scheduleUpdates",
+          "approvePosts",
+          "managePostingSchedule",
+          "manageChannelSettings"
+        ],
+        "isDisconnected": false,
+        "isLocked": false,
+        "isQueuePaused": false
+      }
+    ]
+  },
+  "normalRefresh": {
+    "refreshedAt": "2026-11-10T16:22:20.107Z",
+    "httpStatus": 200,
+    "refreshTokenChanged": true,
+    "accessTokenChanged": true,
+    "scopes": [
+      "account:read",
+      "posts:read",
+      "posts:write",
+      "offline_access"
+    ],
+    "expiresAtMs": 1794331340095
+  },
+  "createCases": [
+    {
+      "state": "created",
+      "requestedAt": "2026-11-10T16:25:42.393Z",
+      "input": {
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "text": "A writing tool earns its place by making a good habit easier to repeat. The draft can start anywhere; the final decision should stay with the writer.",
+        "assets": [],
+        "schedulingType": "automatic",
+        "mode": "shareNow",
+        "needsApproval": false,
+        "saveToDraft": false,
+        "metadata": {
+          "substack": {
+            "linkAttachment": {
+              "url": "https://developers.buffer.com/guides/posts-and-scheduling.html"
+            }
+          }
+        }
+      },
+      "httpStatus": 200,
+      "typename": "PostActionSuccess",
+      "post": {
+        "id": "TEST_POST_1",
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "channelService": "substack",
+        "text": "A writing tool earns its place by making a good habit easier to repeat. The draft can start anywhere; the final decision should stay with the writer.",
+        "status": "sent",
+        "dueAt": "2026-11-10T16:25:42.805Z",
+        "shareMode": "shareNow",
+        "schedulingType": "automatic",
+        "isCustomScheduled": false,
+        "sharedNow": true,
+        "externalLink": "https://substack.com/note/c-TEST_1",
+        "allowedActions": [
+          "viewPost",
+          "sharePostLink",
+          "copyPostLink",
+          "updatePostTags",
+          "addPostNote",
+          "duplicatePost",
+          "updateShopGridLink"
+        ],
+        "metadata": {
+          "linkAttachment": {
+            "url": "https://developers.buffer.com/guides/posts-and-scheduling.html",
+            "expandedUrl": ""
+          }
+        }
+      },
+      "nativeVerification": {
+        "source": "user confirmation",
+        "card": "correct",
+        "deleted": true
+      }
+    },
+    {
+      "state": "created",
+      "requestedAt": "2026-11-10T16:24:40.800Z",
+      "input": {
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "text": "A short note can be a place to develop an idea in public, without turning every thought into a full essay. Keeping that space easy to use matters.",
+        "assets": [],
+        "schedulingType": "automatic",
+        "mode": "shareNow",
+        "needsApproval": false,
+        "saveToDraft": false,
+        "metadata": {
+          "substack": {
+            "linkAttachment": {
+              "url": "https://on.substack.com/p/introducing-notes"
+            }
+          }
+        }
+      },
+      "httpStatus": 200,
+      "typename": "PostActionSuccess",
+      "post": {
+        "id": "TEST_POST_2",
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "channelService": "substack",
+        "text": "A short note can be a place to develop an idea in public, without turning every thought into a full essay. Keeping that space easy to use matters.",
+        "status": "sent",
+        "dueAt": "2026-11-10T16:24:41.228Z",
+        "shareMode": "shareNow",
+        "schedulingType": "automatic",
+        "isCustomScheduled": false,
+        "sharedNow": true,
+        "externalLink": "https://substack.com/note/c-TEST_2",
+        "allowedActions": [
+          "viewPost",
+          "sharePostLink",
+          "copyPostLink",
+          "updatePostTags",
+          "addPostNote",
+          "duplicatePost",
+          "updateShopGridLink"
+        ],
+        "metadata": {
+          "linkAttachment": {
+            "url": "https://on.substack.com/p/introducing-notes",
+            "expandedUrl": ""
+          }
+        }
+      },
+      "nativeVerification": {
+        "source": "user confirmation",
+        "card": "correct",
+        "deleted": true
+      }
+    },
+    {
+      "state": "created",
+      "requestedAt": "2026-11-10T16:22:56.347Z",
+      "input": {
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "text": "The best automation leaves room for judgment. It makes the repeated steps easier while keeping the decisions that matter with the person doing the work.",
+        "assets": [],
+        "schedulingType": "automatic",
+        "mode": "addToQueue",
+        "needsApproval": false,
+        "saveToDraft": false
+      },
+      "httpStatus": 200,
+      "typename": "PostActionSuccess",
+      "post": {
+        "id": "TEST_POST_3",
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "channelService": "substack",
+        "text": "The best automation leaves room for judgment. It makes the repeated steps easier while keeping the decisions that matter with the person doing the work.",
+        "status": "scheduled",
+        "dueAt": "2026-11-11T17:17:00.000Z",
+        "shareMode": "addToQueue",
+        "schedulingType": "automatic",
+        "isCustomScheduled": false,
+        "sharedNow": false,
+        "externalLink": null,
+        "allowedActions": [
+          "publishPostNow",
+          "updatePost",
+          "movePostToDraft",
+          "publishPostNext",
+          "updatePostSchedule",
+          "updatePostTags",
+          "addPostNote",
+          "duplicatePost",
+          "deletePost",
+          "updateShopGridLink",
+          "createPostRecurrence"
+        ],
+        "metadata": {
+          "linkAttachment": null
+        }
+      },
+      "cleanup": {
+        "httpStatus": 200,
+        "data": {
+          "deletePost": {
+            "__typename": "DeletePostSuccess",
+            "id": "TEST_POST_3"
+          }
+        }
+      }
+    },
+    {
+      "state": "created",
+      "requestedAt": "2026-11-10T16:23:36.868Z",
+      "input": {
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "text": "A writing tool earns its place by making a good habit easier to repeat. The draft can start anywhere; the final decision should stay with the writer.",
+        "assets": [],
+        "schedulingType": "automatic",
+        "mode": "customScheduled",
+        "needsApproval": false,
+        "saveToDraft": false,
+        "dueAt": "2026-11-11T16:23:36.867Z",
+        "metadata": {
+          "substack": {
+            "linkAttachment": {
+              "url": "https://developers.buffer.com/guides/posts-and-scheduling.html"
+            }
+          }
+        }
+      },
+      "httpStatus": 200,
+      "typename": "PostActionSuccess",
+      "post": {
+        "id": "TEST_POST_4",
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "channelService": "substack",
+        "text": "A writing tool earns its place by making a good habit easier to repeat. The draft can start anywhere; the final decision should stay with the writer.",
+        "status": "scheduled",
+        "dueAt": "2026-11-11T16:23:36.867Z",
+        "shareMode": "customScheduled",
+        "schedulingType": "automatic",
+        "isCustomScheduled": true,
+        "sharedNow": false,
+        "externalLink": null,
+        "allowedActions": [
+          "publishPostNow",
+          "updatePost",
+          "movePostToDraft",
+          "publishPostNext",
+          "updatePostSchedule",
+          "removePostScheduledTime",
+          "updatePostTags",
+          "addPostNote",
+          "duplicatePost",
+          "deletePost",
+          "updateShopGridLink",
+          "createPostRecurrence"
+        ],
+        "metadata": {
+          "linkAttachment": {
+            "url": "https://developers.buffer.com/guides/posts-and-scheduling.html",
+            "expandedUrl": ""
+          }
+        }
+      },
+      "cleanup": {
+        "httpStatus": 200,
+        "data": {
+          "deletePost": {
+            "__typename": "DeletePostSuccess",
+            "id": "TEST_POST_4"
+          }
+        }
+      }
+    },
+    {
+      "state": "created",
+      "requestedAt": "2026-11-10T16:22:39.341Z",
+      "input": {
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "text": "A good personal workflow should remove the friction around an idea without taking ownership of it. The person supplies the thought and makes the final call; the tools handle the steps in between.",
+        "assets": [],
+        "schedulingType": "automatic",
+        "mode": "customScheduled",
+        "needsApproval": false,
+        "saveToDraft": false,
+        "dueAt": "2026-11-11T16:22:39.340Z"
+      },
+      "httpStatus": 200,
+      "typename": "PostActionSuccess",
+      "post": {
+        "id": "TEST_POST_5",
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "channelService": "substack",
+        "text": "A good personal workflow should remove the friction around an idea without taking ownership of it. The person supplies the thought and makes the final call; the tools handle the steps in between.",
+        "status": "scheduled",
+        "dueAt": "2026-11-11T16:22:39.340Z",
+        "shareMode": "customScheduled",
+        "schedulingType": "automatic",
+        "isCustomScheduled": true,
+        "sharedNow": false,
+        "externalLink": null,
+        "allowedActions": [
+          "publishPostNow",
+          "updatePost",
+          "movePostToDraft",
+          "publishPostNext",
+          "updatePostSchedule",
+          "removePostScheduledTime",
+          "updatePostTags",
+          "addPostNote",
+          "duplicatePost",
+          "deletePost",
+          "updateShopGridLink",
+          "createPostRecurrence"
+        ],
+        "metadata": {
+          "linkAttachment": null
+        }
+      },
+      "cleanup": {
+        "httpStatus": 200,
+        "data": {
+          "deletePost": {
+            "__typename": "DeletePostSuccess",
+            "id": "TEST_POST_5"
+          }
+        }
+      }
+    },
+    {
+      "state": "created",
+      "requestedAt": "2026-11-10T16:23:55.817Z",
+      "input": {
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "text": "A short note can be a place to develop an idea in public, without turning every thought into a full essay. Keeping that space easy to use matters.",
+        "assets": [],
+        "schedulingType": "automatic",
+        "mode": "customScheduled",
+        "needsApproval": false,
+        "saveToDraft": false,
+        "dueAt": "2026-11-11T16:23:55.816Z",
+        "metadata": {
+          "substack": {
+            "linkAttachment": {
+              "url": "https://on.substack.com/p/introducing-notes"
+            }
+          }
+        }
+      },
+      "httpStatus": 200,
+      "typename": "PostActionSuccess",
+      "post": {
+        "id": "TEST_POST_6",
+        "channelId": "TEST_SUBSTACK_CHANNEL",
+        "channelService": "substack",
+        "text": "A short note can be a place to develop an idea in public, without turning every thought into a full essay. Keeping that space easy to use matters.",
+        "status": "scheduled",
+        "dueAt": "2026-11-11T16:23:55.816Z",
+        "shareMode": "customScheduled",
+        "schedulingType": "automatic",
+        "isCustomScheduled": true,
+        "sharedNow": false,
+        "externalLink": null,
+        "allowedActions": [
+          "publishPostNow",
+          "updatePost",
+          "movePostToDraft",
+          "publishPostNext",
+          "updatePostSchedule",
+          "removePostScheduledTime",
+          "updatePostTags",
+          "addPostNote",
+          "duplicatePost",
+          "deletePost",
+          "updateShopGridLink",
+          "createPostRecurrence"
+        ],
+        "metadata": {
+          "linkAttachment": {
+            "url": "https://on.substack.com/p/introducing-notes",
+            "expandedUrl": ""
+          }
+        }
+      },
+      "cleanup": {
+        "httpStatus": 200,
+        "data": {
+          "deletePost": {
+            "__typename": "DeletePostSuccess",
+            "id": "TEST_POST_6"
+          }
+        }
+      }
+    }
+  ],
+  "notExercised": [
+    "Grant revocation and refresh-token reuse were not induced.",
+    "No live transport-loss or runtime fault was injected into Buffer requests; local workerd probes cover conservative recovery.",
+    "Generic typed mutation errors still have no blanket rollback guarantee.",
+    "Scheduled and queued tests were deleted before due time, so eventual delivery was not observed."
+  ]
+}

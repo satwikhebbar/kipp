@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:unit": "vitest run src/__tests__/",
     "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:workflow-sanity:live": "WORKFLOW_SANITY_LIVE=1 vitest run src/__contract__/workflow-sanity.contract.test.ts",
     "test:migration": "vitest run --config vitest.migration.config.ts",
     "test:decisions-contract": "DECISIONS_CONTRACT=1 vitest run src/__contract__/luna-decisions.contract.test.ts",
     "test:provider-contract": "DEEPSEEK_CONTRACT=1 vitest run src/__contract__/deepseek-calendar.contract.test.ts",
@@ -28,6 +29,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.3",
     "@cloudflare/workers-types": "^5.20250710.1",
+    "@types/luxon": "3.7.1",
     "@types/node": "^24.0.0",
     "lefthook": "^2.1.10",
     "tsx": "^4.23.13",
@@ -40,6 +42,7 @@
     "hono": "^4.7.0",
     "jose": "^6.0.0",
     "linkedom": "^0.18.13",
+    "luxon": "3.7.2",
     "rrule": "^2.8.1",
     "zod": "^3.24.2"
   },

@@ -5,6 +5,7 @@ import {
   expandRecurrence,
   type RecurringProposal,
   validateRecurringProposalIssues,
+  validateRecurringTimeIssues,
 } from "./recurrence"
 import {
   calendarDayBounds,
@@ -12,6 +13,7 @@ import {
   scheduleOneOff,
   suggestOneOffAlternative,
   validateProposalIssues,
+  validateProposalTimeIssues,
 } from "./scheduling"
 import type { CalendarValidationIssue } from "./validation"
 
@@ -63,6 +65,8 @@ async function evaluateOneOffCandidate(
 ): Promise<CalendarEvaluation> {
   const issues = validateProposalIssues(proposal)
   if (issues.length) return { kind: "needs_input", issues }
+  const timeIssues = validateProposalTimeIssues(proposal, context.timeZone)
+  if (timeIssues.length) return { kind: "needs_input", issues: timeIssues }
   const bounds = calendarDayBounds(proposal.localDate as string, context.timeZone)
   if (!bounds) return { kind: "needs_input", issues: [{ code: "missing_date", field: "localDate" }] }
   const busy = await context.getBusyIntervals(bounds.timeMin, bounds.timeMax)
@@ -103,6 +107,8 @@ async function evaluateRecurringCandidate(
   const expanded = expandRecurrence(proposal)
   if ("clarification" in expanded)
     return { kind: "needs_input", issues: [{ code: "invalid_first_date", field: "firstDate" }] }
+  const timeIssues = validateRecurringTimeIssues(proposal, expanded.dates, context.timeZone)
+  if (timeIssues.length) return { kind: "needs_input", issues: timeIssues }
   const firstBounds = calendarDayBounds(expanded.dates[0] as string, context.timeZone)
   const lastBounds = calendarDayBounds(expanded.dates.at(-1) as string, context.timeZone)
   if (!firstBounds || !lastBounds)
@@ -110,7 +116,10 @@ async function evaluateRecurringCandidate(
   const busy = await context.getBusyIntervals(firstBounds.timeMin, lastBounds.timeMax)
   const availability = evaluateRecurrenceAvailability(proposal, busy, context.timeZone, context.now)
   if (availability.kind === "clarification")
-    return { kind: "needs_input", issues: [{ code: "event_crosses_local_day", field: "startTime" }] }
+    return {
+      kind: "needs_input",
+      issues: availability.issues ?? [{ code: "event_crosses_local_day", field: "startTime" }],
+    }
   if (availability.kind === "conflict") return noAvailableTime()
   if (availability.kind === "available") {
     const plan: CalendarPlan = {

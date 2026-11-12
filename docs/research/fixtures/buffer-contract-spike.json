@@ -1,0 +1,95 @@
+{
+  "provenance": "Synthetic examples authored 2026-11-10 from Buffer public schemas. Not captured API responses. No credentials or real account/channel/post IDs.",
+  "requiredScopes": ["account:read", "posts:read", "posts:write", "offline_access"],
+  "oauthTokenResponse": {
+    "access_token": "SYNTHETIC_ACCESS_TOKEN",
+    "refresh_token": "SYNTHETIC_SINGLE_USE_REFRESH_TOKEN",
+    "token_type": "Bearer",
+    "expires_in": 3600,
+    "scope": "account:read posts:read posts:write offline_access"
+  },
+  "channel": {
+    "id": "000000000000000000000001",
+    "organizationId": "000000000000000000000002",
+    "service": "substack",
+    "allowedActions": ["scheduleUpdates", "readUpdates"],
+    "isDisconnected": false,
+    "isLocked": false,
+    "isQueuePaused": false
+  },
+  "requests": {
+    "immediate": {
+      "channelId": "000000000000000000000001",
+      "text": "A synthetic Note for contract tests; never send this fixture to a real account.",
+      "assets": [],
+      "mode": "shareNow",
+      "schedulingType": "automatic",
+      "needsApproval": false,
+      "saveToDraft": false
+    },
+    "scheduledWithCard": {
+      "channelId": "000000000000000000000001",
+      "text": "A synthetic scheduled Note.",
+      "assets": [],
+      "mode": "customScheduled",
+      "dueAt": "2030-01-02T04:30:00.000Z",
+      "schedulingType": "automatic",
+      "needsApproval": false,
+      "saveToDraft": false,
+      "metadata": {"substack": {"linkAttachment": {"url": "https://example.com/article?source=notes#section"}}}
+    }
+  },
+  "responses": [
+    {
+      "name": "synthetic-immediate-acceptance",
+      "expected": "accepted if the matching immediate request was approved; actual initial status still needs live verification",
+      "body": {"data": {"createPost": {"__typename": "PostActionSuccess", "post": {
+        "id": "000000000000000000000005", "channelId": "000000000000000000000001",
+        "channelService": "substack", "text": "A synthetic Note for contract tests; never send this fixture to a real account.",
+        "status": "sending", "dueAt": null, "shareMode": "shareNow", "schedulingType": "automatic",
+        "isCustomScheduled": false, "sharedNow": true, "externalLink": null, "metadata": null
+      }}}}
+    },
+    {
+      "name": "matching-scheduled-acceptance",
+      "expected": "accepted",
+      "body": {"data": {"createPost": {"__typename": "PostActionSuccess", "post": {
+        "id": "000000000000000000000003", "channelId": "000000000000000000000001",
+        "channelService": "substack", "text": "A synthetic scheduled Note.", "status": "scheduled",
+        "dueAt": "2030-01-02T04:30:00Z", "shareMode": "customScheduled", "schedulingType": "automatic",
+        "isCustomScheduled": true, "sharedNow": false, "externalLink": null,
+        "metadata": {"linkAttachment": {"url": "https://example.com/article?source=notes#section", "expandedUrl": null}}
+      }}}}
+    },
+    {
+      "name": "unexpected-draft-exists",
+      "expected": "created-unexpected; never resend create",
+      "body": {"data": {"createPost": {"__typename": "PostActionSuccess", "post": {
+        "id": "000000000000000000000004", "channelId": "000000000000000000000001",
+        "channelService": "substack", "text": "A synthetic scheduled Note.", "status": "draft",
+        "dueAt": null, "shareMode": "customScheduled", "schedulingType": "automatic",
+        "isCustomScheduled": true, "sharedNow": false, "externalLink": null, "metadata": null
+      }}}}
+    },
+    {
+      "name": "generic-input-error-does-not-prove-rollback",
+      "expected": "unknown unless separately verified pre-create evidence rule applies",
+      "body": {"data": {"createPost": {"__typename": "InvalidInputError", "message": "Synthetic validation diagnostic"}}}
+    },
+    {
+      "name": "legacy-proxy-error",
+      "expected": "unknown",
+      "body": {"data": {"createPost": {"__typename": "RestProxyError", "message": "Synthetic upstream failure"}}}
+    },
+    {
+      "name": "execution-error-after-possible-effect",
+      "expected": "unknown",
+      "body": {"data": {"createPost": null}, "errors": [{"message": "Synthetic completion error", "path": ["createPost", "post"]}]}
+    }
+  ],
+  "transportCases": [
+    {"name": "timeout-after-request-dispatch", "expected": "unknown; no create retry"},
+    {"name": "local-auth-rejection-before-dispatch", "expected": "definitive no-create; repair then explicit eligible Retry"},
+    {"name": "refresh-response-lost", "expected": "reauthorize; do not reuse uncertain old refresh token"}
+  ]
+}

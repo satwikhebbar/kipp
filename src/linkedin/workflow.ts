@@ -3,6 +3,7 @@ import { appendLinkedInFeedback, createLinkedInConversation, runLinkedInToolSess
 import { promptForActions } from "../core/action-prompt"
 import { assertStepOutputSize } from "../core/conversation"
 import { computeCost, formatCostLine } from "../core/cost"
+import { remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../core/feedback-session"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "../core/types"
 import { waitForWorkflowEvent } from "../core/workflow-events"
@@ -17,16 +18,8 @@ import { createIdeaManager } from "./ideas/manager"
 import { DEFAULT_STYLE_PROMPT } from "./prompts/defaults"
 import { resolvePrompt } from "./prompts/resolver"
 
-const DEFAULT_WAIT_FOR_FEEDBACK_HOURS = 12
 const MAX_FEEDBACK_ROUNDS = 4
-const HOURS_TO_MS = 3_600_000 // ponytail: precomputed 60 * 60 * 1000
 const MINUTES_TO_MS = 60_000
-const SECONDS_TO_MS = 1_000
-const CLOUDFLARE_MAX_WORKFLOW_DURATION_HOURS = 12
-const WORKFLOW_TIMEOUT_SAFETY_MARGIN_MINUTES = 15
-const CLOUDFLARE_MAX_WORKFLOW_DURATION_MS = CLOUDFLARE_MAX_WORKFLOW_DURATION_HOURS * HOURS_TO_MS
-const WORKFLOW_TIMEOUT_SAFETY_MARGIN_MS = WORKFLOW_TIMEOUT_SAFETY_MARGIN_MINUTES * MINUTES_TO_MS
-const MAX_FEEDBACK_SESSION_DURATION_MS = CLOUDFLARE_MAX_WORKFLOW_DURATION_MS - WORKFLOW_TIMEOUT_SAFETY_MARGIN_MS
 const DEFAULT_LLM_RETRIES = 3
 const TELEGRAM_MAX_MESSAGE_CHARS = 4096
 const TELEGRAM_CHUNK_MARGIN_CHARS = 128 // headroom under Telegram's hard message cap
@@ -42,26 +35,7 @@ type PipelineWorkflowOutcome =
   | { outcome: "feedback-expired" }
   | { outcome: "feedback-limit-reached" }
 
-/**
- * Keeps user-feedback waits within one Cloudflare Workflow execution.
- *
- * Cloudflare terminates an execution at 12 hours, so a feedback session must
- * finish before then for the normal timeout path to persist its terminal state.
- */
-export function resolveFeedbackDeadline(startedAtMs: number, configuredHours: string | undefined): number {
-  const requestedHours = Number(configuredHours || DEFAULT_WAIT_FOR_FEEDBACK_HOURS)
-  const requestedDurationMs = Number.isFinite(requestedHours) && requestedHours > 0 ? requestedHours * HOURS_TO_MS : 0
-  const sessionDurationMs = Math.min(
-    requestedDurationMs || MAX_FEEDBACK_SESSION_DURATION_MS,
-    MAX_FEEDBACK_SESSION_DURATION_MS,
-  )
-  return startedAtMs + sessionDurationMs
-}
-
-/** Returns a whole-second Workflow duration that does not extend past the deadline. */
-export function remainingFeedbackTimeoutSeconds(deadlineMs: number, nowMs = Date.now()): number {
-  return Math.max(0, Math.floor((deadlineMs - nowMs) / SECONDS_TO_MS))
-}
+export { remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../core/feedback-session"
 
 /** Generates a unique interaction ID. */
 function interactionId(): string {

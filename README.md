@@ -394,11 +394,15 @@ Tracked in [#101](https://github.com/satwikhebbar/kipp/issues/101).
 | `pnpm test` | Run the standard Vitest suite. |
 | `pnpm test:unit` | Run unit tests. |
 | `pnpm test:integration` | Run integration tests against fake external services. |
+| `pnpm test:workflow-sanity:live` | Run bounded real-LLM LinkedIn and Calendar webhook journeys with mocked account APIs; requires a DeepSeek key in the environment. |
 | `SUBSTACK_EVAL=1 LLM_API_KEY=<key> pnpm exec vitest run --config vitest.config.ts src/__contract__/substack-idea-generation.contract.test.ts` | Run the opt-in live Substack idea-generation evaluation for the configured test article. |
 | `LLM_API_KEY=<key> pnpm test:provider-contract` | Run credential-gated DeepSeek Calendar tool-contract tests. |
 | `pnpm check` | Run lint, documentation checks, typecheck, and the standard tests. |
 
 Lefthook runs typecheck, lint, and tests before each commit.
+
+See [workflow sanity testing](docs/workflow-sanity-testing.md) for the simulated
+Telegram journeys, live-model limits and retained diagnostic transcripts.
 
 ## Deployment
 

@@ -1,3 +1,5 @@
+import { resolveLocalDateTime } from "../core/time"
+
 export const CALENDAR_ISSUE_CODES = [
   "ambiguous_request",
   "missing_information",
@@ -16,6 +18,10 @@ export const CALENDAR_ISSUE_CODES = [
   "invalid_duration_range",
   "invalid_duration_increment",
   "missing_or_invalid_time",
+  "invalid_local_date",
+  "invalid_time_zone",
+  "nonexistent_local_time",
+  "ambiguous_local_time",
   "inferred_duration_requires_time",
   "family_social_requires_time",
   "event_crosses_local_day",
@@ -34,11 +40,34 @@ export type CalendarIssueField =
   | "recurrence"
   | "recurrence.weekdays"
   | "end"
+  | "timeZone"
 
 export interface CalendarValidationIssue {
   code: CalendarIssueCode
   field: CalendarIssueField
   params?: Readonly<Record<string, number | string>>
+}
+
+/** Preserves the strict local-time failure and affected date for Calendar clarification. */
+export function localDateTimeIssue(
+  localDate: string,
+  startTime: string,
+  timeZone: string,
+  dateField: "localDate" | "firstDate" = "localDate",
+): CalendarValidationIssue | null {
+  const result = resolveLocalDateTime(localDate, startTime, timeZone)
+  if (result.kind === "unique") return null
+  if (result.kind === "invalid") {
+    if (result.field === "timeZone") return { code: "invalid_time_zone", field: "timeZone" }
+    if (result.field === "date")
+      return { code: dateField === "firstDate" ? "invalid_first_date" : "invalid_local_date", field: dateField }
+    return { code: "missing_or_invalid_time", field: "startTime" }
+  }
+  return {
+    code: result.kind === "ambiguous" ? "ambiguous_local_time" : "nonexistent_local_time",
+    field: "startTime",
+    params: { localDate, startTime, timeZone },
+  }
 }
 
 /** Temporary compatibility renderer while Calendar dialogue moves into the bounded agent. */
@@ -77,6 +106,14 @@ export function legacyCalendarIssueMessage(issue: CalendarValidationIssue): stri
       return "Please use a duration in 15-minute increments."
     case "missing_or_invalid_time":
       return "Please tell me a valid time."
+    case "invalid_local_date":
+      return "Please tell me a valid date."
+    case "invalid_time_zone":
+      return "Please choose a valid IANA time zone."
+    case "nonexistent_local_time":
+      return `That local time does not exist on ${issue.params?.localDate ?? "the requested date"}. Please choose another time.`
+    case "ambiguous_local_time":
+      return `That local time occurs twice on ${issue.params?.localDate ?? "the requested date"}. Please choose an unambiguous time.`
     case "inferred_duration_requires_time":
       return "Please tell me what time works for this longer block."
     case "family_social_requires_time":

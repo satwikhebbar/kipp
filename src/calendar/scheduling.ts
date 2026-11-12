@@ -1,5 +1,13 @@
+import {
+  isValidLocalDate,
+  isValidTimeZone,
+  localDateAt,
+  localDayBounds,
+  localTimeAt,
+  resolveLocalDateTime,
+} from "../core/time"
 import type { BusyInterval, ManagedCalendarEvent } from "../integrations/google-calendar"
-import { type CalendarValidationIssue, legacyCalendarIssueMessage } from "./validation"
+import { type CalendarValidationIssue, legacyCalendarIssueMessage, localDateTimeIssue } from "./validation"
 
 export const CALENDAR_TIMEZONE_DEFAULT = "Asia/Kolkata"
 export const CALENDAR_SLOT_MINUTES = 15
@@ -48,10 +56,7 @@ const BASE32_CHUNK_MASK = 31
 const EVENT_ID_ENCODED_SUFFIX_LENGTH = 40
 const REQUEST_ID_ENCODED_SUFFIX_LENGTH = 32
 const MAX_EVENT_TITLE_LENGTH = 120
-const TIME_ZONE_RESOLUTION_ATTEMPTS = 2
 const HHMM_COLON_OFFSET = 3
-const START_OF_DAY = "00:00"
-const END_OF_DAY = "23:59"
 
 /** Returns the minutes after midnight for a valid 24-hour time, or null when invalid. */
 export function localMinutes(time: string): number | null {
@@ -60,49 +65,12 @@ export function localMinutes(time: string): number | null {
   return Number(matched[1]) * 60 + Number(time.slice(HHMM_COLON_OFFSET))
 }
 
-/** Formats an instant in the supplied IANA time zone as named calendar parts. */
-function dateTimeParts(timestamp: number, timeZone: string): Record<string, string> {
-  return Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23",
-    })
-      .formatToParts(new Date(timestamp))
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value]),
-  )
-}
+export { localDateAt, localTimeAt } from "../core/time"
 
-/** Returns an instant's YYYY-MM-DD calendar date in the supplied IANA time zone. */
-export function localDateAt(timestamp: number, timeZone: string): string {
-  const parts = dateTimeParts(timestamp, timeZone)
-  return `${parts.year}-${parts.month}-${parts.day}`
-}
-
-/** Returns an instant's HH:mm wall-clock time in the supplied IANA time zone. */
-export function localTimeAt(timestamp: number, timeZone: string): string {
-  const parts = dateTimeParts(timestamp, timeZone)
-  return `${parts.hour}:${parts.minute}`
-}
-
-/** Converts a local wall-clock date/time in an IANA time zone to epoch milliseconds, or null when invalid. */
+/** Compatibility adapter: only a unique valid local time can authorize scheduling. */
 export function zonedDateTimeToMillis(localDate: string, time: string, timeZone: string): number | null {
-  if (!DATE_PATTERN.test(localDate) || !TIME_PATTERN.test(time)) return null
-  const provisional = Date.parse(`${localDate}T${time}:00Z`)
-  if (!Number.isFinite(provisional)) return null
-  let candidate = provisional
-  for (let attempt = 0; attempt < TIME_ZONE_RESOLUTION_ATTEMPTS; attempt++) {
-    const parts = dateTimeParts(candidate, timeZone)
-    const asUtc = Date.parse(`${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}Z`)
-    candidate = provisional - (asUtc - candidate)
-  }
-  return localDateAt(candidate, timeZone) === localDate && localTimeAt(candidate, timeZone) === time ? candidate : null
+  const result = resolveLocalDateTime(localDate, time, timeZone)
+  return result.kind === "unique" ? result.epochMs : null
 }
 
 /** Returns whether a candidate interval overlaps a busy interval, including the requested buffer. */
@@ -137,10 +105,7 @@ export function candidateMinutes(preferredStart: number | null): number[] {
 
 /** Returns ISO instants spanning one local calendar day, or null when the supplied date is invalid. */
 export function calendarDayBounds(localDate: string, timeZone: string): { timeMin: string; timeMax: string } | null {
-  const start = zonedDateTimeToMillis(localDate, START_OF_DAY, timeZone)
-  const end = zonedDateTimeToMillis(localDate, END_OF_DAY, timeZone)
-  if (start === null || end === null) return null
-  return { timeMin: new Date(start).toISOString(), timeMax: new Date(end + MILLIS_PER_MINUTE).toISOString() }
+  return localDayBounds(localDate, timeZone)
 }
 
 /** Returns an explicit reminder override or the policy default for the proposal's classification. */
@@ -194,6 +159,20 @@ export function validateProposal(proposal: OneOffProposal): string | null {
   return issue ? legacyCalendarIssueMessage(issue) : null
 }
 
+/** Validates zone, civil date and explicit wall time before availability reads or instant formatting. */
+export function validateProposalTimeIssues(proposal: OneOffProposal, timeZone: string): CalendarValidationIssue[] {
+  if (!isValidTimeZone(timeZone)) return [{ code: "invalid_time_zone", field: "timeZone" }]
+  const localDate = proposal.localDate ?? ""
+  if (!isValidLocalDate(localDate)) return [{ code: "invalid_local_date", field: "localDate" }]
+  if (proposal.timeIsExplicit) {
+    const issue = localDateTimeIssue(localDate, proposal.startTime ?? "", timeZone)
+    return issue ? [issue] : []
+  }
+  if (!localDayBounds(localDate, timeZone))
+    return [{ code: "nonexistent_local_time", field: "localDate", params: { localDate, timeZone } }]
+  return []
+}
+
 /** Finds a safe deterministic interval or reports the required clarification or a conflict. */
 export function scheduleOneOff(
   proposal: OneOffProposal,
@@ -203,6 +182,8 @@ export function scheduleOneOff(
 ): ScheduledOneOff | { clarification: string } | { conflict: true } {
   const validation = validateProposal(proposal)
   if (validation) return { clarification: validation }
+  const timeIssue = validateProposalTimeIssues(proposal, timeZone)[0]
+  if (timeIssue) return { clarification: legacyCalendarIssueMessage(timeIssue) }
   const localDate = proposal.localDate as string
   const explicitMinutes = proposal.startTime ? localMinutes(proposal.startTime) : null
   const durationMs = proposal.durationMinutes * MILLIS_PER_MINUTE
@@ -239,6 +220,7 @@ export function suggestOneOffAlternative(
   now = Date.now(),
 ): ScheduledOneOff | null {
   if (!proposal.localDate || !proposal.startTime || !proposal.timeIsExplicit) return null
+  if (validateProposalTimeIssues(proposal, timeZone).length) return null
   const requested = localMinutes(proposal.startTime)
   if (requested === null) return null
   const inferred = { ...proposal, timeIsExplicit: false }
