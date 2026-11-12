@@ -1,8 +1,9 @@
 # Connect Buffer
 
 Buffer setup is optional. Existing LinkedIn and Calendar workflows do not need
-Buffer configuration. Phase 2 supplies connection setup and secure refresh;
-`/note` drafting and publication arrive in later phases.
+Buffer configuration. The implemented Phase 3 slice adds immediate text-only
+`/note` drafting, exact approval and guarded Buffer submission. It awaits release;
+links, clarification, queueing, scheduled posting and repair/Retry remain later phases.
 
 1. Connect the desired Substack account inside Buffer. Kipp authorization does
    not create or repair Buffer’s connection to Substack.
@@ -23,8 +24,10 @@ local text configuration. Production values and secrets belong in Cloudflare
 Dashboard, as described in [runtime configuration](production-runtime-configuration.md).
 The five new registry variables are globally optional: client credentials and
 redirect origin are required for Buffer setup; the channel ID is required for
-Notes publication. `PROMPT_NOTES_PATH` is optional and will select a writing
-prompt when the Notes workflow is implemented. Production provisioning remains
+Notes publication. `PROMPT_NOTES_PATH` selects a writing prompt, falling back
+to `notes-style-prompt.md` and then a provisional bundled default only when
+files are missing. Each run snapshots the prompt, model, timezone and destination.
+Production provisioning remains
 a release prerequisite; a dry-run does not verify provisioned values.
 
 The callback reports whether the configured channel is available to the
@@ -47,3 +50,37 @@ callback URL. Do not share callback URLs. Enable **Redact query string** in
 Cloudflare Dashboard observability so OAuth codes/state stay out of request
 logs. Real setup consent, production provisioning and deployment are separate
 release actions; automated tests use synthetic credentials and fake endpoints.
+
+## Notes implementation and release boundary
+
+The structural manifest includes `NOTES_WORKFLOW` (`NotesWorkflow`, `kipp-notes`)
+and `BUFFER_PUBLICATIONS` (`BufferPublicationDO`, append-only SQLite migration
+`v4`). Local configuration needs the same bindings. This code change does not
+deploy those resources or provision production Buffer credentials/channel values.
+
+For this slice, send `/note <raw thoughts>` with text-only, immediate-publication
+intent. Review commentary appears first, then timing, then the exact Note in
+plain text. Only the current owner's Publish button authorizes submission;
+typing “publish” supplies writing feedback. Revise opens a feedback prompt and
+does not call the writer until feedback arrives. The initial generation plus
+four follow-up writing sessions share the existing capped feedback window.
+
+The workflow registers opaque actions before displaying buttons and retains
+authenticated Notes events across forwarding failures. Telegram redelivery
+reuses that event. This does not support concurrent feedback conversations in
+one Telegram chat; LinkedIn and Calendar routing behavior is unchanged.
+
+The publication object persists a dispatch claim before its single Buffer
+create request and stores acceptance separately from Workflow checkpoints.
+Successful acceptance confirms “Sent to Buffer for publication” and ends;
+Kipp does not track delivery. A lost or ambiguous response is terminal, with
+no new-create Retry. An unexpected existing post also cannot authorize a new
+create. If an exact post ID was captured with incomplete evidence, Kipp can
+make one bounded lookup of that ID; it never searches for matching text.
+Publication evidence has no automatic deletion timer. Draft transcripts use
+the existing Workflow retention conventions.
+
+Automated sanity checks drive the real HTTP webhook, Workflows and SQLite
+objects with fake account APIs. The optional bounded real-LLM sanity scenario
+also keeps Buffer and Telegram simulated. Author voice/example study and an
+explicitly authorized integrated account walkthrough remain release prerequisites.

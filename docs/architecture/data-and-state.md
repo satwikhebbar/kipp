@@ -41,11 +41,19 @@ flowchart LR
 | `IdeaIngestDO` SQLite | Idempotency-key ownership records; per-page workflow-start state and repair cooldown | Prevents duplicate Notion pages and workflow starts across Telegram, RSS, and cadence entry points. |
 | RSS article model (transient) | Normalized title, optional subtitle, source URL, and ordered H2-section content produced from RSS `content:encoded` | Exists only during the RSS trigger and bounded extraction session; raw HTML is not persisted or sent to the agent. |
 | `TokenVaultDO` SQLite | Short-lived OAuth state; provider-namespaced encrypted LinkedIn and Google Calendar tokens; Buffer grant, PKCE verifier, credential generation, connection identity, and refresh claim (implemented; awaiting release) | OAuth state expires after five minutes. Tokens use AES-256-GCM and configured key IDs and can be rewrapped during rotation. Only Buffer refresh is coordinated inside the vault; see the policy below. |
-| `InteractionRouterDO` SQLite | Opaque callback or reply registration, workflow target, interaction kind, version, expiry, and delivery state | Contains no request prose or credentials. Entries are claimed idempotently and expire after the owning interaction window. |
+| `BufferPublicationDO` SQLite (awaiting release) | One immutable approved payload and fingerprint, approval evidence, dispatch claim, attempt and typed result per publication | No automatic deletion: losing dispatch evidence could permit duplicate replay. The object sends one create; accepted or uncertain attempts never acquire another send claim. |
+| `InteractionRouterDO` SQLite | Opaque callback or reply registration, workflow target, interaction kind, version, expiry, and delivery state | Legacy routing entries contain no request prose or credentials. Notes deliveries additionally retain the authenticated feedback text needed for transport replay; see below. Entries expire after the owning interaction window and bounded grace. |
 | `PipelineWorkflow` state | LinkedIn agent transcript, review version, approval or revision events, usage, and step results | Durable across the configured feedback wait. Transcript output is bounded before persistence. |
 | `CalendarWorkflow` state | Bounded safe transcript, versioned plan/option ledger, exact evaluated plans, created-event baseline, and interaction events | Exists for the 15-minute Calendar conversation. Provider reasoning is removed; obsolete event-list results are compacted; IDs expire and are single-use. |
 | `MEAL_PLANNING_DB` D1 | Household profile (seeded), active plan header, immutable plan versions, sole feedback-batch ledger, private Mini App review contexts, opaque session digests, launch replay fingerprints, and the chat-scoped plan-message generation counter | The canonical meal-planning store. One active plan per chat; Mini App authority is derived from verified Telegram launch data and a server-owned context, never client plan/chat IDs. Feedback batches move `accepted → delivered → processing → consumed`, with terminal `stale`/`failed` states; revisions are CAS-guarded and change nothing when stale. No transcripts, raw launch data, bearer tokens, or provider text are stored. |
 | `RECIPE_VIDEO_CACHE` KV | Per-dish/slot recipe-video search results for lunch cells | Optional enrichment cache with a 24-hour per-key expiry (`expirationTtl`), so it needs no expiry sweep. A missing or stale video never blocks a plan. |
+
+Notes extends `InteractionRouterDO` with separate action, message-binding,
+version and delivery tables. It atomically retains the authenticated event
+when consuming an action, then acknowledges it after forwarding. Same-update
+or pending same-action redelivery returns the original event. Cleanup is lazy
+at the review deadline plus the existing one-hour grace. This is transport
+recovery for Notes, not support for concurrent Telegram feedback conversations.
 
 Calendar event content is not copied into the Notion Ideas data source or
 the interaction router. The model can see only user text and the narrow event

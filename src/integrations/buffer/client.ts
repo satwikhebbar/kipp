@@ -1,3 +1,6 @@
+import type { BufferCreateCommand, BufferCreateResult, BufferDestination } from "../../notes/types"
+import { mapSubstackPost } from "./substack"
+
 /** Read-only discovery shared by all future Buffer destinations. */
 export interface BufferChannel {
   id: string
@@ -14,7 +17,7 @@ export interface BufferDiscovery {
   channels: BufferChannel[]
 }
 const BUFFER_API_URL = "https://api.buffer.com"
-const DISCOVERY_TIMEOUT_MS = 20_000
+const BUFFER_REQUEST_TIMEOUT_MS = 20_000
 
 /** Executes a single read-only API request and hides potentially sensitive response errors. */
 async function query<T>(accessToken: string, document: string, variables = {}): Promise<T> {
@@ -22,7 +25,7 @@ async function query<T>(accessToken: string, document: string, variables = {}): 
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ query: document, variables }),
-    signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+    signal: AbortSignal.timeout(BUFFER_REQUEST_TIMEOUT_MS),
   })
   if (!response.ok) throw new Error("Buffer account discovery failed")
   const body = (await response.json()) as { data?: T; errors?: unknown[] }
@@ -91,4 +94,102 @@ export function validateSubstackChannel(
       ? "Substack channel is ready, but its Buffer queue is paused. Resume the queue in Buffer before using queue placement."
       : "Substack channel is ready.",
   }
+}
+
+/** Resolves the configured channel without substituting another destination. */
+export async function discoverBufferDestination(
+  accessToken: string,
+  connectionId: string,
+  channelId: string,
+): Promise<BufferDestination> {
+  const discovery = await discoverBuffer(accessToken)
+  if (!validateSubstackChannel(discovery, channelId).ready) throw new Error("Buffer destination unavailable")
+  const channel = discovery.channels.find((channel) => channel.id === channelId)
+  if (!channel) throw new Error("Buffer destination unavailable")
+  return {
+    accountId: discovery.accountId,
+    connectionId,
+    organizationId: channel.organizationId,
+    channelId,
+    service: "substack",
+  }
+}
+
+const POST_FIELDS = `id channelId channelService text status dueAt shareMode schedulingType isCustomScheduled sharedNow externalLink metadata { ... on SubstackPostMetadata { linkAttachment { url expandedUrl } } }`
+const CREATE_POST = `mutation KippCreatePost($input: CreatePostInput!) { createPost(input: $input) { __typename ... on PostActionSuccess { post { ${POST_FIELDS} } } ... on MutationError { message } } }`
+
+/** Decodes post evidence conservatively; generic GraphQL errors never establish non-creation. */
+export function decodeBufferPost(post: unknown, command: BufferCreateCommand): BufferCreateResult {
+  if (!post || typeof post !== "object") return { kind: "unknown", reason: "missing-post" }
+  const p = post as Record<string, unknown>
+  if (typeof p.id !== "string" || !p.id) return { kind: "unknown", reason: "missing-post-id" }
+  const metadata = p.metadata as { linkAttachment?: unknown } | null | undefined
+  if (
+    p.channelId !== command.destination.channelId ||
+    p.channelService !== command.destination.service ||
+    p.text !== command.text ||
+    p.shareMode !== "shareNow" ||
+    (p.schedulingType !== null && p.schedulingType !== "automatic") ||
+    p.isCustomScheduled !== false ||
+    p.sharedNow !== true ||
+    !["sent", "pending", "scheduled"].includes(String(p.status)) ||
+    metadata?.linkAttachment != null
+  )
+    return { kind: "created-unexpected", postId: p.id, reason: "post-does-not-match-approval" }
+  return {
+    kind: "accepted",
+    postId: p.id,
+    ...(typeof p.dueAt === "string" && Number.isFinite(Date.parse(p.dueAt)) ? { dueAt: p.dueAt } : {}),
+    ...(typeof p.externalLink === "string" && /^https:\/\//u.test(p.externalLink) ? { link: p.externalLink } : {}),
+  }
+}
+
+/** Sends exactly one create request. No HTTP status or generic error permits another create. */
+export async function createBufferPostOnce(
+  accessToken: string,
+  command: BufferCreateCommand,
+): Promise<BufferCreateResult> {
+  try {
+    const response = await fetch(BUFFER_API_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: CREATE_POST, variables: { input: mapSubstackPost(command) } }),
+      signal: AbortSignal.timeout(BUFFER_REQUEST_TIMEOUT_MS),
+    })
+    const body = (await response.json()) as {
+      data?: { createPost?: { __typename?: string; post?: unknown } }
+      errors?: unknown[]
+    }
+    const payload = body.data?.createPost
+    // Preserve an ID even alongside errors; its existence rules out a fresh create.
+    if (payload?.post) {
+      const decoded = decodeBufferPost(payload.post, command)
+      if (response.ok && !body.errors?.length && payload.__typename === "PostActionSuccess") return decoded
+      const id = (payload.post as { id?: unknown }).id
+      return { kind: "unknown", reason: "incomplete-post-response", ...(typeof id === "string" ? { postId: id } : {}) }
+    }
+    return { kind: "unknown", reason: "unconfirmed-create" }
+  } catch {
+    return { kind: "unknown", reason: "unconfirmed-create" }
+  }
+}
+
+/** Makes one bounded lookup of a captured post ID; never searches or polls for publication. */
+export async function inspectBufferPost(
+  accessToken: string,
+  postId: string,
+  command: BufferCreateCommand,
+): Promise<BufferCreateResult> {
+  try {
+    const result = await query<{ post: unknown }>(
+      accessToken,
+      `query KippInspectPost($input: PostInput!) { post(input: $input) { ${POST_FIELDS} } }`,
+      { input: { id: postId } },
+    )
+    const decoded = decodeBufferPost(result.post, command)
+    if ("postId" in decoded && decoded.postId === postId) return decoded
+  } catch {
+    /* Unknown stays terminal; a failed read cannot authorize another create. */
+  }
+  return { kind: "unknown", reason: "unconfirmed-create", postId }
 }

@@ -19,12 +19,18 @@ export function createTelegramClient(token: string) {
   async function sendMessage(
     chatId: number | string,
     text: string,
-    opts?: { replyMarkup?: Record<string, unknown>; signal?: AbortSignal },
+    opts?: {
+      replyMarkup?: Record<string, unknown>
+      signal?: AbortSignal
+      plainText?: boolean
+      disableLinkPreview?: boolean
+    },
   ): Promise<{ messageId: number }> {
     const messageBody: Record<string, unknown> = {
       chat_id: chatId,
       text,
-      parse_mode: "Markdown",
+      ...(!opts?.plainText ? { parse_mode: "Markdown" } : {}),
+      ...(opts?.disableLinkPreview ? { link_preview_options: { is_disabled: true } } : {}),
       ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
     }
     try {

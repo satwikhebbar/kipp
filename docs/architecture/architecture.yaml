@@ -16,6 +16,7 @@ runtime_components:
       - pipeline_workflow
       - calendar_workflow
       - meal_planning_workflow
+      - notes_workflow
       - token_vault
       - interaction_router
       - idea_ingest
@@ -61,6 +62,30 @@ runtime_components:
       - runtime
       - integrations.youtube-data-api
       - interaction_router
+  notes_workflow:
+    implementation: src/notes/workflow.ts and src/notes/runner.ts
+    status: Immediate text-only Phase 3 implemented; awaiting release.
+    owns:
+      - deterministic Telegram invocation and snapshotted writing context
+      - bounded writing sessions and exact owner/version/fingerprint approval
+      - retained Notes event consumption and acceptance confirmation
+    depends_on:
+      - agents
+      - providers
+      - integrations
+      - token_vault
+      - interaction_router
+      - buffer_publications
+  buffer_publications:
+    implementation: src/integrations/buffer/publication.ts
+    type: Cloudflare Durable Object with SQLite storage
+    owns:
+      - immutable approved payload and durable dispatch claim before one Buffer create
+      - acceptance replay independent of Workflow checkpoints
+      - terminal uncertainty and one bounded lookup of a captured post ID
+    depends_on:
+      - token_vault
+      - integrations
   token_vault:
     implementation: src/core/token-vault.ts
     type: Cloudflare Durable Object with SQLite storage
@@ -85,6 +110,7 @@ runtime_components:
     owns:
       - short-lived opaque Telegram interaction registrations
       - idempotent claim, acknowledgement, expiry, and bounded cleanup
+      - Notes-only retained authenticated events, owner metadata and version invalidation
     depends_on: []
   idea_ingest:
     implementation: src/core/idea-ingest.ts
@@ -241,7 +267,14 @@ data_stores:
     data:
       - opaque Telegram callback and reply registrations
       - workflow target, interaction kind, version, expiry, and delivery state
+      - Notes action authority, message bindings and immutable deliveries retained until review deadline plus one hour
     owner: interaction_router
+  buffer_publication_storage:
+    type: Durable Object SQLite storage, one object per approved publication
+    data:
+      - approved payload, fingerprint, version and approval evidence
+      - durable dispatch claim and attempt/result evidence; no automatic deletion
+    owner: buffer_publications
   idea_ingest_storage:
     type: Durable Object SQLite storage
     data:
@@ -267,7 +300,8 @@ data_stores:
       - LinkedIn draft transcript and approval or revision events
       - Calendar safe transcript, typed proposals, exact plans, opaque plan and option ledger, created-event baseline, and wait events
       - Meal-planning session outcomes and live-loop wait events
-    owner: pipeline_workflow and calendar_workflow and meal_planning_workflow
+      - Notes prompt/model/destination snapshot, bounded transcript, review actions and processed delivery IDs
+    owner: pipeline_workflow and calendar_workflow and meal_planning_workflow and notes_workflow
 
 external_systems:
   - Telegram Bot API
@@ -275,6 +309,7 @@ external_systems:
   - Notion API
   - GitHub Contents API
   - LinkedIn OAuth and Posts API
+  - Buffer OAuth and GraphQL API (Notes; awaiting release)
   - Google OAuth and Calendar API
   - Gemini API
   - DeepSeek API

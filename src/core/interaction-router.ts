@@ -1,3 +1,5 @@
+import { NotesRouter } from "../notes/router"
+import type { InteractionRegistration, InteractionResolveInput } from "./interaction-router-client"
 import { type Env, INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "./types"
 
 interface Registration {
@@ -54,12 +56,14 @@ function json(data: unknown, status = 200): Response {
  * edit context and transcripts until their edit authority expires.
  */
 export class InteractionRouterDO implements DurableObject {
+  private readonly notes: NotesRouter
   private readonly ctx: DurableObjectState
   private readonly env: Env
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx
     this.env = env
+    this.notes = new NotesRouter(ctx.storage)
     // Safe on every cold start; the schema itself remains in this chat's SQLite storage.
     this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS interactions (
       interaction_id TEXT PRIMARY KEY, version INTEGER NOT NULL, workflow_id TEXT NOT NULL,
@@ -110,6 +114,15 @@ export class InteractionRouterDO implements DurableObject {
       )
       return json({ ok: true })
     }
+    if (url.pathname === "/notes/resolve")
+      return this.ctx.storage.transactionSync(() =>
+        this.notes.resolve(
+          body as unknown as InteractionResolveInput & { userId: string; chatId: string; receivedAtMs: number },
+        ),
+      )
+    if (url.pathname.startsWith("/notes/")) return this.notes.control(url.pathname, body)
+    if (url.pathname === "/register" && typeof body.kind === "string" && body.kind.startsWith("notes-"))
+      return this.notes.register(body as unknown as InteractionRegistration)
     if (url.pathname === "/register") return this.register(body)
     if (url.pathname === "/resolve") return this.resolve(body)
     return new Response("Not found", { status: 404 })

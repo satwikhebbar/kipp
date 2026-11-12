@@ -1,5 +1,52 @@
 # Request flows
 
+## Immediate Notes through Buffer (implemented; awaiting release)
+
+An authenticated `/note <thoughts>` starts one deterministic Workflow instance
+per Telegram chat/message. The run snapshots the writing prompt, model,
+destination identity and feedback deadline, then uses the shared bounded tool
+runtime to produce commentary and exact Note text. Telegram displays commentary,
+timing and the literal Note in that order. Publish authority is an opaque action
+bound to the owner, chat, workflow, candidate version, fingerprint and deadline.
+Writing feedback and model output cannot authorize publication.
+
+```mermaid
+sequenceDiagram
+  participant T as Telegram webhook
+  participant R as InteractionRouterDO
+  participant W as NotesWorkflow
+  participant P as BufferPublicationDO
+  participant B as Buffer
+  T->>W: Start deterministic /note invocation
+  W->>R: Register owner-bound review actions
+  W-->>T: Commentary, timing, exact Note and Publish
+  T->>R: Resolve and retain authenticated approval
+  R-->>T: Immutable delivery event
+  T->>W: Send retained notes-interaction
+  T->>R: Acknowledge delivery
+  W->>W: Validate exact pending action and freeze payload
+  W->>P: Prepare immutable approved publication
+  P->>P: Persist dispatch claim
+  P->>B: One create request
+  B-->>P: Typed result
+  P->>P: Persist acceptance or terminal uncertainty
+  P-->>W: Stored result, including on checkpoint replay
+  W-->>T: Confirm Buffer acceptance and finish
+```
+
+Resolve/forward/ack failure returns HTTP 503 for Notes so webhook redelivery can
+reuse the retained event. The Workflow rejects stale or duplicate events. A
+publication with an existing dispatch claim never acquires another send lease;
+replay returns its durable evidence. Only an incomplete result with a captured
+post ID permits one bounded lookup of that ID. There is no downstream delivery
+polling or inspection-and-retry interaction. Links, clarification, queueing,
+exact-time scheduling and explicit repair/Retry are later implementation phases.
+
+The Notes transport extension leaves existing provider refresh ownership intact:
+Buffer alone uses vault-coordinated refresh under
+[ADR-003](decisions/ADR-003-buffer-only-coordinated-refresh.md). Concurrent
+same-chat feedback remains unsupported.
+
 ## Telegram ingress and interaction routing
 
 Telegram commands ingest or start work; replies and callback buttons resume the

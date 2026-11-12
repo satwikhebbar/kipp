@@ -111,3 +111,31 @@ export async function calendarJourney(harness: Harness): Promise<void> {
   ).toBe(true)
   expect(harness.state.failures).toEqual([])
 }
+
+/** Uses a bounded real or scripted writer, then approves the exact visible Note through Telegram. */
+export async function notesJourney(harness: Harness): Promise<void> {
+  expect(
+    await harness.message(
+      "/note I've noticed that smaller releases make feedback easier to act on. One small decision is easier to understand and reverse than a big batch. Shape this into a brief Note.",
+    ),
+  ).toBe(200)
+  const review = await harness.until(() =>
+    harness.network.getState().telegramMessages.find((message) => {
+      const buttons = message.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
+      return buttons?.flat().some((button) => button.text === "Publish") ? message : undefined
+    }),
+  )
+  expect(review.text?.trim().length).toBeGreaterThan(0)
+  expect(harness.state.bufferWrites).toHaveLength(0)
+  expect(await harness.click(review, /^Publish$/, 90)).toBe(200)
+  await harness.waitStatus("notes")
+  expect(harness.state.bufferWrites).toHaveLength(1)
+  expect(harness.state.bufferWrites[0]).toMatchObject({
+    text: review.text,
+    mode: "shareNow",
+    saveToDraft: false,
+    needsApproval: false,
+  })
+  await harness.waitMessage(/^Sent to Buffer for publication/)
+  expect(harness.state.failures).toEqual([])
+}

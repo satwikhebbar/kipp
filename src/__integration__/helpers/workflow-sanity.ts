@@ -18,13 +18,17 @@ type Runtime = { dispatchFetch(url: string, init?: RequestInit): Promise<Respons
 
 // These controls and observers exist only in the test bundle, never in src/index.ts.
 const entry = `
-  import worker, { PipelineWorkflow, CalendarWorkflow, InteractionRouterDO, IdeaIngestDO, TokenVaultDO } from "./src/index.ts";
+  import worker, { PipelineWorkflow, CalendarWorkflow, InteractionRouterDO, IdeaIngestDO, TokenVaultDO, NotesWorkflow, BufferPublicationDO } from "./src/index.ts";
   import { createTokenVault } from "./src/core/token-vault-client.ts";
-  export { IdeaIngestDO, TokenVaultDO };
+  export { IdeaIngestDO, TokenVaultDO, BufferPublicationDO };
   export class ObservedRouter extends InteractionRouterDO {
     async fetch(request) {
       const registration = new URL(request.url).pathname === "/register" ? await request.clone().json() : null;
       const response = await super.fetch(request);
+      if (["/notes/resolve", "/notes/ack"].includes(new URL(request.url).pathname)) {
+        const check = await fetch("https://sanity.test/router-boundary", {method:"POST",body:JSON.stringify({path:new URL(request.url).pathname,response:await response.clone().json()})});
+        if (!check.ok) return new Response("Injected transport failure", {status:503});
+      }
       if (registration && response.ok) await fetch("https://sanity.test/registered", {method:"POST",body:JSON.stringify(registration)});
       return response;
     }
@@ -33,6 +37,25 @@ const entry = `
     async run(event, step) {
       await step.do("sanity-observe-start", () => fetch("https://sanity.test/started", {method:"POST",body:JSON.stringify({domain:"linkedin",id:event.instanceId})}).then(() => true));
       return super.run(event, step);
+    }
+  }
+  export class NotesProbe extends NotesWorkflow {
+    async run(event, step) {
+      await step.do("sanity-observe-start", () => fetch("https://sanity.test/started", {method:"POST",body:JSON.stringify({domain:"notes",id:event.instanceId})}).then(() => true));
+      const wrapped = new Proxy(step, {get(target, key) {
+        if (key !== "do") { const value = target[key]; return typeof value === "function" ? (...args) => target[key](...args) : value; }
+        return (name, ...args) => {
+          const operation = args.pop();
+          if (name !== "notes-submit") return target.do(name, ...args, operation);
+          return target.do(name, {retries:{limit:1,delay:"1 second"}}, async (...input) => {
+            const result = await operation(...input);
+            const response = await fetch("https://sanity.test/publication-checkpoint", {method:"POST",body:JSON.stringify({result})});
+            if (!response.ok) throw new Error("Injected lost publication checkpoint");
+            return result;
+          });
+        };
+      }});
+      return super.run(event, wrapped);
     }
   }
   export class CalendarProbe extends CalendarWorkflow {
@@ -48,10 +71,11 @@ const entry = `
         const result = await createTokenVault(env, provider).writeTokens({access_token:"synthetic-test-token",refresh_token:"synthetic-refresh",expires_in:86400,created_at:new Date().toISOString()});
         if (!result.ok) throw new Error("Could not seed synthetic tokens");
       }
+      await createTokenVault(env).replaceBufferGrant({accessToken:"synthetic-buffer-token",refreshToken:"synthetic-buffer-refresh",expiresAtMs:Date.now()+86400000,accountId:"buffer-account",scopes:["account:read","posts:read","posts:write","offline_access"]});
       return Response.json({ok:true});
     }
     if (url.pathname === "/__test/status") {
-      const binding = url.searchParams.get("domain") === "linkedin" ? env.PIPELINE_WORKFLOW : env.CALENDAR_WORKFLOW;
+      const binding = url.searchParams.get("domain") === "notes" ? env.NOTES_WORKFLOW : url.searchParams.get("domain") === "linkedin" ? env.PIPELINE_WORKFLOW : env.CALENDAR_WORKFLOW;
       return Response.json(await (await binding.get(url.searchParams.get("id"))).status());
     }
     return worker.fetch(request, env, ctx);
@@ -63,6 +87,9 @@ export async function createWorkflowSanity(options: {
   model?: ScriptedModel
   live?: { apiKey: string; model: string }
   timeZone?: string
+  bufferResult?: (input: WireBody) => WireBody
+  notesRouterFault?: "resolve" | "ack"
+  loseNotesSubmitCheckpoint?: boolean
   onProgress?: (event: { phase: "request" | "response"; call: number; outputTokens?: number }) => void
 }) {
   const require = createRequire(import.meta.url)
@@ -93,10 +120,13 @@ export async function createWorkflowSanity(options: {
     transcript: [] as Array<{ request: WireBody; response: WireBody }>,
     calendarWrites: [] as WireBody[],
     linkedinWrites: [] as WireBody[],
+    bufferWrites: [] as WireBody[],
     started: [] as Array<{ domain: string; id: string }>,
     registrations: [] as WireBody[],
     failures: [] as string[],
   }
+  let routerFaultInjected = false
+  let checkpointFaultInjected = false
   const nativeFetch = globalThis.fetch.bind(globalThis)
   const abort = new AbortController()
   const scenarioMs = options.live ? SANITY_LIMITS.scenarioMs : 20_000
@@ -131,17 +161,20 @@ export async function createWorkflowSanity(options: {
       NOTION_API_KEY: "synthetic",
       NOTION_IDEAS_DATA_SOURCE_ID: "test",
       LINKEDIN_AUTHOR_URN: "urn:li:person:synthetic",
+      BUFFER_SUBSTACK_CHANNEL_ID: "buffer-channel",
       TOKEN_ENCRYPTION_KEY_IDS: "sanity",
       TOKEN_ENCRYPTION_KEY_sanity: Buffer.alloc(32, 7).toString("base64url"),
     },
     workflows: {
       PIPELINE_WORKFLOW: { name: "sanity-linkedin", className: "LinkedInProbe" },
       CALENDAR_WORKFLOW: { name: "sanity-calendar", className: "CalendarProbe" },
+      NOTES_WORKFLOW: { name: "sanity-notes", className: "NotesProbe" },
     },
     durableObjects: {
       INTERACTION_ROUTER: { className: "ObservedRouter", useSQLite: true },
       IDEA_INGEST: { className: "IdeaIngestDO", useSQLite: true },
       TOKEN_VAULT: { className: "TokenVaultDO", useSQLite: true },
+      BUFFER_PUBLICATIONS: { className: "BufferPublicationDO", useSQLite: true },
     },
     outboundService: async (request: NodeRequest) => {
       try {
@@ -150,6 +183,26 @@ export async function createWorkflowSanity(options: {
         const url = new URL(request.url)
         const text = request.method === "GET" ? "" : await request.text()
         const body: WireBody = text ? JSON.parse(text) : {}
+        if (url.origin === "https://sanity.test" && url.pathname === "/publication-checkpoint") {
+          if (options.loseNotesSubmitCheckpoint && !checkpointFaultInjected) {
+            checkpointFaultInjected = true
+            return RuntimeResponse.json({}, { status: 503 })
+          }
+          return RuntimeResponse.json({ ok: true })
+        }
+        if (url.origin === "https://sanity.test" && url.pathname === "/router-boundary") {
+          const response = body.response as { event?: unknown }
+          if (
+            !routerFaultInjected &&
+            options.notesRouterFault &&
+            body.path === `/notes/${options.notesRouterFault}` &&
+            (options.notesRouterFault === "ack" || response.event)
+          ) {
+            routerFaultInjected = true
+            return RuntimeResponse.json({}, { status: 503 })
+          }
+          return RuntimeResponse.json({ ok: true })
+        }
         if (url.origin === "https://sanity.test" && url.pathname === "/started") {
           state.started.push(body as { domain: string; id: string })
           return RuntimeResponse.json({ ok: true })
@@ -194,6 +247,59 @@ export async function createWorkflowSanity(options: {
           if (choices?.some((choice) => choice.finish_reason === "length"))
             throw new Error("Model output was truncated by token limit")
           return RuntimeResponse.json(response)
+        }
+        if (url.origin === "https://api.buffer.com") {
+          const query = String(body.query)
+          if (query.includes("KippIdentity"))
+            return RuntimeResponse.json({
+              data: { account: { id: "buffer-account", organizations: [{ id: "buffer-org" }] } },
+            })
+          if (query.includes("KippChannels"))
+            return RuntimeResponse.json({
+              data: {
+                channels: [
+                  {
+                    id: "buffer-channel",
+                    organizationId: "buffer-org",
+                    service: "substack",
+                    name: "Test",
+                    allowedActions: ["scheduleUpdates"],
+                    isDisconnected: false,
+                    isLocked: false,
+                    isQueuePaused: false,
+                  },
+                ],
+              },
+            })
+          if (query.includes("KippCreatePost")) {
+            const input = (body.variables as { input: WireBody }).input
+            state.bufferWrites.push(input)
+            return RuntimeResponse.json(
+              options.bufferResult
+                ? options.bufferResult(input)
+                : {
+                    data: {
+                      createPost: {
+                        __typename: "PostActionSuccess",
+                        post: {
+                          id: "buffer-post",
+                          channelId: input.channelId,
+                          channelService: "substack",
+                          text: input.text,
+                          status: "sent",
+                          shareMode: "shareNow",
+                          schedulingType: "automatic",
+                          isCustomScheduled: false,
+                          sharedNow: true,
+                          externalLink: null,
+                          metadata: { linkAttachment: null },
+                        },
+                      },
+                    },
+                  },
+            )
+          }
+          throw new Error("Unexpected Buffer request")
         }
         if (url.origin === "https://www.googleapis.com") {
           if (url.pathname === "/calendar/v3/freeBusy" && request.method === "POST")

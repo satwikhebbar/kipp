@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { describe, it } from "vitest"
 import { createWorkflowSanity, SANITY_LIMITS } from "../__integration__/helpers/workflow-sanity"
-import { calendarJourney, linkedInJourney } from "../__integration__/helpers/workflow-sanity-scenarios"
+import { calendarJourney, linkedInJourney, notesJourney } from "../__integration__/helpers/workflow-sanity-scenarios"
 import { resolveModel } from "../providers"
 
 const enabled = process.env.WORKFLOW_SANITY_LIVE === "1"
@@ -13,6 +13,7 @@ describe.skipIf(!enabled)("live LLM webhook workflow sanity", () => {
   for (const [name, journey] of [
     ["linkedin", linkedInJourney],
     ["calendar", calendarJourney],
+    ["notes", notesJourney],
   ] as const) {
     it(
       name,

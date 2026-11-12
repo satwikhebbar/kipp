@@ -20,7 +20,9 @@ import { handleTokenCheckCron } from "./triggers/token-check"
 export { IdeaIngestDO } from "./core/idea-ingest"
 export { InteractionRouterDO } from "./core/interaction-router"
 export { TokenVaultDO } from "./core/token-vault"
+export { BufferPublicationDO } from "./integrations/buffer/publication"
 export { PipelineWorkflow } from "./linkedin/workflow"
+export { NotesWorkflow } from "./notes/workflow"
 export { CalendarWorkflow, MealPlanningWorkflow }
 
 const app = new Hono<{ Bindings: Env }>()

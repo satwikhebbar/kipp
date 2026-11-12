@@ -504,4 +504,4 @@ src/
 
 MIT
 
-Buffer account connection and manual Substack channel configuration are documented in [Buffer setup](docs/buffer-setup.md). The Notes workflow is being implemented in phases.
+Buffer account connection and manual Substack channel configuration are documented in [Buffer setup](docs/buffer-setup.md). The Notes workflow is being implemented in phases. The current, unreleased slice supports `/note <raw thoughts>`, text-only drafting and review, and exact Publish approval for immediate Buffer submission. Links, queueing and scheduling follow in later phases. Automated webhook sanity tests use simulated account APIs; an opt-in bounded real-LLM Notes scenario is also available.

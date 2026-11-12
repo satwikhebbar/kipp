@@ -1,6 +1,8 @@
 export interface Env {
   PIPELINE_WORKFLOW: Workflow
   CALENDAR_WORKFLOW?: Workflow
+  NOTES_WORKFLOW?: Workflow
+  BUFFER_PUBLICATIONS?: DurableObjectNamespace
   MEAL_PLANNING_WORKFLOW?: Workflow
   MEAL_PLANNING_DB?: D1Database
   /** Public HTTPS origin for the authenticated Telegram meal-plan Mini App. */
@@ -123,6 +125,9 @@ export interface WorkflowEvent {
 }
 
 export const INTERACTION_KIND = {
+  NOTES_PUBLISH: "notes-publish",
+  NOTES_REVISE: "notes-revise",
+  NOTES_FEEDBACK: "notes-feedback",
   APPROVE: "approve",
   REVISE: "revise",
   REVISION_FEEDBACK: "revision-feedback",

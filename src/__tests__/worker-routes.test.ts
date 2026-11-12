@@ -7,6 +7,7 @@ import { handleAuthCallback, handleAuthStart } from "../triggers/linkedin-auth"
 vi.mock("../linkedin/workflow", () => ({ PipelineWorkflow: class {} }))
 vi.mock("../calendar/workflow", () => ({ CalendarWorkflow: class {} }))
 vi.mock("../meal-planning/workflow", () => ({ MealPlanningWorkflow: class {} }))
+vi.mock("../notes/workflow", () => ({ NotesWorkflow: class {} }))
 
 import worker from "../index"
 
