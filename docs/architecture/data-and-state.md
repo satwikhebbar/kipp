@@ -40,7 +40,7 @@ flowchart LR
 | Optional private GitHub repository | `style-prompt.md` or a configured prompt path | Supplies a custom LinkedIn style prompt through the Contents API; Kipp falls back to its built-in prompt when unavailable. |
 | `IdeaIngestDO` SQLite | Idempotency-key ownership records; per-page workflow-start state and repair cooldown | Prevents duplicate Notion pages and workflow starts across Telegram, RSS, and cadence entry points. |
 | RSS article model (transient) | Normalized title, optional subtitle, source URL, and ordered H2-section content produced from RSS `content:encoded` | Exists only during the RSS trigger and bounded extraction session; raw HTML is not persisted or sent to the agent. |
-| `TokenVaultDO` SQLite | Short-lived OAuth state; provider-namespaced encrypted LinkedIn and Google Calendar tokens | OAuth state expires after five minutes. Tokens use AES-256-GCM and configured key IDs and can be rewrapped during rotation. |
+| `TokenVaultDO` SQLite | Short-lived OAuth state; provider-namespaced encrypted LinkedIn and Google Calendar tokens; Buffer grant, PKCE verifier, credential generation, connection identity, and refresh claim (implemented; awaiting release) | OAuth state expires after five minutes. Tokens use AES-256-GCM and configured key IDs and can be rewrapped during rotation. Only Buffer refresh is coordinated inside the vault; see the policy below. |
 | `InteractionRouterDO` SQLite | Opaque callback or reply registration, workflow target, interaction kind, version, expiry, and delivery state | Contains no request prose or credentials. Entries are claimed idempotently and expire after the owning interaction window. |
 | `PipelineWorkflow` state | LinkedIn agent transcript, review version, approval or revision events, usage, and step results | Durable across the configured feedback wait. Transcript output is bounded before persistence. |
 | `CalendarWorkflow` state | Bounded safe transcript, versioned plan/option ledger, exact evaluated plans, created-event baseline, and interaction events | Exists for the 15-minute Calendar conversation. Provider reasoning is removed; obsolete event-list results are compacted; IDs expire and are single-use. |
@@ -52,6 +52,27 @@ the interaction router. The model can see only user text and the narrow event
 projection explicitly returned by `list_calendar_events`; descriptions,
 locations, attendees, organizers, conferencing data, links, credentials, and
 raw provider responses remain outside model context and content logs.
+
+## Provider refresh ownership
+
+Buffer is a deliberate exception to the existing token-storage boundary. Its
+vault-owned refresh persists a claim before contacting Buffer and saves both
+replacement tokens before returning access. Overlapping callers share the live
+refresh inside the same vault instance. The claim survives a restart; an
+unresolved claim requires reauthorization rather than reuse of a potentially
+consumed refresh token. Credential generations prevent a late refresh response
+from overwriting a newer authorization.
+
+LinkedIn and Calendar continue to use the vault for encrypted storage, without
+coordinated refresh: LinkedIn's scheduled token check owns its refresh, and the
+Google Calendar API client refreshes during requests. Shared storage alone does
+not serialize either provider's complete read-refresh-write operation.
+
+Do not extend coordinated refresh to LinkedIn or Calendar until concurrent
+workflows are explicitly supported and that extension is explicitly approved.
+Buffer's protection does not enable concurrent Telegram feedback conversations.
+The rationale and release status are recorded in
+[ADR-003](decisions/ADR-003-buffer-only-coordinated-refresh.md).
 
 ## LinkedIn idea lifecycle
 

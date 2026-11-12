@@ -291,3 +291,37 @@ The weekly token check refreshes LinkedIn credentials when possible or alerts
 the allowed Telegram user when reconnection is required. Calendar refreshes an
 expired access token during a request and offers deterministic reconnect/retry
 recovery when authorization is no longer usable.
+
+### Buffer-only coordinated refresh
+
+The Buffer connection implementation is awaiting release. Unlike LinkedIn and
+Calendar, it acquires usable access through a vault-owned refresh operation.
+
+```mermaid
+sequenceDiagram
+  participant C as Buffer caller
+  participant V as TokenVaultDO
+  participant S as Vault SQLite storage
+  participant B as Buffer token endpoint
+
+  C->>V: acquire Buffer access
+  Note over C,V: Overlapping callers await the same live refresh inside the vault
+  V->>S: persist claim for current credential generation
+  S-->>V: storage write completes
+  V->>B: exchange refresh token once
+  B-->>V: replacement access and refresh tokens
+  V->>S: verify generation and claim; save replacement pair without claim
+  S-->>V: storage write completes
+  V-->>C: return usable access
+```
+
+A usable unexpired token returns without a refresh. An unresolved claim after
+restart or an uncertain exchange requires reconnection; the old refresh token
+is not retried. A newer authorization fences late refresh results.
+
+This is a Buffer-specific credential safeguard, independent of the unsupported
+concurrent Telegram feedback capability. LinkedIn and Calendar retain their
+existing refresh paths without coordination. Extending coordination to them is
+deferred until concurrent workflows are explicitly supported and the extension
+is explicitly approved. See
+[ADR-003](decisions/ADR-003-buffer-only-coordinated-refresh.md).

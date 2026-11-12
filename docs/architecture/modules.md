@@ -90,7 +90,7 @@ flowchart LR
 | `core/interaction-router.ts` + `core/interaction-router-client.ts` | Stores and resolves short-lived opaque Telegram interactions with idempotent claim/acknowledgement and expiry. | Durable Object SQLite |
 | `integrations/` | Implements Notion, GitHub, Telegram, LinkedIn, and Google Calendar API clients. | External APIs |
 | `linkedin/prompts/` | Resolves the style prompt from optional GitHub content with a built-in fallback. | GitHub integration |
-| `core/token-vault.ts` + `core/token-vault-client.ts` + `core/crypto.ts` | Stores short-lived OAuth state and provider-namespaced encrypted LinkedIn/Calendar tokens, including refresh and key rewrapping. | Durable Object SQLite, Web Crypto |
+| `core/token-vault.ts` + `core/token-vault-client.ts` + `core/crypto.ts` | Stores short-lived OAuth state and encrypted provider tokens; owns key rewrapping and Buffer-only coordinated refresh (implemented; awaiting release). LinkedIn's scheduled check and Calendar's API client retain refresh ownership outside the vault. See [ADR-003](decisions/ADR-003-buffer-only-coordinated-refresh.md). | Durable Object SQLite, Web Crypto; Buffer token endpoint for Buffer refresh only |
 | `core/conversation.ts` | Preserves serializable LinkedIn transcript state and enforces Workflow output limits. | Provider message types |
 
 `types.ts` supplies shared data contracts. Tests are consumers of these modules,

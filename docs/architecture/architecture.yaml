@@ -67,9 +67,18 @@ runtime_components:
     owns:
       - OAuth state and expiry cleanup
       - provider-namespaced encrypted LinkedIn and Google Calendar token storage
+      - Buffer encrypted grant and PKCE state storage (implemented; awaiting release)
+      - Buffer-only coordinated rotating refresh with durable claims and credential generation fencing
       - token key rewrapping
+    refresh_policy:
+      decision: docs/architecture/decisions/ADR-003-buffer-only-coordinated-refresh.md
+      buffer: Vault-owned refresh; overlapping callers share one operation; interrupted refresh requires reauthorization.
+      linkedin: Existing scheduled token check refreshes outside the vault; no coordinated refresh.
+      google_calendar: Existing API client refreshes outside the vault; no coordinated refresh.
+      scope: Do not add LinkedIn or Calendar refresh coordination until concurrent workflows are explicitly supported and the extension is explicitly approved.
     depends_on:
       - crypto
+      - Buffer OAuth token endpoint (Buffer refresh only; awaiting release)
   interaction_router:
     implementation: src/core/interaction-router.ts
     type: Cloudflare Durable Object with SQLite storage
@@ -225,6 +234,7 @@ data_stores:
     data:
       - provider-namespaced encrypted LinkedIn and Google Calendar OAuth tokens
       - short-lived OAuth state records
+      - Buffer encrypted grant, credential generation, connection identity, and refresh claim (implemented; awaiting release)
     owner: token_vault
   interaction_router_storage:
     type: Durable Object SQLite storage
