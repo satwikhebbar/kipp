@@ -2,11 +2,10 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { describe, it } from "vitest"
 import { createWorkflowSanity, SANITY_LIMITS } from "../__integration__/helpers/workflow-sanity"
 import { calendarJourney, linkedInJourney, notesJourney } from "../__integration__/helpers/workflow-sanity-scenarios"
+import { NOTES_MODEL, NOTES_PROVIDER } from "../agent/notes"
 import { resolveModel } from "../providers"
 
 const enabled = process.env.WORKFLOW_SANITY_LIVE === "1"
-const apiKey = process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY ?? ""
-const model = resolveModel("deepseek", process.env.SANITY_MODEL)
 const CLEANUP_ALLOWANCE_MS = 15_000
 
 describe.skipIf(!enabled)("live LLM webhook workflow sanity", () => {
@@ -18,10 +17,19 @@ describe.skipIf(!enabled)("live LLM webhook workflow sanity", () => {
     it(
       name,
       async () => {
-        if (!apiKey) throw new Error("Set DEEPSEEK_API_KEY or LLM_API_KEY to run live workflow sanity")
+        const provider = name === "notes" ? NOTES_PROVIDER : "deepseek"
+        const model = name === "notes" ? NOTES_MODEL : resolveModel(provider, process.env.SANITY_MODEL)
+        const apiKey =
+          name === "notes" ? process.env.OPENROUTER_API_KEY : (process.env.DEEPSEEK_API_KEY ?? process.env.LLM_API_KEY)
+        if (!apiKey)
+          throw new Error(
+            name === "notes"
+              ? "Set OPENROUTER_API_KEY for Notes sanity"
+              : "Set DEEPSEEK_API_KEY or LLM_API_KEY to run live workflow sanity",
+          )
         console.log(JSON.stringify({ scenario: name, phase: "starting-runtime" }))
         const harness = await createWorkflowSanity({
-          live: { apiKey, model },
+          live: { apiKey, model, provider },
           onProgress: (event) => console.log(JSON.stringify({ scenario: name, model, ...event })),
         })
         try {

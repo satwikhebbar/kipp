@@ -12,6 +12,7 @@ it("exposes only a review handoff, separates commentary, and uses the configured
   expect(result.draft).toEqual({ commentary: "Why this hook.", text: "Exact *Note*." })
   expect(messages[0]).toMatchObject({ text: expect.stringContaining("Audience: builders.") })
   expect(generate.mock.calls[0][0].tools.map((tool: { name: string }) => tool.name)).toEqual(["submit_note"])
+  expect(generate.mock.calls[0][0].reasoning).toBe("disabled")
   expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 20 })
 })
 

@@ -5,6 +5,11 @@ Buffer configuration. The implemented Phase 3 slice adds immediate text-only
 `/note` drafting, exact approval and guarded Buffer submission. It awaits release;
 links, clarification, queueing, scheduled posting and repair/Retry remain later phases.
 
+Notes drafting uses `openai/gpt-6-luna` through the existing OpenRouter client
+and `OPENROUTER_API_KEY`, like the meal planner. Its pinned model is independent
+of the shared `LLM_PROVIDER`/`LLM_MODEL` settings used by LinkedIn and Calendar.
+Reasoning is disabled for this Chat Completions function-calling path.
+
 1. Connect the desired Substack account inside Buffer. Kipp authorization does
    not create or repair Buffer’s connection to Substack.
 2. Register a server-side Buffer OAuth app with the exact callback

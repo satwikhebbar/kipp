@@ -5,6 +5,9 @@ import { persistableAgentMessages } from "../runtime/agent-session"
 import { runTools } from "../runtime/tool-runner"
 import type { ToolRegistry } from "../runtime/tools"
 
+export const NOTES_PROVIDER = "openrouter"
+export const NOTES_MODEL = "openai/gpt-6-luna"
+
 export const DEFAULT_NOTES_PROMPT = `Write a brief Substack Note around one clear idea from the author's thoughts.
 Audience: thoughtful readers interested in the author's observations and practical insights.
 Voice: direct, natural and specific. Preserve the author's meaning and uncertainty. Avoid generic hooks, inflated claims, hashtags and invented personal experiences or facts.
@@ -53,7 +56,7 @@ export async function runNotesSession(provider: ToolProviderClient, messages: To
   const result = await runTools(
     provider,
     registry,
-    { allowedTools: [TOOL], handoffTools: [TOOL], requireHandoff: true },
+    { allowedTools: [TOOL], handoffTools: [TOOL], requireHandoff: true, reasoning: "disabled" },
     messages,
   )
   const persisted = persistableAgentMessages(result.messages)

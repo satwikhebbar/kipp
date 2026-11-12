@@ -56,6 +56,7 @@ it("takes authenticated /note through exact approval and immediate Buffer accept
     expect(await h.message("/note Small releases keep feedback useful.")).toBe(200)
     const review = await h.waitMessage(/^A small release/)
     expect(review.text).toBe(NOTE)
+    expect(h.state.transcript[0].request).toMatchObject({ model: "openai/gpt-6-luna", reasoning: { effort: "none" } })
     const messages = h.network.getState().telegramMessages
     expect(messages.map((m) => m.text).slice(-3)).toEqual([
       "One concrete idea, in the author's voice.",

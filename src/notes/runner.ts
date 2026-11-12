@@ -1,5 +1,12 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
-import { createNotesConversation, DEFAULT_NOTES_PROMPT, type NotesDraft, runNotesSession } from "../agent/notes"
+import {
+  createNotesConversation,
+  DEFAULT_NOTES_PROMPT,
+  NOTES_MODEL,
+  NOTES_PROVIDER,
+  type NotesDraft,
+  runNotesSession,
+} from "../agent/notes"
 import { assertStepOutputSize } from "../core/conversation"
 import { remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../core/feedback-session"
 import { createInteractionRouter } from "../core/interaction-router-client"
@@ -10,7 +17,7 @@ import { discoverBufferDestination } from "../integrations/buffer/client"
 import { createBufferPublication } from "../integrations/buffer/publication"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
-import { createToolProvider, resolveModel, type ToolConversationMessage } from "../providers"
+import { createToolProvider, type ToolConversationMessage } from "../providers"
 import { logRuntime } from "../runtime/logging"
 import { resolvePrompt } from "../writing/prompt-resolver"
 import { authorizedNotesEvent, fingerprintCommand, splitNote } from "./review"
@@ -68,8 +75,8 @@ export async function runNotesWorkflow(
         ready: true as const,
         destination,
         prompt,
-        provider: env.LLM_PROVIDER,
-        model: resolveModel(env.LLM_PROVIDER, env.LLM_MODEL),
+        provider: NOTES_PROVIDER,
+        model: NOTES_MODEL,
         timeZone: env.TIMEZONE ?? null,
         deadlineMs: resolveFeedbackDeadline(p.receivedAtMs, env.WAIT_FOR_FEEDBACK_HOURS),
       }
@@ -102,7 +109,7 @@ export async function runNotesWorkflow(
         try {
           const result = await runNotesSession(
             createToolProvider(
-              env.LLM_API_KEY,
+              env.OPENROUTER_API_KEY,
               snapshot.provider,
               snapshot.model,
               Number(env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
