@@ -25,7 +25,8 @@ unit tests remain in place for expiry, authorization, stale actions and recovery
 
 The separate, opt-in contract suite reuses the LinkedIn and Calendar journeys
 with real DeepSeek, and the Notes journey with GPT-6 Luna through OpenRouter.
-External account APIs remain intercepted.
+External account APIs remain intercepted. Notes covers necessary clarification,
+a prose revision that retains the first embedded card, and exact publication approval.
 It evaluates workflow behavior and payloads, rather than exact prose or editorial
 quality. It does not use an LLM to play the user: user replies are scripted, and
 button values come from actual captured Telegram messages.

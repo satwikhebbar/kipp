@@ -5,7 +5,15 @@
 An authenticated `/note <thoughts>` starts one deterministic Workflow instance
 per Telegram chat/message. The run snapshots the writing prompt, model,
 destination identity and feedback deadline, then uses the shared bounded tool
-runtime to produce commentary and exact Note text. Telegram displays commentary,
+runtime to produce a necessary clarification or commentary and exact Note text.
+The first HTTP(S) URL is parsed from original text and Telegram entities, then
+carried separately as one card. Prose revisions preserve it; explicit feedback
+can replace it from the reply’s first URL or remove it. Clarification has no
+Publish action. Initial drafting, clarification and revisions share five writing
+sessions and the original deadline. Failed bounded writing sessions throw from
+the writing step, using the same default Workflow retries as LinkedIn without
+spending another review round. After exhausted retries, recovery preserves the
+latest valid draft or reports failure if none exists. Telegram displays commentary,
 timing and the literal Note in that order. Publish authority is an opaque action
 bound to the owner, chat, workflow, candidate version, fingerprint and deadline.
 Writing feedback and model output cannot authorize publication.
@@ -39,8 +47,7 @@ reuse the retained event. The Workflow rejects stale or duplicate events. A
 publication with an existing dispatch claim never acquires another send lease;
 replay returns its durable evidence. Only an incomplete result with a captured
 post ID permits one bounded lookup of that ID. There is no downstream delivery
-polling or inspection-and-retry interaction. Links, clarification, queueing,
-exact-time scheduling and explicit repair/Retry are later implementation phases.
+polling or inspection-and-retry interaction. Queueing, exact-time scheduling and explicit repair/Retry are later implementation phases.
 
 The Notes transport extension leaves existing provider refresh ownership intact:
 Buffer alone uses vault-coordinated refresh under

@@ -129,7 +129,7 @@ export class NotesRouter {
       chatId: input.chatId,
       telegramUpdateId: input.telegramUpdateId,
       receivedAtMs: input.receivedAtMs,
-      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.text !== undefined ? { text: input.text, firstUrl: input.firstUrl ?? null } : {}),
     })
     // No asynchronous operation can interleave consumption and retention.
     this.storage.sql.exec(

@@ -39,6 +39,7 @@ const event = {
 describe("Notes review authority", () => {
   it("fingerprints exact text and destination independently of property insertion order", async () => {
     const original = await fingerprintCommand(noteCommand)
+    expect(await fingerprintCommand({ ...noteCommand, attachmentUrl: "https://example.com" })).not.toBe(original)
     expect(await fingerprintCommand({ ...noteCommand, text: `${noteCommand.text} ` })).not.toBe(original)
     for (const field of ["accountId", "connectionId", "organizationId", "channelId"] as const)
       expect(
@@ -72,8 +73,9 @@ describe("Notes review authority", () => {
     expect(chunks.every((chunk) => chunk.length <= 4000)).toBe(true)
     expect(chunks[1].startsWith("😀")).toBe(true)
   })
-  it("does not silently accept later-phase links or timing commands", () => {
-    expect(commandSchema.safeParse({ ...noteCommand, attachmentUrl: "https://example.com" }).success).toBe(false)
+  it("accepts a single HTTP(S) card but rejects unsafe links and later-phase timing", () => {
+    expect(commandSchema.safeParse({ ...noteCommand, attachmentUrl: "https://example.com" }).success).toBe(true)
+    expect(commandSchema.safeParse({ ...noteCommand, attachmentUrl: "javascript:alert(1)" }).success).toBe(false)
     expect(commandSchema.safeParse({ ...noteCommand, timing: { kind: "queue" } }).success).toBe(false)
     expect(commandSchema.safeParse({ ...noteCommand, timing: { kind: "now", dueAt: "later" } }).success).toBe(false)
   })

@@ -8,6 +8,7 @@ import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integration
 import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
 import { MEAL_HELP, MEAL_PLAN_ENDED, MEAL_PLAN_GENERATING, MEAL_STALE_PLAN } from "../meal-planning/messages"
 import { createMealPlanningStore } from "../meal-planning/store"
+import { firstNoteUrl } from "../notes/links"
 import type { NotesWorkflowParams } from "../notes/types"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
@@ -23,6 +24,7 @@ interface TelegramMessageEntity {
   type: string
   offset: number
   length: number
+  url?: string
 }
 
 interface TelegramUser {
@@ -199,6 +201,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         {
           telegramUpdateId: msg.message_id,
           notesUpdateId: updateId,
+          firstUrl: firstNoteUrl(msg.text ?? "", msg.entities),
           messageId: msg.message_id,
           replyToMessageId: msg.reply_to_message.message_id,
           text: msg.text,
@@ -225,6 +228,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         chatId: String(msg.chat.id),
         userId: String(msg.from.id),
         requestText: command.argument,
+        firstUrl: firstNoteUrl(msg.text ?? "", msg.entities),
         telegramMessageId: msg.message_id,
         receivedAtMs: Date.now(),
       }
@@ -342,6 +346,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         {
           telegramUpdateId: msg.message_id,
           notesUpdateId: updateId,
+          firstUrl: firstNoteUrl(msg.text ?? "", msg.entities),
           messageId: msg.message_id,
           text,
         },
@@ -406,6 +411,7 @@ async function dispatchRoutedInteraction(
   userId: number,
   input: {
     telegramUpdateId: number
+    firstUrl?: string | null
     notesUpdateId?: number
     messageId?: number
     callbackToken?: string

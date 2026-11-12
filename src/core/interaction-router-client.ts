@@ -24,6 +24,7 @@ export interface RoutedInteraction extends WorkflowInteraction {
 }
 
 export interface InteractionResolveInput {
+  firstUrl?: string | null
   telegramUpdateId: number
   callbackToken?: string
   replyToMessageId?: number

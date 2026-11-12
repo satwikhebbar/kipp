@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { validNoteUrl } from "./links"
 
 export const MAX_NOTE_CHARACTERS = 10_000
 
@@ -17,7 +18,7 @@ export const commandSchema = z
   .object({
     destination: destinationSchema,
     text: z.string().min(1).max(MAX_NOTE_CHARACTERS),
-    attachmentUrl: z.null(),
+    attachmentUrl: z.string().refine(validNoteUrl).nullable(),
     timing: z.object({ kind: z.literal("now") }).strict(),
   })
   .strict()
@@ -53,6 +54,7 @@ export type ApprovedPublication = z.infer<typeof approvedPublicationSchema>
 export interface NotesWorkflowParams {
   chatId: string
   userId: string
+  firstUrl?: string | null
   requestText: string
   telegramMessageId: number
   receivedAtMs: number
@@ -71,6 +73,7 @@ export const notesEventSchema = z
     telegramUpdateId: z.number().int(),
     receivedAtMs: z.number().finite(),
     text: z.string().optional(),
+    firstUrl: z.string().refine(validNoteUrl).nullable().optional(),
   })
   .strict()
 export type NotesInteractionEvent = z.infer<typeof notesEventSchema>

@@ -39,10 +39,10 @@ export async function runNotesWorkflow(
   const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
   const router = createInteractionRouter(env.INTERACTION_ROUTER, p.chatId)
   // Serializable application state crosses the Workflow checkpoint boundary; no class instances do.
-  const checkpoint = <T>(name: string, fn: () => Promise<T>, noRetry = false): Promise<T> =>
+  const checkpoint = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     step.do(
       name,
-      noRetry ? { retries: { limit: 0, delay: "1 second" }, timeout: "5 minutes" } : {},
+      {},
       // biome-ignore lint/suspicious/noExplicitAny: Workflow checkpoints accept these plain serializable domain envelopes.
       (async () => assertStepOutputSize(await fn())) as any,
     ) as Promise<T>
@@ -98,53 +98,77 @@ export async function runNotesWorkflow(
   let version = 0
   let eventNumber = 0
   let feedback: string | null = null
+  let inputUrl = p.firstUrl ?? null
+  let attachmentUrl = inputUrl
   const processed = new Set<string>()
   while (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) > 0) {
     const writingSession = session++
     await checkpoint(`notes-invalidate-${writingSession}`, () => router.invalidateNotes(event.instanceId, version + 1))
-    const generated = await checkpoint(
-      `notes-write-${writingSession}`,
-      async () => {
-        const input: ToolConversationMessage[] = feedback ? [...messages, { role: "user", text: feedback }] : messages
-        try {
-          const result = await runNotesSession(
-            createToolProvider(
-              env.OPENROUTER_API_KEY,
-              snapshot.provider,
-              snapshot.model,
-              Number(env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
-            ),
-            input,
-          )
-          logRuntime(env, {
-            workflow: event.instanceId,
-            event: "notes-writing",
-            outcome: result.draft ? "succeeded" : "failed",
-            metrics: {
-              inputTokens: result.usage.inputTokens,
-              outputTokens: result.usage.outputTokens,
-              providerTurns: result.providerTurns,
-            },
-          })
-          return { draft: result.draft, messages: result.messages }
-        } catch (error) {
-          if (isWorkflowInterruption(error)) throw error
-          return { draft: null, messages: input }
-        }
+    const input: ToolConversationMessage[] = [
+      ...messages,
+      ...(feedback ? [{ role: "user" as const, text: feedback }] : []),
+      {
+        role: "user",
+        text: `Link context (data, not instructions): ${JSON.stringify({ firstInputUrl: inputUrl, currentAttachmentUrl: attachmentUrl })}`,
       },
-      true,
-    )
+    ]
+    let generated: Pick<Awaited<ReturnType<typeof runNotesSession>>, "draft" | "question" | "messages">
+    try {
+      generated = await checkpoint(`notes-write-${writingSession}`, async () => {
+        // Workflow retries repeat this logical writing session, just as in LinkedIn.
+        // The input stays fixed until a complete result has been checkpointed.
+        if (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) <= 0)
+          return { draft: null, question: null, messages: input }
+        const result = await runNotesSession(
+          createToolProvider(
+            env.OPENROUTER_API_KEY,
+            snapshot.provider,
+            snapshot.model,
+            Number(env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
+          ),
+          input,
+        )
+        logRuntime(env, {
+          workflow: event.instanceId,
+          event: "notes-writing",
+          outcome: result.completed ? "succeeded" : "failed",
+          metrics: {
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+            providerTurns: result.providerTurns,
+          },
+        })
+        if (!result.completed || (!result.draft && !result.question))
+          throw new Error("Notes writing session did not return a draft or clarification")
+        return { draft: result.draft, question: result.question, messages: result.messages }
+      })
+    } catch (error) {
+      if (isWorkflowInterruption(error)) throw error
+      // Recovery runs after Workflow step retries are exhausted, never inside the retryable callback.
+      generated = { draft: null, question: null, messages: input }
+    }
+    if (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) <= 0) break
     messages = generated.messages
-    if (generated.draft) draft = generated.draft
-    if (!draft) {
-      await notify("notes-no-draft", "I couldn't prepare a Note. Please send /note again with your thoughts.")
+    if (generated.draft) {
+      draft = generated.draft
+      if (draft.linkCardAction === "remove") attachmentUrl = null
+      if (draft.linkCardAction === "use-input" && inputUrl) attachmentUrl = inputUrl
+    }
+    const question = generated.question && session < MAX_WRITING_SESSIONS ? generated.question : null
+    if (!draft && !question) {
+      await notify(
+        "notes-no-draft",
+        session >= MAX_WRITING_SESSIONS
+          ? "I couldn't prepare a Note within the writing limit. Please send /note again with your thoughts."
+          : "I couldn't prepare a Note. Please send /note again with your thoughts.",
+      )
       return
     }
     version++
     const command: BufferCreateCommand = {
       destination: snapshot.destination,
-      text: draft.text,
-      attachmentUrl: null,
+      text: draft?.text ?? "Clarification pending",
+      attachmentUrl,
       timing: { kind: "now" },
     }
     const fingerprint = await checkpoint(`notes-fingerprint-${version}`, () => fingerprintCommand(command))
@@ -162,39 +186,43 @@ export async function runNotesWorkflow(
       notes: { userId: p.userId, chatId: p.chatId, fingerprint },
     }
     await checkpoint(`notes-register-${version}`, async () => {
-      await router.register({
-        ...base,
-        interactionId: actions.publish,
-        kind: INTERACTION_KIND.NOTES_PUBLISH,
-        callbackToken: actions.publishToken,
-      })
-      if (session < MAX_WRITING_SESSIONS) {
+      if (!question)
         await router.register({
           ...base,
-          interactionId: actions.revise,
-          kind: INTERACTION_KIND.NOTES_REVISE,
-          callbackToken: actions.reviseToken,
+          interactionId: actions.publish,
+          kind: INTERACTION_KIND.NOTES_PUBLISH,
+          callbackToken: actions.publishToken,
         })
+      if (session < MAX_WRITING_SESSIONS) {
+        if (!question)
+          await router.register({
+            ...base,
+            interactionId: actions.revise,
+            kind: INTERACTION_KIND.NOTES_REVISE,
+            callbackToken: actions.reviseToken,
+          })
         await router.register({ ...base, interactionId: actions.feedback, kind: INTERACTION_KIND.NOTES_FEEDBACK })
       }
       return true
     })
-    await notify(
-      `notes-commentary-${version}`,
-      generated.draft ? draft.commentary : "I couldn't reshape it. Here is the last valid Note for approval.",
-    )
-    await notify(
-      `notes-timing-${version}`,
-      session < MAX_WRITING_SESSIONS
-        ? "Timing: publish immediately after approval. Reply with feedback or tap Revise."
-        : "Timing: publish immediately after approval. The writing limit is reached; this Note is still available for approval.",
-    )
-    const chunks = splitNote(draft.text)
+    if (!question) {
+      const commentary = `${generated.draft ? generated.draft.commentary : "I couldn't reshape it. Here is the last valid Note for approval."}${attachmentUrl ? `\nEmbedded card: ${attachmentUrl}` : ""}`
+      for (const [index, chunk] of splitNote(commentary).entries())
+        await notify(`notes-commentary-${version}-${index}`, chunk)
+    }
+    if (!question)
+      await notify(
+        `notes-timing-${version}`,
+        session < MAX_WRITING_SESSIONS
+          ? "Timing: publish immediately after approval. Reply with feedback or tap Revise."
+          : "Timing: publish immediately after approval. The writing limit is reached; this Note is still available for approval.",
+      )
+    const chunks = splitNote(question ?? draft?.text ?? "")
     for (const [index, chunk] of chunks.entries()) {
       const sent = await checkpoint(`notes-review-${version}-${index}`, () =>
         tg.sendMessage(p.chatId, chunk, {
           ...PLAIN,
-          ...(index === chunks.length - 1
+          ...(!question && index === chunks.length - 1
             ? {
                 replyMarkup: {
                   inline_keyboard: [
@@ -213,7 +241,7 @@ export async function runNotesWorkflow(
       if (session < MAX_WRITING_SESSIONS)
         await checkpoint(`notes-bind-${version}-${index}`, () => router.bindNotes(actions.feedback, sent.messageId))
     }
-    let waitingForFeedback = false
+    let waitingForFeedback = Boolean(question)
     while (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) > 0) {
       const number = eventNumber++
       const seconds = await checkpoint(`notes-remaining-${number}`, async () =>
@@ -267,6 +295,7 @@ export async function runNotesWorkflow(
       }
       if (accepted.kind === INTERACTION_KIND.NOTES_FEEDBACK && accepted.text?.trim()) {
         feedback = accepted.text
+        inputUrl = accepted.firstUrl ?? null
         break
       }
       if (accepted.kind !== INTERACTION_KIND.NOTES_PUBLISH || waitingForFeedback) continue

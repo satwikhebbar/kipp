@@ -9,9 +9,12 @@ it("exposes only a review handoff, separates commentary, and uses the configured
   }))
   const messages = createNotesConversation("Audience: builders. Voice: plain.", "Small steps teach us faster.")
   const result = await runNotesSession({ generate } as ToolProviderClient, messages)
-  expect(result.draft).toEqual({ commentary: "Why this hook.", text: "Exact *Note*." })
+  expect(result.draft).toEqual({ commentary: "Why this hook.", text: "Exact *Note*.", linkCardAction: "keep" })
   expect(messages[0]).toMatchObject({ text: expect.stringContaining("Audience: builders.") })
-  expect(generate.mock.calls[0][0].tools.map((tool: { name: string }) => tool.name)).toEqual(["submit_note"])
+  expect(generate.mock.calls[0][0].tools.map((tool: { name: string }) => tool.name)).toEqual([
+    "submit_note",
+    "ask_note_question",
+  ])
   expect(generate.mock.calls[0][0].reasoning).toBe("disabled")
   expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 20 })
 })
@@ -30,4 +33,36 @@ it("rejects oversized transcripts before provider dispatch", async () => {
     "transcript limit",
   )
   expect(generate).not.toHaveBeenCalled()
+})
+
+it("hands off a necessary clarification without creating a draft", async () => {
+  const result = await runNotesSession(
+    {
+      generate: async () => ({
+        toolCalls: [{ id: "q", name: "ask_note_question", input: { question: "Which experiment do you mean?" } }],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+    },
+    createNotesConversation("plain", "That experiment"),
+  )
+  expect(result.question).toBe("Which experiment do you mean?")
+  expect(result.draft).toBeNull()
+  expect(result.completed).toBe(true)
+})
+
+it("names the link card action explicitly and leaves timing extraction to a later phase", async () => {
+  const messages = createNotesConversation("plain", "thoughts")
+  expect(messages[0]).toMatchObject({ text: expect.stringContaining("linkCardAction controls the embedded link card") })
+  expect(messages[0]).not.toMatchObject({ text: expect.stringContaining("ask them to confirm immediate publication") })
+  const generate = vi.fn(async () => ({
+    toolCalls: [
+      {
+        id: "1",
+        name: "submit_note",
+        input: { commentary: "A clear idea.", text: "A brief Note.", linkCardAction: "remove" },
+      },
+    ],
+    usage: { inputTokens: 1, outputTokens: 1 },
+  }))
+  expect((await runNotesSession({ generate }, messages)).draft?.linkCardAction).toBe("remove")
 })

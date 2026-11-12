@@ -6,6 +6,7 @@ export function mapSubstackPost(command: BufferCreateCommand) {
     channelId: command.destination.channelId,
     text: command.text,
     assets: [],
+    ...(command.attachmentUrl ? { metadata: { substack: { linkAttachment: { url: command.attachmentUrl } } } } : {}),
     schedulingType: "automatic",
     mode: "shareNow",
     needsApproval: false,

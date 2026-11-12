@@ -123,7 +123,7 @@ export function decodeBufferPost(post: unknown, command: BufferCreateCommand): B
   if (!post || typeof post !== "object") return { kind: "unknown", reason: "missing-post" }
   const p = post as Record<string, unknown>
   if (typeof p.id !== "string" || !p.id) return { kind: "unknown", reason: "missing-post-id" }
-  const metadata = p.metadata as { linkAttachment?: unknown } | null | undefined
+  const metadata = p.metadata as { linkAttachment?: { url?: unknown } | null } | null | undefined
   if (
     p.channelId !== command.destination.channelId ||
     p.channelService !== command.destination.service ||
@@ -133,7 +133,7 @@ export function decodeBufferPost(post: unknown, command: BufferCreateCommand): B
     p.isCustomScheduled !== false ||
     p.sharedNow !== true ||
     !["sent", "pending", "scheduled"].includes(String(p.status)) ||
-    metadata?.linkAttachment != null
+    (command.attachmentUrl ? metadata?.linkAttachment?.url !== command.attachmentUrl : metadata?.linkAttachment != null)
   )
     return { kind: "created-unexpected", postId: p.id, reason: "post-does-not-match-approval" }
   return {

@@ -116,15 +116,31 @@ export async function calendarJourney(harness: Harness): Promise<void> {
 export async function notesJourney(harness: Harness): Promise<void> {
   expect(
     await harness.message(
-      "/note I've noticed that smaller releases make feedback easier to act on. One small decision is easier to understand and reverse than a big batch. Shape this into a brief Note.",
+      "/note I've noticed that smaller releases make feedback easier to act on. Before drafting, ask me which tradeoff I want to highlight. Use this as the card: https://example.com/small-releases",
     ),
   ).toBe(200)
-  const review = await harness.until(() =>
-    harness.network.getState().telegramMessages.find((message) => {
-      const buttons = message.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
-      return buttons?.flat().some((button) => button.text === "Publish") ? message : undefined
-    }),
-  )
+  const question = await harness.waitMessage(/\?/)
+  expect(harness.state.registrations.some((r) => r.kind === "notes-publish")).toBe(false)
+  expect(
+    await harness.message(
+      "One small decision is easier to understand and reverse, though each release needs attention. Focus on that tradeoff.",
+      question.messageId,
+    ),
+  ).toBe(200)
+  const findReview = (afterId = 0) =>
+    harness.until(() =>
+      harness.network.getState().telegramMessages.find((message) => {
+        const buttons = message.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
+        return message.messageId > afterId && buttons?.flat().some((button) => button.text === "Publish")
+          ? message
+          : undefined
+      }),
+    )
+  const initial = await findReview()
+  expect(
+    await harness.message("Make the opening more concrete. Keep the same idea and embedded card.", initial.messageId),
+  ).toBe(200)
+  const review = await findReview(initial.messageId)
   expect(review.text?.trim().length).toBeGreaterThan(0)
   expect(harness.state.bufferWrites).toHaveLength(0)
   expect(await harness.click(review, /^Publish$/, 90)).toBe(200)
@@ -135,6 +151,7 @@ export async function notesJourney(harness: Harness): Promise<void> {
     mode: "shareNow",
     saveToDraft: false,
     needsApproval: false,
+    metadata: { substack: { linkAttachment: { url: "https://example.com/small-releases" } } },
   })
   await harness.waitMessage(/^Sent to Buffer for publication/)
   expect(harness.state.failures).toEqual([])

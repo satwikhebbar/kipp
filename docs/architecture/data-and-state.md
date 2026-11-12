@@ -50,7 +50,9 @@ flowchart LR
 
 Notes extends `InteractionRouterDO` with separate action, message-binding,
 version and delivery tables. It atomically retains the authenticated event
-when consuming an action, then acknowledges it after forwarding. Same-update
+when consuming an action, then acknowledges it after forwarding. Feedback
+envelopes retain the parser-selected first URL alongside the original text, so
+masked-link targets survive delivery replay without reparsing changed offsets. Same-update
 or pending same-action redelivery returns the original event. Cleanup is lazy
 at the review deadline plus the existing one-hour grace. This is transport
 recovery for Notes, not support for concurrent Telegram feedback conversations.

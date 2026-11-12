@@ -297,24 +297,21 @@ type TimingInstruction =
   | { kind: "schedule"; date: ProposedDate; localTime: string;
       timeZone?: string }
 
-type AttachmentInstruction =
-  | { kind: "unchanged" }
-  | { kind: "use-first-input-link" }
-  | { kind: "remove" }
+type LinkCardAction = "keep" | "use-input" | "remove"
 
 type NotesWritingResult =
   | { kind: "draft"; commentary: string; text: string;
-      timing: TimingInstruction; attachment: AttachmentInstruction }
+      timing: TimingInstruction; linkCardAction: LinkCardAction }
   | { kind: "clarification"; question: string }
 ```
 
-Implement strict Zod schemas and one isolated native-tool handoff, submit_notes_response, returning draft or clarification. No network, credential or publication tools are exposed. Commentary/question is bounded at 1,500 characters. Nonempty Note text has a 10,000-character provider ceiling; prompt guidance targets much shorter Notes, not the maximum. Review rendering handles longer valid results without silently truncating approved text. Provider-specific length checks live in substack.ts and count the actual plain text; any provider rejection remains a typed result.
+Implement strict Zod schemas with isolated native-tool handoffs: submit_note returns a draft and linkCardAction; ask_note_question returns necessary meaning/fact clarification. TimingInstruction is added with structured timing extraction in Phase 5, not an interim prompt-only timing clarification flow. No network, credential or publication tools are exposed. Commentary/question is bounded at 1,500 characters. Nonempty Note text has a 10,000-character provider ceiling; prompt guidance targets much shorter Notes, not the maximum. Review rendering handles longer valid results without silently truncating approved text. Provider-specific length checks live in substack.ts and count the actual plain text; any provider rejection remains a typed result.
 
 Snapshot the configured PROMPT_NOTES_PATH → notes-style-prompt.md → bundled fallback using the shared resolver. Only missing files fall through; other GitHub failures propagate. Store prompt content/source/SHA once, along with model selection, TIMEZONE and the initial receipt anchor. Do not inherit LinkedIn's word template. Keep the fixed tool/authority instructions separate from configurable audience/voice instructions. Detailed editorial examples remain deferred.
 
-Persist runTools messages via persistableAgentMessages and assertStepOutputSize. Reuse its three-provider-turn/four-tool-call session bounds and existing bounded provider transport retries. Count at most five logical writing sessions: initial plus four clarification/revision sessions. Dispatched failures consume a slot; Revise taps, deterministic checks and OAuth recovery do not. Session steps use stable names writing-0 … writing-4, no automatic application-level generation retry, and retries.limit = 0 at the Workflow step layer. Convert ordinary generation failures into persisted failure results; propagate actual Workflow interruption signals.
+Persist runTools messages via persistableAgentMessages and assertStepOutputSize. Reuse its three-provider-turn/four-tool-call session bounds and existing bounded provider transport retries. Count at most five logical writing sessions: initial plus four clarification/revision sessions. Each logical session consumes one slot; Revise taps, deterministic checks and OAuth recovery do not. Author-approved amendment, 12 November 2026: use the existing LinkedIn behavior for failed writing. Stable steps notes-write-0 … notes-write-4 throw on an unsuccessful bounded session and use default Workflow-step retries with unchanged input, without consuming another logical session. Do not add a separate application generation-retry loop. Only after Workflow retries are exhausted recover the last valid candidate, or report failure when none exists. Propagate actual Workflow interruption signals and stop generation when the original review deadline has elapsed.
 
-The five-session limit is a logical drafting budget, not an exactly-five-HTTP-requests guarantee: provider retries occur inside a session and a runtime interruption before its result checkpoint can repeat a model call. Do not add another coordination store solely for exact LLM billing. Such replay never authorizes a Buffer mutation. Tests verify the five-slot loop and absence of automatic error retry; actual runtime interruption behavior is documented rather than hidden.
+The five-session limit is a logical drafting budget, not an exactly-five-HTTP-requests guarantee: provider retries occur inside a session, Workflow retries can rerun a failed session, and a runtime interruption before its result checkpoint can repeat a model call. Do not add another coordination store solely for exact LLM billing. Such replay never authorizes a Buffer mutation. Tests verify the five-slot loop, fixed-input Workflow retry and exhaustion recovery; actual runtime interruption behavior is documented rather than hidden.
 
 ```ts
 interface NotesRunState {

@@ -24,11 +24,13 @@ const entry = `
   export class ObservedRouter extends InteractionRouterDO {
     async fetch(request) {
       const registration = new URL(request.url).pathname === "/register" ? await request.clone().json() : null;
+      const binding = new URL(request.url).pathname === "/notes/bind" ? await request.clone().json() : null;
       const response = await super.fetch(request);
       if (["/notes/resolve", "/notes/ack"].includes(new URL(request.url).pathname)) {
         const check = await fetch("https://sanity.test/router-boundary", {method:"POST",body:JSON.stringify({path:new URL(request.url).pathname,response:await response.clone().json()})});
         if (!check.ok) return new Response("Injected transport failure", {status:503});
       }
+      if (binding && response.ok) await fetch("https://sanity.test/bound", {method:"POST",body:JSON.stringify(binding)});
       if (registration && response.ok) await fetch("https://sanity.test/registered", {method:"POST",body:JSON.stringify(registration)});
       return response;
     }
@@ -42,10 +44,17 @@ const entry = `
   export class NotesProbe extends NotesWorkflow {
     async run(event, step) {
       await step.do("sanity-observe-start", () => fetch("https://sanity.test/started", {method:"POST",body:JSON.stringify({domain:"notes",id:event.instanceId})}).then(() => true));
+      const writingRetries = this.env.SANITY_NOTES_WRITING_RETRIES;
       const wrapped = new Proxy(step, {get(target, key) {
         if (key !== "do") { const value = target[key]; return typeof value === "function" ? (...args) => target[key](...args) : value; }
         return (name, ...args) => {
           const operation = args.pop();
+          if (name.startsWith("notes-write-") && Number.isInteger(writingRetries)) {
+            // Fault scenarios shorten only the runtime retry policy; production must use its defaults.
+            const config = args[0] ?? {};
+            if (config.retries) throw new Error("Notes writing must use Workflow default retries, like LinkedIn");
+            return target.do(name, {...config,retries:{limit:writingRetries,delay:"1 second"}},operation);
+          }
           if (name !== "notes-submit") return target.do(name, ...args, operation);
           return target.do(name, {retries:{limit:1,delay:"1 second"}}, async (...input) => {
             const result = await operation(...input);
@@ -86,6 +95,8 @@ const entry = `
 export async function createWorkflowSanity(options: {
   model?: ScriptedModel
   live?: { apiKey: string; model: string; provider?: "deepseek" | "openrouter" }
+  notesWritingRetries?: number
+  userTurnLimit?: number
   timeZone?: string
   bufferResult?: (input: WireBody) => WireBody
   notesRouterFault?: "resolve" | "ack"
@@ -123,6 +134,7 @@ export async function createWorkflowSanity(options: {
     bufferWrites: [] as WireBody[],
     started: [] as Array<{ domain: string; id: string }>,
     registrations: [] as WireBody[],
+    boundNotesMessages: [] as number[],
     failures: [] as string[],
   }
   let routerFaultInjected = false
@@ -146,6 +158,9 @@ export async function createWorkflowSanity(options: {
     compatibilityDate: "2026-07-08",
     log: new Log(LogLevel.ERROR),
     bindings: {
+      ...(options.notesWritingRetries !== undefined
+        ? { SANITY_NOTES_WRITING_RETRIES: options.notesWritingRetries }
+        : {}),
       TELEGRAM_BOT_TOKEN: "synthetic:bot",
       TELEGRAM_WEBHOOK_SECRET: "sanity-secret",
       TELEGRAM_ALLOWED_USER_ID: "42",
@@ -206,6 +221,10 @@ export async function createWorkflowSanity(options: {
         }
         if (url.origin === "https://sanity.test" && url.pathname === "/started") {
           state.started.push(body as { domain: string; id: string })
+          return RuntimeResponse.json({ ok: true })
+        }
+        if (url.origin === "https://sanity.test" && url.pathname === "/bound") {
+          state.boundNotesMessages.push(Number(body.messageId))
           return RuntimeResponse.json({ ok: true })
         }
         if (url.origin === "https://sanity.test" && url.pathname === "/registered") {
@@ -299,7 +318,11 @@ export async function createWorkflowSanity(options: {
                           isCustomScheduled: false,
                           sharedNow: true,
                           externalLink: null,
-                          metadata: { linkAttachment: null },
+                          metadata: {
+                            linkAttachment:
+                              (input.metadata as { substack?: { linkAttachment?: unknown } } | undefined)?.substack
+                                ?.linkAttachment ?? null,
+                          },
                         },
                       },
                     },
@@ -359,7 +382,8 @@ export async function createWorkflowSanity(options: {
   let userTurns = 0
   /** Sends an authenticated Telegram update through the production HTTP route. */
   async function update(body: WireBody, id = ++updateId, secret = "sanity-secret") {
-    if (++userTurns > SANITY_LIMITS.userTurns) throw new Error("User-turn budget exceeded")
+    if (++userTurns > (options.live ? SANITY_LIMITS.userTurns : (options.userTurnLimit ?? SANITY_LIMITS.userTurns)))
+      throw new Error("User-turn budget exceeded")
     const response = await bounded(
       runtime.dispatchFetch("https://kipp.test/webhook/telegram", {
         method: "POST",
@@ -394,16 +418,26 @@ export async function createWorkflowSanity(options: {
     network,
     until,
     update,
-    message: (text: string, replyTo?: number) =>
-      update({
+    message: async (
+      text: string,
+      replyTo?: number,
+      entities?: Array<{ type: string; offset: number; length: number; url?: string }>,
+    ) => {
+      // Telegram HTTP capture can precede the workflow's post-send reply binding.
+      // Simulated replies wait for that boundary, just as callbacks wait for registration.
+      if (replyTo && state.started.some((item) => item.domain === "notes"))
+        await until(() => state.boundNotesMessages.includes(replyTo))
+      return update({
         message: {
           message_id: updateId + 1,
           from: { id: 42, is_bot: false },
           chat: { id: 100, type: "private" },
           text,
+          ...(entities ? { entities } : {}),
           ...(replyTo ? { reply_to_message: { message_id: replyTo, from: { id: 7, is_bot: true } } } : {}),
         },
-      }),
+      })
+    },
     click: async (message: TelegramMessage, label: RegExp, id?: number) => {
       const keyboard = message.replyMarkup?.inline_keyboard as Array<Array<{ text: string; callback_data?: string }>>
       const button = keyboard?.flat().find((button) => label.test(button.text))

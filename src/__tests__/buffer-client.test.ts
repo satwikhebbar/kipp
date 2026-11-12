@@ -7,6 +7,7 @@ import {
   validateSubstackChannel,
 } from "../integrations/buffer/client"
 import { bufferRedirectUri, parseBufferToken } from "../integrations/buffer/oauth"
+import { mapSubstackPost } from "../integrations/buffer/substack"
 import type { BufferCreateCommand } from "../notes/types"
 import { bufferHarness } from "./helpers/buffer-vault"
 
@@ -172,4 +173,21 @@ it.each(["http", "malformed", "network"])("makes no hidden retry after %s failur
   vi.stubGlobal("fetch", fetch)
   expect(await createBufferPostOnce("synthetic", command)).toMatchObject({ kind: "unknown" })
   expect(fetch).toHaveBeenCalledTimes(1)
+})
+
+it("maps and verifies exactly the approved embedded card", async () => {
+  const linked = { ...command, attachmentUrl: "https://example.com/a?q=1#b" }
+  expect(mapSubstackPost(linked)).toMatchObject({
+    metadata: { substack: { linkAttachment: { url: linked.attachmentUrl } } },
+  })
+  expect(
+    decodeBufferPost(
+      { ...acceptedPost, metadata: { linkAttachment: { url: linked.attachmentUrl, expandedUrl: "" } } },
+      linked,
+    ).kind,
+  ).toBe("accepted")
+  expect(decodeBufferPost(acceptedPost, linked).kind).toBe("created-unexpected")
+  expect(
+    decodeBufferPost({ ...acceptedPost, metadata: { linkAttachment: { url: "https://different.com" } } }, linked).kind,
+  ).toBe("created-unexpected")
 })

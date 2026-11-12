@@ -1,9 +1,9 @@
 # Connect Buffer
 
 Buffer setup is optional. Existing LinkedIn and Calendar workflows do not need
-Buffer configuration. The implemented Phase 3 slice adds immediate text-only
-`/note` drafting, exact approval and guarded Buffer submission. It awaits release;
-links, clarification, queueing, scheduled posting and repair/Retry remain later phases.
+Buffer configuration. Phases 1–4 implement immediate `/note` drafting, necessary clarification,
+revisions, one embedded link, exact approval and guarded Buffer submission.
+This awaits release; queueing, scheduled posting and repair/Retry remain later phases.
 
 Notes drafting uses `openai/gpt-6-luna` through the existing OpenRouter client
 and `OPENROUTER_API_KEY`, like the meal planner. Its pinned model is independent
@@ -63,12 +63,29 @@ and `BUFFER_PUBLICATIONS` (`BufferPublicationDO`, append-only SQLite migration
 `v4`). Local configuration needs the same bindings. This code change does not
 deploy those resources or provision production Buffer credentials/channel values.
 
-For this slice, send `/note <raw thoughts>` with text-only, immediate-publication
-intent. Review commentary appears first, then timing, then the exact Note in
+For this slice, send `/note <raw thoughts>` with immediate-publication intent. Review commentary appears first, then timing, then the exact Note in
 plain text. Only the current owner's Publish button authorizes submission;
 typing “publish” supplies writing feedback. Revise opens a feedback prompt and
 does not call the writer until feedback arrives. The initial generation plus
 four follow-up writing sessions share the existing capped feedback window.
+Necessary clarification also counts; tapping Revise alone does not. Failed bounded
+writing sessions use the same Workflow-step retries as LinkedIn, within the same
+logical session and with fixed input. These retries do not spend another review
+round. If retries are exhausted or the writing limit is reached, the last valid
+Note remains available with fresh controls; without a valid draft, the run ends
+with a failure notice. Clarification messages have no Publish button.
+Timing extraction and queue/scheduling submission arrive together in Phase 5;
+Phase 4 clarification focuses on meaning and facts needed to write the Note.
+
+The first valid HTTP(S) URL in the original input becomes the single embedded
+card, including Telegram hyperlinks whose visible label differs from the target.
+A parser uses original UTF-16 entity offsets; later links are ignored. Kipp does
+not fetch article contents or generate previews. Commentary identifies the exact
+card URL before the timing and Note text. Prose revisions preserve the card;
+explicit feedback can remove it or replace it with the first link in that reply.
+The writer selects `linkCardAction` (`keep`, `use-input` or `remove`);
+application code supplies the actual parsed card URL. Exact approval fingerprints the card
+as well as the Note; Buffer acceptance must match both.
 
 The workflow registers opaque actions before displaying buttons and retains
 authenticated Notes events across forwarding failures. Telegram redelivery

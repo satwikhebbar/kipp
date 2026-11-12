@@ -209,14 +209,15 @@ input text/entities → deterministic first URL → one attachment
 writing result → draft OR necessary clarification
 feedback → invalidate old authority → next writing session
   success → replacement candidate + fresh controls
-  failure/limit → last valid candidate + fresh controls
+  failed session → default Workflow retry with fixed input (same logical session)
+  exhausted retries/limit → last valid candidate + fresh controls
 ```
 
 Implement notes/links.ts with original-message entity offsets, text_link targets and literal parsing only on uncovered spans. Merge by textual order and attach the first valid HTTP(S) destination regardless of hostname. No link preference, selection list, extra confirmation, article fetch or output links from subsequent URLs.
 
 Use the same normalized link metadata in invocation and feedback contracts. A prose revision preserves the attachment; explicit change/removal creates a new review. The agent may propose use-first-input-link or remove but cannot invent a destination or authorize publication.
 
-Implement direct-reply feedback, Revise-to-request-feedback without generation and necessary intent/fact clarification. Count at most five logical writing sessions including failed dispatched sessions. Keep the original deadline. Reoffer the latest valid draft after failure/exhaustion, with stale controls rejected. Maintain shared transcript/usage bounds and the future independent ideation input boundary without implementing ideation.
+Implement direct-reply feedback, Revise-to-request-feedback without generation and necessary intent/fact clarification. Count at most five logical writing sessions. Author-approved amendment, 12 November 2026: failed bounded sessions throw from their checkpoint and use default Workflow retries like LinkedIn, within the same logical session and with fixed input. Only after retries are exhausted reoffer the latest valid draft, with fresh controls; end with failure if none exists. Keep the original deadline. Maintain shared transcript/usage bounds and the future independent ideation input boundary without implementing ideation.
 
 ### Validation
 
@@ -234,6 +235,14 @@ Exercise initial clarification, four follow-up writing sessions, repeated Revise
 #### Manual Verification
 
 Review example conversations for text-only, linked input and revision feedback. Editorial examples/style quality remain a separate release activity.
+
+### Phase 4 verification evidence (12 November 2026)
+
+Necessary clarification now uses a non-publishing handoff and the existing retained feedback route. Drafting and clarification share five logical sessions and the original deadline. Per the author’s subsequent review, failed bounded sessions use default Workflow retries with fixed input, without consuming another logical round; fallback runs after retry exhaustion. Revise taps do not generate; exhaustion or failed rewriting reoffers the exact last valid draft and card with fresh approval controls.
+
+Original Telegram text/entity offsets select the first valid HTTP(S) destination, including masked links. Invocation and retained feedback carry the same normalized URL. Prose revisions preserve the card; the model-facing linkCardAction (keep/use-input/remove) can select the reply’s first URL or remove the card on explicit feedback. Review commentary identifies it, approval fingerprints it, and Buffer acceptance verifies the matching metadata. There is no article fetch or URL selection interaction.
+
+Verification passed after review amendments: 1,002 default tests (37 gated skips), 104 integration tests including LinkedIn and Calendar regressions, and documentation/lint/type checks. The Notes runtime suite has 14 cases, including transient writing recovery without spending a review round and exhausted retries with/without a valid candidate. The expanded bounded live GPT-6 Luna journey exercised necessary clarification, drafting, a card-preserving revision and approval in three calls/237 output tokens; all account endpoints were simulated. Final production configuration/build dry-run passed (1,537.59 KiB raw / 342.83 KiB gzip). No Note was published and no deployment occurred. Beads agent-harness-wmzd records Phase 4; agent-harness-asw4 records review amendments; agent-harness-ve7n tracks Phase 5. Timing extraction and queue/scheduling support arrive together in Phase 5; Phase 4 has no interim prompt-only timing clarification workaround.
 
 ## Phase 5: Queue or schedule Notes and recover only confirmed rejections
 
@@ -326,7 +335,7 @@ Buffer acceptance is Kipp's completion boundary. Manual inspection of an eventua
 | Editorial prompt and output quality | Deferred author-example study (Beads agent-harness-5bp9); required before claiming editorial/release acceptance, not a prerequisite for mocked infrastructure work |
 | Production setup and deployment provisioning | Development-account OAuth/rotation, channel permissions, three timing modes and both native card types are verified; integrate the production vault/guard and provision deployment values separately |
 
-No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. Phases 1–3 have passed their verification, including bounded live-LLM journeys with mocked account APIs. Phase 4 is next.
+No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. Phases 1–4 have passed their verification, including bounded live-LLM journeys with mocked account APIs. Phase 5 is next.
 
 Queue mode is an approved amendment (10 November 2026) in Phase 5; it does not alter the six-phase order; implementation was subsequently authorized on 10 November 2026. The completed live Buffer spike includes addToQueue acceptance and assigned-time verification.
 
