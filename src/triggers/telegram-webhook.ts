@@ -331,7 +331,30 @@ async function handleBoundaryError(env: Env, chatId: number | undefined, err: un
     outcome: "failed",
     failureCategory: err instanceof NotionError ? "storage-error" : "unhandled",
   })
-  console.error(new Date().toISOString(), "[telegram-webhook] unhandled error:", err)
+  const errorDetails =
+    err instanceof Error
+      ? {
+          name: err.name,
+          message: err.message,
+          stack: err.stack,
+          ...(err.cause === undefined
+            ? {}
+            : {
+                cause:
+                  err.cause instanceof Error
+                    ? { name: err.cause.name, message: err.cause.message, stack: err.cause.stack }
+                    : String(err.cause),
+              }),
+        }
+      : { type: typeof err, value: String(err) }
+  console.error(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      component: "telegram-webhook",
+      event: "unhandled-error",
+      error: errorDetails,
+    }),
+  )
   if (env.TELEGRAM_BOT_TOKEN && chatId !== undefined) {
     await createTelegramClient(env.TELEGRAM_BOT_TOKEN)
       .sendMessage(chatId, userFacingFailureMessage(err), { signal: AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS) })
