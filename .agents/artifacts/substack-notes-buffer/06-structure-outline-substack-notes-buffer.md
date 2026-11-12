@@ -32,7 +32,7 @@ LinkedIn remains Notion-driven and creates LinkedIn drafts. Shared Calendar time
 | Phase | Testable result | Dependency |
 | --- | --- | --- |
 | 1 | Shared helpers and strict time conversion verified, including automated webhook and live-LLM regressions (agent-harness-j9r7) | Approved design |
-| 2 | Connect Buffer and acquire/refresh tokens for the manually configured Substack channel | Existing vault/setup patterns |
+| 2 | Buffer setup and rotating refresh verified (agent-harness-k80l); production provisioning remains a release prerequisite | Existing vault/setup patterns |
 | 3 | Text-only /note reaches exact approval and guarded immediate Buffer acceptance | Phases 1–2 |
 | 4 | Clarification, revisions and first-URL cards work without stale approval | Phase 3 |
 | 5 | Buffer queue placement, exact scheduled submission and eligible rejection recovery work | Phases 1–4 |
@@ -90,7 +90,7 @@ Automated verification passed: 181 unit tests across ten suites, 36 integration 
 
 The integrated production dry-run measured 1,475.83 KiB raw / 328.91 KiB gzip versus 1,234.16 KiB / 276.98 KiB before these changes: an increase of 241.67 KiB raw / 51.93 KiB gzip. No binding or runtime configuration changed; no deployment or live Calendar operation occurred.
 
-Parent code review agrees with the retained spike evidence, including the additional numeric-offset and repeated-midnight cases. This satisfies the wrapper comparison review. On 12 November the author chose automated webhook journeys instead of routine manual account regression checks. The existing LinkedIn and Calendar integration suites now additionally exercise production HTTP routes, actual local Workflows/Durable Objects and real API clients with intercepted external HTTP. LinkedIn covers revision, exact draft approval and callback redelivery; Calendar covers clarification, IST creation and DST gap/overlap rejection. The separate bounded real-LLM journeys passed: LinkedIn two calls/918 output tokens; Calendar three calls/270 output tokens. No real LinkedIn or Calendar writes were made. Full default and integration suites passed, with final verification recorded in Beads agent-harness-9tvj. Phase 2 has not started; Beads agent-harness-j9r7 owns the phase status.
+Parent code review agrees with the retained spike evidence, including the additional numeric-offset and repeated-midnight cases. This satisfies the wrapper comparison review. On 12 November the author chose automated webhook journeys instead of routine manual account regression checks. The existing LinkedIn and Calendar integration suites now additionally exercise production HTTP routes, actual local Workflows/Durable Objects and real API clients with intercepted external HTTP. LinkedIn covers revision, exact draft approval and callback redelivery; Calendar covers clarification, IST creation and DST gap/overlap rejection. The separate bounded real-LLM journeys passed: LinkedIn two calls/918 output tokens; Calendar three calls/270 output tokens. No real LinkedIn or Calendar writes were made. Full default and integration suites passed, with final verification recorded in Beads agent-harness-9tvj. Phase 1 is complete in Beads agent-harness-j9r7; Phase 2 evidence follows below.
 
 ## Phase 2: Connect Buffer and safely refresh one grant
 
@@ -134,6 +134,16 @@ Cover PKCE/cookie/state expiry and replay, fixed redirect origin, granted scopes
 #### Manual Verification
 
 Review setup instructions and failure messages for clarity. Real OAuth app registration, account connection and local/production secret provisioning remain separately authorized actions, not automated test prerequisites.
+
+### Phase 2 implementation evidence — 12 November 2026
+
+Protected Buffer setup/callback routes now use fixed-origin PKCE, encrypted five-minute single-use state and secure cookies. Read-only discovery checks authenticated organization membership and the manually configured Substack channel, publishing permissions, disconnection and paused-queue diagnostics. Setup lists channel names/IDs when configuration is absent. Operator instructions are in [Connect Buffer](../../../docs/buffer-setup.md).
+
+The existing encrypted vault now owns a dedicated Buffer grant path. Concurrent callers share one live refresh; a durable claim precedes dispatch, rotated tokens are stored together, and a newer authorization fences late responses. Interrupted or uncertain refresh requires reauthorization. Same-account reconnection preserves connection identity; another account changes it. Generic provider operations cannot bypass this path. Existing LinkedIn/Google keys and behavior are preserved.
+
+Verification passed: 93 focused auth/vault/client tests; full check with lint/docs/typecheck and 937 passing tests (36 gated skips); all 90 integration tests, including automated LinkedIn/Calendar webhook journeys; 41 migration tests; whitespace check; and deploy:check with 43 registered variables. Dry-run bundle: 1,493.37 KiB raw / 332.73 KiB gzip. The next refresh after reconstructed vault state uses the persisted replacement refresh token; fault tests cover abandoned claims, failed replacement persistence and generation fencing.
+
+Parent review confirms setup instructions and failure messages match the approved flow. Existing local client credentials were retained; the spike-verified callback origin and channel ID were added only to ignored local configuration. Production provisioning and integrated real-account consent remain later release actions. No live provider calls, publication, deployment, commit or push occurred. Beads agent-harness-k80l owns Phase 2 completion; Phase 3 is next.
 
 ## Phase 3: Publish a text-only Note from Telegram through an exact approval
 
@@ -306,7 +316,7 @@ Buffer acceptance is Kipp's completion boundary. Manual inspection of an eventua
 | Editorial prompt and output quality | Deferred author-example study (Beads agent-harness-5bp9); required before claiming editorial/release acceptance, not a prerequisite for mocked infrastructure work |
 | Production setup and deployment provisioning | Development-account OAuth/rotation, channel permissions, three timing modes and both native card types are verified; integrate the production vault/guard and provision deployment values separately |
 
-No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. Phase 1 has passed wrapper review and automated regression verification, including bounded live-LLM journeys with mocked account APIs. Phase 2 is next.
+No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. Phase 1 has passed wrapper review and automated regression verification, including bounded live-LLM journeys with mocked account APIs. Phase 2 is verified; Phase 3 is next.
 
 Queue mode is an approved amendment (10 November 2026) in Phase 5; it does not alter the six-phase order; implementation was subsequently authorized on 10 November 2026. The completed live Buffer spike includes addToQueue acceptance and assigned-time verification.
 

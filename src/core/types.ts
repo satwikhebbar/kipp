@@ -21,6 +21,11 @@ export interface Env {
   GOOGLE_CALENDAR_CLIENT_ID?: string
   GOOGLE_CALENDAR_CLIENT_SECRET?: string
   GOOGLE_CALENDAR_REDIRECT_ORIGIN?: string
+  BUFFER_CLIENT_ID?: string
+  BUFFER_CLIENT_SECRET?: string
+  BUFFER_REDIRECT_ORIGIN?: string
+  BUFFER_SUBSTACK_CHANNEL_ID?: string
+  PROMPT_NOTES_PATH?: string
   LINKEDIN_AUTHOR_URN: string
   DEPLOYMENT_ENV?: string
   LOG_LEVEL?: string
@@ -186,6 +191,25 @@ export interface GoogleCalendarTokens {
 export const TOKEN_PROVIDER = {
   LINKEDIN: "linkedin",
   GOOGLE_CALENDAR: "google-calendar",
+  BUFFER: "buffer",
 } as const
 
 export type TokenProvider = (typeof TOKEN_PROVIDER)[keyof typeof TOKEN_PROVIDER]
+
+/** Buffer credentials are only read and refreshed inside the encrypted vault. */
+export interface BufferGrantInput {
+  accessToken: string
+  refreshToken: string
+  expiresAtMs: number
+  accountId: string
+  scopes: string[]
+}
+
+export interface BufferGrant extends BufferGrantInput {
+  credentialGeneration: number
+  connectionId: string
+}
+
+export type BufferAccess =
+  | { kind: "usable"; accessToken: string; accountId: string; credentialGeneration: number; connectionId: string }
+  | { kind: "needs-auth"; reason: string }

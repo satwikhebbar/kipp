@@ -8,6 +8,7 @@ import { MealPlanningWorkflow } from "./meal-planning/workflow"
 import { HTTP_STATUS } from "./runtime/http"
 import { logRuntime } from "./runtime/logging"
 import { userFacingFailureMessage } from "./runtime/user-failures"
+import { handleBufferAuthCallback, handleBufferAuthStart } from "./triggers/buffer-auth"
 import { handleCadenceCron } from "./triggers/cadence"
 import { handleGoogleCalendarAuthCallback, handleGoogleCalendarAuthStart } from "./triggers/google-calendar-auth"
 import { handleAuthCallback, handleAuthStart } from "./triggers/linkedin-auth"
@@ -27,6 +28,9 @@ const app = new Hono<{ Bindings: Env }>()
 app.route("/", miniAppRoutes)
 
 app.get("/", (c) => c.text("linkedin-pipeline"))
+
+app.get("/setup/buffer", async (c) => handleBufferAuthStart(c.req.raw, c.env))
+app.get("/auth/buffer/callback", async (c) => handleBufferAuthCallback(c.req.raw, c.env))
 
 app.get("/setup/linkedin", async (c) => handleAuthStart(c.req.raw, c.req.header("host") ?? "", c.env))
 

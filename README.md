@@ -503,3 +503,5 @@ src/
 ## License
 
 MIT
+
+Buffer account connection and manual Substack channel configuration are documented in [Buffer setup](docs/buffer-setup.md). The Notes workflow is being implemented in phases.
