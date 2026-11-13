@@ -3,6 +3,7 @@ import { addCivilDays, isValidTimeZone, localDateAt, localTimeAt, resolveLocalDa
 
 const MAX_QUESTION_CHARACTERS = 1500
 const MAX_RELATIVE_DAYS = 36500
+const MILLISECONDS_PER_MINUTE = 60_000
 const instantSchema = z
   .string()
   .datetime()
@@ -20,6 +21,18 @@ export const timingInstructionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("now") }).strict(),
   z.object({ kind: z.literal("queue") }).strict(),
   z.object({ kind: z.literal("clarify"), question: z.string().trim().min(1).max(MAX_QUESTION_CHARACTERS) }).strict(),
+  z
+    .object({
+      kind: z.literal("relative-duration"),
+      minutes: z
+        .number()
+        .int()
+        .positive()
+        .max(MAX_RELATIVE_DAYS * 24 * 60),
+      timeZone: z.string().nullable().default(null),
+      source: z.enum(["initial", "current"]).default("current"),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal("schedule"),
@@ -59,7 +72,8 @@ export function resolveNoteTiming(
           question: "The approved posting time has passed. What future date, time and timezone should I use?",
         }
   }
-  if (instruction.kind !== "schedule") return { kind: "ready", timing: instruction }
+  if (instruction.kind !== "schedule" && instruction.kind !== "relative-duration")
+    return { kind: "ready", timing: instruction }
   const zone = instruction.timeZone ?? defaultZone
   if (!zone || !isValidTimeZone(zone) || (zone !== "UTC" && !zone.includes("/")))
     return {
@@ -68,6 +82,16 @@ export function resolveNoteTiming(
     }
   if (!Number.isFinite(receivedAtMs))
     return { kind: "clarification", question: "Please give an explicit future date and time." }
+  if (instruction.kind === "relative-duration") {
+    // Elapsed minutes cross civil-day and DST boundaries without wall-clock arithmetic.
+    const dueAtMs = receivedAtMs + instruction.minutes * MILLISECONDS_PER_MINUTE
+    if (!Number.isFinite(new Date(dueAtMs).getTime()))
+      return { kind: "clarification", question: "Please give a valid future posting time." }
+    const timing: NoteTiming = { kind: "schedule", dueAt: new Date(dueAtMs).toISOString(), timeZone: zone }
+    return isNoteTimingFuture(timing, now)
+      ? { kind: "ready", timing }
+      : { kind: "clarification", question: "That posting time has passed. What future date and time should I use?" }
+  }
   const date =
     instruction.date.kind === "absolute"
       ? instruction.date.localDate

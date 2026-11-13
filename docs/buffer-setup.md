@@ -98,6 +98,12 @@ For exact schedules, an explicit IANA timezone overrides configured `TIMEZONE`.
 Missing or ambiguous zones, conflicting instructions, DST gaps/overlaps and past
 times require clarification. Code converts a valid wall time to UTC; relative
 dates use the persisted receipt of the message that supplied the instruction.
+Elapsed delays such as "three hours later" or "in 90 minutes" are extracted as
+positive whole minutes and added to that receipt in code, never to approval or
+model completion time. "In 24 hours" means 24 elapsed hours across DST;
+"tomorrow at 6pm" means the next civil date at that local time. The exact resolved
+date, time and timezone appear in the review before Schedule approval. Explicitly
+different or unclear anchors require clarification.
 The initial and current receipts are supplied separately so an unresolved initial
 request survives later clarification. Rewrites keep the resolved instant. Future
 eligibility is checked at approval, Retry and immediately before dispatch; an

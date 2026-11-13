@@ -82,3 +82,30 @@ it("names link card actions and extracts publication timing separately", async (
   }))
   expect((await runNotesSession({ generate }, messages)).draft?.linkCardAction).toBe("remove")
 })
+
+it("accepts structured elapsed durations and instructs extraction without clock arithmetic", async () => {
+  const messages = createNotesConversation("plain", "Publish this three hours later.")
+  expect(messages[0]).toMatchObject({ text: expect.stringContaining("Use relative-duration for elapsed delays") })
+  const result = await runNotesSession(
+    {
+      generate: async () => ({
+        toolCalls: [
+          {
+            id: "relative",
+            name: "submit_note",
+            input: {
+              commentary: "Kept the idea.",
+              text: "A useful thought.",
+              timing: { kind: "relative-duration", minutes: 180, source: "current", timeZone: null },
+            },
+          },
+        ],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+    },
+    messages,
+  )
+  expect(result.completed).toBe(true)
+  expect(result.draft?.timing).toEqual({ kind: "relative-duration", minutes: 180, source: "current", timeZone: null })
+  expect(result.question).toBeNull()
+})

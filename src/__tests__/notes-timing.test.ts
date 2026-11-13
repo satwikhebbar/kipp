@@ -23,6 +23,63 @@ const schedule = (date: string, time = "09:00", timeZone: string | null = null) 
     timeZone,
   })
 
+it.each([
+  ["2026-11-12T18:00:00Z", 180, "Asia/Kolkata", "2026-11-12T21:00:00.000Z", "2026-11-13 02:30 Asia/Kolkata"],
+  ["2026-12-31T23:45:00Z", 30, "UTC", "2027-01-01T00:15:00.000Z", "2027-01-01 00:15 UTC"],
+  ["2026-03-08T06:30:00Z", 60, "America/New_York", "2026-03-08T07:30:00.000Z", "2026-03-08 03:30 America/New_York"],
+  ["2026-11-01T05:30:00Z", 60, "America/New_York", "2026-11-01T06:30:00.000Z", "2026-11-01 01:30 America/New_York"],
+  ["2026-03-07T14:00:00Z", 1440, "America/New_York", "2026-03-08T14:00:00.000Z", "2026-03-08 10:00 America/New_York"],
+  [
+    "2026-10-03T15:15:00Z",
+    60,
+    "Australia/Lord_Howe",
+    "2026-10-03T16:15:00.000Z",
+    "2026-10-04 03:15 Australia/Lord_Howe",
+  ],
+])("adds elapsed minutes from %s across civil and DST boundaries", (start, minutes, zone, dueAt, display) => {
+  const received = Date.parse(start)
+  const input = timingInstructionSchema.parse({ kind: "relative-duration", minutes })
+  const expected = { kind: "ready", timing: { kind: "schedule", dueAt, timeZone: zone } }
+  expect(resolveNoteTiming(input, null, received, zone, received)).toEqual(expected)
+  expect(resolveNoteTiming(input, null, received, zone, received + 1000)).toEqual(expected)
+  expect(formatNoteInstant(dueAt, zone)).toBe(display)
+})
+
+it("anchors new relative instructions to the supplied receipt and preserves resolved schedules on prose edits", () => {
+  const input = timingInstructionSchema.parse({ kind: "relative-duration", minutes: 90, timeZone: "UTC" })
+  const original = { kind: "schedule" as const, dueAt: "2030-01-01T00:00:00.000Z", timeZone: "UTC" }
+  const result = resolveNoteTiming(input, original, receipt, "Asia/Kolkata", now)
+  expect(result).toEqual({
+    kind: "ready",
+    timing: { kind: "schedule", dueAt: "2026-11-12T19:30:00.000Z", timeZone: "UTC" },
+  })
+  if (result.kind !== "ready") throw new Error("Expected schedule")
+  expect(resolveNoteTiming({ kind: "unchanged" }, result.timing, receipt + 60_000, "UTC", now)).toEqual(result)
+  expect(resolveNoteTiming(input, null, receipt, "UTC", receipt + 90 * 60_000).kind).toBe("clarification")
+  expect(resolveNoteTiming(input, null, Number.NaN, "UTC", now).kind).toBe("clarification")
+  expect(resolveNoteTiming(input, null, 8.64e15, "UTC", now).kind).toBe("clarification")
+  expect(
+    resolveNoteTiming(
+      timingInstructionSchema.parse({ kind: "relative-duration", minutes: 5 }),
+      null,
+      receipt,
+      null,
+      now,
+    ).kind,
+  ).toBe("clarification")
+})
+
+it.each([
+  0,
+  -1,
+  1.5,
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+  36500 * 24 * 60 + 1,
+])("rejects invalid elapsed minutes %s", (minutes) => {
+  expect(timingInstructionSchema.safeParse({ kind: "relative-duration", minutes }).success).toBe(false)
+})
+
 it("defaults to immediate, preserves a queue/schedule on prose edits, and changes mode explicitly", () => {
   expect(resolveNoteTiming({ kind: "unchanged" }, null, receipt, null, now)).toEqual({
     kind: "ready",

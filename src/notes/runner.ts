@@ -248,7 +248,8 @@ export async function runNotesWorkflow(
           resolveNoteTiming(
             proposedDraft.timing,
             timing,
-            proposedDraft.timing.kind === "schedule" && proposedDraft.timing.source === "initial"
+            (proposedDraft.timing.kind === "schedule" || proposedDraft.timing.kind === "relative-duration") &&
+              proposedDraft.timing.source === "initial"
               ? p.receivedAtMs
               : sourceReceivedAtMs,
             snapshot.timeZone,

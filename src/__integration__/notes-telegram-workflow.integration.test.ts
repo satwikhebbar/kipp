@@ -1,10 +1,90 @@
 import { expect, it } from "vitest"
 import { expectConversationResponse } from "./helpers/conversation-contract"
 import { createWorkflowSanity, toolResponse } from "./helpers/workflow-sanity"
-import { notesScheduledJourney } from "./helpers/workflow-sanity-scenarios"
+import { notesReceipt, notesRelativeJourney, notesScheduledJourney } from "./helpers/workflow-sanity-scenarios"
 
 const NOTE = "A small release is easier to understand. Keep *the decision* human. 😀"
 const model = () => toolResponse("submit_note", { commentary: "One concrete idea, in the author's voice.", text: NOTE })
+
+it("keeps the relative receipt fixed when the bounded writing session retries", async () => {
+  const h = await createWorkflowSanity({
+    notesWritingRetries: 1,
+    model: (_body, call) =>
+      call <= 3
+        ? {
+            choices: [{ finish_reason: "stop", message: { content: "No handoff." } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          }
+        : toolResponse("submit_note", {
+            commentary: "A clear point.",
+            text: NOTE,
+            timing: { kind: "relative-duration", minutes: 180 },
+          }),
+  })
+  try {
+    await h.message("/note Small releases. Publish in three hours.")
+    const review = await h.waitMessage(/A small release/)
+    expect(h.state.modelCalls).toBe(4)
+    expect(h.state.transcript[3].request.messages).toEqual(h.state.transcript[0].request.messages)
+    const dueAt = new Date(notesReceipt(h.state.transcript[0].request) + 180 * 60_000).toISOString()
+    await h.click(review, /^Schedule$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0]).toMatchObject({ dueAt })
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("resolves initial and revised elapsed delays through exact approval and Buffer acceptance", async () => {
+  const h = await createWorkflowSanity({
+    model: (_body, call) =>
+      toolResponse("submit_note", {
+        commentary: "A clear point.",
+        text: NOTE,
+        timing:
+          call === 1
+            ? { kind: "relative-duration", minutes: 180 }
+            : call === 2
+              ? { kind: "relative-duration", minutes: 90 }
+              : { kind: "unchanged" },
+      }),
+  })
+  try {
+    await notesRelativeJourney(h)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("preserves the initial relative anchor through clarification, reboot and publication retry", async () => {
+  const h = await createWorkflowSanity({
+    loseNotesSubmitCheckpoint: true,
+    persistent: true,
+    model: (_body, call) =>
+      call === 1
+        ? toolResponse("ask_note_question", { question: "Which release do you mean?" })
+        : toolResponse("submit_note", {
+            commentary: "A clear point.",
+            text: NOTE,
+            timing: { kind: "relative-duration", minutes: 180, source: "initial" },
+          }),
+  })
+  try {
+    await h.message("/note Publish my thoughts on the release three hours later.")
+    const question = await h.waitMessage(/Which release/)
+    await h.message("The small release.", question.messageId)
+    const review = await h.waitMessage(/A small release/)
+    const dueAt = new Date(notesReceipt(h.state.transcript[0].request, "initial") + 180 * 60_000).toISOString()
+    await h.reboot()
+    await h.click(review, /^Schedule$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0]).toMatchObject({ dueAt })
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
 
 it("splits only oversized reviews and publishes the literal Note without commentary or separators", async () => {
   const note = `${"a".repeat(3999)}😀 ${"b".repeat(4500)}TAIL`

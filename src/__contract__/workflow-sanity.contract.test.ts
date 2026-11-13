@@ -5,6 +5,7 @@ import {
   calendarJourney,
   linkedInJourney,
   notesJourney,
+  notesRelativeJourney,
   notesScheduledJourney,
 } from "../__integration__/helpers/workflow-sanity-scenarios"
 import { NOTES_MODEL, NOTES_PROVIDER } from "../agent/notes"
@@ -19,6 +20,7 @@ describe.skipIf(!enabled)("live LLM webhook workflow sanity", () => {
     ["calendar", calendarJourney],
     ["notes", notesJourney],
     ["notes scheduled", notesScheduledJourney],
+    ["notes relative", notesRelativeJourney],
   ] as const) {
     it(
       name,

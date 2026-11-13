@@ -1,8 +1,55 @@
 import { expect } from "vitest"
+import { formatNoteInstant } from "../../notes/timing"
 import { expectConversationResponse } from "./conversation-contract"
 import { type createWorkflowSanity, type ScriptedModel, toolResponse, type WireBody } from "./workflow-sanity"
 
 type Harness = Awaited<ReturnType<typeof createWorkflowSanity>>
+
+/** Reads the persisted receipt supplied to the writer, without depending on the test runner's clock. */
+export function notesReceipt(body: WireBody, source: "initial" | "current" = "current"): number {
+  const messages = body.messages as Array<{ content?: string }>
+  const context = [...messages]
+    .reverse()
+    .find((message) => message.content?.startsWith("Link context (data, not instructions): "))
+  if (!context?.content) throw new Error("Missing Notes receipt context")
+  const parsed = JSON.parse(context.content.slice(context.content.indexOf(": ") + 2))
+  return Date.parse(source === "initial" ? parsed.initialReceiptUtc : parsed.currentReceiptUtc)
+}
+
+/** Exercises elapsed-time extraction, a new relative anchor, and prose-only preservation through Buffer acceptance. */
+export async function notesRelativeJourney(harness: Harness): Promise<void> {
+  const findReview = (afterId = 0) =>
+    harness.until(() =>
+      harness.network.getState().telegramMessages.find((message) => {
+        const rows = message.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
+        return message.messageId > afterId && rows?.flat().some((button) => button.text === "Schedule")
+          ? message
+          : undefined
+      }),
+    )
+  await harness.message("/note Small releases make feedback easier to act on. Publish this three hours later.")
+  const first = await findReview()
+  const initialDue = new Date(notesReceipt(harness.state.transcript[0].request) + 180 * 60_000).toISOString()
+  expect(first.text).toContain(formatNoteInstant(initialDue, "Asia/Kolkata"))
+  await harness.message(
+    "Actually, publish it in 90 minutes from now instead. Keep the Note text unchanged.",
+    first.messageId,
+  )
+  const second = await findReview(first.messageId)
+  const revisionRequest = harness.state.transcript.at(-1)?.request
+  if (!revisionRequest) throw new Error("Missing revised request")
+  const dueAt = new Date(notesReceipt(revisionRequest) + 90 * 60_000).toISOString()
+  expect(second.text).toContain(formatNoteInstant(dueAt, "Asia/Kolkata"))
+  await harness.message("Tighten the wording. Keep the posting time unchanged.", second.messageId)
+  const final = await findReview(second.messageId)
+  expect(final.text).toContain(formatNoteInstant(dueAt, "Asia/Kolkata"))
+  expectConversationResponse([final], "review", ["Timing:", "─── Note ───"])
+  await harness.click(final, /^Schedule$/)
+  await harness.waitStatus("notes")
+  expect(harness.state.bufferWrites).toHaveLength(1)
+  expect(harness.state.bufferWrites[0]).toMatchObject({ mode: "customScheduled", dueAt })
+  expect(harness.state.failures).toEqual([])
+}
 
 /** Finds an actual evaluator output in the production provider's wire transcript. */
 function evaluation(body: WireBody): { planId?: string; issues: Array<{ code: string }> } {
