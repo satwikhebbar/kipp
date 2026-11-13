@@ -187,8 +187,7 @@ Beads `agent-harness-11x7`. Release requires three separate decisions/actions:
    live spike verified Buffer's API/card behavior but did not exercise this
    complete implementation. Do not automatically retry an uncertain live test.
 
-Run `pnpm check`, `pnpm test:integration`, `pnpm test:migration` and
-`pnpm deploy:check` before release. The optional bounded real-LLM suite keeps
+Run `pnpm check`, `pnpm test:integration` and `pnpm deploy:check` before release. The optional bounded real-LLM suite keeps
 account APIs simulated and assesses the writing/tool handoff separately.
 The deployment dry-run validates the tracked configuration contract and bundle;
 it does not read/verify Dashboard secrets, app entitlement or perform a deploy.

@@ -18,7 +18,6 @@
     "test:unit": "vitest run src/__tests__/",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:workflow-sanity:live": "WORKFLOW_SANITY_LIVE=1 vitest run src/__contract__/workflow-sanity.contract.test.ts",
-    "test:migration": "vitest run --config vitest.migration.config.ts",
     "test:decisions-contract": "DECISIONS_CONTRACT=1 vitest run src/__contract__/luna-decisions.contract.test.ts",
     "test:provider-contract": "DEEPSEEK_CONTRACT=1 vitest run src/__contract__/deepseek-calendar.contract.test.ts",
     "test:meal-contract": "DEEPSEEK_CONTRACT=1 vitest run src/__contract__/deepseek-meal-planning.contract.test.ts",

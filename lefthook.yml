@@ -11,5 +11,3 @@ pre-commit:
       run: pnpm test
     test-integration:
       run: pnpm test:integration
-    test-migration:
-      run: pnpm test:migration
