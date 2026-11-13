@@ -8,25 +8,26 @@ import {
   runNotesSession,
 } from "../agent/notes"
 import { assertStepOutputSize } from "../core/conversation"
+import { type ConversationTurn, createConversationTurn } from "../core/conversation-turn"
 import { remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../core/feedback-session"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { createTokenVault } from "../core/token-vault-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-events"
-import { discoverBufferDestination } from "../integrations/buffer/client"
+import { BufferDestinationError, discoverBufferDestination } from "../integrations/buffer/client"
+import { bufferRedirectUri } from "../integrations/buffer/oauth"
 import { createGitHubClient } from "../integrations/github"
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage } from "../providers"
 import { logRuntime } from "../runtime/logging"
 import { resolvePrompt } from "../writing/prompt-resolver"
 import { publishApprovedNote } from "./publication"
-import { authorizedNotesEvent, fingerprintCommand, splitNote } from "./review"
+import { authorizedNotesEvent, fingerprintCommand } from "./review"
 import { isNoteTimingFuture, type NoteTiming, noteApprovalLabel, noteTimingLabel, resolveNoteTiming } from "./timing"
-import type { ApprovedPublication, BufferCreateCommand, NotesWorkflowParams } from "./types"
+import type { ApprovedPublication, BufferCreateCommand, BufferDestination, NotesWorkflowParams } from "./types"
 
 const DEFAULT_LLM_RETRIES = 3
 const MAX_WRITING_SESSIONS = 5
-const PLAIN = { plainText: true, disableLinkPreview: true } as const
 
 export { NOTES_UNKNOWN_MESSAGE } from "./publication"
 
@@ -38,7 +39,9 @@ export async function runNotesWorkflow(
 ): Promise<void> {
   const p = event.payload
   const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
+  const redirectUri = bufferRedirectUri(env)
   const router = createInteractionRouter(env.INTERACTION_ROUTER, p.chatId)
+  let turn = createConversationTurn()
   // Serializable application state crosses the Workflow checkpoint boundary; no class instances do.
   const checkpoint = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     step.do(
@@ -47,7 +50,12 @@ export async function runNotesWorkflow(
       // biome-ignore lint/suspicious/noExplicitAny: Workflow checkpoints accept these plain serializable domain envelopes.
       (async () => assertStepOutputSize(await fn())) as any,
     ) as Promise<T>
-  const notify = (name: string, text: string) => checkpoint(name, () => tg.sendMessage(p.chatId, text, PLAIN))
+  const notify = async (name: string, text: string, kind: "failure" | "clarification" = "failure") => {
+    const sent = await turn.respond({ kind, message: text }, ({ text, options }, index) =>
+      checkpoint(index ? `${name}-${index}` : name, () => tg.sendMessage(p.chatId, text, options)),
+    )
+    return sent[sent.length - 1]
+  }
   if (
     !p.userId ||
     !p.chatId ||
@@ -58,15 +66,6 @@ export async function runNotesWorkflow(
     return
   const snapshot = await checkpoint("notes-snapshot", async () => {
     try {
-      if (!env.BUFFER_SUBSTACK_CHANNEL_ID || !env.BUFFER_PUBLICATIONS) return { ready: false as const }
-      const access = await createTokenVault(env).acquireBufferAccess()
-      if (access.kind !== "usable") return { ready: false as const }
-      const destination = await discoverBufferDestination(
-        access.accessToken,
-        access.connectionId,
-        env.BUFFER_SUBSTACK_CHANNEL_ID,
-      )
-      if (destination.accountId !== access.accountId) return { ready: false as const }
       const prompt = await resolvePrompt(
         createGitHubClient(env),
         [env.PROMPT_NOTES_PATH, "notes-style-prompt.md"].filter((path): path is string => Boolean(path)),
@@ -74,7 +73,6 @@ export async function runNotesWorkflow(
       )
       return {
         ready: true as const,
-        destination,
         prompt,
         provider: NOTES_PROVIDER,
         model: NOTES_MODEL,
@@ -89,7 +87,7 @@ export async function runNotesWorkflow(
   if (!snapshot.ready) {
     await notify(
       "notes-setup-needed",
-      "Couldn't prepare Notes. Check the Notes prompt configuration, connect Buffer at /setup/buffer, and check the configured Substack channel. Then send /note again.",
+      "Couldn't load the Notes writing prompt. Check the GitHub credentials and prompt configuration, then send /note again.",
     )
     return
   }
@@ -104,7 +102,98 @@ export async function runNotesWorkflow(
   let submissionNumber = 0
   let inputUrl = p.firstUrl ?? null
   let attachmentUrl = inputUrl
+  let destination: BufferDestination | null = null
   const processed = new Set<string>()
+  // A setup turn and a writing turn are mutually exclusive. The invocation's
+  // original thoughts stay in Workflow state while consent is completed.
+  while (!destination && remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) > 0) {
+    const connection = await checkpoint(`notes-connection-${version}`, () => resolveNotesConnection(env))
+    if (connection.kind === "ready") {
+      destination = connection.destination
+      break
+    }
+    version++
+    const resume = await checkpoint(`notes-connect-actions-${version}`, async () => ({
+      interactionId: crypto.randomUUID(),
+      callbackToken: `n:${crypto.randomUUID()}`,
+      fingerprint: `connection:${crypto.randomUUID()}`,
+    }))
+    await checkpoint(`notes-connect-register-${version}`, () =>
+      router.register({
+        workflowId: event.instanceId,
+        interactionId: resume.interactionId,
+        callbackToken: resume.callbackToken,
+        kind: INTERACTION_KIND.NOTES_CONTINUE,
+        version,
+        expiresAt: snapshot.deadlineMs,
+        notes: { userId: p.userId, chatId: p.chatId, fingerprint: resume.fingerprint },
+      }),
+    )
+    await turn.respond(
+      {
+        kind: "connection",
+        message: `${connection.message} Your thoughts are saved. After fixing the connection, tap Continue and I'll draft your Note. Connecting or continuing will not publish.`,
+        controls: {
+          kind: "inline",
+          rows: [
+            ...(connection.reauthorize && redirectUri
+              ? [
+                  [
+                    {
+                      intent: "link" as const,
+                      label: "Connect Buffer",
+                      url: `${new URL(redirectUri).origin}/setup/buffer`,
+                    },
+                  ],
+                ]
+              : []),
+            [{ intent: "resume", label: "Continue", callbackToken: resume.callbackToken }],
+          ],
+        },
+      },
+      ({ text, options }, index) =>
+        checkpoint(index ? `notes-connect-message-${version}-${index}` : `notes-connect-message-${version}`, () =>
+          tg.sendMessage(p.chatId, text, options),
+        ),
+    )
+    while (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) > 0) {
+      const number = eventNumber++
+      const seconds = await checkpoint(`notes-connect-remaining-${number}`, async () =>
+        remainingFeedbackTimeoutSeconds(snapshot.deadlineMs),
+      )
+      if (!seconds) break
+      const reply = await waitForWorkflowEvent<unknown>(step, `notes-connect-event-${number}`, {
+        type: "notes-interaction",
+        timeout: `${seconds} seconds`,
+      })
+      if (reply.type === "timeout") {
+        turn = createConversationTurn()
+        await notify("notes-expired", "This Note's review window has ended. Start a new /note when ready.")
+        return
+      }
+      const accepted = authorizedNotesEvent(reply.payload, {
+        workflowId: event.instanceId,
+        userId: p.userId,
+        chatId: p.chatId,
+        version,
+        fingerprint: resume.fingerprint,
+        deadlineMs: snapshot.deadlineMs,
+        actions: { [resume.interactionId]: INTERACTION_KIND.NOTES_CONTINUE },
+      })
+      if (!accepted || processed.has(accepted.deliveryId)) continue
+      processed.add(accepted.deliveryId)
+      turn = createConversationTurn()
+      await checkpoint(`notes-continue-invalidate-${version}`, () =>
+        router.invalidateNotes(event.instanceId, version + 1),
+      )
+      break
+    }
+  }
+  if (!destination) {
+    turn = createConversationTurn()
+    await notify("notes-expired", "This Note's review window has ended. Start a new /note when ready.")
+    return
+  }
   while (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) > 0) {
     const writingSession = session++
     await checkpoint(`notes-invalidate-${writingSession}`, () => router.invalidateNotes(event.instanceId, version + 1))
@@ -184,11 +273,12 @@ export async function runNotesWorkflow(
       return
     }
     version++
+    const reviewTiming = timing ?? { kind: "now" as const }
     const command: BufferCreateCommand = {
-      destination: snapshot.destination,
+      destination,
       text: draft?.text ?? "Clarification pending",
       attachmentUrl,
-      timing: timing ?? { kind: "now" },
+      timing: reviewTiming,
     }
     const fingerprint = await checkpoint(`notes-fingerprint-${version}`, () => fingerprintCommand(command))
     const actions = await checkpoint(`notes-actions-${version}`, async () => ({
@@ -224,42 +314,34 @@ export async function runNotesWorkflow(
       }
       return true
     })
-    if (!question) {
-      const commentary = `${generated.draft && resolution?.kind === "ready" ? generated.draft.commentary : "I couldn't reshape it. Here is the last valid Note for approval."}${attachmentUrl ? `\nEmbedded card: ${attachmentUrl}` : ""}`
-      for (const [index, chunk] of splitNote(commentary).entries())
-        await notify(`notes-commentary-${version}-${index}`, chunk)
-    }
-    if (!question)
-      await notify(
-        `notes-timing-${version}`,
-        session < MAX_WRITING_SESSIONS
-          ? `${noteTimingLabel(command.timing)} Reply with feedback or tap Revise.`
-          : `${noteTimingLabel(command.timing)} The writing limit is reached; this Note is still available for approval.`,
-      )
-    const chunks = splitNote(question ?? draft?.text ?? "")
-    for (const [index, chunk] of chunks.entries()) {
-      const sent = await checkpoint(`notes-review-${version}-${index}`, () =>
-        tg.sendMessage(p.chatId, chunk, {
-          ...PLAIN,
-          ...(!question && index === chunks.length - 1
-            ? {
-                replyMarkup: {
-                  inline_keyboard: [
-                    [
-                      { text: noteApprovalLabel(command.timing), callback_data: actions.publishToken },
-                      ...(session < MAX_WRITING_SESSIONS
-                        ? [{ text: "Revise", callback_data: actions.reviseToken }]
-                        : []),
-                    ],
-                  ],
-                },
-              }
-            : {}),
-        }),
-      )
+    const commentary = `${generated.draft && resolution?.kind === "ready" ? generated.draft.commentary : "I couldn't reshape it. Here is the last valid Note for approval."}${attachmentUrl ? `\nEmbedded card: ${attachmentUrl}` : ""}`
+    const timingLabel =
+      session < MAX_WRITING_SESSIONS
+        ? `${noteTimingLabel(reviewTiming)} Reply with feedback or tap Revise.`
+        : `${noteTimingLabel(reviewTiming)} The writing limit is reached; this Note is still available for approval.`
+    const response: ConversationTurn = question
+      ? { kind: "clarification", message: question }
+      : {
+          kind: "review",
+          sections: [commentary, timingLabel, `─── Note ───\n\n${draft?.text ?? ""}`],
+          controls: {
+            kind: "inline",
+            rows: [
+              [
+                { intent: "approve", label: noteApprovalLabel(reviewTiming), callbackToken: actions.publishToken },
+                ...(session < MAX_WRITING_SESSIONS
+                  ? [{ intent: "revise" as const, label: "Revise", callbackToken: actions.reviseToken }]
+                  : []),
+              ],
+            ],
+          },
+        }
+    await turn.respond(response, async ({ text, options }, index) => {
+      const sent = await checkpoint(`notes-review-${version}-${index}`, () => tg.sendMessage(p.chatId, text, options))
       if (session < MAX_WRITING_SESSIONS)
         await checkpoint(`notes-bind-${version}-${index}`, () => router.bindNotes(actions.feedback, sent.messageId))
-    }
+      return sent
+    })
     let waitingForFeedback = Boolean(question)
     while (remainingFeedbackTimeoutSeconds(snapshot.deadlineMs) > 0) {
       const number = eventNumber++
@@ -272,6 +354,7 @@ export async function runNotesWorkflow(
         timeout: `${seconds} seconds`,
       })
       if (reply.type === "timeout") {
+        turn = createConversationTurn()
         await notify("notes-expired", "This Note's review window has ended. Start a new /note when ready.")
         return
       }
@@ -281,7 +364,10 @@ export async function runNotesWorkflow(
         : {
             [actions.publish]: INTERACTION_KIND.NOTES_PUBLISH,
             ...(session < MAX_WRITING_SESSIONS
-              ? { [actions.revise]: INTERACTION_KIND.NOTES_REVISE, [actions.feedback]: INTERACTION_KIND.NOTES_FEEDBACK }
+              ? {
+                  [actions.revise]: INTERACTION_KIND.NOTES_REVISE,
+                  [actions.feedback]: INTERACTION_KIND.NOTES_FEEDBACK,
+                }
               : {}),
           }
       const accepted = authorizedNotesEvent(payload, {
@@ -295,7 +381,8 @@ export async function runNotesWorkflow(
       })
       if (!accepted || processed.has(accepted.deliveryId)) continue
       processed.add(accepted.deliveryId)
-      const elapsedApproval = accepted.kind === INTERACTION_KIND.NOTES_PUBLISH && !isNoteTimingFuture(command.timing)
+      turn = createConversationTurn()
+      const elapsedApproval = accepted.kind === INTERACTION_KIND.NOTES_PUBLISH && !isNoteTimingFuture(reviewTiming)
       if (elapsedApproval && session >= MAX_WRITING_SESSIONS) {
         await notify(
           `notes-schedule-elapsed-${version}`,
@@ -311,13 +398,19 @@ export async function runNotesWorkflow(
         // Existing feedback row is immutable: use a fresh action and bind the feedback prompt.
         actions.feedback = await checkpoint(`notes-feedback-id-${version}`, async () => crypto.randomUUID())
         await checkpoint(`notes-feedback-register-${version}`, () =>
-          router.register({ ...base, version, interactionId: actions.feedback, kind: INTERACTION_KIND.NOTES_FEEDBACK }),
+          router.register({
+            ...base,
+            version,
+            interactionId: actions.feedback,
+            kind: INTERACTION_KIND.NOTES_FEEDBACK,
+          }),
         )
         const sent = await notify(
           `notes-feedback-prompt-${version}`,
           elapsedApproval
             ? "That posting time has passed. Reply with a future date, time and timezone for fresh review."
             : "What would you like to change? Reply with your feedback.",
+          "clarification",
         )
         await checkpoint(`notes-feedback-bind-${version}`, () => router.bindNotes(actions.feedback, sent.messageId))
         continue
@@ -356,8 +449,10 @@ export async function runNotesWorkflow(
         snapshot.timeZone,
         session < MAX_WRITING_SESSIONS,
         submissionNumber++,
+        turn,
       )
       if (outcome.kind === "finished") return
+      turn = createConversationTurn()
       feedback = outcome.text
       inputUrl = outcome.firstUrl
       sourceReceivedAtMs = outcome.receivedAtMs
@@ -365,5 +460,44 @@ export async function runNotesWorkflow(
       break
     }
   }
+  turn = createConversationTurn()
   await notify("notes-expired", "This Note's review window has ended. Start a new /note when ready.")
+}
+
+/** Checks publishing setup before writing; failures retain original thoughts for explicit resume. */
+async function resolveNotesConnection(
+  env: Env,
+): Promise<
+  { kind: "ready"; destination: BufferDestination } | { kind: "blocked"; message: string; reauthorize: boolean }
+> {
+  const blocked = (message: string, reauthorize = false) => ({ kind: "blocked" as const, message, reauthorize })
+  if (!env.BUFFER_PUBLICATIONS || !env.BUFFER_SUBSTACK_CHANNEL_ID)
+    return blocked(
+      "Notes publication needs the Buffer binding and configured Substack channel ID. Ask the operator to configure them.",
+    )
+  try {
+    const access = await createTokenVault(env).acquireBufferAccess()
+    if (access.kind !== "usable") return blocked("Buffer isn't connected or needs reauthorization.", true)
+    const destination = await discoverBufferDestination(
+      access.accessToken,
+      access.connectionId,
+      env.BUFFER_SUBSTACK_CHANNEL_ID,
+    )
+    if (destination.accountId !== access.accountId)
+      return blocked(
+        "The configured channel does not match the connected Buffer account. Check the channel configuration.",
+      )
+    return { kind: "ready", destination }
+  } catch (error) {
+    if (isWorkflowInterruption(error)) throw error
+    if (error instanceof BufferDestinationError) {
+      if (error.repair === "reauthorize") return blocked("Buffer authorization needs to be renewed.", true)
+      if (error.repair === "reconnect-channel") return blocked("Reconnect the Substack channel inside Buffer.")
+      return blocked("Check the configured Substack channel and its publishing permissions in Buffer.")
+    }
+    return blocked(
+      "Couldn't check the Buffer connection. Try Continue again; if authorization remains unavailable, reconnect Buffer.",
+      true,
+    )
+  }
 }

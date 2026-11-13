@@ -1,5 +1,11 @@
 import type { WorkflowStep } from "cloudflare:workers"
 import { assertStepOutputSize } from "../core/conversation"
+import { presentConversationTurn } from "../core/conversation-presenter"
+import {
+  type ConnectionAction,
+  type ConversationTurnCoordinator,
+  createConversationTurn,
+} from "../core/conversation-turn"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND } from "../core/types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-events"
@@ -12,7 +18,6 @@ import type { ApprovedPublication, BufferCreateResult } from "./types"
 export const NOTES_UNKNOWN_MESSAGE =
   "I couldn't confirm submission to Buffer. The Note may already have been received; Kipp hasn't sent another attempt. The approved text remains above for you to use independently."
 const MILLISECONDS_PER_SECOND = 1000
-const PLAIN = { plainText: true, disableLinkPreview: true } as const
 
 /** Confirms Buffer acceptance without promising downstream delivery or inventing a queue time. */
 export function notePublicationMessage(
@@ -49,6 +54,7 @@ export async function publishApprovedNote(
   zone: string | null,
   canRevise: boolean,
   submissionNumber: number,
+  turn: ConversationTurnCoordinator = createConversationTurn(),
 ): Promise<PublicationOutcome> {
   const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
   const router = createInteractionRouter(env.INTERACTION_ROUTER, approved.approval.chatId)
@@ -57,8 +63,15 @@ export async function publishApprovedNote(
   const checkpoint = <T>(name: string, fn: () => Promise<T>): Promise<T> =>
     step.do(name, {}, (async () => assertStepOutputSize(await fn())) as never) as Promise<T>
   const prefix = `notes-publication-${approved.candidateVersion}`
-  const notify = (suffix: string, text: string) =>
-    checkpoint(`${prefix}-${suffix}`, () => tg.sendMessage(approved.approval.chatId, text, PLAIN))
+  const notify = async (suffix: string, text: string, kind: "failure" | "confirmation" | "clarification") => {
+    turn.claim(kind)
+    const sent = await presentConversationTurn({ kind, message: text }, ({ text, options }, index) =>
+      checkpoint(`${prefix}-${suffix}${index ? `-${index}` : ""}`, () =>
+        tg.sendMessage(approved.approval.chatId, text, options),
+      ),
+    )
+    return sent[sent.length - 1]
+  }
   const guarded = async (operation: () => Promise<BufferCreateResult>): Promise<BufferCreateResult> => {
     try {
       return await operation()
@@ -141,20 +154,28 @@ export async function publishApprovedNote(
             : rejected.reason === "schedule-elapsed"
               ? "The posting time has passed. Revise it to choose a future time."
               : "Check your Buffer channel configuration."
-    const buttons = [
+    const buttons: ConnectionAction[] = [
       ...(rejected.repair === "reauthorize" && origin
-        ? [{ text: "Connect Buffer", url: `${origin}/setup/buffer` }]
+        ? [{ intent: "link" as const, label: "Connect Buffer", url: `${origin}/setup/buffer` }]
         : []),
-      ...(retryEligible ? [{ text: "Retry", callback_data: actions.retryToken }] : []),
-      ...(canRevise ? [{ text: "Revise", callback_data: actions.reviseToken }] : []),
+      ...(retryEligible ? [{ intent: "resume" as const, label: "Retry", callbackToken: actions.retryToken }] : []),
+      ...(canRevise ? [{ intent: "revise" as const, label: "Revise", callbackToken: actions.reviseToken }] : []),
     ]
-    const sent = await checkpoint(`${prefix}-repair-message-${attempt}`, () =>
-      tg.sendMessage(
-        approved.approval.chatId,
-        `The Note wasn't submitted. ${guidance}${retryEligible ? " Then tap Retry to submit the unchanged Note." : ""}${canRevise ? " You can also reply with a change for fresh review." : ""}`,
-        { ...PLAIN, replyMarkup: { inline_keyboard: [buttons] } },
-      ),
+    const repairKind =
+      rejected.repair === "reauthorize" || rejected.repair === "reconnect-channel" ? "connection" : "failure"
+    turn.claim(repairKind)
+    const sentParts = await presentConversationTurn(
+      {
+        kind: repairKind,
+        message: `The Note wasn't submitted. ${guidance}${retryEligible ? " Then tap Retry to submit the unchanged Note." : ""}${canRevise ? " You can also reply with a change for fresh review." : ""}`,
+        controls: { kind: "inline", rows: [buttons] },
+      },
+      ({ text, options }, index) =>
+        checkpoint(`${prefix}-repair-message-${attempt}${index ? `-${index}` : ""}`, () =>
+          tg.sendMessage(approved.approval.chatId, text, options),
+        ),
     )
+    const sent = sentParts[sentParts.length - 1]
     if (canRevise)
       await checkpoint(`${prefix}-repair-bind-${attempt}`, () => router.bindNotes(actions.feedback, sent.messageId))
     let waitingForFeedback = false
@@ -189,6 +210,7 @@ export async function publishApprovedNote(
             },
       })
       if (!accepted) continue
+      turn = createConversationTurn()
       if (accepted.kind === INTERACTION_KIND.NOTES_REVISE) {
         version++
         waitingForFeedback = true
@@ -203,7 +225,11 @@ export async function publishApprovedNote(
           })
           return true
         })
-        const prompt = await notify(`feedback-${number}`, "What would you like to change? Reply with your feedback.")
+        const prompt = await notify(
+          `feedback-${number}`,
+          "What would you like to change? Reply with your feedback.",
+          "clarification",
+        )
         await checkpoint(`${prefix}-feedback-bind-${number}`, () =>
           router.bindNotes(actions.feedback, prompt.messageId),
         )
@@ -238,6 +264,7 @@ export async function publishApprovedNote(
     result.kind === "rejected" && result.reason === "destination-changed"
       ? "The Buffer account or channel changed. The Note wasn't submitted. Start a new /note for fresh destination review."
       : notePublicationMessage(result, approved, zone)
-  await notify("result", message)
+  if (turn.responded) turn = createConversationTurn() // The repair wait ended without another user response.
+  await notify("result", message, result.kind === "accepted" ? "confirmation" : "failure")
   return { kind: "finished" }
 }

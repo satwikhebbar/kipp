@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi as vitest } from "vites
 import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import type { Env } from "../core/types"
 import type { ToolConversationMessage } from "../providers"
+import { expectConversationResponse } from "./helpers/conversation-contract"
 
 vitest.mock("cloudflare:workers", () => {
   class WorkflowEntrypoint {
@@ -912,6 +913,11 @@ describe("agent-centered Calendar Telegram integration", () => {
     )
     const run = startWorkflow(calendar, runtimeEnv)
     const reconnectIndex = await waitForMessageText(network, "Reconnect, then tap Retry")
+    expectConversationResponse(
+      network.getState().telegramMessages.filter((message) => message.text !== "Scheduling that now."),
+      "connection",
+    )
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
     expect(network.getState().telegramMessages[reconnectIndex]?.text).toContain(
       `${PRODUCTION_TEST_ORIGIN}/setup/google-calendar`,
     )

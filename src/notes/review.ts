@@ -1,8 +1,6 @@
 import { type BufferCreateCommand, notesEventSchema } from "./types"
 
 const HEX_RADIX = 16
-const HIGH_SURROGATE_START = 0xd800
-const HIGH_SURROGATE_END = 0xdbff
 
 /** Hashes the exact versioned publication tuple, excluding commentary and presentation. */
 export async function fingerprintCommand(command: BufferCreateCommand): Promise<string> {
@@ -24,20 +22,7 @@ export async function fingerprintCommand(command: BufferCreateCommand): Promise<
 }
 
 /** Splits Telegram text losslessly without dividing a UTF-16 surrogate pair. */
-export function splitNote(text: string, limit = 4000): string[] {
-  if (limit < 2) throw new Error("Invalid message limit")
-  const chunks: string[] = []
-  let remaining = text
-  while (remaining.length > limit) {
-    let end = limit
-    const code = remaining.charCodeAt(end - 1)
-    if (code >= HIGH_SURROGATE_START && code <= HIGH_SURROGATE_END) end--
-    chunks.push(remaining.slice(0, end))
-    remaining = remaining.slice(end)
-  }
-  if (remaining) chunks.push(remaining)
-  return chunks
-}
+export { splitConversationText as splitNote } from "../core/conversation-presenter"
 
 /** Validates independent owner, candidate, action and fixed-deadline authority. Text cannot approve. */
 export function authorizedNotesEvent(

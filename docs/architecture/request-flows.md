@@ -4,8 +4,15 @@
 
 An authenticated `/note <thoughts>` starts one deterministic Workflow instance
 per Telegram chat/message. The run snapshots the writing prompt, model,
-destination identity and feedback deadline, then uses the shared bounded tool
-runtime to produce a necessary clarification or commentary and exact Note text.
+timezone and feedback deadline, then resolves and pins the Buffer account/channel
+identity before starting the shared bounded writer. If setup is unavailable,
+the run retains the original thoughts and sends only repair guidance with
+Continue and, when needed, Connect Buffer. No writer call or draft accompanies
+that turn. Continue rechecks setup and starts drafting only after success,
+without spending a writing session on setup or authorizing a create; it retains
+the original deadline. The writer produces a necessary clarification or
+commentary and exact Note text. Once pinned,
+destination identity cannot silently change during revision or publication repair.
 The first HTTP(S) URL is parsed from original text and Telegram entities, then
 carried separately as one card. Prose revisions preserve it; explicit feedback
 can replace it from the reply’s first URL or remove it. Clarification has no
@@ -14,7 +21,9 @@ sessions and the original deadline. Failed bounded writing sessions throw from
 the writing step, using the same default Workflow retries as LinkedIn without
 spending another review round. After exhausted retries, recovery preserves the
 latest valid draft or reports failure if none exists. Telegram displays commentary,
-timing and the literal Note in that order. Publish authority is an opaque action
+timing and the literal Note in one message with a clear Note divider and review
+keyboard. Connection guidance remains a separate turn. Only oversized reviews split, with controls
+on the final part. Publish authority is an opaque action
 bound to the owner, chat, workflow, candidate version, fingerprint and deadline.
 Writing feedback and model output cannot authorize publication. The writer supplies
 structured now/queue/schedule intent separately from the Note text. Deterministic
@@ -31,6 +40,13 @@ sequenceDiagram
   participant P as BufferPublicationDO
   participant B as Buffer
   T->>W: Start deterministic /note invocation
+  W->>B: Resolve destination before writing
+  opt Connection needs repair
+    W-->>T: Connect Buffer and Continue; retain thoughts, no draft
+    T->>W: Authenticated Continue after repair
+    W->>B: Recheck destination; no create
+  end
+  W->>W: Draft from original thoughts after connection is ready
   W->>R: Register owner-bound review actions
   W-->>T: Commentary, timing, exact Note and mode-specific approval
   T->>R: Resolve and retain authenticated approval

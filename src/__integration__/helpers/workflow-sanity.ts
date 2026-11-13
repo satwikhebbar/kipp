@@ -83,7 +83,8 @@ const entry = `
         const result = await createTokenVault(env, provider).writeTokens({access_token:"synthetic-test-token",refresh_token:"synthetic-refresh",expires_in:86400,created_at:new Date().toISOString()});
         if (!result.ok) throw new Error("Could not seed synthetic tokens");
       }
-      await createTokenVault(env).replaceBufferGrant({accessToken:"synthetic-buffer-token",refreshToken:"synthetic-buffer-refresh",expiresAtMs:Date.now()+86400000,accountId:"buffer-account",scopes:["account:read","posts:read","posts:write","offline_access"]});
+      if (url.searchParams.get("skipBuffer") !== "true")
+        await createTokenVault(env).replaceBufferGrant({accessToken:"synthetic-buffer-token",refreshToken:"synthetic-buffer-refresh",expiresAtMs:Date.now()+86400000,accountId:"buffer-account",scopes:["account:read","posts:read","posts:write","offline_access"]});
       return Response.json({ok:true});
     }
     if (url.pathname === "/__test/buffer-grant") {
@@ -108,6 +109,7 @@ export async function createWorkflowSanity(options: {
   model?: ScriptedModel
   live?: { apiKey: string; model: string; provider?: "deepseek" | "openrouter" }
   notesWritingRetries?: number
+  skipBufferGrant?: boolean
   userTurnLimit?: number
   timeZone?: string | null
   bufferResult?: (input: WireBody) => WireBody
@@ -146,6 +148,7 @@ export async function createWorkflowSanity(options: {
     linkedinWrites: [] as WireBody[],
     bufferWrites: [] as WireBody[],
     bufferRefreshes: 0,
+    bufferDiscoveryCalls: 0,
     publicationCheckpoints: 0,
     publicationResults: [] as unknown[],
     bufferDisconnected: false,
@@ -307,10 +310,12 @@ export async function createWorkflowSanity(options: {
         }
         if (url.origin === "https://api.buffer.com") {
           const query = String(body.query)
-          if (query.includes("KippIdentity"))
+          if (query.includes("KippIdentity")) {
+            state.bufferDiscoveryCalls++
             return RuntimeResponse.json({
               data: { account: { id: "buffer-account", organizations: [{ id: "buffer-org" }] } },
             })
+          }
           if (query.includes("KippChannels"))
             return RuntimeResponse.json({
               data: {
@@ -439,7 +444,9 @@ export async function createWorkflowSanity(options: {
     )
   }
   try {
-    const response = await bounded(runtime.dispatchFetch("https://kipp.test/__test/seed"))
+    const response = await bounded(
+      runtime.dispatchFetch(`https://kipp.test/__test/seed?skipBuffer=${Boolean(options.skipBufferGrant)}`),
+    )
     if (!response.ok) throw new Error("Could not seed test vault")
   } catch (error) {
     clearTimeout(timer)

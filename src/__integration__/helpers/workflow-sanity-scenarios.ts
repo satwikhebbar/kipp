@@ -1,4 +1,5 @@
 import { expect } from "vitest"
+import { expectConversationResponse } from "./conversation-contract"
 import { type createWorkflowSanity, type ScriptedModel, toolResponse, type WireBody } from "./workflow-sanity"
 
 type Harness = Awaited<ReturnType<typeof createWorkflowSanity>>
@@ -57,7 +58,12 @@ export function scriptedCalendar(date: string, time: string, clarifyFirst = fals
 /** Drives real Telegram buttons and feedback through to one exact approved LinkedIn DRAFT request. */
 export async function linkedInJourney(harness: Harness): Promise<void> {
   expect(await harness.message("/generate 1")).toBe(200)
-  const initial = await harness.waitMessage(/^\*Draft for idea/)
+  const initial = await harness.waitMessage(/^Draft for idea/)
+  expectConversationResponse(
+    harness.network.getState().telegramMessages.filter((message) => !message.text.startsWith("Started workflow")),
+    "review",
+    ["Draft for idea", "Will be posted as a LinkedIn draft:"],
+  )
   expect(harness.state.linkedinWrites).toHaveLength(0)
   expect(await harness.click(initial, /^Revise/)).toBe(200)
   await harness.waitMessage(/Type your revision feedback/)
@@ -69,7 +75,12 @@ export async function linkedInJourney(harness: Harness): Promise<void> {
   expect(
     await harness.message('Keep the topic. End the post with this exact sentence: "Keep the next step small."'),
   ).toBe(200)
-  const revised = await harness.waitMessage(/^\*Revised draft for idea/, initial.messageId)
+  const revised = await harness.waitMessage(/^Revised draft for idea/, initial.messageId)
+  expectConversationResponse(
+    harness.network.getState().telegramMessages.filter((message) => message.messageId === revised.messageId),
+    "review",
+    ["Revised draft for idea", "Will be posted as a LinkedIn draft:"],
+  )
   expect(harness.state.linkedinWrites).toHaveLength(0)
   expect(await harness.click(revised, /^Approve/, 90)).toBe(200)
   await harness.waitStatus("linkedin")
@@ -92,6 +103,10 @@ export async function calendarJourney(harness: Harness): Promise<void> {
     await harness.message("/calendar Call Jamie on 2027-07-28 for 30 minutes. Ask me what time before scheduling."),
   ).toBe(200)
   const question = await harness.waitMessage(/\?/)
+  expectConversationResponse(
+    harness.network.getState().telegramMessages.filter((message) => message.text !== "Scheduling that now."),
+    "clarification",
+  )
   await harness.until(() =>
     harness.state.registrations.find((registration) => registration.kind === "calendar-clarification"),
   )
@@ -99,6 +114,11 @@ export async function calendarJourney(harness: Harness): Promise<void> {
   expect(await harness.message("7pm, in Asia/Kolkata.", question.messageId)).toBe(200)
   await harness.waitStatus("calendar")
   expect(harness.state.calendarWrites).toHaveLength(1)
+  expectConversationResponse(
+    harness.network.getState().telegramMessages.filter((message) => message.messageId > question.messageId),
+    "confirmation",
+    ["Added: Call Jamie"],
+  )
   expect(harness.state.calendarWrites[0]).toMatchObject({
     summary: "Call Jamie",
     start: { dateTime: "2027-07-28T13:30:00.000Z", timeZone: "Asia/Kolkata" },
@@ -137,6 +157,11 @@ export async function notesJourney(harness: Harness): Promise<void> {
       }),
     )
   const initial = await findReview()
+  expectConversationResponse(
+    harness.network.getState().telegramMessages.filter((message) => message.messageId > question.messageId),
+    "review",
+    ["Timing:", "─── Note ───"],
+  )
   expect(
     await harness.message("Make the opening more concrete. Keep the same idea and embedded card.", initial.messageId),
   ).toBe(200)
@@ -147,7 +172,7 @@ export async function notesJourney(harness: Harness): Promise<void> {
   await harness.waitStatus("notes")
   expect(harness.state.bufferWrites).toHaveLength(1)
   expect(harness.state.bufferWrites[0]).toMatchObject({
-    text: review.text,
+    text: review.text?.split("\n\n─── Note ───\n\n").at(-1),
     mode: "addToQueue",
     saveToDraft: false,
     needsApproval: false,
@@ -178,14 +203,14 @@ export async function notesScheduledJourney(harness: Harness): Promise<void> {
   const initial = await findReview()
   const initialButtons = initial.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>> | undefined
   expect(initialButtons?.flat().some((button) => button.text === "Schedule")).toBe(true)
-  expect((await harness.waitMessage(/^Timing:/)).text).toContain("2030-01-01 09:00")
+  expect((await harness.waitMessage(/Timing:/)).text).toContain("2030-01-01 09:00")
   await harness.message("Make the opening more concrete. Keep the posting time unchanged.", initial.messageId)
   const review = await findReview(initial.messageId)
   await harness.click(review, /^Schedule$/)
   await harness.waitStatus("notes")
   expect(harness.state.bufferWrites).toHaveLength(1)
   expect(harness.state.bufferWrites[0]).toMatchObject({
-    text: review.text,
+    text: review.text?.split("\n\n─── Note ───\n\n").at(-1),
     mode: "customScheduled",
     dueAt: "2030-01-01T09:00:00.000Z",
     needsApproval: false,

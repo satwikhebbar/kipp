@@ -1,6 +1,8 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 import { runCalendarAgentSession } from "../agent/calendar-session"
 import { type ActionPromptOutcome, promptForActions } from "../core/action-prompt"
+import { presentConversationTurn } from "../core/conversation-presenter"
+import { type ConversationTurnCoordinator, createConversationTurn } from "../core/conversation-turn"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
 import { isWorkflowInterruption } from "../core/workflow-events"
@@ -50,6 +52,8 @@ function calendarPromptForActions(
   message: string,
   actions: Array<[string, WorkflowInteractionKind]>,
   keyboard = true,
+  turn = createConversationTurn(),
+  kind: "connection" | "clarification" = "clarification",
 ): Promise<CalendarActionResponse> {
   return promptForActions({
     env,
@@ -61,6 +65,8 @@ function calendarPromptForActions(
     message,
     actions,
     keyboard,
+    turn,
+    kind,
     ttlMs: CALENDAR_INTERACTION_TTL_MS,
     interactionGroup: "calendar",
     logEventName: "calendar-interaction",
@@ -110,6 +116,7 @@ export async function runAgentCenteredCalendarWorkflow(
   // contradictory pre-write "no decision" message.
   let calendarWriteOccurred = Boolean(editContext)
 
+  let responseTurn = createConversationTurn()
   for (let turn = 0; turn < MAX_CALENDAR_INTERACTION_TURNS; turn++) {
     const currentAgentVersion = ++agentVersion
     const calendar = createGoogleCalendarClient(env)
@@ -144,7 +151,8 @@ export async function runAgentCenteredCalendarWorkflow(
       logAgentSession(env, event.instanceId, sessionStep.session)
 
       if (sessionStep.session.calendarFailureKind === "authorization" && !retryUsed) {
-        const retry = await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn)
+        const retry = await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn, responseTurn)
+        responseTurn = createConversationTurn()
         if (retry) {
           retryUsed = true
           messages.push({
@@ -165,7 +173,7 @@ export async function runAgentCenteredCalendarWorkflow(
         )
       if (!sessionStep.session.completed || !sessionStep.session.terminal) {
         if (calendarWriteOccurred) {
-          await notify(env, step, event.payload.chatId, CALENDAR_UPDATE_FAILURE, `edit-session-${turn}`)
+          await notify(env, step, event.payload.chatId, CALENDAR_UPDATE_FAILURE, `edit-session-${turn}`, responseTurn)
           return
         }
         await notify(
@@ -176,6 +184,7 @@ export async function runAgentCenteredCalendarWorkflow(
             ? CALENDAR_AGENT_NO_DECISION
             : CALENDAR_AGENT_UNAVAILABLE,
           `session-${turn}`,
+          responseTurn,
         )
         return
       }
@@ -191,8 +200,10 @@ export async function runAgentCenteredCalendarWorkflow(
             `calendar-agent-reply-${turn}`,
             terminal.message,
             INTERACTION_KIND.CALENDAR_CLARIFICATION,
+            responseTurn,
           )
           if (!reply) return
+          responseTurn = createConversationTurn()
           messages.push({ role: "user", text: reply })
           continue
         }
@@ -209,7 +220,14 @@ export async function runAgentCenteredCalendarWorkflow(
             outcome: "failed",
             failureCategory: "invalid-calendar-options",
           })
-          await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `options-authorize-${turn}`)
+          await notify(
+            env,
+            step,
+            event.payload.chatId,
+            CALENDAR_AGENT_NO_DECISION,
+            `options-authorize-${turn}`,
+            responseTurn,
+          )
           return
         }
         const replacementKind = options.some((option) => option.plan.kind === "recurring")
@@ -227,14 +245,17 @@ export async function runAgentCenteredCalendarWorkflow(
             ["Try another time", replacementKind],
             ["Cancel", INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL],
           ],
+          true,
+          responseTurn,
         )
+        responseTurn = createConversationTurn()
         if (response.type === "timeout") return
         if (response.type === "reply") {
           messages.push({ role: "user", text: response.text })
           continue
         }
         if (response.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL) {
-          await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED, `options-cancel-${turn}`)
+          await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED, `options-cancel-${turn}`, responseTurn)
           return
         }
         const selected = options[response.actionIndex]
@@ -247,8 +268,10 @@ export async function runAgentCenteredCalendarWorkflow(
             `calendar-agent-replacement-${turn}`,
             "Reply with another time for this calendar request.",
             replacementKind,
+            responseTurn,
           )
           if (!replacement) return
+          responseTurn = createConversationTurn()
           messages.push({ role: "user", text: replacement })
           continue
         }
@@ -259,7 +282,14 @@ export async function runAgentCenteredCalendarWorkflow(
         const consumed = decision.authorization
         if (!consumed.ok) {
           if (calendarWriteOccurred) return
-          await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `option-consume-${turn}`)
+          await notify(
+            env,
+            step,
+            event.payload.chatId,
+            CALENDAR_AGENT_NO_DECISION,
+            `option-consume-${turn}`,
+            responseTurn,
+          )
           return
         }
         if (
@@ -288,6 +318,7 @@ export async function runAgentCenteredCalendarWorkflow(
           turn,
           messages,
           editContext,
+          responseTurn,
         )
         return
       }
@@ -297,7 +328,14 @@ export async function runAgentCenteredCalendarWorkflow(
       )
       if (!authorized.ok) {
         if (calendarWriteOccurred) return
-        await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `plan-authorize-${turn}`)
+        await notify(
+          env,
+          step,
+          event.payload.chatId,
+          CALENDAR_AGENT_NO_DECISION,
+          `plan-authorize-${turn}`,
+          responseTurn,
+        )
         return
       }
       if (
@@ -321,7 +359,7 @@ export async function runAgentCenteredCalendarWorkflow(
       const consumed = decision.authorization
       if (!consumed.ok) {
         if (calendarWriteOccurred) return
-        await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `plan-consume-${turn}`)
+        await notify(env, step, event.payload.chatId, CALENDAR_AGENT_NO_DECISION, `plan-consume-${turn}`, responseTurn)
         return
       }
       await writePlan(env, step, event, consumed.plan, editing, turn)
@@ -336,12 +374,15 @@ export async function runAgentCenteredCalendarWorkflow(
         turn,
         messages,
         editContext,
+        responseTurn,
       )
       return
     } catch (error) {
       if (isWorkflowInterruption(error)) throw error
+      if (responseTurn.responded) throw error
       if (error instanceof GoogleCalendarError && error.kind === "authorization" && !retryUsed) {
-        if (await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn)) {
+        if (await promptForAuthorizationRecovery(env, step, event, ++interactionVersion, turn, responseTurn)) {
+          responseTurn = createConversationTurn()
           retryUsed = true
           messages.push({
             role: "system",
@@ -366,6 +407,7 @@ export async function runAgentCenteredCalendarWorkflow(
         event.payload.chatId,
         calendarWriteOccurred ? CALENDAR_UPDATE_FAILURE : CALENDAR_FAILURE,
         `failure-${turn}`,
+        responseTurn,
       )
       return
     }
@@ -377,6 +419,7 @@ export async function runAgentCenteredCalendarWorkflow(
     event.payload.chatId,
     "I still need clearer scheduling details. Please start a new request.",
     "turn-limit",
+    responseTurn,
   )
 }
 
@@ -406,6 +449,7 @@ async function promptForAuthorizationRecovery(
   event: WorkflowEvent<CalendarWorkflowParams>,
   version: number,
   turn: number,
+  responseTurn: ConversationTurnCoordinator,
 ): Promise<boolean> {
   const retry = await calendarPromptForActions(
     env,
@@ -418,6 +462,9 @@ async function promptForAuthorizationRecovery(
       ["Retry", INTERACTION_KIND.CALENDAR_RETRY],
       ["Cancel", INTERACTION_KIND.CALENDAR_CANCEL],
     ],
+    true,
+    responseTurn,
+    "connection",
   )
   const accepted = retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_RETRY
   const cancelled = retry.type === "action" && retry.kind === INTERACTION_KIND.CALENDAR_CANCEL
@@ -586,6 +633,7 @@ async function confirmPlanForEditing(
   turn: number,
   messages: ToolConversationMessage[],
   previous?: CalendarEditContext,
+  responseTurn = createConversationTurn(),
 ): Promise<void> {
   const router = createInteractionRouter(env.INTERACTION_ROUTER, event.payload.chatId)
   const prepared = await step.do(`calendar-agent-edit-context-${turn}`, async () => ({
@@ -604,14 +652,30 @@ async function confirmPlanForEditing(
       context: { baseline: plan, messages, original, resourceId } satisfies CalendarEditContext,
     }),
   )
-  const send = () =>
-    createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(event.payload.chatId, confirmationMessage(plan, editing), {
-      replyMarkup: {
-        inline_keyboard: [
-          [{ text: plan.kind === "recurring" ? "Edit entire series" : "Edit", callback_data: prepared.callbackToken }],
-        ],
+  responseTurn.claim("confirmation")
+  const send = async () => {
+    const parts = await presentConversationTurn(
+      {
+        kind: "confirmation",
+        message: confirmationMessage(plan, editing),
+        controls: {
+          kind: "inline",
+          rows: [
+            [
+              {
+                intent: "edit",
+                label: plan.kind === "recurring" ? "Edit entire series" : "Edit",
+                callbackToken: prepared.callbackToken,
+              },
+            ],
+          ],
+        },
       },
-    })
+      ({ text, options }) =>
+        createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(event.payload.chatId, text, options),
+    )
+    return parts[parts.length - 1]
+  }
   let sent: { messageId: number }
   try {
     sent = await step.do(`calendar-agent-confirmation-${turn}-notify`, send)
@@ -657,14 +721,22 @@ export async function runCalendarEditWorkflow(
     return
   }
   if (edit.openPrompt) {
+    const turn = createConversationTurn()
+    turn.claim("clarification")
     const sent = await step.do("calendar-edit-prompt", async () => {
-      const message = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
-        event.payload.chatId,
-        context.baseline.kind === "recurring"
-          ? "Reply with the correction for the entire recurring series."
-          : "Reply with the correction for this calendar block.",
-        { replyMarkup: { force_reply: true } },
+      const parts = await presentConversationTurn(
+        {
+          kind: "clarification",
+          message:
+            context.baseline.kind === "recurring"
+              ? "Reply with the correction for the entire recurring series."
+              : "Reply with the correction for this calendar block.",
+          controls: { kind: "reply" },
+        },
+        ({ text, options }) =>
+          createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(event.payload.chatId, text, options),
       )
+      const message = parts[parts.length - 1]
       return {
         messageId: message.messageId,
         interactionId: crypto.randomUUID(),
@@ -831,9 +903,19 @@ function logAgentSession(
 }
 
 /** Sends one deterministic workflow notification through a durable step. */
-async function notify(env: Env, step: WorkflowStep, chatId: string, message: string, name: string): Promise<void> {
-  await step.do(`calendar-agent-notify-${name}`, () =>
-    createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message),
+async function notify(
+  env: Env,
+  step: WorkflowStep,
+  chatId: string,
+  message: string,
+  name: string,
+  turn = createConversationTurn(),
+): Promise<void> {
+  turn.claim("failure")
+  await presentConversationTurn({ kind: "failure", message }, ({ text, options }, index) =>
+    step.do(`calendar-agent-notify-${name}${index ? `-${index}` : ""}`, () =>
+      createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, text, options),
+    ),
   )
 }
 
@@ -846,7 +928,18 @@ async function promptForReply(
   name: string,
   message: string,
   kind: WorkflowInteractionKind,
+  turn = createConversationTurn(),
 ): Promise<string | null> {
-  const response = await calendarPromptForActions(env, step, event, version, name, message, [["Reply", kind]], false)
+  const response = await calendarPromptForActions(
+    env,
+    step,
+    event,
+    version,
+    name,
+    message,
+    [["Reply", kind]],
+    false,
+    turn,
+  )
   return response.type === "reply" ? response.text : null
 }

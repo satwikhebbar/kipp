@@ -1,9 +1,164 @@
 import { expect, it } from "vitest"
+import { expectConversationResponse } from "./helpers/conversation-contract"
 import { createWorkflowSanity, toolResponse } from "./helpers/workflow-sanity"
 import { notesScheduledJourney } from "./helpers/workflow-sanity-scenarios"
 
 const NOTE = "A small release is easier to understand. Keep *the decision* human. 😀"
 const model = () => toolResponse("submit_note", { commentary: "One concrete idea, in the author's voice.", text: NOTE })
+
+it("splits only oversized reviews and publishes the literal Note without commentary or separators", async () => {
+  const note = `${"a".repeat(3999)}😀 ${"b".repeat(4500)}TAIL`
+  const h = await createWorkflowSanity({
+    model: () => toolResponse("submit_note", { commentary: "Kept every supplied detail.", text: note }),
+  })
+  try {
+    await h.message("/note Keep this longer thought intact.")
+    const last = await h.waitMessage(/TAIL$/)
+    const messages = h.network.getState().telegramMessages
+    expect(messages).toHaveLength(3)
+    expect(messages.every((message) => String(message.text).length <= 4000)).toBe(true)
+    expect(messages.slice(0, -1).every((message) => !message.replyMarkup)).toBe(true)
+    expect(messages.map((message) => message.text).join("")).toBe(
+      `Kept every supplied detail.\n\nTiming: publish immediately after approval. Reply with feedback or tap Revise.\n\n─── Note ───\n\n${note}`,
+    )
+    await h.click(last, /^Publish$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0].text).toBe(note)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("asks only for connection, retains original thoughts across reboot, then drafts after Continue", async () => {
+  const h = await createWorkflowSanity({
+    skipBufferGrant: true,
+    persistent: true,
+    userTurnLimit: 10,
+    model: () =>
+      toolResponse("submit_note", {
+        commentary: "One concrete idea.",
+        text: NOTE,
+        timing: {
+          kind: "schedule",
+          date: { kind: "absolute", localDate: "2030-01-01" },
+          localTime: "19:00",
+          timeZone: "Asia/Kolkata",
+        },
+      }),
+  })
+  try {
+    await h.message("/note Small releases. https://example.com/article Post 2030-01-01 at 19:00 Asia/Kolkata.")
+    const connection = await h.waitMessage(/Buffer isn't connected/)
+    expectConversationResponse(h.network.getState().telegramMessages, "connection")
+    expect(h.network.getState().telegramMessages).toHaveLength(1)
+    expect(connection.text).not.toContain(NOTE)
+    expect(connection.text).not.toContain("─── Note ───")
+    expect(connection.replyMarkup?.inline_keyboard).toEqual([
+      [{ text: "Connect Buffer", url: "https://kipp.test/setup/buffer" }],
+      [{ text: "Continue", callback_data: expect.any(String) }],
+    ])
+    expect(h.state.modelCalls).toBe(0)
+    expect(h.state.registrations.some((r) => r.kind === "notes-publish")).toBe(false)
+    const keyboard = connection.replyMarkup?.inline_keyboard as Array<Array<{ text: string; callback_data?: string }>>
+    const token = keyboard.flat().find((button) => button.text === "Continue")?.callback_data
+    expect(
+      await h.update({
+        callback_query: {
+          id: "wrong",
+          from: { id: 43 },
+          message: { message_id: connection.messageId, chat: { id: 100 } },
+          data: token,
+        },
+      }),
+    ).toBe(403)
+    await h.click(connection, /^Continue$/)
+    const stillDisconnected = await h.waitMessage(/Buffer isn't connected/, connection.messageId)
+    expect(h.state.modelCalls).toBe(0)
+    expect(h.network.getState().telegramMessages.every((message) => !message.text?.includes("─── Note ───"))).toBe(true)
+    await h.controlNotes("pause")
+    await h.waitStatus("notes", "paused")
+    await h.reboot()
+    await h.controlNotes("resume")
+    await h.setBufferGrant()
+    expect(h.state.modelCalls).toBe(0)
+    await h.click(stillDisconnected, /^Continue$/)
+    const ready = await h.waitMessage(/─── Note ───/)
+    expectConversationResponse(
+      h.network.getState().telegramMessages.filter((message) => message.messageId > stillDisconnected.messageId),
+      "review",
+      ["Timing:", "─── Note ───"],
+    )
+    expect(ready.text).not.toContain("Buffer isn't connected")
+    expect(h.state.modelCalls).toBe(1)
+    expect(JSON.stringify(h.state.transcript[0].request)).toContain("Small releases.")
+    expect(h.state.bufferWrites).toHaveLength(0)
+    expect(new Set(h.state.registrations.map((r) => r.expiresAt)).size).toBe(1)
+    await h.click(stillDisconnected, /^Continue$/)
+    await h.click(connection, /^Continue$/)
+    expect(h.state.modelCalls).toBe(1)
+    expect(h.state.bufferWrites).toHaveLength(0)
+    await h.click(ready, /^Schedule$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0]).toMatchObject({
+      text: NOTE,
+      mode: "customScheduled",
+      dueAt: "2030-01-01T13:30:00.000Z",
+      metadata: { substack: { linkAttachment: { url: "https://example.com/article" } } },
+    })
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("keeps all five writing sessions after connection repair without extending the deadline", async () => {
+  const h = await createWorkflowSanity({ skipBufferGrant: true, model, userTurnLimit: 12 })
+  try {
+    await h.message("/note Small releases.")
+    const connection = await h.waitMessage(/Buffer isn't connected/)
+    await h.click(connection, /^Continue$/)
+    const retry = await h.waitMessage(/Buffer isn't connected/, connection.messageId)
+    expect(h.state.modelCalls).toBe(0)
+    await h.setBufferGrant()
+    await h.click(retry, /^Continue$/)
+    let review = await h.waitMessage(/─── Note ───/)
+    for (let i = 0; i < 4; i++) {
+      await h.message("Keep the facts, refine the wording.", review.messageId)
+      review = await h.waitMessage(/─── Note ───/, review.messageId)
+    }
+    expect(h.state.modelCalls).toBe(5)
+    expect(new Set(h.state.registrations.map((r) => r.expiresAt)).size).toBe(1)
+    expect(review.replyMarkup?.inline_keyboard).toEqual([[{ text: "Publish", callback_data: expect.any(String) }]])
+    await h.click(review, /^Publish$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("asks only for channel repair before drafting and resumes the original invocation", async () => {
+  const h = await createWorkflowSanity({ model })
+  try {
+    h.state.bufferDisconnected = true
+    await h.message("/note Small releases.")
+    const connection = await h.waitMessage(/Reconnect the Substack channel inside Buffer/)
+    expect(h.network.getState().telegramMessages).toHaveLength(1)
+    expect(h.state.modelCalls).toBe(0)
+    expect(h.state.registrations.some((r) => r.kind === "notes-publish")).toBe(false)
+    h.state.bufferDisconnected = false
+    await h.click(connection, /^Continue$/)
+    const ready = await h.waitMessage(/─── Note ───/)
+    expect(h.state.modelCalls).toBe(1)
+    expect(h.state.bufferWrites).toHaveLength(0)
+    await h.click(ready, /^Publish$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
 
 it.each([
   "resolve",
@@ -12,7 +167,7 @@ it.each([
   const h = await createWorkflowSanity({ model, persistent: true, notesRouterFault: fault })
   try {
     await h.message("/note Small releases keep feedback useful.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     expect(await h.click(review, /^Publish$/, 90)).toBe(503)
     if (fault === "resolve") {
       await h.controlNotes("pause")
@@ -34,7 +189,7 @@ it.each(["review", "accepted"])("recovers the production Notes Workflow after co
   const h = await createWorkflowSanity({ model, persistent: true, loseNotesSubmitCheckpoint: boundary === "accepted" })
   try {
     await h.message("/note Small releases keep feedback useful. https://example.com/article")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     if (boundary === "accepted") {
       await h.click(review, /^Publish$/)
       await h.until(() => (h.state.publicationCheckpoints === 1 ? true : undefined))
@@ -47,7 +202,7 @@ it.each(["review", "accepted"])("recovers the production Notes Workflow after co
     await h.controlNotes("resume")
     if (boundary === "review") await h.click(review, /^Publish$/)
     await h.waitStatus("notes")
-    await h.waitMessage(/^Sent to Buffer for publication/)
+    await h.waitMessage(/Sent to Buffer for publication/)
     await h.click(review, /^Publish$/)
     expect(h.state.modelCalls).toBe(1)
     expect(h.state.bufferWrites).toHaveLength(1)
@@ -64,11 +219,11 @@ it("replays a lost Workflow submit checkpoint from durable acceptance without an
   const h = await createWorkflowSanity({ model, loseNotesSubmitCheckpoint: true })
   try {
     await h.message("/note Small releases keep feedback useful.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.click(review, /^Publish$/)
     await h.waitStatus("notes")
     expect(h.state.bufferWrites).toHaveLength(1)
-    await h.waitMessage(/^Sent to Buffer for publication/)
+    await h.waitMessage(/Sent to Buffer for publication/)
   } finally {
     await h.dispose()
   }
@@ -86,13 +241,13 @@ it("keeps Revise separate from writing and rejects the old Publish button", asyn
   })
   try {
     await h.message("/note Small releases keep feedback useful.")
-    const first = await h.waitMessage(/^A small release/)
+    const first = await h.waitMessage(/A small release/)
     await h.click(first, /^Revise$/)
     const question = await h.waitMessage(/What would you like to change/)
     await h.click(first, /^Revise$/)
     expect(h.state.modelCalls).toBe(1)
     await h.message("Make it tighter.", question.messageId)
-    const latest = await h.waitMessage(/^Smaller releases/)
+    const latest = await h.waitMessage(/Smaller releases/)
     expect(await h.click(first, /^Publish$/)).toBe(200)
     expect(h.state.bufferWrites).toHaveLength(0)
     await h.click(latest, /^Publish$/)
@@ -112,15 +267,14 @@ it("takes authenticated /note through exact approval and immediate Buffer accept
     await h.waitMessage(/Use \/note/)
     expect(h.state.modelCalls).toBe(0)
     expect(await h.message("/note Small releases keep feedback useful.")).toBe(200)
-    const review = await h.waitMessage(/^A small release/)
-    expect(review.text).toBe(NOTE)
+    const review = await h.waitMessage(/A small release/)
+    expect(review.text).toContain(`─── Note ───\n\n${NOTE}`)
     expect(h.state.transcript[0].request).toMatchObject({ model: "openai/gpt-6-luna", reasoning: { effort: "none" } })
     const messages = h.network.getState().telegramMessages
-    expect(messages.map((m) => m.text).slice(-3)).toEqual([
-      "One concrete idea, in the author's voice.",
-      expect.stringContaining("Timing: publish immediately"),
-      NOTE,
-    ])
+    expect(messages.filter((m) => m.messageId >= review.messageId)).toHaveLength(1)
+    expect(review.text).toBe(
+      `One concrete idea, in the author's voice.\n\nTiming: publish immediately after approval. Reply with feedback or tap Revise.\n\n─── Note ───\n\n${NOTE}`,
+    )
     expect(h.state.bufferWrites).toHaveLength(0)
     expect(await h.click(review, /^Publish$/, 90)).toBe(200)
     await h.waitStatus("notes")
@@ -136,7 +290,7 @@ it("takes authenticated /note through exact approval and immediate Buffer accept
         saveToDraft: false,
       },
     ])
-    await h.waitMessage(/^Sent to Buffer for publication/)
+    await h.waitMessage(/Sent to Buffer for publication/)
     expect(h.state.failures).toEqual([])
   } finally {
     await h.dispose()
@@ -150,7 +304,7 @@ it.each([
   const h = await createWorkflowSanity({ model, notesRouterFault: fault })
   try {
     await h.message("/note Small releases keep feedback useful.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     expect(await h.click(review, /^Publish$/, 90)).toBe(503)
     expect(await h.click(review, /^Publish$/, 90)).toBe(200)
     await h.waitStatus("notes")
@@ -167,7 +321,7 @@ it("ends without a publishing Retry when Buffer returns an unconfirmed mutation 
   })
   try {
     await h.message("/note Small releases keep feedback useful.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.click(review, /^Publish$/)
     await h.waitStatus("notes")
     const failure = await h.waitMessage(/couldn't confirm submission/)
@@ -190,7 +344,7 @@ it("clarifies missing facts before presenting any Publish action", async () => {
     expect(question.replyMarkup).toBeUndefined()
     expect(h.state.registrations.some((r) => r.kind === "notes-publish")).toBe(false)
     await h.message("The smaller release experiment.", question.messageId)
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.click(review, /^Publish$/)
     await h.waitStatus("notes")
     expect(h.state.modelCalls).toBe(2)
@@ -220,21 +374,21 @@ it("retains a masked first card through prose revision, replaces it from feedbac
         url: "https://first.example.com/?a=1#part",
       },
     ])
-    const first = await h.waitMessage(/^Version 1/)
+    const first = await h.waitMessage(/Version 1/)
     await h.waitMessage(/Embedded card: https:\/\/first.example.com/)
     await h.message("Make it more direct.", first.messageId)
-    const second = await h.waitMessage(/^Version 2/)
+    const second = await h.waitMessage(/Version 2/)
     await h.waitMessage(/Embedded card: https:\/\/first.example.com/, first.messageId)
     await h.message(
       "Use this instead https://replacement.example.com and ignore https://last.example.com",
       second.messageId,
     )
-    const third = await h.waitMessage(/^Version 3/)
+    const third = await h.waitMessage(/Version 3/)
     await h.waitMessage(/Embedded card: https:\/\/replacement.example.com/)
     await h.click(first, /^Publish$/)
     expect(h.state.bufferWrites).toHaveLength(0)
     await h.message("Remove the card.", third.messageId)
-    const fourth = await h.waitMessage(/^Version 4/)
+    const fourth = await h.waitMessage(/Version 4/)
     await h.click(fourth, /^Publish$/)
     await h.waitStatus("notes")
     expect(h.state.bufferWrites).toHaveLength(1)
@@ -248,10 +402,10 @@ it("publishes only the first URL as a card and verifies Buffer's matching metada
   const h = await createWorkflowSanity({ model })
   try {
     await h.message("/note See https://example.com/first?a=1#part and https://substack.com/second")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.click(review, /^Publish$/)
     await h.waitStatus("notes")
-    await h.waitMessage(/^Sent to Buffer for publication/)
+    await h.waitMessage(/Sent to Buffer for publication/)
     expect(h.state.bufferWrites[0].metadata).toEqual({
       substack: { linkAttachment: { url: "https://example.com/first?a=1#part" } },
     })
@@ -268,13 +422,13 @@ it("keeps the last valid linked draft after clarification exhausts five writing 
   })
   try {
     await h.message("/note Small releases https://example.com/original")
-    const original = await h.waitMessage(/^A small release/)
+    const original = await h.waitMessage(/A small release/)
     await h.message("Revise it.", original.messageId)
     for (let call = 2; call <= 4; call++) {
       const question = await h.waitMessage(new RegExp(`^Question ${call}:`))
       await h.message("Keep the supplied facts.", question.messageId)
     }
-    const final = await h.waitMessage(/^A small release/, original.messageId)
+    const final = await h.waitMessage(/A small release/, original.messageId)
     await h.waitMessage(/writing limit is reached/)
     expect(h.state.modelCalls).toBe(5)
     expect(final.replyMarkup?.inline_keyboard).toEqual([[{ text: "Publish", callback_data: expect.any(String) }]])
@@ -324,11 +478,11 @@ it("reoffers the exact last valid draft and card after Workflow writing retries 
   })
   try {
     await h.message("/note Small releases https://example.com/original")
-    const original = await h.waitMessage(/^A small release/)
+    const original = await h.waitMessage(/A small release/)
     await h.message("Try a different opening.", original.messageId)
     await h.waitMessage(/couldn't reshape it/)
-    const recovered = await h.waitMessage(/^A small release/, original.messageId)
-    expect(recovered.text).toBe(NOTE)
+    const recovered = await h.waitMessage(/A small release/, original.messageId)
+    expect(recovered.text).toContain(`─── Note ───\n\n${NOTE}`)
     expect(h.state.modelCalls).toBe(7)
     expect(new Set(h.state.registrations.map((r) => r.expiresAt)).size).toBe(1)
     await h.click(original, /^Publish$/)
@@ -357,13 +511,13 @@ it("retries a failed bounded writing session without consuming another logical r
   })
   try {
     await h.message("/note Small releases https://example.com/original")
-    let review = await h.waitMessage(/^A small release/)
+    let review = await h.waitMessage(/A small release/)
     expect(h.state.modelCalls).toBe(4)
     expect(h.state.transcript[3].request.messages).toEqual(h.state.transcript[0].request.messages)
     // Four follow-ups remain after recovery of the initial writing step.
     for (let round = 0; round < 4; round++) {
       await h.message("Tighten the wording; preserve the card.", review.messageId)
-      review = await h.waitMessage(/^A small release/, review.messageId)
+      review = await h.waitMessage(/A small release/, review.messageId)
     }
     expect(h.state.modelCalls).toBe(8)
     expect(review.replyMarkup?.inline_keyboard).toEqual([[{ text: "Publish", callback_data: expect.any(String) }]])
@@ -407,11 +561,11 @@ it.each(["Asia/Kolkata", null])("queues a Note and displays Buffer's assigned sl
   })
   try {
     await h.message("/note Small releases. Add this to my queue.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.waitMessage(/Timing: next available slot/)
     await h.click(review, /^Add to queue$/)
     await h.waitStatus("notes")
-    const confirmation = await h.waitMessage(/^Added to your Buffer queue/)
+    const confirmation = await h.waitMessage(/Added to your Buffer queue/)
     expect(confirmation.text).toContain(timeZone ? "2030-01-01 19:00 Asia/Kolkata" : "2030-01-01 13:30 UTC")
     expect(h.state.bufferWrites).toHaveLength(1)
     expect(h.state.bufferWrites[0]).toMatchObject({ mode: "addToQueue", schedulingType: "automatic" })
@@ -440,16 +594,16 @@ it("schedules an exact UTC instant and preserves it through a prose revision", a
   })
   try {
     await h.message("/note Small releases. Schedule for 2030-01-01 at 7pm.")
-    const first = await h.waitMessage(/^A small release/)
+    const first = await h.waitMessage(/A small release/)
     await h.waitMessage(/Timing: 2030-01-01 19:00 Asia\/Kolkata/)
     await h.message("Make the opening more concrete.", first.messageId)
-    const review = await h.waitMessage(/^A revised small/)
+    const review = await h.waitMessage(/A revised small/)
     await h.click(first, /^Schedule$/)
     expect(h.state.bufferWrites).toHaveLength(0)
     await h.click(review, /^Schedule$/)
     await h.waitStatus("notes")
     expect(h.state.bufferWrites[0]).toMatchObject({ mode: "customScheduled", dueAt: "2030-01-01T13:30:00.000Z" })
-    await h.waitMessage(/^Scheduled with Buffer for 2030-01-01 19:00 Asia\/Kolkata/)
+    await h.waitMessage(/Scheduled with Buffer for 2030-01-01 19:00 Asia\/Kolkata/)
   } finally {
     await h.dispose()
   }
@@ -479,7 +633,7 @@ it.each([
       expect(clarification.replyMarkup).toBeUndefined()
       expect(h.state.registrations.some((r) => r.kind === "notes-publish")).toBe(false)
       await h.message("Use my Buffer queue instead.", clarification.messageId)
-      const review = await h.waitMessage(/^A small release/)
+      const review = await h.waitMessage(/A small release/)
       await h.click(review, /^Add to queue$/)
       await h.waitStatus("notes")
       expect(h.state.bufferWrites).toHaveLength(1)
@@ -514,7 +668,7 @@ it("clarifies missing scheduling timezone but permits queue placement without on
     const question = await h.waitMessage(/Which timezone/)
     expect(h.state.bufferWrites).toHaveLength(0)
     await h.message("Use the queue instead.", question.messageId)
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.click(review, /^Add to queue$/)
     await h.waitStatus("notes")
     expect(h.state.bufferWrites[0]).not.toHaveProperty("dueAt")
@@ -530,7 +684,7 @@ it("requires explicit Retry after resuming a paused queue and ignores duplicate/
   })
   try {
     await h.message("/note Small releases. Queue it.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     h.state.bufferQueuePaused = true
     await h.click(review, /^Add to queue$/)
     const repair = await h.waitMessage(/Resume your queue in Buffer/)
@@ -542,7 +696,7 @@ it("requires explicit Retry after resuming a paused queue and ignores duplicate/
     await h.click(repair, /^Retry$/, 90)
     await h.click(repair, /^Retry$/, 91)
     expect(h.state.bufferWrites).toHaveLength(1)
-    await h.waitMessage(/^Added to your Buffer queue/)
+    await h.waitMessage(/Added to your Buffer queue/)
   } finally {
     await h.dispose()
   }
@@ -552,7 +706,7 @@ it("requests Buffer reauthorization and retries the same approved Note after sam
   const h = await createWorkflowSanity({ model })
   try {
     await h.message("/note Small releases.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.setBufferGrant(true)
     await h.click(review, /^Publish$/)
     const repair = await h.waitMessage(/Reconnect using Connect Buffer/)
@@ -584,13 +738,13 @@ it("seals a rejected guard before changed timing gets fresh approval", async () 
   })
   try {
     await h.message("/note Small releases.")
-    const first = await h.waitMessage(/^A small release/)
+    const first = await h.waitMessage(/A small release/)
     h.state.bufferDisconnected = true
     await h.click(first, /^Publish$/)
     const repair = await h.waitMessage(/Reconnect the Substack channel inside Buffer/)
     h.state.bufferDisconnected = false
     await h.message("Put it in my queue instead.", repair.messageId)
-    const revised = await h.waitMessage(/^A small release/, repair.messageId)
+    const revised = await h.waitMessage(/A small release/, repair.messageId)
     await h.click(repair, /^Retry$/)
     expect(h.state.bufferWrites).toHaveLength(0)
     await h.click(revised, /^Add to queue$/)
@@ -606,7 +760,7 @@ it("stops offering Retry after three definitive no-create failures", async () =>
   const h = await createWorkflowSanity({ model, userTurnLimit: 8 })
   try {
     await h.message("/note Small releases.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     h.state.bufferDisconnected = true
     await h.click(review, /^Publish$/)
     let repair = await h.waitMessage(/Reconnect the Substack channel inside Buffer/)
@@ -628,7 +782,7 @@ it("requires fresh destination review after reauthorization changes the account"
   const h = await createWorkflowSanity({ model })
   try {
     await h.message("/note Small releases.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.setBufferGrant(true)
     await h.click(review, /^Publish$/)
     const repair = await h.waitMessage(/Reconnect using Connect Buffer/)
@@ -668,10 +822,10 @@ it("confirms queue acceptance without inventing a slot when dueAt is absent", as
   })
   try {
     await h.message("/note Small releases. Queue it.")
-    const review = await h.waitMessage(/^A small release/)
+    const review = await h.waitMessage(/A small release/)
     await h.click(review, /^Add to queue$/)
     await h.waitStatus("notes")
-    expect((await h.waitMessage(/^Added to your Buffer queue/)).text).toBe("Added to your Buffer queue.")
+    expect((await h.waitMessage(/Added to your Buffer queue/)).text).toBe("Added to your Buffer queue.")
     expect(h.state.bufferWrites).toHaveLength(1)
   } finally {
     await h.dispose()

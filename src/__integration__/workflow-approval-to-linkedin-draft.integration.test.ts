@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import { workflowTimeoutError } from "../__tests__/fixtures/workflow-timeout"
 import type { Env } from "../core/types"
 import { PipelineWorkflow } from "../linkedin/workflow"
+import { expectConversationResponse } from "./helpers/conversation-contract"
 import { createWorkflowSanity, toolResponse } from "./helpers/workflow-sanity"
 import { linkedInJourney, scriptedLinkedIn } from "./helpers/workflow-sanity-scenarios"
 import { createFakeInteractionRouter, createFakeNetwork, createFakeStep, type FakeNotionPage } from "./setup"
@@ -117,9 +118,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     })
     try {
       expect(await harness.message("/generate 1")).toBe(200)
-      await expect(harness.waitMessage(/^\*Draft for idea/)).rejects.toThrow(
-        "Model output was truncated by token limit",
-      )
+      await expect(harness.waitMessage(/^Draft for idea/)).rejects.toThrow("Model output was truncated by token limit")
       expect(harness.state.modelCalls).toBe(1)
       expect(harness.state.linkedinWrites).toHaveLength(0)
     } finally {
@@ -178,7 +177,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(state.linkedinDrafts[0].text).not.toContain("Here is the post reframed")
     expect(state.linkedinDrafts[0].authorUrn).toBe("urn:li:person:123")
 
-    const draftMsg = state.telegramMessages.find((msg) => msg.text.startsWith("*Draft for idea"))
+    const draftMsg = state.telegramMessages.find((msg) => msg.text.startsWith("Draft for idea"))
     expect(draftMsg).toBeDefined()
     expect(draftMsg?.text).toContain("OPENING HOOK")
     expect(draftMsg?.text).toContain("IMAGE IDEAS")
@@ -219,6 +218,12 @@ describe("workflow-approval-to-linkedin-draft", () => {
     expect(step.getCalledSteps()).not.toContain("archive")
     expect(step.getCalledSteps()).not.toContain("notify-published")
     expect(getState().linkedinDrafts).toHaveLength(0)
+    const messages = getState().telegramMessages
+    expectConversationResponse(messages.slice(0, 1), "review", [
+      "Draft for idea",
+      "Will be posted as a LinkedIn draft:",
+    ])
+    expectConversationResponse(messages.slice(1), "connection")
   })
 
   it("revises on feedback then publishes on subsequent approval", async () => {

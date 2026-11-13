@@ -74,7 +74,7 @@ export const notesEventSchema = z
     chatId: z.string().min(1),
     interactionId: z.string().min(1),
     version: z.number().int().positive(),
-    kind: z.enum(["notes-publish", "notes-revise", "notes-feedback", "notes-retry"]),
+    kind: z.enum(["notes-publish", "notes-revise", "notes-feedback", "notes-retry", "notes-continue"]),
     fingerprint: z.string(),
     telegramUpdateId: z.number().int(),
     receivedAtMs: z.number().finite(),

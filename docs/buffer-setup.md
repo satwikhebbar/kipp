@@ -31,7 +31,9 @@ The five new registry variables are globally optional: client credentials and
 redirect origin are required for Buffer setup; the channel ID is required for
 Notes publication. `PROMPT_NOTES_PATH` selects a writing prompt, falling back
 to `notes-style-prompt.md` and then a provisional bundled default only when
-files are missing. Each run snapshots the prompt, model, timezone and destination.
+files are missing. Each run snapshots the prompt, model and timezone, then
+resolves and pins the Buffer destination before starting the writer. A connection
+prompt and a writing response are mutually exclusive turns.
 Production provisioning remains
 a release prerequisite; a dry-run does not verify provisioned values.
 
@@ -63,9 +65,11 @@ and `BUFFER_PUBLICATIONS` (`BufferPublicationDO`, append-only SQLite migration
 `v4`). Local configuration needs the same bindings. This code change does not
 deploy those resources or provision production Buffer credentials/channel values.
 
-Send `/note <raw thoughts>` with optional posting instructions. Review commentary
-appears first, then timing, then the exact Note in
-plain text. Only the current owner's Publish, Add to queue or Schedule button authorizes submission;
+Send `/note <raw thoughts>` with optional posting instructions. A single review
+message contains commentary, timing, then the exact plain-text Note beneath a
+visible divider. Connection guidance is a separate setup turn, never included
+in the review. Only oversized reviews split across messages, with controls on the
+final part. Only the current owner's Publish, Add to queue or Schedule button authorizes submission;
 typing “publish” supplies writing feedback. Revise opens a feedback prompt and
 does not call the writer until feedback arrives. The initial generation plus
 four follow-up writing sessions share the existing capped feedback window.
@@ -75,6 +79,14 @@ logical session and with fixed input. These retries do not spend another review
 round. If retries are exhausted or the writing limit is reached, the last valid
 Note remains available with fresh controls; without a valid draft, the run ends
 with a failure notice. Clarification messages have no approval buttons.
+If Buffer is unavailable at startup, Kipp retains the original thoughts and sends
+only connection/channel repair guidance, with Continue and (when authorization
+is missing) Connect Buffer. No writer call, draft or review buttons accompany
+that turn. After repair, Continue rechecks and pins the destination, then starts
+drafting from the original thoughts. It never publishes or consumes a writing
+session by itself. Repeated failed connection checks preserve the fixed review
+deadline. Subsequent changes to a pinned destination still require a new run,
+as described in publication repair below.
 Posting intent is returned as a separate structured timing proposal by the writer.
 With no posting instruction, publication defaults to immediate; prose-only revisions preserve timing.
 Queue approval delegates the next slot to Buffer. If Buffer returns its assigned
@@ -166,6 +178,9 @@ cover the uncheckpointed mutation boundaries separately. These are regression
 checks, not a claim that every possible infrastructure failure is recoverable.
 
 ## Release prerequisites
+
+Use the [localhost acceptance and production readiness runbook](notes-local-acceptance.md)
+for environment checks, migration handling, live test cases and cleanup.
 
 Implementation and simulated-account verification do not establish production
 readiness. Provisioning and the integrated account walkthrough are tracked by
