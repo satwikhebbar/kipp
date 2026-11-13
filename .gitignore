@@ -34,3 +34,6 @@ wrangler.local.toml
 .beads-credential-key
 .beads/
 .beads/proxieddb/
+
+# Humanlayer artefacts
+.humanlayer
