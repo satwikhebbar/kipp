@@ -1,0 +1,969 @@
+{
+  "profile": "openengine.graph.full/v1",
+  "initialInput": {
+    "kind": "record",
+    "fields": {
+      "task": {
+        "type": {
+          "kind": "string"
+        },
+        "required": true
+      }
+    }
+  },
+  "policy": {
+    "policy": "policy.native-v2@1",
+    "default": "deny"
+  },
+  "root": {
+    "kind": "seq",
+    "name": "run",
+    "state": {
+      "kind": "record",
+      "fields": {
+        "acceptanceFeedback": {
+          "type": {
+            "kind": "string"
+          },
+          "required": true
+        },
+        "codeFeedback": {
+          "type": {
+            "kind": "string"
+          },
+          "required": true
+        },
+        "task": {
+          "type": {
+            "kind": "string"
+          },
+          "required": true
+        },
+        "noItems": {
+          "type": {
+            "kind": "array",
+            "items": {
+              "kind": "null"
+            }
+          },
+          "required": true
+        },
+        "checkResult": {
+          "type": {
+            "kind": "string"
+          },
+          "required": true
+        }
+      }
+    },
+    "children": [
+      {
+        "kind": "loop",
+        "name": "review_loop",
+        "state": {
+          "kind": "record",
+          "fields": {
+            "acceptanceFeedback": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            },
+            "codeFeedback": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            },
+            "task": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            },
+            "noItems": {
+              "type": {
+                "kind": "array",
+                "items": {
+                  "kind": "null"
+                }
+              },
+              "required": true
+            },
+            "checkResult": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            }
+          }
+        },
+        "body": {
+          "kind": "seq",
+          "name": "review_iteration",
+          "state": {
+            "kind": "record",
+            "fields": {
+              "acceptanceFeedback": {
+                "type": {
+                  "kind": "string"
+                },
+                "required": true
+              },
+              "codeFeedback": {
+                "type": {
+                  "kind": "string"
+                },
+                "required": true
+              },
+              "task": {
+                "type": {
+                  "kind": "string"
+                },
+                "required": true
+              },
+              "noItems": {
+                "type": {
+                  "kind": "array",
+                  "items": {
+                    "kind": "null"
+                  }
+                },
+                "required": true
+              },
+              "checkResult": {
+                "type": {
+                  "kind": "string"
+                },
+                "required": true
+              }
+            }
+          },
+          "children": [
+            {
+              "kind": "step",
+              "name": "worker",
+              "worker": "builtin.agent.software-worker@1",
+              "instructions": "Implement the task using repository conventions; inspect and preserve any existing task changes. Address both reviewers feedback on repair passes. Run useful focused checks with concise output during development. Do not run the full pre-commit group or full integration/migration suites: the separate mechanical checks stage owns them on every pass. If feedback concerns an environment restriction, do not change application behavior or repeatedly rerun full checks to repair the environment. Work only in the selected worktree. Return a local diff; do not commit, publish or deploy. The coordinator owns issue tracking. If blocked, explain the blocker instead of claiming success.",
+              "input": {
+                "kind": "record",
+                "fields": {
+                  "acceptanceFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "codeFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "task": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  }
+                }
+              },
+              "output": {
+                "kind": "null"
+              },
+              "inputBindings": [
+                {
+                  "target": [
+                    "task"
+                  ],
+                  "value": {
+                    "source": "state",
+                    "path": [
+                      "task"
+                    ]
+                  }
+                },
+                {
+                  "target": [
+                    "acceptanceFeedback"
+                  ],
+                  "value": {
+                    "source": "state",
+                    "path": [
+                      "acceptanceFeedback"
+                    ]
+                  }
+                },
+                {
+                  "target": [
+                    "codeFeedback"
+                  ],
+                  "value": {
+                    "source": "state",
+                    "path": [
+                      "codeFeedback"
+                    ]
+                  }
+                }
+              ],
+              "writeBindings": [],
+              "attempts": 1
+            },
+            {
+              "kind": "choice",
+              "name": "worker_execution",
+              "state": {
+                "kind": "record",
+                "fields": {
+                  "acceptanceFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "codeFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "task": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "noItems": {
+                    "type": {
+                      "kind": "array",
+                      "items": {
+                        "kind": "null"
+                      }
+                    },
+                    "required": true
+                  },
+                  "checkResult": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  }
+                }
+              },
+              "branches": [
+                {
+                  "when": {
+                    "kind": "in",
+                    "value": {
+                      "name": "worker",
+                      "source": "error",
+                      "field": null
+                    },
+                    "labels": [
+                      "crash",
+                      "malformed",
+                      "refusal",
+                      "timeout"
+                    ]
+                  },
+                  "node": {
+                    "kind": "fail",
+                    "name": "worker_execution_failed",
+                    "reason": "worker_execution_failed"
+                  }
+                }
+              ],
+              "otherwise": {
+                "kind": "map",
+                "name": "worker_execution_clear",
+                "state": {
+                  "kind": "record",
+                  "fields": {
+                    "acceptanceFeedback": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "codeFeedback": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "task": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "noItems": {
+                      "type": {
+                        "kind": "array",
+                        "items": {
+                          "kind": "null"
+                        }
+                      },
+                      "required": true
+                    },
+                    "checkResult": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    }
+                  }
+                },
+                "promotedStatePaths": [],
+                "body": {
+                  "kind": "fail",
+                  "name": "worker_execution_clear_invalid",
+                  "reason": "unexpected_noop_item"
+                },
+                "over": {
+                  "source": "state",
+                  "path": [
+                    "noItems"
+                  ]
+                },
+                "maxItems": 1
+              },
+              "promotedStatePaths": []
+            },
+            {
+              "kind": "step",
+              "name": "checks",
+              "worker": "pilot.script.checks@1",
+              "input": {
+                "kind": "null"
+              },
+              "output": {
+                "kind": "record",
+                "fields": {
+                  "passed": {
+                    "type": {
+                      "kind": "boolean"
+                    },
+                    "required": true
+                  },
+                  "summary": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  }
+                }
+              },
+              "inputBindings": [],
+              "writeBindings": [
+                {
+                  "value": {
+                    "node": "checks",
+                    "channel": "out",
+                    "path": [
+                      "summary"
+                    ]
+                  },
+                  "target": [
+                    "checkResult"
+                  ]
+                }
+              ],
+              "attempts": 1,
+              "timeoutMs": 600000
+            },
+            {
+              "kind": "choice",
+              "name": "check_execution",
+              "state": {
+                "kind": "record",
+                "fields": {
+                  "acceptanceFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "codeFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "task": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "noItems": {
+                    "type": {
+                      "kind": "array",
+                      "items": {
+                        "kind": "null"
+                      }
+                    },
+                    "required": true
+                  },
+                  "checkResult": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  }
+                }
+              },
+              "branches": [
+                {
+                  "when": {
+                    "kind": "in",
+                    "value": {
+                      "name": "checks",
+                      "source": "error",
+                      "field": null
+                    },
+                    "labels": [
+                      "crash",
+                      "malformed",
+                      "refusal",
+                      "timeout"
+                    ]
+                  },
+                  "node": {
+                    "kind": "fail",
+                    "name": "check_execution_failed",
+                    "reason": "check_execution_failed"
+                  }
+                }
+              ],
+              "otherwise": {
+                "kind": "map",
+                "name": "check_execution_clear",
+                "state": {
+                  "kind": "record",
+                  "fields": {
+                    "acceptanceFeedback": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "codeFeedback": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "task": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "noItems": {
+                      "type": {
+                        "kind": "array",
+                        "items": {
+                          "kind": "null"
+                        }
+                      },
+                      "required": true
+                    },
+                    "checkResult": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    }
+                  }
+                },
+                "promotedStatePaths": [],
+                "body": {
+                  "kind": "fail",
+                  "name": "check_execution_clear_invalid",
+                  "reason": "unexpected_noop_item"
+                },
+                "over": {
+                  "source": "state",
+                  "path": [
+                    "noItems"
+                  ]
+                },
+                "maxItems": 1
+              },
+              "promotedStatePaths": []
+            },
+            {
+              "kind": "par",
+              "name": "reviews",
+              "state": {
+                "kind": "record",
+                "fields": {
+                  "acceptanceFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "codeFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "task": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "noItems": {
+                    "type": {
+                      "kind": "array",
+                      "items": {
+                        "kind": "null"
+                      }
+                    },
+                    "required": true
+                  },
+                  "checkResult": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  }
+                }
+              },
+              "branches": [
+                {
+                  "kind": "verifier",
+                  "name": "acceptance",
+                  "worker": "builtin.agent.acceptance-verifier@1",
+                  "input": {
+                    "kind": "record",
+                    "fields": {
+                      "task": {
+                        "type": {
+                          "kind": "string"
+                        },
+                        "required": true
+                      },
+                      "checkResult": {
+                        "type": {
+                          "kind": "string"
+                        },
+                        "required": true
+                      }
+                    }
+                  },
+                  "output": {
+                    "kind": "null"
+                  },
+                  "inputBindings": [
+                    {
+                      "target": [
+                        "task"
+                      ],
+                      "value": {
+                        "source": "state",
+                        "path": [
+                          "task"
+                        ]
+                      }
+                    },
+                    {
+                      "target": [
+                        "checkResult"
+                      ],
+                      "value": {
+                        "source": "state",
+                        "path": [
+                          "checkResult"
+                        ]
+                      }
+                    }
+                  ],
+                  "writeBindings": [
+                    {
+                      "value": {
+                        "node": "acceptance",
+                        "channel": "diagnostic",
+                        "path": [
+                          "message"
+                        ]
+                      },
+                      "target": [
+                        "acceptanceFeedback"
+                      ]
+                    }
+                  ],
+                  "attempts": 1,
+                  "signals": {
+                    "verdict": [
+                      "accepted",
+                      "rejected"
+                    ]
+                  },
+                  "diagnostic": {
+                    "kind": "record",
+                    "fields": {
+                      "message": {
+                        "type": {
+                          "kind": "string"
+                        },
+                        "required": true
+                      }
+                    }
+                  },
+                  "instructions": "Review each task requirement against the implementation and regression tests. The checkResult input is the mechanical Lefthook outcome for this worker pass; reaching this node requires that gate to succeed. Inspect its summary and rely on it for the full repository checks. Do not rerun Lefthook or the full unit, integration or migration suites. Run only focused checks needed to investigate a specific concern; keep their output concise. Test caches and temporary artifacts may be written, but do not modify source, tests, documentation or dependencies. Do not install dependencies. Retain prior review context and distinguish resolved, remaining and new findings. Accept only when the task and review criteria are satisfied; otherwise reject with actionable diagnostics. Work only in the selected worktree. Do not commit, publish or deploy. The coordinator owns issue tracking. Report environment blockers distinctly from code defects."
+                },
+                {
+                  "kind": "verifier",
+                  "name": "code",
+                  "worker": "builtin.agent.code-verifier@1",
+                  "input": {
+                    "kind": "record",
+                    "fields": {
+                      "task": {
+                        "type": {
+                          "kind": "string"
+                        },
+                        "required": true
+                      },
+                      "checkResult": {
+                        "type": {
+                          "kind": "string"
+                        },
+                        "required": true
+                      }
+                    }
+                  },
+                  "output": {
+                    "kind": "null"
+                  },
+                  "inputBindings": [
+                    {
+                      "target": [
+                        "task"
+                      ],
+                      "value": {
+                        "source": "state",
+                        "path": [
+                          "task"
+                        ]
+                      }
+                    },
+                    {
+                      "target": [
+                        "checkResult"
+                      ],
+                      "value": {
+                        "source": "state",
+                        "path": [
+                          "checkResult"
+                        ]
+                      }
+                    }
+                  ],
+                  "writeBindings": [
+                    {
+                      "value": {
+                        "node": "code",
+                        "channel": "diagnostic",
+                        "path": [
+                          "message"
+                        ]
+                      },
+                      "target": [
+                        "codeFeedback"
+                      ]
+                    }
+                  ],
+                  "attempts": 1,
+                  "signals": {
+                    "verdict": [
+                      "accepted",
+                      "rejected"
+                    ]
+                  },
+                  "diagnostic": {
+                    "kind": "record",
+                    "fields": {
+                      "message": {
+                        "type": {
+                          "kind": "string"
+                        },
+                        "required": true
+                      }
+                    }
+                  },
+                  "instructions": "Review correctness, privacy, shared contracts, regressions, scope and maintainability. The checkResult input is the mechanical Lefthook outcome for this worker pass; reaching this node requires that gate to succeed. Inspect its summary and rely on it for the full repository checks. Do not rerun Lefthook or the full unit, integration or migration suites. Run only focused checks needed to investigate a specific concern; keep their output concise. Test caches and temporary artifacts may be written, but do not modify source, tests, documentation or dependencies. Do not install dependencies. Retain prior review context and distinguish resolved, remaining and new findings. Accept only when the task and review criteria are satisfied; otherwise reject with actionable diagnostics. Work only in the selected worktree. Do not commit, publish or deploy. The coordinator owns issue tracking. Report environment blockers distinctly from code defects."
+                }
+              ],
+              "promotedStatePaths": [
+                [
+                  "acceptanceFeedback"
+                ],
+                [
+                  "codeFeedback"
+                ]
+              ],
+              "join": {
+                "kind": "all"
+              }
+            },
+            {
+              "kind": "choice",
+              "name": "review_execution",
+              "state": {
+                "kind": "record",
+                "fields": {
+                  "acceptanceFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "codeFeedback": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "task": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  },
+                  "noItems": {
+                    "type": {
+                      "kind": "array",
+                      "items": {
+                        "kind": "null"
+                      }
+                    },
+                    "required": true
+                  },
+                  "checkResult": {
+                    "type": {
+                      "kind": "string"
+                    },
+                    "required": true
+                  }
+                }
+              },
+              "branches": [
+                {
+                  "when": {
+                    "kind": "any",
+                    "guards": [
+                      {
+                        "kind": "in",
+                        "value": {
+                          "name": "acceptance",
+                          "source": "error",
+                          "field": null
+                        },
+                        "labels": [
+                          "crash",
+                          "malformed",
+                          "refusal",
+                          "timeout"
+                        ]
+                      },
+                      {
+                        "kind": "in",
+                        "value": {
+                          "name": "code",
+                          "source": "error",
+                          "field": null
+                        },
+                        "labels": [
+                          "crash",
+                          "malformed",
+                          "refusal",
+                          "timeout"
+                        ]
+                      }
+                    ]
+                  },
+                  "node": {
+                    "kind": "fail",
+                    "name": "review_execution_failed",
+                    "reason": "review_execution_failed"
+                  }
+                }
+              ],
+              "otherwise": {
+                "kind": "map",
+                "name": "review_execution_clear",
+                "state": {
+                  "kind": "record",
+                  "fields": {
+                    "acceptanceFeedback": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "codeFeedback": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "task": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    },
+                    "noItems": {
+                      "type": {
+                        "kind": "array",
+                        "items": {
+                          "kind": "null"
+                        }
+                      },
+                      "required": true
+                    },
+                    "checkResult": {
+                      "type": {
+                        "kind": "string"
+                      },
+                      "required": true
+                    }
+                  }
+                },
+                "promotedStatePaths": [],
+                "body": {
+                  "kind": "fail",
+                  "name": "review_execution_clear_invalid",
+                  "reason": "unexpected_noop_item"
+                },
+                "over": {
+                  "source": "state",
+                  "path": [
+                    "noItems"
+                  ]
+                },
+                "maxItems": 1
+              },
+              "promotedStatePaths": []
+            }
+          ],
+          "promotedStatePaths": [
+            [
+              "acceptanceFeedback"
+            ],
+            [
+              "codeFeedback"
+            ]
+          ]
+        },
+        "until": {
+          "kind": "all",
+          "guards": [
+            {
+              "kind": "in",
+              "value": {
+                "name": "acceptance",
+                "source": "signal",
+                "field": "verdict"
+              },
+              "labels": [
+                "accepted"
+              ]
+            },
+            {
+              "kind": "in",
+              "value": {
+                "name": "code",
+                "source": "signal",
+                "field": "verdict"
+              },
+              "labels": [
+                "accepted"
+              ]
+            }
+          ]
+        },
+        "maxIterations": 3,
+        "promotedStatePaths": []
+      },
+      {
+        "kind": "choice",
+        "name": "loop_result",
+        "state": {
+          "kind": "record",
+          "fields": {
+            "acceptanceFeedback": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            },
+            "codeFeedback": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            },
+            "task": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            },
+            "noItems": {
+              "type": {
+                "kind": "array",
+                "items": {
+                  "kind": "null"
+                }
+              },
+              "required": true
+            },
+            "checkResult": {
+              "type": {
+                "kind": "string"
+              },
+              "required": true
+            }
+          }
+        },
+        "branches": [
+          {
+            "when": {
+              "kind": "in",
+              "value": {
+                "name": "review_loop",
+                "source": "group",
+                "field": "terminated"
+              },
+              "labels": [
+                "converged"
+              ]
+            },
+            "node": {
+              "kind": "succeed",
+              "name": "done",
+              "output": {
+                "kind": "null"
+              },
+              "bindings": []
+            }
+          }
+        ],
+        "otherwise": {
+          "kind": "fail",
+          "name": "review_attempts_exhausted",
+          "reason": "review_attempts_exhausted"
+        },
+        "promotedStatePaths": []
+      }
+    ],
+    "promotedStatePaths": []
+  }
+}

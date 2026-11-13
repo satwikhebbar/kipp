@@ -27,6 +27,7 @@ wrangler.local.toml
 .codex/
 .cursor/
 .tars/
+.zeroshot-pilot/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

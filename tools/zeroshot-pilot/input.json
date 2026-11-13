@@ -1,0 +1,3 @@
+{
+  "task": "Implement structured meal-context extraction diagnostics (agent-harness-vz5).\n\nEmit inventoryChanges as separate available and unavailable ingredient-name arrays, and exceptionAdds as an array of structured summaries containing non-sensitive metadata such as kind, day and mealSlots. Represent empty results explicitly with empty arrays. Exclude free-form household instructions and quantity notes.\n\nPreserve the extractor wire schema, existing meal-planning behavior and transcript logging controls. Add regression coverage for populated results, empty results and privacy omissions, and document the event shape."
+}

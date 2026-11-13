@@ -1,0 +1,67 @@
+{
+  "harness": "codex",
+  "provider": "openai",
+  "size": "medium",
+  "activeMemory": {
+    "repository": false,
+    "graph": false
+  },
+  "globalAgents": {
+    "postmortem": {
+      "enabled": false
+    }
+  },
+  "nodes": {
+    "worker": {
+      "kind": "agent",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "sessionScope": "node_instance",
+      "harnessConfig": {
+        "args": [
+          "--config",
+          "sandbox_mode=\"workspace-write\"",
+          "--config",
+          "approval_policy=\"never\""
+        ]
+      }
+    },
+    "acceptance": {
+      "kind": "agent",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "sessionScope": "node_instance",
+      "harnessConfig": {
+        "args": [
+          "--config",
+          "sandbox_mode=\"workspace-write\"",
+          "--config",
+          "approval_policy=\"never\""
+        ]
+      }
+    },
+    "code": {
+      "kind": "agent",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "sessionScope": "node_instance",
+      "harnessConfig": {
+        "args": [
+          "--config",
+          "sandbox_mode=\"workspace-write\"",
+          "--config",
+          "approval_policy=\"never\""
+        ]
+      }
+    },
+    "checks": {
+      "kind": "script",
+      "command": [
+        "bash",
+        "-c",
+        "set -o pipefail; rtk proxy cat >/dev/null; if check_summary=\"$(rtk pnpm exec lefthook run pre-commit --force --no-auto-install --no-tty 2>&1 | rtk proxy tail -c 2000)\"; then printf '%s\\n' \"$check_summary\" >&2; rtk proxy node -e 'process.stdout.write(JSON.stringify({passed:true,summary:\"Lefthook pre-commit PASSED\\n\"+process.argv[1]})+\"\\n\")' \"$check_summary\"; else check_status=$?; printf '%s\\n' \"$check_summary\" >&2; exit \"$check_status\"; fi"
+      ],
+      "connections": {}
+    }
+  }
+}
