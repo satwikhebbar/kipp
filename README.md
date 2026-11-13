@@ -131,6 +131,41 @@ responses stay outside model context and content logs.
 - Optional private GitHub repository for a custom LinkedIn style prompt
 - Gemini or DeepSeek API key
 
+## Meal context extraction diagnostics
+
+The `meal-planning-context-extraction` runtime event reports initial week-context
+extraction. It follows `LOG_LEVEL=info`. Successful events always include
+`details.applied`, `inventoryChangeCount` and `exceptionAddCount`. Structured
+summaries are included only when `DEPLOYMENT_ENV=development` and
+`LLM_DEBUG_TRANSCRIPT=true` (trimmed and case-insensitive for the latter), using
+the existing transcript logging gate:
+
+```json
+{
+  "event": "meal-planning-context-extraction",
+  "outcome": "succeeded",
+  "details": {
+    "applied": true,
+    "inventoryChangeCount": 2,
+    "exceptionAddCount": 1,
+    "inventoryChanges": { "available": ["carrot"], "unavailable": ["paneer"] },
+    "exceptionAdds": [{ "kind": "half_day", "day": "Fri", "mealSlots": ["school-lunch"] }]
+  }
+}
+```
+
+Ingredient names are normalized. Each inventory array contains only changes
+with that exact status; the extractor's existing `low` status remains supported
+by meal planning and included in the count. Exception summaries contain only
+`kind`, optional `day`, and `mealSlots` (an empty array when unspecified).
+Summaries describe extracted facts before the planner canonicalizes their scope.
+No changes produces `applied: false`, zero counts,
+`inventoryChanges: { "available": [], "unavailable": [] }` and
+`exceptionAdds: []`. Disabled transcript logging omits both summary fields.
+The event excludes request text, household instructions, quantity notes and use
+notes. This does not change the separate development transcript events.
+Failed extraction retains its existing failure metadata without summaries.
+
 ## Setup
 
 ### 1. Install the application

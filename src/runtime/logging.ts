@@ -4,6 +4,14 @@ export const LOG_LEVEL = {
   INFO: "info",
 } as const
 
+/** JSON-safe diagnostic metadata; callers must allowlist fields before logging. */
+export type RuntimeLogDetail =
+  | string
+  | number
+  | boolean
+  | readonly RuntimeLogDetail[]
+  | { readonly [key: string]: RuntimeLogDetail | undefined }
+
 export type RuntimeLogFields = {
   workflow?: string
   sessionId?: string
@@ -16,7 +24,7 @@ export type RuntimeLogFields = {
   failureCategory?: string
   metrics?: Readonly<Record<string, number | boolean>>
   /** Safe, non-payload labels that identify a state transition or validation boundary. */
-  details?: Readonly<Record<string, string | number | boolean>>
+  details?: Readonly<Record<string, RuntimeLogDetail>>
 }
 
 /** Emits metadata only; callers must never attach user/provider payloads. */

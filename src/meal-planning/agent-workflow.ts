@@ -13,7 +13,7 @@ import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-e
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage, type ToolProviderRequestEvent } from "../providers"
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
-import { logRuntime } from "../runtime/logging"
+import { logRuntime, type RuntimeLogDetail } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
 import { computeCoverageSet } from "./coverage"
 import { createEasyBuyClassifier } from "./easy-buy-classifier"
@@ -415,17 +415,23 @@ async function extractInitialWeekContext(
         })
         return { context, usage }
       }
-      const inventoryChanges = parsed.data.inventoryChanges
-        .map(({ name, status }) => `${normalizeIngredient(name)}:${status}`)
-        .join(",")
-      const exceptionAdds = parsed.data.exceptionAdds
-        .map((exception) => `${exception.kind}:${JSON.stringify(exception.appliesTo ?? {})}`)
-        .join(",")
-      const extractionDetails: Record<string, string | number | boolean> = {}
-      if (transcriptEnabled(env)) {
-        extractionDetails.inventoryChanges = inventoryChanges
-        extractionDetails.exceptionAdds = exceptionAdds
-      }
+      const extractionDetails: Record<string, RuntimeLogDetail> = transcriptEnabled(env)
+        ? {
+            inventoryChanges: {
+              available: parsed.data.inventoryChanges
+                .filter(({ status }) => status === "available")
+                .map(({ name }) => normalizeIngredient(name)),
+              unavailable: parsed.data.inventoryChanges
+                .filter(({ status }) => status === "unavailable")
+                .map(({ name }) => normalizeIngredient(name)),
+            },
+            exceptionAdds: parsed.data.exceptionAdds.map(({ kind, appliesTo }) => ({
+              kind,
+              ...(appliesTo?.day !== undefined ? { day: appliesTo.day } : {}),
+              mealSlots: appliesTo?.mealSlots ?? [],
+            })),
+          }
+        : {}
       if (parsed.data.inventoryChanges.length === 0 && parsed.data.exceptionAdds.length === 0) {
         logRuntime(env, {
           workflow: event.instanceId,

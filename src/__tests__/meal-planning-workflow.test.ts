@@ -1133,7 +1133,16 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ])
   })
 
-  it("applies extracted initial inventory before evaluating and persisting the plan", async () => {
+  it.each([
+    { deployment: "development", debug: "true", includeDetails: true },
+    { deployment: "development", debug: " TRUE ", includeDetails: true },
+    { deployment: "development", debug: "false", includeDetails: false },
+    { deployment: "production", debug: "true", includeDetails: false },
+  ])("applies extracted initial inventory with diagnostics gated by $deployment/$debug", async ({
+    deployment,
+    debug,
+    includeDetails,
+  }) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -1151,8 +1160,14 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           name: "extract_week_context",
           input: {
             inventoryChanges: [
-              { name: "carrots", status: "available" },
+              {
+                name: "carrots",
+                status: "available",
+                quantityNote: "Private quantity note",
+                useNote: "Private use note",
+              },
               { name: "paneer", status: "unavailable" },
+              { name: "peas", status: "low" },
             ],
             exceptionAdds: [
               {
@@ -1169,15 +1184,16 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ])
 
     await runAgentCenteredMealPlanningWorkflow(
-      makeEnv(namespace, d1),
+      makeEnv(namespace, d1, { DEPLOYMENT_ENV: deployment, LLM_DEBUG_TRANSCRIPT: debug }),
       mealEvent(invokedAtMs, "Plan this week. I have carrots and do not have paneer."),
       step as never,
     )
 
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.weeklyInventory.items).toEqual([
-      { name: "carrot", status: "available" },
+      { name: "carrot", status: "available", quantityNote: "Private quantity note", useNote: "Private use note" },
       { name: "paneer", status: "unavailable" },
+      { name: "pea", status: "low" },
     ])
     expect(active?.plan.weeklyExceptions.items).toEqual([
       {
@@ -1186,7 +1202,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         instruction: "No school lunch on Friday.",
       },
     ])
-    expect(deepseekBodies[1].messages.at(-1)?.content).toContain("Weekly inventory: carrot, paneer (unavailable)")
+    expect(deepseekBodies[1].messages.at(-1)?.content).toContain(
+      "Weekly inventory: carrot (Private quantity note; Private use note), paneer (unavailable), pea (low)",
+    )
     const extractionLog = logSpy.mock.calls
       .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
       .find((line) => line.event === "meal-planning-context-extraction")
@@ -1194,10 +1212,82 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       outcome: "succeeded",
       details: {
         applied: true,
-        inventoryChangeCount: 2,
+        inventoryChangeCount: 3,
         exceptionAddCount: 1,
       },
     })
+    const details = extractionLog?.details as Record<string, unknown>
+    if (includeDetails) {
+      expect(details).toEqual({
+        applied: true,
+        inventoryChangeCount: 3,
+        exceptionAddCount: 1,
+        inventoryChanges: { available: ["carrot"], unavailable: ["paneer"] },
+        exceptionAdds: [{ kind: "half_day", day: "Fri", mealSlots: ["school-lunch"] }],
+      })
+    } else {
+      expect(details).not.toHaveProperty("inventoryChanges")
+      expect(details).not.toHaveProperty("exceptionAdds")
+    }
+    const diagnostic = JSON.stringify(extractionLog)
+    for (const privateText of [
+      "Private quantity note",
+      "Private use note",
+      "No school lunch on Friday.",
+      "Plan this week.",
+    ]) {
+      expect(diagnostic).not.toContain(privateText)
+    }
+    for (const privateField of ["quantityNote", "useNote", "instruction", "requestText"]) {
+      expect(diagnostic).not.toContain(privateField)
+    }
+  })
+
+  it.each([false, true])("logs explicit empty arrays with an unscoped exception: %s", async (withException) => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    const logSpy = vi.spyOn(console, "log")
+    stubNetwork([
+      deepseekResponse([
+        {
+          name: "extract_week_context",
+          input: {
+            inventoryChanges: [],
+            exceptionAdds: withException ? [{ kind: "occasion", instruction: "Private household occasion" }] : [],
+          },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+
+    await runAgentCenteredMealPlanningWorkflow(
+      makeEnv(namespace, d1, { DEPLOYMENT_ENV: "development", LLM_DEBUG_TRANSCRIPT: "true" }),
+      mealEvent(invokedAtMs, "Plan this week."),
+      step as never,
+    )
+
+    const extractionLog = logSpy.mock.calls
+      .map(([line]) => JSON.parse(String(line)) as Record<string, unknown>)
+      .find((line) => line.event === "meal-planning-context-extraction")
+    expect(extractionLog).toMatchObject({
+      outcome: "succeeded",
+      details: {
+        applied: withException,
+        inventoryChangeCount: 0,
+        exceptionAddCount: withException ? 1 : 0,
+        inventoryChanges: { available: [], unavailable: [] },
+        exceptionAdds: withException ? [{ kind: "occasion", mealSlots: [] }] : [],
+      },
+    })
+    expect(JSON.stringify(extractionLog)).not.toContain("Private household occasion")
+    expect(await createMealPlanningStore(d1).activePlan(CHAT)).toBeTruthy()
   })
 
   it("adds a Mini App review button only after persisting its private-chat context", async () => {
