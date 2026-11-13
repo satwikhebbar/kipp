@@ -1,5 +1,94 @@
 # Request flows
 
+## Notes through Buffer (implemented; awaiting release)
+
+An authenticated `/note <thoughts>` starts one deterministic Workflow instance
+per Telegram chat/message. The run snapshots the writing prompt, model,
+timezone and feedback deadline, then resolves and pins the Buffer account/channel
+identity before starting the shared bounded writer. If setup is unavailable,
+the run retains the original thoughts and sends only repair guidance with
+Continue and, when needed, Connect Buffer. No writer call or draft accompanies
+that turn. Continue rechecks setup and starts drafting only after success,
+without spending a writing session on setup or authorizing a create; it retains
+the original deadline. The writer produces a necessary clarification or
+commentary and exact Note text. Once pinned,
+destination identity cannot silently change during revision or publication repair.
+The first HTTP(S) URL is parsed from original text and Telegram entities, then
+carried separately as one card. Prose revisions preserve it; explicit feedback
+can replace it from the reply’s first URL or remove it. Clarification has no
+Publish action. Initial drafting, clarification and revisions share five writing
+sessions and the original deadline. Failed bounded writing sessions throw from
+the writing step, using the same default Workflow retries as LinkedIn without
+spending another review round. After exhausted retries, recovery preserves the
+latest valid draft or reports failure if none exists. Telegram displays commentary,
+timing and the literal Note in one message with a clear Note divider and review
+keyboard. Connection guidance remains a separate turn. Only oversized reviews split, with controls
+on the final part. Publish authority is an opaque action
+bound to the owner, chat, workflow, candidate version, fingerprint and deadline.
+Writing feedback and model output cannot authorize publication. The writer supplies
+structured now/queue/schedule intent separately from the Note text. Deterministic
+time resolution uses the source message receipt and explicit/default timezone;
+invalid, missing, ambiguous or elapsed scheduling requires clarification. Prose
+revisions preserve timing. Queue approval delegates the next slot to Buffer; the
+confirmation shows returned `dueAt` without polling or inventing a timestamp.
+
+```mermaid
+sequenceDiagram
+  participant T as Telegram webhook
+  participant R as InteractionRouterDO
+  participant W as NotesWorkflow
+  participant P as BufferPublicationDO
+  participant B as Buffer
+  T->>W: Start deterministic /note invocation
+  W->>B: Resolve destination before writing
+  opt Connection needs repair
+    W-->>T: Connect Buffer and Continue; retain thoughts, no draft
+    T->>W: Authenticated Continue after repair
+    W->>B: Recheck destination; no create
+  end
+  W->>W: Draft from original thoughts after connection is ready
+  W->>R: Register owner-bound review actions
+  W-->>T: Commentary, timing, exact Note and mode-specific approval
+  T->>R: Resolve and retain authenticated approval
+  R-->>T: Immutable delivery event
+  T->>W: Send retained notes-interaction
+  T->>R: Acknowledge delivery
+  W->>W: Validate exact pending action and freeze payload
+  W->>P: Prepare immutable approved publication
+  P->>P: Persist dispatch claim
+  P->>B: One create request
+  B-->>P: Typed result
+  P->>P: Persist acceptance or terminal uncertainty
+  P-->>W: Stored result, including on checkpoint replay
+  W-->>T: Confirm Buffer acceptance and finish
+```
+
+Resolve/forward/ack failure returns HTTP 503 for Notes so webhook redelivery can
+reuse the retained event. The Workflow rejects stale or duplicate events. A
+publication with an existing dispatch claim never acquires another send lease;
+replay returns its durable evidence. Only an incomplete result with a captured
+post ID permits one bounded lookup of that ID. There is no downstream delivery
+polling or inspection-and-retry interaction. A definitive no-create rejection is
+a separate path: offer repair and explicit Retry of the unchanged payload, with
+fresh owner/action/attempt validation and at most three attempts. The repair wait
+is at most fifteen minutes within the original review deadline and scheduled due time. A
+changed payload seals the rejected guard before fresh review; unknown, dispatching,
+accepted and unexpected-created evidence cannot be superseded into another create.
+
+The Notes transport extension leaves existing provider refresh ownership intact:
+Buffer alone uses vault-coordinated refresh under
+[ADR-003](decisions/ADR-003-buffer-only-coordinated-refresh.md). Concurrent
+same-chat feedback remains unsupported.
+
+Production-module recovery tests run fresh workerd runtimes against the same
+SQLite and Workflow stores. They cover retained review authority, acceptance
+before a lost Workflow checkpoint, dispatch-claim and result-storage failures,
+Retry replay and rejected supersession, router resolve/ack boundaries, and
+rotating-token claims. A failed result save after a create retains uncertainty;
+a saved result with a lost response replays acceptance. Neither path creates
+again. These tests simulate provider endpoints and do not establish live account
+entitlement or editorial quality; see [release prerequisites](../buffer-setup.md#release-prerequisites).
+
 ## Telegram ingress and interaction routing
 
 Telegram commands ingest or start work; replies and callback buttons resume the
@@ -291,3 +380,37 @@ The weekly token check refreshes LinkedIn credentials when possible or alerts
 the allowed Telegram user when reconnection is required. Calendar refreshes an
 expired access token during a request and offers deterministic reconnect/retry
 recovery when authorization is no longer usable.
+
+### Buffer-only coordinated refresh
+
+The Buffer connection implementation is awaiting release. Unlike LinkedIn and
+Calendar, it acquires usable access through a vault-owned refresh operation.
+
+```mermaid
+sequenceDiagram
+  participant C as Buffer caller
+  participant V as TokenVaultDO
+  participant S as Vault SQLite storage
+  participant B as Buffer token endpoint
+
+  C->>V: acquire Buffer access
+  Note over C,V: Overlapping callers await the same live refresh inside the vault
+  V->>S: persist claim for current credential generation
+  S-->>V: storage write completes
+  V->>B: exchange refresh token once
+  B-->>V: replacement access and refresh tokens
+  V->>S: verify generation and claim; save replacement pair without claim
+  S-->>V: storage write completes
+  V-->>C: return usable access
+```
+
+A usable unexpired token returns without a refresh. An unresolved claim after
+restart or an uncertain exchange requires reconnection; the old refresh token
+is not retried. A newer authorization fences late refresh results.
+
+This is a Buffer-specific credential safeguard, independent of the unsupported
+concurrent Telegram feedback capability. LinkedIn and Calendar retain their
+existing refresh paths without coordination. Extending coordination to them is
+deferred until concurrent workflows are explicitly supported and the extension
+is explicitly approved. See
+[ADR-003](decisions/ADR-003-buffer-only-coordinated-refresh.md).

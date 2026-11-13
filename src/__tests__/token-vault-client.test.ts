@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
-import { verifyAccessJwt } from "../core/token-vault-client"
+import { createTokenVault, verifyAccessJwt } from "../core/token-vault-client"
 import type { Env } from "../core/types"
 
 const KID = "test-key-01"
@@ -391,5 +391,34 @@ describe("verifyAccessJwt — team-scoped JWKS cache", () => {
 
     // Cross-team JWT should fail (wrong key)
     expect(await verifyAccessJwt(await makeRequest(await signFor(payload(ISS_A), kpB)), envA)).toBeNull()
+  })
+})
+
+describe("Buffer vault client routing", () => {
+  it("uses dedicated commands without exposing the rotating grant through generic reads", async () => {
+    const fetch = vi.fn(async (_url, options) => Response.json({ op: JSON.parse(options.body).op }))
+    const idFromName = vi.fn(() => "singleton")
+    const env = { TOKEN_VAULT: { idFromName, get: () => ({ fetch }) } } as unknown as Env
+    const vault = createTokenVault(env)
+    const grant = {
+      accessToken: "a",
+      refreshToken: "r",
+      accountId: "account",
+      expiresAtMs: Date.now() + 3600_000,
+      scopes: ["account:read"],
+    }
+    await vault.issueBufferState()
+    await vault.consumeBufferState("state", "cookie")
+    await vault.replaceBufferGrant(grant)
+    await vault.acquireBufferAccess()
+    await vault.rewrapBuffer()
+    expect(idFromName).toHaveBeenCalledWith("linkedin-token-vault")
+    expect(fetch.mock.calls.map(([, options]) => JSON.parse(options.body))).toEqual([
+      { op: "issueBufferState" },
+      { op: "consumeBufferState", state: "state", cookieId: "cookie" },
+      { op: "replaceBufferGrant", grant },
+      { op: "acquireBufferAccess" },
+      { op: "rewrapBuffer" },
+    ])
   })
 })

@@ -1,6 +1,8 @@
 export interface Env {
   PIPELINE_WORKFLOW: Workflow
   CALENDAR_WORKFLOW?: Workflow
+  NOTES_WORKFLOW?: Workflow
+  BUFFER_PUBLICATIONS?: DurableObjectNamespace
   MEAL_PLANNING_WORKFLOW?: Workflow
   MEAL_PLANNING_DB?: D1Database
   /** Public HTTPS origin for the authenticated Telegram meal-plan Mini App. */
@@ -21,6 +23,11 @@ export interface Env {
   GOOGLE_CALENDAR_CLIENT_ID?: string
   GOOGLE_CALENDAR_CLIENT_SECRET?: string
   GOOGLE_CALENDAR_REDIRECT_ORIGIN?: string
+  BUFFER_CLIENT_ID?: string
+  BUFFER_CLIENT_SECRET?: string
+  BUFFER_REDIRECT_ORIGIN?: string
+  BUFFER_SUBSTACK_CHANNEL_ID?: string
+  PROMPT_NOTES_PATH?: string
   LINKEDIN_AUTHOR_URN: string
   DEPLOYMENT_ENV?: string
   LOG_LEVEL?: string
@@ -118,6 +125,11 @@ export interface WorkflowEvent {
 }
 
 export const INTERACTION_KIND = {
+  NOTES_RETRY: "notes-retry",
+  NOTES_CONTINUE: "notes-continue",
+  NOTES_PUBLISH: "notes-publish",
+  NOTES_REVISE: "notes-revise",
+  NOTES_FEEDBACK: "notes-feedback",
   APPROVE: "approve",
   REVISE: "revise",
   REVISION_FEEDBACK: "revision-feedback",
@@ -186,6 +198,25 @@ export interface GoogleCalendarTokens {
 export const TOKEN_PROVIDER = {
   LINKEDIN: "linkedin",
   GOOGLE_CALENDAR: "google-calendar",
+  BUFFER: "buffer",
 } as const
 
 export type TokenProvider = (typeof TOKEN_PROVIDER)[keyof typeof TOKEN_PROVIDER]
+
+/** Buffer credentials are only read and refreshed inside the encrypted vault. */
+export interface BufferGrantInput {
+  accessToken: string
+  refreshToken: string
+  expiresAtMs: number
+  accountId: string
+  scopes: string[]
+}
+
+export interface BufferGrant extends BufferGrantInput {
+  credentialGeneration: number
+  connectionId: string
+}
+
+export type BufferAccess =
+  | { kind: "usable"; accessToken: string; accountId: string; credentialGeneration: number; connectionId: string }
+  | { kind: "needs-auth"; reason: string }

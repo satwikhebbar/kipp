@@ -201,6 +201,35 @@ describe("Calendar recurrence policy", () => {
       ])
   })
 
+  it.each([
+    ["2026-03-01", "02:30", "2026-03-08", "nonexistent_local_time"],
+    ["2026-10-25", "01:30", "2026-11-01", "ambiguous_local_time"],
+  ])("identifies the affected recurring date across a transition from %s", (firstDate, startTime, localDate, code) => {
+    const result = evaluateRecurrenceAvailability(
+      {
+        ...MONTHLY,
+        firstDate,
+        startTime,
+        recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+        end: { mode: "count", occurrences: 3 },
+      },
+      [],
+      "America/New_York",
+      Date.parse("2026-01-01T00:00:00.000Z"),
+    )
+    expect(result).toMatchObject({
+      kind: "clarification",
+      issues: [{ code, field: "startTime", params: { localDate, startTime, timeZone: "America/New_York" } }],
+    })
+  })
+
+  it("rejects an invalid recurrence zone before formatting an instant", () => {
+    expect(evaluateRecurrenceAvailability(MONTHLY, [], "Not/AZone")).toMatchObject({
+      kind: "clarification",
+      issues: [{ code: "invalid_time_zone", field: "timeZone" }],
+    })
+  })
+
   it("uses the whole-series branch at exactly fifty percent conflict", () => {
     const proposal: RecurringProposal = {
       ...MONTHLY,

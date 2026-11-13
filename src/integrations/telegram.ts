@@ -1,3 +1,5 @@
+import { verticalButtonRows } from "./telegram-keyboard"
+
 const TELEGRAM_API = "https://api.telegram.org"
 
 /** Ceiling for best-effort failure notifications so a hung request can't delay handler completion. */
@@ -19,13 +21,28 @@ export function createTelegramClient(token: string) {
   async function sendMessage(
     chatId: number | string,
     text: string,
-    opts?: { replyMarkup?: Record<string, unknown>; signal?: AbortSignal },
+    opts?: {
+      replyMarkup?: Record<string, unknown>
+      signal?: AbortSignal
+      plainText?: boolean
+      disableLinkPreview?: boolean
+    },
   ): Promise<{ messageId: number }> {
     const messageBody: Record<string, unknown> = {
       chat_id: chatId,
       text,
-      parse_mode: "Markdown",
-      ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
+      ...(!opts?.plainText ? { parse_mode: "Markdown" } : {}),
+      ...(opts?.disableLinkPreview ? { link_preview_options: { is_disabled: true } } : {}),
+      ...(opts?.replyMarkup
+        ? {
+            reply_markup: {
+              ...opts.replyMarkup,
+              ...(Array.isArray(opts.replyMarkup.inline_keyboard)
+                ? { inline_keyboard: verticalButtonRows(opts.replyMarkup.inline_keyboard) }
+                : {}),
+            },
+          }
+        : {}),
     }
     try {
       const data = await call<{ result: { message_id: number } }>("sendMessage", messageBody, opts?.signal)

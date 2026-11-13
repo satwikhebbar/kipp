@@ -439,7 +439,7 @@ describe("PipelineWorkflow", () => {
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
     expect(linkedinDrafts).toEqual([cleanPost])
-    const draftMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
+    const draftMsg = telegramTexts.find((t) => t.startsWith("Draft for idea"))
     expect(draftMsg).toBeDefined()
     expect(draftMsg).toContain(conversationResponse)
     expect(draftMsg).toContain("Will be posted as a LinkedIn draft:")
@@ -470,13 +470,12 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    const headerMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
+    const headerMsg = telegramTexts.find((t) => t.startsWith("Draft for idea"))
     expect(headerMsg).toBe(telegramTexts[0])
-    const postMsg = telegramTexts.find((t) => t.startsWith("Will be posted as a LinkedIn draft:"))
-    expect(postMsg).toBeDefined()
-    expect(postMsg).toContain(nearMaxPost)
-    expect(postMsg).toContain("Reply with feedback or tap below.")
-    expect(telegramTexts.indexOf(postMsg as string)).toBe(1)
+    const review = telegramTexts.slice(0, 2).join("")
+    expect(review).toContain(maxResponse)
+    expect(review).toContain(`Will be posted as a LinkedIn draft:\n\n${nearMaxPost}`)
+    expect(review).toContain("Reply with feedback or tap below.")
     for (const text of telegramTexts) expect(text.length).toBeLessThanOrEqual(4096)
   })
 
@@ -528,7 +527,7 @@ describe("PipelineWorkflow", () => {
 
     expect(linkedinDrafts).toEqual([revisedPost])
     expect(linkedinDrafts[0]).not.toContain("Revised conversational response")
-    const revisedMsg = telegramTexts.find((t) => t.startsWith("*Revised draft for idea"))
+    const revisedMsg = telegramTexts.find((t) => t.startsWith("Revised draft for idea"))
     expect(revisedMsg).toBeDefined()
     expect(revisedMsg).toContain("Revised conversational response")
   })
@@ -782,7 +781,7 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    const notifyMsg = telegramTexts.find((t) => t.startsWith("*Draft for idea"))
+    const notifyMsg = telegramTexts.find((t) => t.startsWith("Draft for idea"))
     expect(notifyMsg).toBeDefined()
     expect(notifyMsg).toContain("Est. cost:")
     expect(notifyMsg).toContain("100000 in")
@@ -811,7 +810,7 @@ describe("PipelineWorkflow", () => {
 
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), makeStep())
 
-    const notifyMsg = telegramTexts.find((t) => t.startsWith("*Revised draft for idea"))
+    const notifyMsg = telegramTexts.find((t) => t.startsWith("Revised draft for idea"))
     expect(notifyMsg).toBeDefined()
     expect(notifyMsg).toContain("Est. cost:")
     expect(notifyMsg).toContain("300 in")
@@ -958,7 +957,7 @@ describe("PipelineWorkflow", () => {
     ).rejects.toThrow("Interaction router /register failed")
     await (wf as unknown as { run: (e: unknown, s: unknown) => Promise<void> }).run(makeEvent(), retryingStep)
 
-    expect(telegramTexts.filter((t) => t.startsWith("*Draft")).length).toBe(1)
+    expect(telegramTexts.filter((t) => t.startsWith("Draft")).length).toBe(1)
     expect(sendStep).toHaveBeenCalledWith("register-notify-interactions", expect.any(Function))
   })
 

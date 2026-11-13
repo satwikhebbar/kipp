@@ -23,7 +23,25 @@ export function sqliteInteractionRouter(env: Env = {} as Env) {
               return { toArray: () => [] }
             },
           }
-          router = new InteractionRouterDO({ storage: { sql } } as never, env)
+          router = new InteractionRouterDO(
+            {
+              storage: {
+                sql,
+                transactionSync: (fn: () => unknown) => {
+                  db.exec("BEGIN")
+                  try {
+                    const result = fn()
+                    db.exec("COMMIT")
+                    return result
+                  } catch (error) {
+                    db.exec("ROLLBACK")
+                    throw error
+                  }
+                },
+              },
+            } as never,
+            env,
+          )
           objects.set(id, router)
         }
         const request = new Request(url, init)

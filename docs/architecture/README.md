@@ -1,6 +1,7 @@
 # Architecture
 
-This directory documents the deployed architecture of Kipp. It is intended to
+This directory documents Kipp's architecture, marking implemented but unreleased
+components explicitly. It is intended to
 be read by maintainers and coding agents before making changes that affect
 module ownership, runtime boundaries, persistence, external integrations, or
 security boundaries.
@@ -11,7 +12,7 @@ security boundaries.
 architecture inventory. The Mermaid diagrams in this directory are a readable
 projection of that inventory and must agree with it.
 
-The documentation describes the deployed system, not every source file. Do not
+The documentation describes runtime responsibilities and release status, not every source file. Do not
 update it for cosmetic refactors, file moves, renamed symbols, or test-only
 changes that leave responsibilities and dependencies unchanged.
 

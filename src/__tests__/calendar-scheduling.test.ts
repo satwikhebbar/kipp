@@ -49,6 +49,43 @@ describe("Calendar scheduling policy", () => {
     expect(calendarDayBounds("not-a-date", TIME_ZONE)).toBeNull()
   })
 
+  it("keeps compatibility conversion strict for gaps, overlaps and invalid zones", () => {
+    expect(zonedDateTimeToMillis("2026-03-08", "02:30", "America/New_York")).toBeNull()
+    expect(zonedDateTimeToMillis("2026-11-01", "01:30", "America/New_York")).toBeNull()
+    expect(zonedDateTimeToMillis(DATE, "19:00", "Not/AZone")).toBeNull()
+    expect(calendarDayBounds("2018-11-04", "America/Sao_Paulo")).toEqual({
+      timeMin: "2018-11-04T03:00:00.000Z",
+      timeMax: "2018-11-05T02:00:00.000Z",
+    })
+  })
+
+  it("asks about explicit nonexistent or repeated times instead of scheduling another instant", () => {
+    expect(
+      scheduleOneOff({ ...EXPLICIT_CALL, localDate: "2026-03-08", startTime: "02:30" }, [], "America/New_York"),
+    ).toEqual({
+      clarification: "That local time does not exist on 2026-03-08. Please choose another time.",
+    })
+    expect(
+      scheduleOneOff({ ...EXPLICIT_CALL, localDate: "2026-11-01", startTime: "01:30" }, [], "America/New_York"),
+    ).toEqual({
+      clarification: "That local time occurs twice on 2026-11-01. Please choose an unambiguous time.",
+    })
+    expect(scheduleOneOff(EXPLICIT_CALL, [], "Not/AZone")).toEqual({
+      clarification: "Please choose a valid IANA time zone.",
+    })
+  })
+
+  it("skips non-unique inferred slots during a daytime zone transition", () => {
+    // Sudan advanced clocks from noon to 13:00 on this date; the search window includes that gap.
+    const inferred = { ...EXPLICIT_CALL, localDate: "2000-01-15", startTime: "12:00", timeIsExplicit: false }
+    const result = scheduleOneOff(
+      inferred,
+      [{ start: "2000-01-15T10:00:00.000Z", end: "2000-01-15T23:00:00.000Z" }],
+      "Africa/Khartoum",
+    )
+    expect(result).toMatchObject({ localStartTime: "11:15", start: "2000-01-15T09:15:00.000Z" })
+  })
+
   it("honors a free explicit time without inferred buffers", () => {
     const scheduled = scheduleOneOff(EXPLICIT_CALL, [], TIME_ZONE)
     expect(scheduled).toMatchObject({ localStartTime: "19:00", reminderMinutes: CALENDAR_ORDINARY_REMINDER_MINUTES })

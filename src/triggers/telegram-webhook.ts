@@ -8,18 +8,23 @@ import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integration
 import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
 import { MEAL_HELP, MEAL_PLAN_ENDED, MEAL_PLAN_GENERATING, MEAL_STALE_PLAN } from "../meal-planning/messages"
 import { createMealPlanningStore } from "../meal-planning/store"
+import { firstNoteUrl } from "../notes/links"
+import type { NotesWorkflowParams } from "../notes/types"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
 
 const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32
 const UNKNOWN_COMMAND_MESSAGE =
-  "Unknown command. Use /add <text>, /generate [idea id], /calendar <request>, /mealplan <request>, or tap inline buttons."
+  "Unknown command. Use /add <text>, /generate [idea id], /note <thoughts>, /calendar <request>, /mealplan <request>, or tap inline buttons."
+
+class NotesTransportError extends Error {}
 
 interface TelegramMessageEntity {
   type: string
   offset: number
   length: number
+  url?: string
 }
 
 interface TelegramUser {
@@ -58,7 +63,7 @@ interface TelegramCommand {
   argument: string
 }
 
-const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "calendar", "mealplan"])
+const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "note", "calendar", "mealplan"])
 
 /** Reads a Telegram slash command from its bot_command entity, with a text fallback for test and legacy updates. */
 function telegramCommand(message: TelegramMessage): TelegramCommand | null {
@@ -161,19 +166,21 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       logRuntime(env, { event: "telegram-callback", outcome: "succeeded" })
       return new Response("OK")
     } catch (err) {
+      if (err instanceof NotesTransportError || cq.data?.startsWith("n:"))
+        return new Response("Retry Notes delivery", { status: 503 })
       return handleBoundaryError(env, cq.message?.chat.id, err)
     }
   }
 
   if (update.message) {
-    return handleMessage(update.message, env, new URL(request.url).origin)
+    return handleMessage(update.message, env, new URL(request.url).origin, update.update_id)
   }
 
   return new Response("OK")
 }
 
 /** Processes a Telegram message: commands, replies, and routed interactions. */
-async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string): Promise<Response> {
+async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string, updateId: number): Promise<Response> {
   if (!msg.text || !msg.from || msg.from.is_bot) return new Response("OK")
   if (!verifyUser(env, msg.from.id)) return new Response("Forbidden", { status: 403 })
 
@@ -193,12 +200,43 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         msg.from.id,
         {
           telegramUpdateId: msg.message_id,
+          notesUpdateId: updateId,
+          firstUrl: firstNoteUrl(msg.text ?? "", msg.entities),
           messageId: msg.message_id,
           replyToMessageId: msg.reply_to_message.message_id,
           text: msg.text,
         },
         setupOrigin,
       )
+      return new Response("OK")
+    }
+
+    if (command?.name === "note") {
+      if (!command.argument) {
+        await tg.sendMessage(msg.chat.id, "Use /note <raw thoughts> to draft a Note for review.", { plainText: true })
+        return new Response("OK")
+      }
+      if (!env.NOTES_WORKFLOW || !env.BUFFER_PUBLICATIONS) {
+        await tg.sendMessage(
+          msg.chat.id,
+          "Notes is not configured. Ask the operator to enable the Notes workflow and connect Buffer.",
+          { plainText: true },
+        )
+        return new Response("OK")
+      }
+      const params: NotesWorkflowParams = {
+        chatId: String(msg.chat.id),
+        userId: String(msg.from.id),
+        requestText: command.argument,
+        firstUrl: firstNoteUrl(msg.text ?? "", msg.entities),
+        telegramMessageId: msg.message_id,
+        receivedAtMs: Date.now(),
+      }
+      try {
+        await startEditWorkflow(env.NOTES_WORKFLOW, `note:${msg.chat.id}:${msg.message_id}`, params)
+      } catch {
+        throw new NotesTransportError("Notes invocation unavailable")
+      }
       return new Response("OK")
     }
 
@@ -307,6 +345,8 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         msg.from.id,
         {
           telegramUpdateId: msg.message_id,
+          notesUpdateId: updateId,
+          firstUrl: firstNoteUrl(msg.text ?? "", msg.entities),
           messageId: msg.message_id,
           text,
         },
@@ -320,6 +360,7 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
       return new Response("OK")
     }
   } catch (err) {
+    if (err instanceof NotesTransportError) return new Response("Retry Notes delivery", { status: 503 })
     return handleBoundaryError(env, msg.chat.id, err)
   }
 }
@@ -370,6 +411,8 @@ async function dispatchRoutedInteraction(
   userId: number,
   input: {
     telegramUpdateId: number
+    firstUrl?: string | null
+    notesUpdateId?: number
     messageId?: number
     callbackToken?: string
     replyToMessageId?: number
@@ -378,6 +421,30 @@ async function dispatchRoutedInteraction(
   setupOrigin?: string,
 ): Promise<boolean> {
   const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
+  // Resolve/retain Notes before touching legacy consume-once routes. No raw event enters error logs.
+  if (!input.callbackToken || input.callbackToken.startsWith("n:"))
+    try {
+      const notes = await router.resolveNotes({
+        ...input,
+        telegramUpdateId: input.notesUpdateId ?? input.telegramUpdateId,
+        userId: String(userId),
+        chatId: String(chatId),
+        receivedAtMs: Date.now(),
+      })
+      if (notes.handled) {
+        if (notes.event) {
+          if (!env.NOTES_WORKFLOW) throw new NotesTransportError("Notes workflow unavailable")
+          await (await env.NOTES_WORKFLOW.get(notes.event.workflowId)).sendEvent({
+            type: "notes-interaction",
+            payload: notes.event,
+          })
+          await router.acknowledgeNotes(notes.event.deliveryId)
+        }
+        return true
+      }
+    } catch {
+      throw new NotesTransportError("Notes delivery unavailable")
+    }
   const { interaction, reason } = await router.resolve(input)
   const inputKind = input.callbackToken ? "callback" : input.replyToMessageId !== undefined ? "reply" : "plain-text"
   if (!interaction) {

@@ -1,7 +1,7 @@
 version: 1
 system:
   name: Kipp
-  purpose: Create approval-gated LinkedIn drafts and safe personal Google Calendar blocks from Telegram.
+  purpose: Run personal LinkedIn, Calendar, meal-planning and approval-gated Notes workflows from Telegram.
   runtime:
     platform: Cloudflare Workers
     entrypoint: src/index.ts
@@ -16,6 +16,7 @@ runtime_components:
       - pipeline_workflow
       - calendar_workflow
       - meal_planning_workflow
+      - notes_workflow
       - token_vault
       - interaction_router
       - idea_ingest
@@ -61,21 +62,61 @@ runtime_components:
       - runtime
       - integrations.youtube-data-api
       - interaction_router
+  notes_workflow:
+    implementation: src/notes/workflow.ts and src/notes/runner.ts
+    status: Implemented and restart-tested; editorial acceptance, production provisioning and integrated account walkthrough still gate release.
+    owns:
+      - deterministic Telegram invocation and snapshotted writing context
+      - bounded writing sessions and exact owner/version/fingerprint approval
+      - retained Notes event consumption and acceptance confirmation
+      - structured timing extraction with strict receipt-anchored timezone resolution
+      - explicit bounded repair of confirmed no-create failures
+    depends_on:
+      - agents
+      - providers
+      - integrations
+      - token_vault
+      - interaction_router
+      - buffer_publications
+      - notes_domain
+      - writing
+      - shared_time
+  buffer_publications:
+    implementation: src/integrations/buffer/publication.ts
+    type: Cloudflare Durable Object with SQLite storage
+    owns:
+      - immutable approved payload and durable dispatch claim before one Buffer create
+      - acceptance replay independent of Workflow checkpoints
+      - terminal uncertainty and one bounded lookup of a captured post ID
+      - owner-bound Retry delivery deduplication and rejected-attempt supersession
+    depends_on:
+      - token_vault
+      - integrations
   token_vault:
     implementation: src/core/token-vault.ts
     type: Cloudflare Durable Object with SQLite storage
     owns:
       - OAuth state and expiry cleanup
       - provider-namespaced encrypted LinkedIn and Google Calendar token storage
+      - Buffer encrypted grant and PKCE state storage (implemented; awaiting release)
+      - Buffer-only coordinated rotating refresh with durable claims and credential generation fencing
       - token key rewrapping
+    refresh_policy:
+      decision: docs/architecture/decisions/ADR-003-buffer-only-coordinated-refresh.md
+      buffer: Vault-owned refresh; overlapping callers share one operation; interrupted refresh requires reauthorization.
+      linkedin: Existing scheduled token check refreshes outside the vault; no coordinated refresh.
+      google_calendar: Existing API client refreshes outside the vault; no coordinated refresh.
+      scope: Do not add LinkedIn or Calendar refresh coordination until concurrent workflows are explicitly supported and the extension is explicitly approved.
     depends_on:
       - crypto
+      - Buffer OAuth token endpoint (Buffer refresh only; awaiting release)
   interaction_router:
     implementation: src/core/interaction-router.ts
     type: Cloudflare Durable Object with SQLite storage
     owns:
       - short-lived opaque Telegram interaction registrations
       - idempotent claim, acknowledgement, expiry, and bounded cleanup
+      - Notes-only retained authenticated events, owner metadata and version invalidation
     depends_on: []
   idea_ingest:
     implementation: src/core/idea-ingest.ts
@@ -88,12 +129,36 @@ runtime_components:
       - pipeline_workflow
 
 modules:
+  notes_domain:
+    path: src/notes
+    owns:
+      - first-link parsing and exact text/card/timing fingerprints
+      - strict publication timing and immutable approval contracts
+      - bounded repair conversation and Notes-only retained router delivery
+    depends_on:
+      - shared_time
+      - interaction_router
+      - buffer_publications
+      - integrations
+  writing:
+    path: src/writing
+    owns:
+      - ordered GitHub prompt resolution with source provenance and missing-file-only fallback
+    depends_on:
+      - integrations.github
+  shared_time:
+    path: src/core/time.ts
+    owns:
+      - strict IANA-zone wall-time resolution with explicit gap and overlap outcomes
+      - civil-date arithmetic and local-day bounds shared by Notes and Calendar
+    depends_on:
+      - Luxon
   triggers:
     path: src/triggers
     owns:
       - Telegram webhook handling
       - RSS, cadence, and token-check schedules
-      - LinkedIn and Google Calendar OAuth start and callback handling
+      - LinkedIn, Google Calendar and Buffer OAuth start and callback handling
     depends_on:
       - ideas
       - integrations
@@ -105,6 +170,7 @@ modules:
       - interaction_router
       - idea_ingest
       - substack
+      - notes_workflow
   substack:
     path: src/substack
     owns:
@@ -134,6 +200,7 @@ modules:
       - safe Calendar transcript persistence and event-list compaction
       - Meal-planning propose_plan and needs_clarification handoffs
       - Substack source-grounded idea extraction and ranked candidate handoff
+      - Notes submit_note and ask_note_question handoffs; no publishing authority
     depends_on:
       - providers
       - runtime
@@ -176,6 +243,7 @@ modules:
     depends_on:
       - Gemini API
       - DeepSeek API
+      - OpenRouter API
   integrations:
     path: src/integrations
     owns:
@@ -184,12 +252,14 @@ modules:
       - Telegram Bot API access
       - LinkedIn draft creation
       - Google Calendar FreeBusy, event creation, verification, and token refresh
+      - Buffer OAuth, account/channel discovery and single-attempt GraphQL post submission
     depends_on:
       - Notion API
       - GitHub API
       - Telegram Bot API
       - LinkedIn API
       - Google Calendar API
+      - Buffer OAuth and GraphQL API
   prompts:
     path: src/linkedin/prompts
     owns:
@@ -218,20 +288,28 @@ data_stores:
   github_style_prompt_repository:
     type: Optional private GitHub repository accessed through the Contents API
     data:
-      - optional style-prompt.md
-    owner: prompts
+      - optional style-prompt.md and notes-style-prompt.md or configured paths
+    owner: prompts and notes_workflow
   token_vault_storage:
     type: Durable Object SQLite storage
     data:
       - provider-namespaced encrypted LinkedIn and Google Calendar OAuth tokens
       - short-lived OAuth state records
+      - Buffer encrypted grant, credential generation, connection identity, and refresh claim (implemented; awaiting release)
     owner: token_vault
   interaction_router_storage:
     type: Durable Object SQLite storage
     data:
       - opaque Telegram callback and reply registrations
       - workflow target, interaction kind, version, expiry, and delivery state
+      - Notes action authority, message bindings and immutable deliveries retained until review deadline plus one hour
     owner: interaction_router
+  buffer_publication_storage:
+    type: Durable Object SQLite storage, one object per approved publication
+    data:
+      - approved payload, fingerprint, version and approval evidence
+      - durable dispatch claim and attempt/result evidence; no automatic deletion
+    owner: buffer_publications
   idea_ingest_storage:
     type: Durable Object SQLite storage
     data:
@@ -257,7 +335,8 @@ data_stores:
       - LinkedIn draft transcript and approval or revision events
       - Calendar safe transcript, typed proposals, exact plans, opaque plan and option ledger, created-event baseline, and wait events
       - Meal-planning session outcomes and live-loop wait events
-    owner: pipeline_workflow and calendar_workflow and meal_planning_workflow
+      - Notes prompt/model/destination snapshot, bounded transcript, review actions and processed delivery IDs
+    owner: pipeline_workflow and calendar_workflow and meal_planning_workflow and notes_workflow
 
 external_systems:
   - Telegram Bot API
@@ -265,9 +344,11 @@ external_systems:
   - Notion API
   - GitHub Contents API
   - LinkedIn OAuth and Posts API
+  - Buffer OAuth and GraphQL API (Notes; awaiting release)
   - Google OAuth and Calendar API
   - Gemini API
   - DeepSeek API
+  - OpenRouter API (GPT-6 Luna for Notes and meal planning)
   - YouTube Data API (optional recipe-video enrichment)
   - Cloudflare Access
 
@@ -289,3 +370,6 @@ security_boundaries:
   - RSS article HTML is parsed and reduced before entering model context; images, captions, interface markup, raw tags, and attributes are excluded
   - RSS `content:encoded` is the sole v1 Substack body source; public-page scraping, undocumented APIs, browser rendering, and third-party extraction are deferred alternatives
   - Substack article retrieval is bound to the triggering RSS item; the agent cannot browse arbitrary URLs or induce outbound article fetches
+  - Notes publishing requires owner/chat/workflow/version/fingerprint/deadline-bound approval; model output and typed publish text cannot authorize a create
+  - Notes credentials remain outside the writer; publication and rotating refresh claims persist before provider mutations
+  - Notes acceptance ends at Buffer; uncertainty cannot authorize another create and concurrent same-chat feedback remains unsupported

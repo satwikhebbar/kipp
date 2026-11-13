@@ -1,6 +1,8 @@
 import type { WorkflowStep } from "cloudflare:workers"
 import { createTelegramClient } from "../integrations/telegram"
 import { logRuntime } from "../runtime/logging"
+import { presentConversationTurn } from "./conversation-presenter"
+import { type ConnectionAction, type ConversationTurnCoordinator, createConversationTurn } from "./conversation-turn"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
 import type { Env, WorkflowInteractionKind } from "./types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "./workflow-events"
@@ -39,6 +41,9 @@ export interface ActionPromptOptions {
   maxLabelChars?: number
   /** Runtime event name used when an interaction operation fails. */
   logEventName?: string
+  /** The owning user turn; reserve outside checkpoints before any notification. */
+  turn?: ConversationTurnCoordinator
+  kind?: "connection" | "clarification"
 }
 
 /**
@@ -64,6 +69,9 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
   } = options
   if (keyboard && actions.length > 1 && actions.some(([label]) => label.length > maxLabelChars))
     throw new Error(`Action labels must be at most ${maxLabelChars} characters`)
+  const kind = options.kind ?? "clarification"
+  const turn = options.turn ?? createConversationTurn()
+  turn.claim(kind)
   let stage: ActionPromptStage = "notify"
   try {
     const sent = await step.do(`${name}-notify`, async () => {
@@ -73,20 +81,24 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
         interactionId: crypto.randomUUID(),
         callbackToken: keyboard ? crypto.randomUUID() : undefined,
       }))
-      const message = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
-        chatId,
-        options.message,
-        keyboard
-          ? {
-              replyMarkup: {
-                inline_keyboard: [
-                  prepared.map((action) => ({ text: action.label, callback_data: action.callbackToken ?? "" })),
-                ],
-              },
-            }
-          : { replyMarkup: { force_reply: true } },
+      const controls = keyboard
+        ? {
+            kind: "inline" as const,
+            rows: [
+              prepared.map(
+                (action): ConnectionAction => ({
+                  intent: action.kind.endsWith("cancel") ? "cancel" : "resume",
+                  label: action.label,
+                  callbackToken: action.callbackToken ?? "",
+                }),
+              ),
+            ],
+          }
+        : { kind: "reply" as const }
+      const sent = await presentConversationTurn({ kind, message: options.message, controls }, ({ text, options }) =>
+        createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, text, options),
       )
-      return { messageId: message.messageId, prepared, expiresAt: Date.now() + ttlMs }
+      return { messageId: sent[sent.length - 1].messageId, prepared, expiresAt: Date.now() + ttlMs }
     })
     const prepared = sent.prepared
     stage = "register"

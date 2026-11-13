@@ -1,6 +1,9 @@
+import type { NotesActionMetadata } from "../notes/router"
+import type { NotesInteractionEvent } from "../notes/types"
 import type { WorkflowInteraction, WorkflowInteractionKind } from "./types"
 
 export interface InteractionRegistration {
+  notes?: NotesActionMetadata
   interactionId: string
   version: number
   workflowId: string
@@ -21,6 +24,7 @@ export interface RoutedInteraction extends WorkflowInteraction {
 }
 
 export interface InteractionResolveInput {
+  firstUrl?: string | null
   telegramUpdateId: number
   callbackToken?: string
   replyToMessageId?: number
@@ -39,6 +43,13 @@ export function createInteractionRouter(namespace: DurableObjectNamespace, chatI
     return response.json() as Promise<T>
   }
   return {
+    resolveNotes: (input: InteractionResolveInput & { userId: string; chatId: string; receivedAtMs: number }) =>
+      post<{ handled: boolean; event?: NotesInteractionEvent | null }>("/notes/resolve", input),
+    acknowledgeNotes: (deliveryId: string) => post<{ ok: boolean }>("/notes/ack", { deliveryId }),
+    invalidateNotes: (workflowId: string, version: number) =>
+      post<{ ok: boolean }>("/notes/invalidate", { workflowId, version }),
+    bindNotes: (interactionId: string, messageId: number) =>
+      post<{ ok: boolean }>("/notes/bind", { interactionId, messageId }),
     register: (registration: InteractionRegistration) => post<{ ok: boolean }>("/register", registration),
     resolve: (input: InteractionResolveInput) =>
       post<{ interaction: RoutedInteraction | null; reason?: "expired" | "stale" }>("/resolve", input),

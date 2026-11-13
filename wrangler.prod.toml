@@ -45,6 +45,19 @@ new_sqlite_classes = ["InteractionRouterDO"]
 tag = "v3"
 new_sqlite_classes = ["IdeaIngestDO"]
 
+[[durable_objects.bindings]]
+name = "BUFFER_PUBLICATIONS"
+class_name = "BufferPublicationDO"
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["BufferPublicationDO"]
+
+[[workflows]]
+binding = "NOTES_WORKFLOW"
+name = "kipp-notes"
+class_name = "NotesWorkflow"
+
 # Cloudflare Workflow binding
 [[workflows]]
 binding = "PIPELINE_WORKFLOW"

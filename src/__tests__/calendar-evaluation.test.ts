@@ -12,6 +12,103 @@ const CONTEXT = {
 }
 
 describe("Calendar candidate evaluation", () => {
+  it.each([
+    ["2026-03-08", "02:30", "America/New_York", "nonexistent_local_time", "startTime"],
+    ["2026-11-01", "01:30", "America/New_York", "ambiguous_local_time", "startTime"],
+    ["2026-08-04", "19:00", "Not/AZone", "invalid_time_zone", "timeZone"],
+    ["2026-02-30", "19:00", "UTC", "invalid_local_date", "localDate"],
+  ])("returns typed local-time clarification before availability reads: %s %s %s", async (localDate, startTime, timeZone, code, field) => {
+    const getBusyIntervals = vi.fn()
+    const ledger = createCalendarPlanLedger()
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "one_off",
+        proposal: {
+          title: "A thought to discuss",
+          localDate,
+          startTime,
+          durationMinutes: 30,
+          dateIsExplicit: true,
+          timeIsExplicit: true,
+          classification: "ordinary",
+          needsClarification: false,
+        },
+      },
+      { ...CONTEXT, timeZone, getBusyIntervals, ledger },
+    )
+    expect(result).toMatchObject({ kind: "needs_input", issues: [{ code, field }] })
+    expect(getBusyIntervals).not.toHaveBeenCalled()
+    expect(ledger.records).toHaveLength(0)
+  })
+
+  it("reports a recurring gap on its actual occurrence date before issuing a plan", async () => {
+    const getBusyIntervals = vi.fn()
+    const ledger = createCalendarPlanLedger()
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "recurring",
+        proposal: {
+          title: "Weekly review",
+          firstDate: "2026-03-01",
+          dateIsExplicit: true,
+          startTime: "02:30",
+          timeIsExplicit: true,
+          durationMinutes: 30,
+          classification: "ordinary",
+          recurrence: { cadence: "weekly", weekdays: { mode: "first_date_weekday" } },
+          recurrenceIsExplicit: true,
+          needsClarification: false,
+          end: { mode: "count", occurrences: 3 },
+        },
+      },
+      { ...CONTEXT, timeZone: "America/New_York", getBusyIntervals, ledger },
+    )
+    expect(result).toEqual({
+      kind: "needs_input",
+      issues: [
+        {
+          code: "nonexistent_local_time",
+          field: "startTime",
+          params: { localDate: "2026-03-08", startTime: "02:30", timeZone: "America/New_York" },
+        },
+      ],
+    })
+    expect(getBusyIntervals).not.toHaveBeenCalled()
+    expect(ledger.records).toHaveLength(0)
+  })
+
+  it.each([
+    ["2026-03-08", "America/New_York", "2026-03-08T05:00:00.000Z", "2026-03-09T04:00:00.000Z"],
+    ["2026-11-01", "America/New_York", "2026-11-01T04:00:00.000Z", "2026-11-02T05:00:00.000Z"],
+    ["2018-11-04", "America/Sao_Paulo", "2018-11-04T03:00:00.000Z", "2018-11-05T02:00:00.000Z"],
+  ])("queries the actual local day bounds: %s %s", async (localDate, timeZone, timeMin, timeMax) => {
+    const getBusyIntervals = vi.fn().mockResolvedValue([])
+    const result = await evaluateCalendarCandidate(
+      {
+        kind: "one_off",
+        proposal: {
+          title: "Review",
+          localDate,
+          startTime: "09:00",
+          durationMinutes: 30,
+          dateIsExplicit: true,
+          timeIsExplicit: true,
+          classification: "ordinary",
+          needsClarification: false,
+        },
+      },
+      {
+        ...CONTEXT,
+        ledger: createCalendarPlanLedger(),
+        timeZone,
+        getBusyIntervals,
+        now: Date.parse("2018-01-01T00:00:00Z"),
+      },
+    )
+    expect(result.kind).toBe("ready")
+    expect(getBusyIntervals).toHaveBeenCalledWith(timeMin, timeMax)
+  })
+
   it("aggregates policy issues before any Calendar read", async () => {
     const getBusyIntervals = vi.fn()
     const result = await evaluateCalendarCandidate(

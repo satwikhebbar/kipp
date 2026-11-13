@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from "jose"
+import type { BufferAccess, BufferGrantInput } from "./types"
 import { type Env, type GoogleCalendarTokens, type LinkedInTokens, TOKEN_PROVIDER, type TokenProvider } from "./types"
 
 export { TOKEN_PROVIDER, type TokenProvider } from "./types"
@@ -75,6 +76,15 @@ export function createTokenVault(env: Env, provider: TokenProvider = TOKEN_PROVI
   }
 
   return {
+    issueBufferState: () => cmd<{ state: string; cookieId: string; challenge: string }>("issueBufferState"),
+    consumeBufferState: (state: string, cookieId: string) =>
+      cmd<{ valid: false } | { valid: true; verifier: string; redirectUri: string }>("consumeBufferState", {
+        state,
+        cookieId,
+      }),
+    replaceBufferGrant: (grant: BufferGrantInput) => cmd<{ ok: boolean }>("replaceBufferGrant", { grant }),
+    acquireBufferAccess: () => cmd<BufferAccess>("acquireBufferAccess"),
+    rewrapBuffer: () => cmd<{ success: boolean }>("rewrapBuffer"),
     issueState: () => cmd<{ state: string; cookieId: string }>("issueState", { provider }),
     consumeState: (state: string, cookieId: string) =>
       cmd<{ valid: boolean }>("consumeState", { provider, state, cookieId }),
