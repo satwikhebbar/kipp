@@ -90,10 +90,8 @@ describe("conversation presenter", () => {
     expect(parts[0].options.replyMarkup).toEqual({
       inline_keyboard: [
         [{ text: "Connect", url: "https://example.com/setup" }],
-        [
-          { text: "Continue", callback_data: "resume" },
-          { text: "Cancel", callback_data: "cancel" },
-        ],
+        [{ text: "Continue", callback_data: "resume" }],
+        [{ text: "Cancel", callback_data: "cancel" }],
       ],
     })
   })

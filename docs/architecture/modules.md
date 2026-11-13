@@ -27,8 +27,10 @@ The presenter joins ordered review sections with blank lines, sends literal text
 with link previews disabled, and splits only responses exceeding 4,000 UTF-16 code
 units. Sections that fit stay intact where possible. Splitting preserves text
 and surrogate pairs; controls appear only on the
-last part. Workflows supply their content labels and separators and bind returned
-message IDs using their existing routing policy. Published content remains a
+last part. Inline buttons always use one button per row, preserving their reading
+order. The Telegram client enforces the same layout for callers outside the
+presenter, including meal planning. Workflows supply their content labels and
+separators and bind returned message IDs using their existing routing policy. Published content remains a
 separate domain value, never extracted from the presentation.
 
 For legacy adapters that prepare controls inside an existing delivery checkpoint,

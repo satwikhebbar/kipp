@@ -840,7 +840,8 @@ describe("agent-centered CalendarWorkflow", () => {
       text: string
       reply_markup: { inline_keyboard: Array<Array<{ text: string }>> }
     }
-    const labels = body.reply_markup.inline_keyboard[0]?.map((button) => button.text)
+    expect(body.reply_markup.inline_keyboard.every((row) => row.length === 1)).toBe(true)
+    const labels = body.reply_markup.inline_keyboard.flat().map((button) => button.text)
     expect(body.text).not.toContain("Option ID")
     expect(labels).toEqual(["Use adjustments", "Try another time", "Cancel"])
     expect(labels?.every((label) => label.length <= 16)).toBe(true)

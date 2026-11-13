@@ -712,7 +712,9 @@ it("requests Buffer reauthorization and retries the same approved Note after sam
     const repair = await h.waitMessage(/Reconnect using Connect Buffer/)
     expect(h.state.bufferRefreshes).toBe(1)
     expect(repair.replyMarkup?.inline_keyboard).toEqual([
-      expect.arrayContaining([{ text: "Connect Buffer", url: "https://kipp.test/setup/buffer" }]),
+      [{ text: "Connect Buffer", url: "https://kipp.test/setup/buffer" }],
+      [{ text: "Retry", callback_data: expect.any(String) }],
+      [{ text: "Revise", callback_data: expect.any(String) }],
     ])
     expect(h.state.bufferWrites).toHaveLength(0)
     await h.setBufferGrant()

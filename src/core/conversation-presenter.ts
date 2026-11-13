@@ -1,3 +1,4 @@
+import { verticalButtonRows } from "../integrations/telegram-keyboard"
 import type { ConversationControls, ConversationTurn } from "./conversation-turn"
 
 const TELEGRAM_MESSAGE_LIMIT = 4000
@@ -34,7 +35,7 @@ export function splitConversationText(text: string, limit = TELEGRAM_MESSAGE_LIM
 function controlMarkup(controls: ConversationControls): Record<string, unknown> {
   if (controls.kind === "reply") return { force_reply: true }
   return {
-    inline_keyboard: controls.rows.map((row) =>
+    inline_keyboard: verticalButtonRows(controls.rows).map((row) =>
       row.map((action) =>
         action.intent === "link"
           ? { text: action.label, url: action.url }

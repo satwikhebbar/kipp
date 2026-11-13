@@ -51,6 +51,34 @@ function mockEnv() {
 describe("createTelegramClient", () => {
   beforeEach(() => mockFetch.mockReset())
 
+  it("stacks all inline actions vertically without changing their payloads or caller markup", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ result: { message_id: 42 } }) })
+    const retry = { text: "Retry", callback_data: "retry-token" }
+    const cancel = { text: "Cancel", callback_data: "cancel-token" }
+    const connect = { text: "Connect", url: "https://example.test/setup" }
+    const review = { text: "Review", web_app: { url: "https://example.test/review" } }
+    const markup = {
+      inline_keyboard: [
+        [retry, cancel],
+        [connect, review],
+      ],
+    }
+    await createTelegramClient("test").sendMessage(1, "Actions", { replyMarkup: markup })
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).reply_markup).toEqual({
+      inline_keyboard: [[retry], [cancel], [connect], [review]],
+    })
+    expect(markup.inline_keyboard).toEqual([
+      [retry, cancel],
+      [connect, review],
+    ])
+  })
+
+  it("preserves force-reply markup", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ result: { message_id: 42 } }) })
+    await createTelegramClient("test").sendMessage(1, "Feedback", { replyMarkup: { force_reply: true } })
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).reply_markup).toEqual({ force_reply: true })
+  })
+
   it("sendMessage calls the Telegram API and returns message_id", async () => {
     mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 42 } }) })
     const tg = createTelegramClient("bot:token")

@@ -345,7 +345,7 @@ async function waitForWorkflowWait(calendar: ReturnType<typeof liveWorkflowBindi
 function callbackToken(network: ReturnType<typeof createFakeNetwork>, messageIndex: number, buttonIndex = 0): string {
   const markup = network.getState().telegramMessages[messageIndex]?.replyMarkup
   const keyboard = markup?.inline_keyboard as Array<Array<{ callback_data: string }>>
-  return keyboard[0]?.[buttonIndex]?.callback_data as string
+  return keyboard.flat()[buttonIndex]?.callback_data as string
 }
 
 describe("Calendar HTTP sanity in workerd", () => {

@@ -1227,8 +1227,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(planMessage).toBeTruthy()
     if (!planMessage) throw new Error("Expected persisted plan message")
     const buttons = (planMessage.replyMarkup as { inline_keyboard: Array<Array<Record<string, unknown>>> })
-      .inline_keyboard[0]
-    expect(buttons).toEqual([
+      .inline_keyboard
+    expect(buttons.every((row) => row.length === 1)).toBe(true)
+    expect(buttons.flat()).toEqual([
       expect.objectContaining({ text: "Give feedback" }),
       { text: "Review this week's plan", web_app: { url: "https://mini-app.example.test/mini-app" } },
     ])
