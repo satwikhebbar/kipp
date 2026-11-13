@@ -1,9 +1,9 @@
 # Connect Buffer
 
 Buffer setup is optional. Existing LinkedIn and Calendar workflows do not need
-Buffer configuration. Phases 1–5 implement `/note` drafting, necessary clarification, revisions,
+Buffer configuration. The implemented workflow supports `/note` drafting, necessary clarification, revisions,
 one embedded link, immediate/queue/scheduled approval and guarded Buffer submission.
-This awaits release and final restart-boundary verification.
+Restart-boundary verification uses production modules in workerd; release remains gated below.
 
 Notes drafting uses `openai/gpt-6-luna` through the existing OpenRouter client
 and `OPENROUTER_API_KEY`, like the meal planner. Its pinned model is independent
@@ -138,3 +138,59 @@ Automated sanity checks drive the real HTTP webhook, Workflows and SQLite
 objects with fake account APIs. The optional bounded real-LLM sanity scenario
 also keeps Buffer and Telegram simulated. Author voice/example study and an
 explicitly authorized integrated account walkthrough remain release prerequisites.
+
+## Recovery and operator guidance
+
+| Telegram outcome | Meaning and next action |
+| --- | --- |
+| Sent to Buffer / Added to queue / Scheduled with Buffer | Buffer accepted the approved payload. The workflow is finished; Buffer owns downstream delivery. Manage later delivery changes in Buffer/Substack. |
+| Not submitted, with Retry | A known pre-create failure occurred. Repair the stated connection, channel or queue issue, then tap the current Retry before it expires. Reconnecting alone never posts. |
+| Account or channel changed | Start a new `/note` and review the destination again. Existing approval cannot transfer to another account. |
+| Could not confirm submission | The request may have reached Buffer. There is no publishing Retry. Decide independently whether to check Buffer/Substack or reuse the text already visible in Telegram. |
+| Unexpected settings | A post exists but did not match the approved settings. Check Buffer; Kipp cannot send another create for that approval. |
+
+An interrupted dispatch remains claimed even if it stopped before sending the
+request. This deliberately favors avoiding a duplicate over automatic recovery.
+Do not delete/reset a publication object or replay an old approval to force a
+send. Retain publication/attempt evidence when investigating. Similarly, an
+interrupted rotating-token claim requires Connect Buffer again; never restore
+an old refresh token from logs or a backup. Credentials and approved Note text
+must not be added to operational logs or shared troubleshooting output.
+
+Automated recovery tests recreate workerd against persistent SQLite/Workflow
+stores. They verify retained review authority and saved acceptance, storage
+failure before/after create, explicit Retry and supersession, router event
+retention/acknowledgement, and rotating-token recovery/fencing. Graceful engine
+pause allows a controlled Workflow checkpoint restart; injected storage failures
+cover the uncheckpointed mutation boundaries separately. These are regression
+checks, not a claim that every possible infrastructure failure is recoverable.
+
+## Release prerequisites
+
+Implementation and simulated-account verification do not establish production
+readiness. Provisioning and the integrated account walkthrough are tracked by
+Beads `agent-harness-11x7`. Release requires three separate decisions/actions:
+
+1. **Editorial acceptance:** study author examples and finalize/review the style
+   prompt, including audience, voice, brevity, factual fidelity and examples.
+   The bundled default is provisional (Beads `agent-harness-5bp9`).
+2. **Provisioning:** configure OpenRouter access, GitHub prompt access, Buffer
+   OAuth app/redirect origin/channel ID and encryption keys in the intended
+   environment. Check channel entitlement and permissions through protected
+   setup. Retain the existing `NOTES_WORKFLOW`, `BUFFER_PUBLICATIONS` and `v4`
+   manifest entries; no additional Phase 6 binding, variable or migration is
+   needed. Verify Cloudflare Access coverage and query-string redaction.
+3. **Integrated account walkthrough:** with explicit authorization, use the
+   configured dev Telegram bot and production modules to approve text-only
+   immediate, queue and exact-time submissions; verify the returned queue time
+   and external/Substack article cards, then clean up test content. The earlier
+   live spike verified Buffer's API/card behavior but did not exercise this
+   complete implementation. Do not automatically retry an uncertain live test.
+
+Run `pnpm check`, `pnpm test:integration`, `pnpm test:migration` and
+`pnpm deploy:check` before release. The optional bounded real-LLM suite keeps
+account APIs simulated and assesses the writing/tool handoff separately.
+The deployment dry-run validates the tracked configuration contract and bundle;
+it does not read/verify Dashboard secrets, app entitlement or perform a deploy.
+Deployment and real posting require separate authorization. Card inspection here
+is a release check, not an ongoing workflow delivery-monitoring step.

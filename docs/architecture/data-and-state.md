@@ -8,6 +8,7 @@ flowchart LR
   telegram["Telegram ingress"] --> linkedinFlow["PipelineWorkflow"]
   telegram --> calendarFlow["CalendarWorkflow"]
   telegram --> mealFlow["MealPlanningWorkflow"]
+  telegram --> notesFlow["NotesWorkflow - awaiting release"]
   rss["RSS trigger"] --> ingest["IdeaIngestDO SQLite"]
   telegram --> ingest
   ingest <--> ideas["Notion Ideas data source"]
@@ -24,6 +25,12 @@ flowchart LR
   linkedinFlow --> linkedinState["LinkedIn Workflow state"]
   calendarFlow --> calendarState["Calendar Workflow state"]
   mealFlow --> mealState["Meal-planning Workflow state"]
+  notesFlow <--> router
+  notesFlow --> vault
+  notesFlow --> style
+  notesFlow --> publication["BufferPublicationDO SQLite"]
+  publication --> vault
+  notesFlow --> notesState["Notes Workflow state"]
 
   subgraph notion["Notion"]
     ideas
@@ -37,13 +44,14 @@ flowchart LR
 | Store | Data | Lifecycle and protection |
 | --- | --- | --- |
 | Notion Ideas data source | LinkedIn idea page bodies plus `Kipp ID`, status, source, Substack URL, chat ID, and idempotency-key properties | The LinkedIn content store. `IdeaIngestDO` serializes idempotent creation and claims a deterministic workflow instance per page. Calendar does not use this store. |
-| Optional private GitHub repository | `style-prompt.md` or a configured prompt path | Supplies a custom LinkedIn style prompt through the Contents API; Kipp falls back to its built-in prompt when unavailable. |
+| Optional private GitHub repository | `style-prompt.md`, `notes-style-prompt.md` or configured prompt paths | Supplies author/audience instructions through the Contents API. Only missing files permit fallback; authorization and transport errors fail the read. Each Notes run snapshots content and provenance. |
 | `IdeaIngestDO` SQLite | Idempotency-key ownership records; per-page workflow-start state and repair cooldown | Prevents duplicate Notion pages and workflow starts across Telegram, RSS, and cadence entry points. |
 | RSS article model (transient) | Normalized title, optional subtitle, source URL, and ordered H2-section content produced from RSS `content:encoded` | Exists only during the RSS trigger and bounded extraction session; raw HTML is not persisted or sent to the agent. |
 | `TokenVaultDO` SQLite | Short-lived OAuth state; provider-namespaced encrypted LinkedIn and Google Calendar tokens; Buffer grant, PKCE verifier, credential generation, connection identity, and refresh claim (implemented; awaiting release) | OAuth state expires after five minutes. Tokens use AES-256-GCM and configured key IDs and can be rewrapped during rotation. Only Buffer refresh is coordinated inside the vault; see the policy below. |
-| `BufferPublicationDO` SQLite (awaiting release) | One immutable approved payload and fingerprint, approval evidence, dispatch claim, attempt and typed result per publication | No automatic deletion: losing dispatch evidence could permit duplicate replay. The object sends one create; accepted or uncertain attempts never acquire another send claim. |
+| `BufferPublicationDO` SQLite (awaiting release) | One immutable approved payload and fingerprint, approval evidence, dispatch claims, numbered attempts and typed results per publication | No automatic deletion: losing dispatch evidence could permit duplicate replay. Each authorized attempt sends at most one create; accepted or uncertain attempts never acquire another send claim. |
 | `InteractionRouterDO` SQLite | Opaque callback or reply registration, workflow target, interaction kind, version, expiry, and delivery state | Legacy routing entries contain no request prose or credentials. Notes deliveries additionally retain the authenticated feedback text needed for transport replay; see below. Entries expire after the owning interaction window and bounded grace. |
 | `PipelineWorkflow` state | LinkedIn agent transcript, review version, approval or revision events, usage, and step results | Durable across the configured feedback wait. Transcript output is bounded before persistence. |
+| `NotesWorkflow` state (awaiting release) | Prompt/model/destination/timezone snapshot, bounded transcript, receipt anchors, exact candidates and processed event IDs | Initial generation plus four follow-ups within configured feedback wait capped at 11h45m. Uses the existing Workflow retention conventions; no separate transcript deletion job. |
 | `CalendarWorkflow` state | Bounded safe transcript, versioned plan/option ledger, exact evaluated plans, created-event baseline, and interaction events | Exists for the 15-minute Calendar conversation. Provider reasoning is removed; obsolete event-list results are compacted; IDs expire and are single-use. |
 | `MEAL_PLANNING_DB` D1 | Household profile (seeded), active plan header, immutable plan versions, sole feedback-batch ledger, private Mini App review contexts, opaque session digests, launch replay fingerprints, and the chat-scoped plan-message generation counter | The canonical meal-planning store. One active plan per chat; Mini App authority is derived from verified Telegram launch data and a server-owned context, never client plan/chat IDs. Feedback batches move `accepted → delivered → processing → consumed`, with terminal `stale`/`failed` states; revisions are CAS-guarded and change nothing when stale. No transcripts, raw launch data, bearer tokens, or provider text are stored. |
 | `RECIPE_VIDEO_CACHE` KV | Per-dish/slot recipe-video search results for lunch cells | Optional enrichment cache with a 24-hour per-key expiry (`expirationTtl`), so it needs no expiry sweep. A missing or stale video never blocks a plan. |

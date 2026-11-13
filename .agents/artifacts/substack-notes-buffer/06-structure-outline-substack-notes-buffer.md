@@ -339,6 +339,19 @@ Two later release prerequisites remain explicit:
 
 Buffer acceptance is Kipp's completion boundary. Manual inspection of an eventual card during release validation must not introduce ongoing application polling.
 
+
+### Phase 6 verification evidence — 12 November 2026
+
+Completed under Beads agent-harness-plb3. Added sixteen production-runtime regression cases: twelve in notes-recovery.integration.test.ts and four in the existing Notes webhook suite. The new storage harness bundles the production BufferPublicationDO, TokenVaultDO and InteractionRouterDO; fault wrappers and inspection/control routes exist only in the test bundle. Reboots dispose the old workerd runtime and reconstruct it against isolated persisted SQLite stores. Full Workflow cases also retain the actual Workflow store and explicitly pause/resume the engine at the chosen boundary.
+
+Verified dispatch-claim completion loss before create, rolled-back result writes after create, saved-result completion loss and normal acceptance replay, including the exact payload, one attempt and Buffer-assigned queue time. Confirmed rejected Retry authority and delivery deduplication survive reboot; wrong-owner and stale Retry cannot send, and superseded rejected guards remain sealed. Real webhook redelivery after resolve/ack loss survives restart with one create and no repeated writing. A review awaiting approval and acceptance before a lost Workflow checkpoint recover without changing the exact text/card.
+
+Vault runtime cases establish no refresh after a stranded persisted claim, no reuse after a replacement-token write failure, shared concurrent access across RPC callers, unrelated-provider access during refresh, persisted replacement-token use on the next post-reboot exchange, and fencing of a late response by newer authorization. SQLite/Workflow persistence is real; provider APIs and credentials are synthetic. These controlled interruption cases do not claim exhaustive infrastructure-failure recovery.
+
+Validation passed: pnpm check (1,032 tests, 38 gated skips; lint/docs/typecheck), all 134 integration tests across 11 files, 41 migration tests, and deploy:check (43 registered variables; 1,560.38 KiB raw / 347.90 KiB gzip). No new runtime variable, binding or migration is required. The existing v4 publication migration and production keep_vars contract remain unchanged. Existing LinkedIn/Calendar/meal/security/router regressions passed. No additional live-LLM run was needed because writing contracts and production code were unchanged in this phase.
+
+README, Buffer setup/recovery/release guidance, runtime configuration and canonical architecture inventory/affected diagrams now describe the completed implementation and its unreleased status. Existing ADR-003 still governs Buffer-only refresh coordination; no new architectural decision was introduced. Editorial acceptance remains agent-harness-5bp9; provisioning and the explicitly authorized integrated account walkthrough are tracked by agent-harness-11x7. Changes remain uncommitted; no deployment, live account mutation, PR update or remote Beads sync was performed.
+
 ## Open Questions and Gates
 
 | Gate | Resolution path |
@@ -347,7 +360,7 @@ Buffer acceptance is Kipp's completion boundary. Manual inspection of an eventua
 | Editorial prompt and output quality | Deferred author-example study (Beads agent-harness-5bp9); required before claiming editorial/release acceptance, not a prerequisite for mocked infrastructure work |
 | Production setup and deployment provisioning | Development-account OAuth/rotation, channel permissions, three timing modes and both native card types are verified; integrate the production vault/guard and provision deployment values separately |
 
-No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. Phases 1–5 have passed their verification, including bounded live-LLM journeys with mocked account APIs. Phase 6 is next.
+No additional product-flow questions remain. The TDD records spike findings and the Luxon recommendation; production implementation remains separate from the complete live Buffer spike. Implementation is authorized. All six implementation phases have passed automated verification, including bounded live-LLM journeys with mocked account APIs in Phase 5 and production-module cold-restart checks in Phase 6. Editorial acceptance and integrated account/provisioning validation remain release gates.
 
 Queue mode is an approved amendment (10 November 2026) in Phase 5; it does not alter the six-phase order; implementation was subsequently authorized on 10 November 2026. The completed live Buffer spike includes addToQueue acceptance and assigned-time verification.
 

@@ -32,7 +32,7 @@ sequenceDiagram
   participant B as Buffer
   T->>W: Start deterministic /note invocation
   W->>R: Register owner-bound review actions
-  W-->>T: Commentary, timing, exact Note and Publish
+  W-->>T: Commentary, timing, exact Note and mode-specific approval
   T->>R: Resolve and retain authenticated approval
   R-->>T: Immutable delivery event
   T->>W: Send retained notes-interaction
@@ -63,6 +63,15 @@ The Notes transport extension leaves existing provider refresh ownership intact:
 Buffer alone uses vault-coordinated refresh under
 [ADR-003](decisions/ADR-003-buffer-only-coordinated-refresh.md). Concurrent
 same-chat feedback remains unsupported.
+
+Production-module recovery tests run fresh workerd runtimes against the same
+SQLite and Workflow stores. They cover retained review authority, acceptance
+before a lost Workflow checkpoint, dispatch-claim and result-storage failures,
+Retry replay and rejected supersession, router resolve/ack boundaries, and
+rotating-token claims. A failed result save after a create retains uncertainty;
+a saved result with a lost response replays acceptance. Neither path creates
+again. These tests simulate provider endpoints and do not establish live account
+entitlement or editorial quality; see [release prerequisites](../buffer-setup.md#release-prerequisites).
 
 ## Telegram ingress and interaction routing
 

@@ -5,6 +5,61 @@ import { notesScheduledJourney } from "./helpers/workflow-sanity-scenarios"
 const NOTE = "A small release is easier to understand. Keep *the decision* human. 😀"
 const model = () => toolResponse("submit_note", { commentary: "One concrete idea, in the author's voice.", text: NOTE })
 
+it.each([
+  "resolve",
+  "ack",
+] as const)("redelivers the same webhook after router %s loss and runtime reboot", async (fault) => {
+  const h = await createWorkflowSanity({ model, persistent: true, notesRouterFault: fault })
+  try {
+    await h.message("/note Small releases keep feedback useful.")
+    const review = await h.waitMessage(/^A small release/)
+    expect(await h.click(review, /^Publish$/, 90)).toBe(503)
+    if (fault === "resolve") {
+      await h.controlNotes("pause")
+      await h.waitStatus("notes", "paused")
+      expect(h.state.bufferWrites).toHaveLength(0)
+    } else await h.waitStatus("notes")
+    await h.reboot()
+    if (fault === "resolve") await h.controlNotes("resume")
+    expect(await h.click(review, /^Publish$/, 90)).toBe(200)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.modelCalls).toBe(1)
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it.each(["review", "accepted"])("recovers the production Notes Workflow after cold restart at %s", async (boundary) => {
+  const h = await createWorkflowSanity({ model, persistent: true, loseNotesSubmitCheckpoint: boundary === "accepted" })
+  try {
+    await h.message("/note Small releases keep feedback useful. https://example.com/article")
+    const review = await h.waitMessage(/^A small release/)
+    if (boundary === "accepted") {
+      await h.click(review, /^Publish$/)
+      await h.until(() => (h.state.publicationCheckpoints === 1 ? true : undefined))
+      expect(h.state.publicationResults).toMatchObject([{ kind: "accepted" }])
+    }
+    await h.controlNotes("pause")
+    await h.waitStatus("notes", "paused")
+    await h.reboot()
+    await h.waitStatus("notes", "paused")
+    await h.controlNotes("resume")
+    if (boundary === "review") await h.click(review, /^Publish$/)
+    await h.waitStatus("notes")
+    await h.waitMessage(/^Sent to Buffer for publication/)
+    await h.click(review, /^Publish$/)
+    expect(h.state.modelCalls).toBe(1)
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0]).toMatchObject({
+      text: NOTE,
+      metadata: { substack: { linkAttachment: { url: "https://example.com/article" } } },
+    })
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
 it("replays a lost Workflow submit checkpoint from durable acceptance without another Buffer create", async () => {
   const h = await createWorkflowSanity({ model, loseNotesSubmitCheckpoint: true })
   try {

@@ -37,3 +37,20 @@ does not accidentally remove it.
 `MEAL_PLANNING_DB` with `--remote`, then uploads the Worker. A migration failure
 stops the upload. `deploy:check` is read-only for the production database. Never
 put a secret in the production TOML, repository, test fixtures, or logs.
+
+## Notes through Buffer
+
+The structural manifest already declares `NOTES_WORKFLOW` (`NotesWorkflow`) and
+`BUFFER_PUBLICATIONS` (`BufferPublicationDO`) with append-only SQLite migration
+`v4`. The final verification phase adds no binding, runtime variable or migration.
+Do not remove the publication objects or their evidence to retry a submission.
+
+Buffer setup needs `BUFFER_CLIENT_ID`, `BUFFER_CLIENT_SECRET` and
+`BUFFER_REDIRECT_ORIGIN`; posting also needs `BUFFER_SUBSTACK_CHANNEL_ID`.
+Notes uses the existing `OPENROUTER_API_KEY` and token-encryption configuration.
+`PROMPT_NOTES_PATH` is optional; the fallback prompt still needs editorial review.
+These optional feature variables remain registered even when Buffer is unused.
+Provision actual values in Dashboard and local development separately; a dry-run
+cannot establish that they exist or that the Buffer account has permission.
+See [setup, recovery and release prerequisites](buffer-setup.md#release-prerequisites)
+before enabling the workflow for real submissions.

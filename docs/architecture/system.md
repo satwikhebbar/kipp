@@ -2,7 +2,8 @@
 
 Kipp is a personal workflow assistant on Cloudflare Workers. Telegram is its
 primary user interface. Separate durable workflows currently handle LinkedIn
-drafting, personal Google Calendar scheduling, and school-week meal planning
+drafting, personal Google Calendar scheduling, school-week meal planning, and
+Notes publication through Buffer (implemented, awaiting release)
 while sharing a bounded agent runtime, interaction routing, OAuth storage, and
 external integrations.
 
@@ -18,6 +19,7 @@ flowchart LR
   worker --> linkedinFlow["LinkedIn Workflow"]
   worker --> calendarFlow["Calendar Workflow"]
   worker --> mealFlow["Meal-planning Workflow"]
+  worker --> notesFlow["NotesWorkflow - awaiting release"]
   worker --> substackExtract["Substack extraction"]
   worker <--> router["InteractionRouterDO"]
   worker <--> vault["TokenVaultDO"]
@@ -31,6 +33,16 @@ flowchart LR
   calendarFlow --> llm
   calendarFlow <--> calendar["Google Calendar API"]
   mealFlow --> llm
+  mealFlow --> openrouter["OpenRouter API"]
+  notesFlow --> openrouter
+  notesFlow --> github
+  notesFlow <--> telegram
+  notesFlow <--> router
+  notesFlow --> vault
+  notesFlow --> publication["BufferPublicationDO"]
+  publication --> vault
+  publication --> buffer["Buffer OAuth and GraphQL API"]
+  vault --> buffer
   mealFlow <--> mealDb["MEAL_PLANNING_DB D1"]
   mealFlow --> mealVideo["RECIPE_VIDEO_CACHE KV"]
   mealFlow <--> youtube["YouTube Data API"]
@@ -63,6 +75,8 @@ flowchart TB
     linkedinFlow["PipelineWorkflow\nLinkedIn generation and review"]
     calendarFlow["CalendarWorkflow\nCalendar conversation and writes"]
     mealFlow["MealPlanningWorkflow\nMeal-planning conversation, persistence, and revisions"]
+    notesFlow["NotesWorkflow\nWriting, timing, exact approval and repair"]
+    publication["BufferPublicationDO\nImmutable approval and dispatch/result evidence"]
     router["InteractionRouterDO\nshort-lived Telegram routing"]
     vault["TokenVaultDO\nencrypted OAuth tokens"]
     ingest["IdeaIngestDO\nidempotent idea ingestion and workflow ownership"]
@@ -71,6 +85,13 @@ flowchart TB
   triggers --> linkedinFlow
   triggers --> calendarFlow
   triggers --> mealFlow
+  triggers --> notesFlow
+  notesFlow <--> router
+  notesFlow --> vault
+  notesFlow --> publication
+  publication --> vault
+  publication --> external
+  notesFlow --> external
   triggers --> router
   triggers --> vault
   triggers --> ingest
@@ -86,9 +107,9 @@ flowchart TB
   triggers --> external
 ```
 
-`src/index.ts` exposes seven routes: health, Telegram webhook, LinkedIn and
-Google Calendar OAuth starts, both OAuth callbacks, and administrative token
-rewrapping. It also dispatches the daily RSS poll, weekly token check, and
+`src/index.ts` exposes health, Telegram webhook, protected setup/OAuth routes
+for LinkedIn, Google Calendar and Buffer, meal-review Mini App routes, and
+administrative token rewrapping. It also dispatches the daily RSS poll, weekly token check, and
 weekly LinkedIn cadence check.
 
 The daily RSS poll uses the triggering item's complete `content:encoded` body.

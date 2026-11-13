@@ -1,4 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises"
 import { createRequire } from "node:module"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createFakeNetwork } from "../setup"
 
 export type WireBody = Record<string, unknown>
@@ -91,6 +94,11 @@ const entry = `
       const binding = url.searchParams.get("domain") === "notes" ? env.NOTES_WORKFLOW : url.searchParams.get("domain") === "linkedin" ? env.PIPELINE_WORKFLOW : env.CALENDAR_WORKFLOW;
       return Response.json(await (await binding.get(url.searchParams.get("id"))).status());
     }
+    if (url.pathname === "/__test/control") {
+      const instance = await env.NOTES_WORKFLOW.get(url.searchParams.get("id"));
+      await instance[url.searchParams.get("operation")]();
+      return Response.json({ok:true});
+    }
     return worker.fetch(request, env, ctx);
   }};
 `
@@ -105,6 +113,7 @@ export async function createWorkflowSanity(options: {
   bufferResult?: (input: WireBody) => WireBody
   notesRouterFault?: "resolve" | "ack"
   loseNotesSubmitCheckpoint?: boolean
+  persistent?: boolean
   onProgress?: (event: { phase: "request" | "response"; call: number; outputTokens?: number }) => void
 }) {
   const require = createRequire(import.meta.url)
@@ -137,6 +146,8 @@ export async function createWorkflowSanity(options: {
     linkedinWrites: [] as WireBody[],
     bufferWrites: [] as WireBody[],
     bufferRefreshes: 0,
+    publicationCheckpoints: 0,
+    publicationResults: [] as unknown[],
     bufferDisconnected: false,
     bufferQueuePaused: false,
     started: [] as Array<{ domain: string; id: string }>,
@@ -159,11 +170,15 @@ export async function createWorkflowSanity(options: {
     target: "es2022",
     external: ["cloudflare:workers"],
   })
-  const runtime: Runtime = new Miniflare({
+  const persistence = options.persistent ? await mkdtemp(join(tmpdir(), "kipp-notes-workflow-recovery-")) : null
+  const runtimeOptions = {
     modules: true,
     script: outputFiles[0].text,
     compatibilityDate: "2026-07-08",
     log: new Log(LogLevel.ERROR),
+    ...(persistence
+      ? { workflowsPersist: join(persistence, "workflows"), durableObjectsPersist: join(persistence, "objects") }
+      : {}),
     bindings: {
       ...(options.notesWritingRetries !== undefined
         ? { SANITY_NOTES_WRITING_RETRIES: options.notesWritingRetries }
@@ -214,6 +229,8 @@ export async function createWorkflowSanity(options: {
         const text = request.method === "GET" ? "" : await request.text()
         const body: WireBody = text ? JSON.parse(text) : {}
         if (url.origin === "https://sanity.test" && url.pathname === "/publication-checkpoint") {
+          state.publicationCheckpoints++
+          state.publicationResults.push(body.result)
           if (options.loseNotesSubmitCheckpoint && !checkpointFaultInjected) {
             checkpointFaultInjected = true
             return RuntimeResponse.json({}, { status: 503 })
@@ -372,7 +389,8 @@ export async function createWorkflowSanity(options: {
         return RuntimeResponse.json({ error: message }, { status: 599 })
       }
     },
-  })
+  }
+  let runtime: Runtime = new Miniflare(runtimeOptions)
   const timer = setTimeout(
     () => abort.abort(new Error("Scenario wall-clock budget exceeded")),
     Math.max(0, deadline - Date.now()),
@@ -431,6 +449,20 @@ export async function createWorkflowSanity(options: {
   return {
     state,
     network,
+    /** Pauses or resumes the actual Notes engine before a deliberate workerd shutdown. */
+    controlNotes: async (operation: "pause" | "resume") => {
+      const instance = await until(() => state.started.find((item) => item.domain === "notes"))
+      const response = await runtime.dispatchFetch(
+        `https://kipp.test/__test/control?id=${instance.id}&operation=${operation}`,
+      )
+      if (!response.ok) throw new Error(`Could not ${operation} Notes workflow`)
+    },
+    /** Reconstructs a fresh runtime against the same Workflow and SQLite stores. */
+    reboot: async () => {
+      if (!persistence) throw new Error("Persistent runtime was not requested")
+      await runtime.dispose()
+      runtime = new Miniflare(runtimeOptions)
+    },
     setBufferGrant: async (nearExpiry = false, accountId = "buffer-account") => {
       const response = await runtime.dispatchFetch(
         `https://kipp.test/__test/buffer-grant?nearExpiry=${nearExpiry}&account=${encodeURIComponent(accountId)}`,
@@ -498,6 +530,7 @@ export async function createWorkflowSanity(options: {
       clearTimeout(timer)
       abort.abort()
       await runtime.dispose()
+      if (persistence) await rm(persistence, { recursive: true, force: true })
     },
   }
 }
