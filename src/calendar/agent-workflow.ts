@@ -1116,6 +1116,7 @@ async function handleConflictDisclosure(
       await client.createManagedEvent(managedEvent(identity, plan.proposal, requestedScheduled, timeZone))
     })
   } catch (error) {
+    if (isWorkflowInterruption(error)) throw error
     createFailure = error
   }
   if (createFailure) {
@@ -1129,7 +1130,8 @@ async function handleConflictDisclosure(
         await client.deleteManagedEvent(identity.id)
         return !(await client.findManagedEvent(identity.id, identity.requestId))
       })) as boolean
-    } catch {
+    } catch (error) {
+      if (isWorkflowInterruption(error)) throw error
       removed = false
     }
     if (!removed) {
