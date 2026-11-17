@@ -19,6 +19,7 @@ const mockCreateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockUpdateManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockReconcileManagedSeries = vitest.hoisted(() => vitest.fn())
 const mockDeleteManagedEvent = vitest.hoisted(() => vitest.fn())
+const mockFindManagedEvent = vitest.hoisted(() => vitest.fn())
 const mockFindConflictingEvents = vitest.hoisted(() => vitest.fn())
 const mockMoveExistingEvent = vitest.hoisted(() => vitest.fn())
 const MockGoogleCalendarError = vitest.hoisted(
@@ -41,6 +42,7 @@ vitest.mock("../integrations/google-calendar", () => ({
     updateManagedEvent: mockUpdateManagedEvent,
     reconcileManagedSeries: mockReconcileManagedSeries,
     deleteManagedEvent: mockDeleteManagedEvent,
+    findManagedEvent: mockFindManagedEvent,
     findConflictingEvents: mockFindConflictingEvents,
     moveExistingEvent: mockMoveExistingEvent,
   }),
@@ -274,6 +276,7 @@ describe("agent-centered CalendarWorkflow", () => {
     mockUpdateManagedEvent.mockReset()
     mockReconcileManagedSeries.mockReset().mockResolvedValue(undefined)
     mockDeleteManagedEvent.mockReset().mockResolvedValue(undefined)
+    mockFindManagedEvent.mockReset().mockResolvedValue(false)
     mockFindConflictingEvents.mockReset().mockResolvedValue([])
     mockMoveExistingEvent.mockReset().mockResolvedValue({ ok: true })
     telegramMock()
@@ -1365,6 +1368,83 @@ describe("agent-centered CalendarWorkflow", () => {
       .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
       .filter(Boolean)
     expect(texts.some((text) => text.includes("couldn't create your block, so I restored Standup"))).toBe(true)
+  })
+
+  it("reconciles an ambiguous create before restoring the displaced event", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    mockCreateManagedEvent.mockRejectedValueOnce(new MockGoogleCalendarError("ambiguous", "transient"))
+    mockFindManagedEvent.mockResolvedValueOnce(false)
+    queueChoice(ONE_OFF)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+      ),
+    )
+
+    expect(mockDeleteManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(2)
+    expect(mockMoveExistingEvent.mock.calls[1]).toEqual([
+      "existing-1",
+      "2026-07-28T13:30:00.000Z",
+      "2026-07-28T14:00:00.000Z",
+    ])
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("couldn't create your block, so I restored Standup"))).toBe(true)
+  })
+
+  it("does not restore the displaced event when the managed create cannot be reconciled", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    mockCreateManagedEvent.mockRejectedValueOnce(new MockGoogleCalendarError("ambiguous", "transient"))
+    mockDeleteManagedEvent.mockRejectedValueOnce(new MockGoogleCalendarError("delete failed", "permanent"))
+    queueChoice(ONE_OFF)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+      ),
+    )
+
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(1)
+    expect(mockFindManagedEvent).not.toHaveBeenCalled()
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("couldn't confirm whether your new block was created"))).toBe(true)
+    expect(texts.some((text) => text.includes("left Standup"))).toBe(true)
+    expect(texts.some((text) => text.includes("Restored Standup"))).toBe(false)
   })
 
   it("surfaces a safe availability-changed outcome on a 412 precondition-failed move", async () => {

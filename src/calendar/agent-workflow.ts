@@ -1119,6 +1119,35 @@ async function handleConflictDisclosure(
     createFailure = error
   }
   if (createFailure) {
+    // An ambiguous create may have applied upstream without a successful readback.
+    // Remove the deterministic managed event before restoring the displaced event,
+    // so compensation can never leave two events at the requested time.
+    let removed = false
+    try {
+      removed = (await step.do(`calendar-conflict-create-reconcile-${turn}`, async () => {
+        const client = createGoogleCalendarClient(env)
+        await client.deleteManagedEvent(identity.id)
+        return !(await client.findManagedEvent(identity.id, identity.requestId))
+      })) as boolean
+    } catch {
+      removed = false
+    }
+    if (!removed) {
+      logRuntime(env, {
+        workflow: event.instanceId,
+        event: "calendar-conflict-operation",
+        outcome: "failed",
+        failureCategory: "calendar-conflict-reconcile-failed",
+      })
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        `I couldn't confirm whether your new block was created, so I left ${snapshot.title} at ${localTimeAt(Date.parse(target.start), timeZone)} to avoid two overlapping events. Please check your Calendar.`,
+        `calendar-conflict-create-unresolved-${turn}`,
+      )
+      return { status: "ended", version: v }
+    }
     const restored = (await step.do(`calendar-conflict-restore-${turn}`, async () => {
       const client = createGoogleCalendarClient(env)
       return (await client.moveExistingEvent(snapshot.id, snapshot.start, snapshot.end)).ok
