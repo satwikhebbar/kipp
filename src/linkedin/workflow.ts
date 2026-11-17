@@ -37,7 +37,6 @@ type PipelineWorkflowOutcome =
   | { outcome: "publish-failed" }
   | { outcome: "not-configured" }
   | { outcome: "feedback-expired" }
-  | { outcome: "feedback-limit-reached" }
 
 export { remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../core/feedback-session"
 
@@ -347,24 +346,31 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let runningOutputTokens = state.costOutputTokens ?? 0
     let latestCostLine = state.costLine
 
-    for (let i = 0; i < MAX_FEEDBACK_ROUNDS; i++) {
-      const timeoutSeconds = await stepDo(`feedback-remaining-${i}`, async () =>
+    const expireFeedback = async (round: number): Promise<PipelineWorkflowOutcome> => {
+      await stepDo(`timeout-${round}`, async () => {
+        const manager = createIdeaManager(createNotionClient(this.env))
+        await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
+      })
+      return { outcome: "feedback-expired" }
+    }
+
+    let revisionCount = 0
+    let waitIndex = 0
+    // Keep waiting until the deadline rather than a fixed event count, so the
+    // final draft's Approve control stays actionable after the revision limit.
+    while (true) {
+      const round = waitIndex++
+      const timeoutSeconds = await stepDo(`feedback-remaining-${round}`, async () =>
         remainingFeedbackTimeoutSeconds(feedbackDeadlineMs),
       )
-      if (timeoutSeconds === 0) {
-        await stepDo(`timeout-${i}`, async () => {
-          const manager = createIdeaManager(createNotionClient(this.env))
-          await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
-        })
-        return { outcome: "feedback-expired" }
-      }
+      if (timeoutSeconds === 0) return expireFeedback(round)
       logRuntime(this.env, {
         workflow: event.instanceId,
         event: "linkedin-feedback-wait",
         outcome: "started",
-        details: { round: i, timeoutSeconds },
+        details: { round, timeoutSeconds },
       })
-      const reply = await waitForWorkflowEvent<{ text?: string }>(step, `feedback-${i}`, {
+      const reply = await waitForWorkflowEvent<{ text?: string }>(step, `feedback-${round}`, {
         type: "telegram-reply",
         // biome-ignore lint/suspicious/noExplicitAny: WorkflowSleepDuration doesn't accept computed strings
         timeout: `${timeoutSeconds} seconds` as any,
@@ -375,7 +381,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         event: "linkedin-feedback-wait",
         outcome: "succeeded",
         details: {
-          round: i,
+          round,
           result: reply.type === "timeout" ? "timeout" : "event",
           interaction: text === "__approve__" ? "approve" : text === "__revise__" ? "revise" : "feedback",
           responseCharacters: currentDraft.length,
@@ -383,19 +389,26 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           transcriptCharacters: JSON.stringify(currentMessages).length,
         },
       })
-      if (reply.type === "timeout") {
-        await stepDo(`timeout-${i}`, async () => {
-          const manager = createIdeaManager(createNotionClient(this.env))
-          await manager.updateIdea(pageId, { status: "awaiting-feedback-expired" })
-        })
-        return { outcome: "feedback-expired" }
+      if (reply.type === "timeout") return expireFeedback(round)
+
+      if (text !== "__approve__" && revisionCount >= MAX_FEEDBACK_ROUNDS) {
+        if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
+          await stepDo(`notify-revision-limit-${round}`, async () => {
+            const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
+            await tg.sendMessage(
+              state.chatId,
+              "Revision limit reached. Approve the current draft to post it, or wait for the offer to expire.",
+            )
+          })
+        }
+        continue
       }
 
       turn = createConversationTurn()
       if (text === "__revise__") {
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
           turn.claim("clarification")
-          const feedbackInteraction = await stepDo(`notify-revision-prompt-${i}`, async () => {
+          const feedbackInteraction = await stepDo(`notify-revision-prompt-${round}`, async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
             await presentConversationTurn(
               { kind: "clarification", message: "Type your revision feedback." },
@@ -403,13 +416,13 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             )
             return {
               interactionId: interactionId(),
-              version: i + 1,
+              version: round + 1,
               workflowId: event.instanceId,
               kind: INTERACTION_KIND.REVISION_FEEDBACK,
               expiresAt: feedbackDeadlineMs,
             }
           })
-          await stepDo(`register-revision-feedback-${i}`, async () => {
+          await stepDo(`register-revision-feedback-${round}`, async () => {
             const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
             await router.register(feedbackInteraction)
           })
@@ -439,7 +452,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         for (let attempt = 0; attempt < MAX_LINKEDIN_PUBLISH_ATTEMPTS; attempt++) {
           let publication: { kind: "ok"; urn: string } | { kind: "needs-auth" }
           try {
-            publication = await stepDo(`linkedin-publish-${i}-${attempt}`, async () => {
+            publication = await stepDo(`linkedin-publish-${round}-${attempt}`, async () => {
               const publishToken = await getLinkedInToken(this.env)
               if (!publishToken || !this.env.LINKEDIN_AUTHOR_URN) return { kind: "needs-auth" as const }
               try {
@@ -504,7 +517,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
             chatId: state.chatId,
             ideaId,
             setupOrigin: (reply.payload as { setupOrigin?: string } | undefined)?.setupOrigin,
-            round: i,
+            round,
             attempt,
             turn,
           })
@@ -512,7 +525,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           if (decision === "retry") continue
           if (decision === "cancel") {
             turn.claim("confirmation")
-            await stepDo(`notify-publish-cancelled-${i}`, async () => {
+            await stepDo(`notify-publish-cancelled-${round}`, async () => {
               const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
               await presentConversationTurn(
                 { kind: "confirmation", message: "Draft publish cancelled. No LinkedIn draft was created." },
@@ -525,7 +538,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
         if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
           turn.claim("failure")
-          await stepDo(`notify-publish-attempts-exhausted-${i}`, async () => {
+          await stepDo(`notify-publish-attempts-exhausted-${round}`, async () => {
             const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
             await presentConversationTurn(
               {
@@ -540,7 +553,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         return { outcome: "publish-failed" }
       }
 
-      const revised = await stepDo(`revise-${i}`, async () => {
+      const revised = await stepDo(`revise-${revisionCount}`, async () => {
         const provider = createToolProvider(
           this.env.LLM_API_KEY,
           this.env.LLM_PROVIDER,
@@ -592,9 +605,9 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {
         turn.claim("review")
-        const notification = await stepDo(`notify-revised-${i}`, async () => {
+        const notification = await stepDo(`notify-revised-${revisionCount}`, async () => {
           const tg = createTelegramClient(this.env.TELEGRAM_BOT_TOKEN)
-          const interactions = createDraftInteractions(0, event.instanceId, i + 2, feedbackDeadlineMs)
+          const interactions = createDraftInteractions(0, event.instanceId, revisionCount + 2, feedbackDeadlineMs)
           const messageId = await sendDraftReview(
             tg,
             state.chatId,
@@ -606,12 +619,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           )
           return { interactions: interactions.map((interaction) => ({ ...interaction, botMessageId: messageId })) }
         })
-        await stepDo(`register-notify-revised-interactions-${i}`, async () => {
+        await stepDo(`register-notify-revised-interactions-${revisionCount}`, async () => {
           const router = createInteractionRouter(this.env.INTERACTION_ROUTER, state.chatId)
           await Promise.all(notification.interactions.map((interaction) => router.register(interaction)))
         })
       }
+      revisionCount++
     }
-    return { outcome: "feedback-limit-reached" }
   }
 }
