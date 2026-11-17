@@ -4,6 +4,7 @@ import { createNotionClient } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager } from "../linkedin/ideas/manager"
 import { createToolProvider } from "../providers"
+import { resolveOpenRouterModel } from "../providers/routing"
 import { isTransientHttpStatus } from "../runtime/http"
 import { parseSubstackArticle } from "../substack/article"
 import { assembleSubstackIdeaBody, runSubstackIdeaToolSession, selectSubstackIdeas } from "../substack/idea-agent"
@@ -87,9 +88,9 @@ export async function handleRssCron(env: Env): Promise<{ started: boolean; ideaI
     contentHtml: newItem.contentHtml,
   })
   const provider = createToolProvider(
-    env.LLM_API_KEY,
-    env.LLM_PROVIDER || "gemini",
-    env.LLM_MODEL,
+    env.OPENROUTER_API_KEY,
+    "openrouter",
+    resolveOpenRouterModel(env.LLM_PROVIDER, env.LLM_MODEL),
     Number(env.LLM_MAX_RETRIES ?? DEFAULT_RSS_RETRIES),
   )
   const session = await runSubstackIdeaToolSession(provider, article)

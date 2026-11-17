@@ -38,7 +38,8 @@ function baseEnv(overrides?: Partial<Env>): Env {
     LINKEDIN_AUTHOR_URN: "",
     ALLOW_INSECURE_LOCAL_TOKEN_FALLBACK: "true",
     DEPLOYMENT_ENV: "development",
-    LLM_API_KEY: "key",
+    LLM_API_KEY: "direct-key",
+    OPENROUTER_API_KEY: "router-key",
     LLM_PROVIDER: "deepseek",
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",
@@ -346,7 +347,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
       "fetch",
       vi.fn(async (url: RequestInfo | URL, opts?: RequestInit) => {
         const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url
-        if (urlStr.includes("api.deepseek.com"))
+        if (urlStr.includes("openrouter.ai/api/v1/chat/completions"))
           return {
             ok: false,
             status: 503,
@@ -366,7 +367,7 @@ describe("workflow-approval-to-linkedin-draft", () => {
         sleep: step.sleep,
         sleepUntil: step.sleepUntil,
       }),
-    ).rejects.toThrow("DeepSeek tool request failed (503)")
+    ).rejects.toThrow("OpenRouter tool request failed (503)")
 
     const errorOutput = consoleSpy.mock.calls.flat().join("\n")
     consoleSpy.mockRestore()

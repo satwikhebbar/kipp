@@ -15,6 +15,7 @@ import {
 } from "../integrations/google-calendar"
 import { createTelegramClient } from "../integrations/telegram"
 import { createToolProvider, type ToolConversationMessage } from "../providers"
+import { resolveOpenRouterModel } from "../providers/routing"
 import { logRuntime } from "../runtime/logging"
 import type { CalendarEvaluationContext } from "./evaluation"
 import { evaluateCalendarCandidate } from "./evaluation"
@@ -159,9 +160,9 @@ export async function runAgentCenteredCalendarWorkflow(
       const sessionStep = (await step.do(`calendar-agent-session-${turn}`, (async () => {
         const sessionLedger = structuredClone(ledger)
         const provider = createToolProvider(
-          env.LLM_API_KEY,
-          env.LLM_PROVIDER,
-          env.LLM_MODEL,
+          env.OPENROUTER_API_KEY,
+          "openrouter",
+          resolveOpenRouterModel(env.LLM_PROVIDER, env.LLM_MODEL),
           Number(env.LLM_MAX_RETRIES || "3"),
         )
         const evaluation: CalendarEvaluationContext = {

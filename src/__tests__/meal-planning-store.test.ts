@@ -3,6 +3,7 @@ import { dirname, join } from "node:path"
 import type { DatabaseSync } from "node:sqlite"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+import { computeVersionCost } from "../core/cost"
 import {
   type CreateActivePlanInput,
   createInMemoryMealPlanningStore,
@@ -234,7 +235,6 @@ describe("createInMemoryMealPlanningStore", () => {
       inputTokens: 100,
       outputTokens: 20,
       byModel: [{ inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" }],
-      decisionsCostUsd: 0,
     })
 
     const promoted = await store.promotePlanVersion(
@@ -245,33 +245,63 @@ describe("createInMemoryMealPlanningStore", () => {
       inputTokens: 140,
       outputTokens: 25,
       byModel: [{ inputTokens: 140, outputTokens: 25, model: "openai/gpt-5.6-luna" }],
-      decisionsCostUsd: 0,
     })
     const active = await store.activePlan(CHAT)
     expect(active?.version.usage).toEqual({
       inputTokens: 40,
       outputTokens: 5,
       model: "openai/gpt-5.6-luna",
-      decisionsCostUsd: 0,
     })
   })
 
-  it("sums the classifier's reported cost across versions independently of the priced model", async () => {
+  it("sums complete reported version costs without repricing or adding classifier cost again", async () => {
     const store = await newStore()
     await createPlan(
       store,
       createInput({
-        usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna", decisionsCostUsd: 0.002 },
+        usage: {
+          inputTokens: 100,
+          outputTokens: 20,
+          model: "unknown/model",
+          costUsd: 0.012,
+        },
       }),
     )
     await store.promotePlanVersion(
       promoteInput({
-        usage: { inputTokens: 40, outputTokens: 5, model: "openai/gpt-5.6-luna", decisionsCostUsd: 0.003 },
+        usage: {
+          inputTokens: 40,
+          outputTokens: 5,
+          model: "unknown/model",
+          costUsd: 0.023,
+        },
       }),
     )
     const total = await store.sumPlanUsage("plan-1")
-    expect(total?.decisionsCostUsd).toBeCloseTo(0.005)
-    expect(total?.byModel).toEqual([{ inputTokens: 140, outputTokens: 25, model: "openai/gpt-5.6-luna" }])
+    expect(total?.byModel).toEqual([{ inputTokens: 140, outputTokens: 25, model: "unknown/model", costUsd: 0.035 }])
+    expect(computeVersionCost(total?.byModel ?? []).totalCostUsd).toBeCloseTo(0.035)
+  })
+
+  it("keeps classifier supplements in the legacy pricing path when grouping in-memory versions", async () => {
+    const store = await newStore()
+    await createPlan(
+      store,
+      createInput({ usage: { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" } }),
+    )
+    await store.promotePlanVersion(
+      promoteInput({
+        usage: {
+          inputTokens: 50,
+          outputTokens: 10,
+          model: "openai/gpt-5.6-luna",
+          costUsd: 0.004,
+          costStatus: "legacy",
+        },
+      }),
+    )
+    const total = await store.sumPlanUsage("plan-1")
+    expect(computeVersionCost(total?.byModel ?? []).totalCostUsd).toBeCloseTo(0.004066)
+    expect(computeVersionCost(total?.byModel ?? []).costKind).toBe("estimated")
   })
 
   it("sumPlanUsage groups tokens by model so each version is priced at its own rate", async () => {
@@ -290,7 +320,6 @@ describe("createInMemoryMealPlanningStore", () => {
         { inputTokens: 40, outputTokens: 5, model: "deepseek-v4-flash" },
         { inputTokens: 100, outputTokens: 20, model: "openai/gpt-5.6-luna" },
       ],
-      decisionsCostUsd: 0,
     })
   })
 
@@ -568,13 +597,11 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       inputTokens: 200,
       outputTokens: 30,
       model: "openai/gpt-5.6-luna",
-      decisionsCostUsd: 0,
     })
     expect(await store.sumPlanUsage("plan-1")).toEqual({
       inputTokens: 200,
       outputTokens: 30,
       byModel: [{ inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna" }],
-      decisionsCostUsd: 0,
     })
     expect(d1Scalar(db, "SELECT usage_model FROM meal_plan_version WHERE plan_id = ? AND version = 1", "plan-1")).toBe(
       "openai/gpt-5.6-luna",
@@ -582,26 +609,78 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
 
     const promoted = await store.promotePlanVersion(
       promoteInput({
-        usage: { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna", decisionsCostUsd: 0.004 },
+        usage: {
+          inputTokens: 50,
+          outputTokens: 10,
+          model: "openai/gpt-5.6-luna",
+          costUsd: 0.004,
+          costStatus: "legacy",
+        },
       }),
     )
     expect(promoted.ok).toBe(true)
     expect(await store.sumPlanUsage("plan-1")).toEqual({
       inputTokens: 250,
       outputTokens: 40,
-      byModel: [{ inputTokens: 250, outputTokens: 40, model: "openai/gpt-5.6-luna" }],
-      decisionsCostUsd: 0.004,
+      byModel: [
+        { inputTokens: 250, outputTokens: 40, model: "openai/gpt-5.6-luna", costUsd: 0.004, costStatus: "legacy" },
+      ],
     })
     expect(
-      d1Scalar(db, "SELECT decisions_cost_usd FROM meal_plan_version WHERE plan_id = ? AND version = 2", "plan-1"),
+      d1Scalar(db, "SELECT cost_usd FROM meal_plan_version WHERE plan_id = ? AND version = 2", "plan-1"),
     ).toBeCloseTo(0.004)
     const active = await store.activePlan(CHAT)
     expect(active?.version.usage).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       model: "openai/gpt-5.6-luna",
-      decisionsCostUsd: 0.004,
+      costUsd: 0.004,
+      costStatus: "legacy",
     })
+  })
+
+  it("migrates legacy classifier charges and prior reported rows into one cost column", async () => {
+    const { db, d1 } = createD1TestDb("0005_openrouter_reported_cost.sql")
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    db.prepare(`INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone,
+      instance_id, status, current_version, created_at, updated_at)
+      VALUES ('plan-1', ?, ?, ?, 'Asia/Kolkata', 'instance-1', 'active', 3, 'now', 'now')`).run(
+      CHAT,
+      WEEKS.weekStart,
+      WEEKS.weekEnd,
+    )
+    const insert = db.prepare(`INSERT INTO meal_plan_version (plan_id, version, candidate_json,
+      evaluation_json, request_kind, created_at, usage_input_tokens, usage_output_tokens, usage_model,
+      decisions_cost_usd, usage_reported_cost_usd, usage_reported_cost_status)
+      VALUES ('plan-1', ?, '{}', '{}', 'initial_plan', 'now', 100, 20, 'openai/gpt-5.6-luna', ?, ?, ?)`)
+    insert.run(1, 0.002, null, "legacy")
+    insert.run(2, 0.003, 0.01, "reported")
+    insert.run(3, 0.004, null, "unavailable")
+    db.exec(
+      readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), "../../migrations/0006_unified_version_cost.sql"),
+        "utf8",
+      ),
+    )
+    expect(db.prepare("SELECT cost_usd, cost_status FROM meal_plan_version ORDER BY version").all()).toEqual([
+      { cost_usd: 0.002, cost_status: "legacy" },
+      { cost_usd: 0.013000000000000001, cost_status: "reported" },
+      { cost_usd: null, cost_status: "unavailable" },
+    ])
+    const columns = db
+      .prepare("PRAGMA table_info(meal_plan_version)")
+      .all()
+      .map((row) => row.name)
+    expect(columns).not.toContain("decisions_cost_usd")
+    expect(columns).not.toContain("usage_reported_cost_usd")
+    expect(columns).not.toContain("usage_reported_cost_status")
+    const total = await store.sumPlanUsage("plan-1")
+    expect(computeVersionCost(total?.byModel ?? []).totalCostUsd).toBeNull()
+    db.prepare("DELETE FROM meal_plan_version WHERE version = 3").run()
+    const available = await store.sumPlanUsage("plan-1")
+    expect(computeVersionCost(available?.byModel ?? []).totalCostUsd).toBeCloseTo(0.015044)
+    expect(computeVersionCost(available?.byModel ?? []).costKind).toBe("estimated")
   })
 
   it("round-trips reported, unavailable, and legacy cost states through D1 and counts decisions cost once", async () => {
@@ -614,8 +693,8 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
           inputTokens: 200,
           outputTokens: 30,
           model: "openai/gpt-5.6-luna",
-          reportedCostUsd: 0.012,
-          decisionsCostUsd: 0.002,
+          costUsd: 0.014,
+          costStatus: "reported",
         },
       }),
     )
@@ -626,8 +705,7 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
           inputTokens: 50,
           outputTokens: 10,
           model: "openai/gpt-5.6-luna",
-          reportedCostUsd: null,
-          decisionsCostUsd: 0.003,
+          costUsd: null,
         },
       }),
     )
@@ -639,45 +717,36 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
           inputTokens: 25,
           outputTokens: 5,
           model: "openai/gpt-5.6-luna",
-          decisionsCostUsd: 0.004,
+          costUsd: 0.004,
+          costStatus: "legacy",
         },
       }),
     )
     expect(legacy.ok).toBe(true)
 
-    expect(
-      d1Scalar(
-        db,
-        "SELECT usage_reported_cost_status FROM meal_plan_version WHERE plan_id = ? AND version = 1",
-        "plan-1",
-      ),
-    ).toBe("reported")
-    expect(
-      d1Scalar(
-        db,
-        "SELECT usage_reported_cost_status FROM meal_plan_version WHERE plan_id = ? AND version = 2",
-        "plan-1",
-      ),
-    ).toBe("unavailable")
+    expect(d1Scalar(db, "SELECT cost_status FROM meal_plan_version WHERE plan_id = ? AND version = 1", "plan-1")).toBe(
+      "reported",
+    )
+    expect(d1Scalar(db, "SELECT cost_status FROM meal_plan_version WHERE plan_id = ? AND version = 2", "plan-1")).toBe(
+      "unavailable",
+    )
     // Omitting the new columns has the same default state as a pre-migration row.
-    db.prepare(
-      "UPDATE meal_plan_version SET usage_reported_cost_usd = NULL, usage_reported_cost_status = 'legacy' WHERE plan_id = ? AND version = 3",
-    ).run("plan-1")
+    db.prepare("UPDATE meal_plan_version SET cost_status = 'legacy' WHERE plan_id = ? AND version = 3").run("plan-1")
 
     const active = await store.activePlan(CHAT)
     expect(active?.version.usage).toMatchObject({ inputTokens: 25, outputTokens: 5, model: "openai/gpt-5.6-luna" })
-    expect(active?.version.usage?.reportedCostUsd).toBeUndefined()
+    expect(active?.version.usage?.costUsd).toBe(0.004)
     const total = await store.sumPlanUsage("plan-1")
     expect(total).toMatchObject({
       inputTokens: 275,
       outputTokens: 45,
       byModel: [
-        { inputTokens: 25, outputTokens: 5, model: "openai/gpt-5.6-luna" },
-        { inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna", reportedCostUsd: 0.012 },
-        { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna", reportedCostUsd: null },
+        { inputTokens: 25, outputTokens: 5, model: "openai/gpt-5.6-luna", costUsd: 0.004, costStatus: "legacy" },
+        { inputTokens: 200, outputTokens: 30, model: "openai/gpt-5.6-luna", costUsd: 0.014 },
+        { inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna", costUsd: null },
       ],
     })
-    expect(total?.decisionsCostUsd).toBeCloseTo(0.009)
+    expect(computeVersionCost(total?.byModel ?? []).totalCostUsd).toBeNull()
   })
 
   it("a legacy version persisted without usage hydrates null and does not skew the sum", async () => {
@@ -697,7 +766,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       inputTokens: 50,
       outputTokens: 10,
       byModel: [{ inputTokens: 50, outputTokens: 10, model: "openai/gpt-5.6-luna" }],
-      decisionsCostUsd: 0,
     })
   })
 

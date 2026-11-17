@@ -12,6 +12,7 @@ vitest.mock("cloudflare:workers", () => {
   return { WorkflowEntrypoint }
 })
 
+const mockCreateProvider = vitest.hoisted(() => vitest.fn())
 const mockGenerate = vitest.hoisted(() => vitest.fn())
 const mockBusyIntervals = vitest.hoisted(() => vitest.fn())
 const mockListEvents = vitest.hoisted(() => vitest.fn())
@@ -33,7 +34,12 @@ const MockGoogleCalendarError = vitest.hoisted(
     },
 )
 
-vitest.mock("../providers", () => ({ createToolProvider: () => ({ generate: mockGenerate }) }))
+vitest.mock("../providers", () => ({
+  createToolProvider: (...args: unknown[]) => {
+    mockCreateProvider(...args)
+    return { generate: mockGenerate }
+  },
+}))
 vitest.mock("../integrations/google-calendar", () => ({
   createGoogleCalendarClient: () => ({
     getBusyIntervals: mockBusyIntervals,
@@ -154,7 +160,8 @@ let testRouter = sqliteInteractionRouter()
 function environment(): Env {
   return {
     TELEGRAM_BOT_TOKEN: "bot-token",
-    LLM_API_KEY: "key",
+    LLM_API_KEY: "direct-key",
+    OPENROUTER_API_KEY: "router-key",
     LLM_PROVIDER: "deepseek",
     LLM_MAX_RETRIES: "0",
     TIMEZONE: "Asia/Kolkata",
@@ -271,6 +278,7 @@ describe("agent-centered CalendarWorkflow", () => {
     vitest.setSystemTime(new Date("2026-07-01T00:00:00.000Z"))
     nextEditId = 0
     testRouter = sqliteInteractionRouter()
+    mockCreateProvider.mockReset()
     mockGenerate.mockReset()
     mockBusyIntervals.mockReset().mockResolvedValue([])
     mockListEvents.mockReset().mockResolvedValue({ events: [], truncated: false })
@@ -686,6 +694,7 @@ describe("agent-centered CalendarWorkflow", () => {
     const step = createStep({ type: "timeout" })
     await run(step)
 
+    expect(mockCreateProvider).toHaveBeenCalledWith("router-key", "openrouter", "~deepseek/deepseek-flash-latest", 0)
     expect(mockBusyIntervals).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(step.do).toHaveBeenCalledWith("calendar-agent-revalidate-0", expect.any(Function))

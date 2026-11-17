@@ -17,7 +17,8 @@ import { createGitHubClient } from "../integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integrations/linkedin"
 import { createNotionClient } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
-import { createToolProvider, resolveModel } from "../providers"
+import { createToolProvider } from "../providers"
+import { resolveOpenRouterModel } from "../providers/routing"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
 import { createIdeaManager } from "./ideas/manager"
@@ -237,12 +238,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     const state = await stepDo("generate", async () => {
       const provider = createToolProvider(
-        this.env.LLM_API_KEY,
-        this.env.LLM_PROVIDER,
-        this.env.LLM_MODEL,
+        this.env.OPENROUTER_API_KEY,
+        "openrouter",
+        resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL),
         Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
       )
-      const model = resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
+      const model = resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
 
       const client = createGitHubClient(this.env)
       const manager = createIdeaManager(createNotionClient(this.env))
@@ -557,12 +558,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       const revised = await stepDo(`revise-${revisionCount}`, async () => {
         const provider = createToolProvider(
-          this.env.LLM_API_KEY,
-          this.env.LLM_PROVIDER,
-          this.env.LLM_MODEL,
+          this.env.OPENROUTER_API_KEY,
+          "openrouter",
+          resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL),
           Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
         )
-        const model = state.model ?? resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
+        const model = resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
         const feedback = text === "__revise__" ? undefined : text
         const messages = feedback ? appendLinkedInFeedback(currentMessages, feedback) : currentMessages
         const session = await runLinkedInToolSession(provider, messages)

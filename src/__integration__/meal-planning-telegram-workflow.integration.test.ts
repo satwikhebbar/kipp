@@ -15,7 +15,7 @@ vitest.mock("../providers", () => ({ createToolProvider: () => ({ generate: mock
 const mockGenerate = vitest.hoisted(() => vitest.fn())
 
 const LLM_QUEUE: Array<{ label: string; response: unknown }> = []
-const LLM_USAGE = { inputTokens: 1000, outputTokens: 500 }
+const LLM_USAGE = { inputTokens: 1000, outputTokens: 500, reportedCostUsd: 0.001 }
 
 function queueResponse(label: string, response: unknown): void {
   LLM_QUEUE.push({ label, response })
@@ -461,13 +461,15 @@ describe("agent-centered meal-planning Telegram integration", () => {
       inputTokens: 2000,
       outputTokens: 1000,
       model: "~openai/gpt-luna-latest",
-      decisionsCostUsd: 0,
+      costUsd: 0.002,
     })
     const plans = network.getState().telegramMessages.filter((candidate) => candidate.text.includes("School week of"))
     expect(plans).toHaveLength(2)
-    expect(plans[0]?.text).toContain("Est. cost:")
+    expect(plans[0]?.text).toContain("Cost: $")
+    expect(plans[0]?.text).toContain("$0.0030")
     expect(plans[0]?.text).toContain("3000 in / 1500 out")
-    expect(plans[1]?.text).toContain("Est. cost:")
+    expect(plans[1]?.text).toContain("Cost: $")
+    expect(plans[1]?.text).toContain("$0.0050")
     expect(plans[1]?.text).toContain("5000 in / 2500 out")
 
     step.timeout()

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const mockProvider = vi.hoisted(() => ({ generate: vi.fn() }))
 vi.mock("../providers/index", () => ({ createToolProvider: vi.fn(() => mockProvider) }))
 
+import { createToolProvider } from "../providers/index"
 import { handleRssCron, itemIdentity, parseRssFeed } from "../triggers/rss"
 import { createFakeIdeaIngestStub } from "./helpers/idea-ingest-stub"
 
@@ -86,7 +87,8 @@ function mockEnv() {
   const { stub, ingestFetches } = createFakeIdeaIngestStub({ pageId: "page_1", ideaId: "1" })
   return {
     SUBSTACK_RSS_URL: "https://test.substack.com/feed",
-    LLM_API_KEY: "key",
+    LLM_API_KEY: "direct-key",
+    OPENROUTER_API_KEY: "router-key",
     LLM_PROVIDER: "gemini",
     POSTING_CADENCE_DAYS: "7",
     TELEGRAM_BOT_TOKEN: "",
@@ -170,6 +172,7 @@ describe("handleRssCron", () => {
 
     const result = await handleRssCron(env as never)
 
+    expect(createToolProvider).toHaveBeenCalledWith("router-key", "openrouter", "google/gemini-2.5-flash", 3)
     expect(result).toEqual({ started: true, ideaId: "1" })
     expect(mockProvider.generate).toHaveBeenCalledWith(
       expect.objectContaining({

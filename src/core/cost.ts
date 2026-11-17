@@ -3,7 +3,7 @@ import type { LLMUsage, WorkflowCost } from "./types"
 type ModelPricing = { inputCacheMissPer1M: number; outputPer1M: number }
 
 // Input is priced at the cache-miss rate. deepseek-* are DeepSeek-direct
-// prices (LinkedIn/calendar call DeepSeek directly, not via OpenRouter).
+// prices used only for historical rows and non-reporting provider clients.
 // ~openai/gpt-luna-latest verified 2026-09-23 against the OpenRouter model page.
 // deepseek-flash is DeepSeek-V4.1-Flash's exact API model name; its peak
 // cache-miss and output rates were verified 2026-09-23 against the DeepSeek
@@ -100,6 +100,26 @@ export function computeCostByModel(groups: ModelUsage[]): WorkflowCost {
         ? "estimated"
         : "reported"
   return { totalInputTokens, totalOutputTokens, totalCostUsd, model: models.join(" + "), costKind }
+}
+
+/** Sums complete per-version charges, estimating only legacy planner usage. */
+export function computeVersionCost(
+  groups: Array<ModelUsage & { costUsd?: number | null; costStatus?: "legacy" | "reported" | "unavailable" }>,
+): WorkflowCost {
+  let legacyClassifierCost = 0
+  const cost = computeCostByModel(
+    groups.map((group) => {
+      const legacy = group.costStatus === "legacy" || (group.costStatus === undefined && group.costUsd === undefined)
+      if (legacy) legacyClassifierCost += group.costUsd ?? 0
+      return {
+        inputTokens: group.inputTokens,
+        outputTokens: group.outputTokens,
+        model: group.model,
+        ...(legacy ? {} : { reportedCostUsd: group.costUsd ?? null }),
+      }
+    }),
+  )
+  return { ...cost, totalCostUsd: cost.totalCostUsd === null ? null : cost.totalCostUsd + legacyClassifierCost }
 }
 
 /** Formats a cost object as a Markdown line for display. */

@@ -55,18 +55,18 @@ export interface MealPlanGenerationRecord {
 export interface VersionUsage {
   inputTokens: number
   outputTokens: number
-  /** Model string priced at report time via `computeCost`/`PRICING`. */
+  /** Model label retained for diagnostics and historical token pricing. */
   model: string
-  /** OpenRouter's reported USD cost; null means a requested cost was unavailable. */
-  reportedCostUsd?: number | null
-  /** Reported USD cost of this version's easy-buy classifier calls; 0 when none ran. */
-  decisionsCostUsd?: number
+  /** Complete planner plus classifier USD cost; null means a requested cost was unavailable. */
+  costUsd?: number | null
+  /** Legacy rows store only their classifier cost in costUsd; reported rows store the full cost. */
+  costStatus?: VersionCostStatus
 }
 
-type ReportedCostStatus = "legacy" | "reported" | "unavailable"
+export type VersionCostStatus = "legacy" | "reported" | "unavailable"
 
 /** Distinguishes pre-reporting rows from a new request whose cost was unavailable. */
-function reportedCostStatus(cost: number | null | undefined): ReportedCostStatus {
+function versionCostStatus(cost: number | null | undefined): VersionCostStatus {
   return cost === undefined ? "legacy" : cost === null ? "unavailable" : "reported"
 }
 
@@ -75,8 +75,6 @@ export interface PlanUsageTotal {
   inputTokens: number
   outputTokens: number
   byModel: VersionUsage[]
-  /** Sum of every version's reported classifier cost; added to the priced total at report time. */
-  decisionsCostUsd: number
 }
 
 /** A hydrated `meal_plan` header row (plan identity, week bounds, live instance, week-scoped state). */
@@ -807,7 +805,7 @@ function makeVersionRecord(
     feedbackBatchId,
     video,
     provisionalMealDefinitions,
-    usage: usage ? { ...usage, decisionsCostUsd: usage.decisionsCostUsd ?? 0 } : null,
+    usage: usage ? { ...usage } : null,
     createdAt: now,
   }
 }
@@ -817,8 +815,8 @@ const PLAN_WITH_VERSION_SELECT = `
          p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
          v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
          v.feedback_batch_id, v.video_json, v.provisional_meals_json,
-         v.usage_input_tokens, v.usage_output_tokens, v.usage_model, v.decisions_cost_usd,
-         v.usage_reported_cost_usd, v.usage_reported_cost_status,
+         v.usage_input_tokens, v.usage_output_tokens, v.usage_model,
+         v.cost_usd, v.cost_status,
          v.created_at AS version_created_at
   FROM meal_plan p
   JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version`
@@ -874,12 +872,11 @@ function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
               inputTokens: Number(row.usage_input_tokens),
               outputTokens: Number(row.usage_output_tokens ?? 0),
               model: String(row.usage_model ?? ""),
-              ...(row.usage_reported_cost_status === "reported"
-                ? { reportedCostUsd: Number(row.usage_reported_cost_usd) }
-                : row.usage_reported_cost_status === "unavailable"
-                  ? { reportedCostUsd: null }
-                  : {}),
-              decisionsCostUsd: Number(row.decisions_cost_usd ?? 0),
+              ...(row.cost_status === "legacy"
+                ? row.cost_usd
+                  ? { costUsd: Number(row.cost_usd), costStatus: "legacy" as const }
+                  : {}
+                : { costUsd: row.cost_status === "reported" ? Number(row.cost_usd) : null }),
             },
       createdAt: String(row.version_created_at),
     },
@@ -998,10 +995,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
-                                            usage_input_tokens, usage_output_tokens, usage_model, decisions_cost_usd,
-                                            usage_reported_cost_usd, usage_reported_cost_status,
+                                            usage_input_tokens, usage_output_tokens, usage_model,
+                                            cost_usd, cost_status,
                                             created_at)
-             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND EXISTS (SELECT 1 FROM meal_plan_generation
                            WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
@@ -1015,9 +1012,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.usage?.inputTokens ?? null,
             input.usage?.outputTokens ?? null,
             input.usage?.model ?? null,
-            input.usage?.decisionsCostUsd ?? null,
-            typeof input.usage?.reportedCostUsd === "number" ? input.usage.reportedCostUsd : null,
-            reportedCostStatus(input.usage?.reportedCostUsd),
+            typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
+            input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
             now,
             input.chatId,
             input.chatId,
@@ -1096,10 +1092,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
-                                            usage_input_tokens, usage_output_tokens, usage_model, decisions_cost_usd,
-                                            usage_reported_cost_usd, usage_reported_cost_status,
+                                            usage_input_tokens, usage_output_tokens, usage_model,
+                                            cost_usd, cost_status,
                                             created_at)
-             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM meal_plan
+             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
@@ -1119,9 +1115,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.usage?.inputTokens ?? null,
             input.usage?.outputTokens ?? null,
             input.usage?.model ?? null,
-            input.usage?.decisionsCostUsd ?? null,
-            typeof input.usage?.reportedCostUsd === "number" ? input.usage.reportedCostUsd : null,
-            reportedCostStatus(input.usage?.reportedCostUsd),
+            typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
+            input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
             now,
             input.planId,
             input.chatId,
@@ -1373,14 +1368,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const result = await db
         .prepare(
           `SELECT usage_model AS model,
-                  usage_reported_cost_status AS reported_cost_status,
-                  SUM(usage_reported_cost_usd) AS reported_cost_usd,
+                  cost_status AS cost_status,
+                  SUM(cost_usd) AS cost_usd,
                   COALESCE(SUM(usage_input_tokens), 0) AS input_tokens,
                   COALESCE(SUM(usage_output_tokens), 0) AS output_tokens
            FROM meal_plan_version
            WHERE plan_id = ? AND usage_input_tokens IS NOT NULL
-           GROUP BY usage_model, usage_reported_cost_status
-           ORDER BY usage_model, usage_reported_cost_status`,
+           GROUP BY usage_model, cost_status
+           ORDER BY usage_model, cost_status`,
         )
         .bind(planId)
         .all()
@@ -1390,23 +1385,16 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         model: String(row.model ?? ""),
         inputTokens: Number(row.input_tokens),
         outputTokens: Number(row.output_tokens),
-        ...(row.reported_cost_status === "reported"
-          ? { reportedCostUsd: Number(row.reported_cost_usd ?? 0) }
-          : row.reported_cost_status === "unavailable"
-            ? { reportedCostUsd: null }
-            : {}),
+        ...(row.cost_status === "legacy"
+          ? row.cost_usd
+            ? { costUsd: Number(row.cost_usd), costStatus: "legacy" as const }
+            : {}
+          : { costUsd: row.cost_status === "reported" ? Number(row.cost_usd) : null }),
       }))
-      // Reported classifier cost is a flat USD sum, not grouped by the priced
-      // planner model, so it is summed separately and added at report time.
-      const decisions = await db
-        .prepare("SELECT COALESCE(SUM(decisions_cost_usd), 0) AS cost FROM meal_plan_version WHERE plan_id = ?")
-        .bind(planId)
-        .first()
       return {
         inputTokens: byModel.reduce((sum, group) => sum + group.inputTokens, 0),
         outputTokens: byModel.reduce((sum, group) => sum + group.outputTokens, 0),
         byModel,
-        decisionsCostUsd: Number((decisions as { cost?: number } | null)?.cost ?? 0),
       }
     },
 
@@ -1975,33 +1963,33 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const byModel = new Map<string, VersionUsage>()
       for (const record of records) {
         const usage = record.usage as VersionUsage
-        const status = reportedCostStatus(usage.reportedCostUsd)
+        const status = usage.costStatus ?? versionCostStatus(usage.costUsd)
         const key = `${usage.model}\u0000${status}`
         const existing = byModel.get(key)
         if (existing) {
           existing.inputTokens += usage.inputTokens
           existing.outputTokens += usage.outputTokens
-          if (status === "reported")
-            existing.reportedCostUsd = Number(existing.reportedCostUsd) + Number(usage.reportedCostUsd)
+          if (status !== "unavailable" && usage.costUsd !== undefined) {
+            existing.costUsd = Number(existing.costUsd ?? 0) + Number(usage.costUsd)
+            if (status === "legacy") existing.costStatus = "legacy"
+          }
         } else {
           byModel.set(key, {
             model: usage.model,
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
-            ...(status === "reported" || status === "unavailable" ? { reportedCostUsd: usage.reportedCostUsd } : {}),
+            ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd } : {}),
+            ...(status === "legacy" && usage.costUsd !== undefined ? { costStatus: "legacy" as const } : {}),
           })
         }
       }
       const groups = [...byModel.values()].sort((a, b) =>
-        a.model === b.model
-          ? String(a.reportedCostUsd).localeCompare(String(b.reportedCostUsd))
-          : a.model.localeCompare(b.model),
+        a.model === b.model ? String(a.costUsd).localeCompare(String(b.costUsd)) : a.model.localeCompare(b.model),
       )
       return {
         inputTokens: groups.reduce((sum, group) => sum + group.inputTokens, 0),
         outputTokens: groups.reduce((sum, group) => sum + group.outputTokens, 0),
         byModel: groups,
-        decisionsCostUsd: records.reduce((sum, record) => sum + (record.usage?.decisionsCostUsd ?? 0), 0),
       }
     },
 

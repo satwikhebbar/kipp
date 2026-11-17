@@ -6,7 +6,7 @@ import {
   resolveWeekContextUpdate,
   runMealPlanningAgentSession,
 } from "../agent/meal-planning-session"
-import { computeCostByModel, formatCostLine } from "../core/cost"
+import { computeVersionCost, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowInteractionKind } from "../core/types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-events"
@@ -150,8 +150,7 @@ function makeVersionUsage(usage: LLMUsage, decisionsCostUsd = 0): VersionUsage {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     model: MEAL_PLANNER_MODEL,
-    ...(usage.reportedCostUsd === undefined ? {} : { reportedCostUsd: usage.reportedCostUsd }),
-    decisionsCostUsd,
+    costUsd: typeof usage.reportedCostUsd === "number" ? usage.reportedCostUsd + decisionsCostUsd : null,
   }
 }
 
@@ -722,11 +721,8 @@ async function sendPlanAndRegister(
     if (!version.usage || !env.MEAL_PLANNING_DB) return ""
     const usageTotal = await createMealPlanningStore(env.MEAL_PLANNING_DB).sumPlanUsage(plan.planId)
     if (!usageTotal) return ""
-    const cost = computeCostByModel(usageTotal.byModel)
-    // The classifier's reported cost is a flat USD sum the pricing table cannot
-    // reproduce, so it is added to the priced planner total before formatting.
-    const totalCostUsd = cost.totalCostUsd === null ? null : cost.totalCostUsd + usageTotal.decisionsCostUsd
-    return formatCostLine({ ...cost, totalCostUsd }, { preserveHistoricalPricing: true })
+    const cost = computeVersionCost(usageTotal.byModel)
+    return formatCostLine(cost, { preserveHistoricalPricing: true })
   })
   const message = `${renderPlanLaunchMessage(plan)}${costLine}`
   const reviewUrl = miniAppLaunchUrl(env.MINI_APP_ORIGIN)

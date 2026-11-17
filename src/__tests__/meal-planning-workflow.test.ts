@@ -18,7 +18,7 @@ import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } f
 import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
-import { createD1TestDb, d1Count } from "./d1-test-db"
+import { createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
 import { sqliteInteractionRouter } from "./fixtures/interaction-router"
 import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
@@ -285,6 +285,13 @@ function stubNetwork(deepseekResponses: unknown[]) {
         replyMarkup: body.reply_markup,
       })
       return jsonResponse({ ok: true, result: { message_id: messageId++ } })
+    }
+    if (urlStr.includes("openrouter.ai/api/alpha/decisions")) {
+      const body = JSON.parse(init?.body as string)
+      return jsonResponse({
+        answers: Object.fromEntries(Object.keys(body.questions).map((id) => [id, { type: "noul", noul: 1 }])),
+        usage: { input_tokens: 10, output_tokens: 2, cost: 0.002 },
+      })
     }
     if (urlStr.includes("api.deepseek.com") || urlStr.includes("openrouter.ai/api/v1")) {
       const body = JSON.parse((init?.body as string) ?? "{}") as {
@@ -896,16 +903,14 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       inputTokens: 2,
       outputTokens: 2,
       model: "~openai/gpt-luna-latest",
-      reportedCostUsd: null,
-      decisionsCostUsd: 0,
+      costUsd: null,
     })
     const planId = active?.plan.planId
     if (!planId) throw new Error("expected a persisted plan id")
     expect(await store.sumPlanUsage(planId)).toEqual({
       inputTokens: 2,
       outputTokens: 2,
-      byModel: [{ inputTokens: 2, outputTokens: 2, model: "~openai/gpt-luna-latest", reportedCostUsd: null }],
-      decisionsCostUsd: 0,
+      byModel: [{ inputTokens: 2, outputTokens: 2, model: "~openai/gpt-luna-latest", costUsd: null }],
     })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
 
@@ -923,6 +928,38 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         interactionGroup: "meal-planning",
       }),
     )
+  })
+
+  it("persists and reports planner plus classifier cost as one complete version charge", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const store = createMealPlanningStore(d1)
+    const profile = await store.loadOrCreateProfile(CHAT)
+    const firstDefinition = profile.profile.mealDefinitions?.[0]
+    if (!firstDefinition) throw new Error("expected fixture definitions")
+    firstDefinition.requiredIngredients = ["carrot"]
+    firstDefinition.principalIngredients = ["carrot"]
+    db.prepare("UPDATE meal_profile SET profile_json = ? WHERE chat_id = ?").run(JSON.stringify(profile.profile), CHAT)
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    base.easyBuys.push("carrot")
+    const evaluate = deepseekResponse([{ name: "evaluate_meal_plan", input: base }])
+    const propose = deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }])
+    const { telegramMessages } = stubNetwork([
+      { ...evaluate, usage: { ...evaluate.usage, cost: 0.01 } },
+      { ...propose, usage: { ...propose.usage, cost: 0.02 } },
+    ])
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    const active = await store.activePlan(CHAT)
+    expect(active?.version.usage?.costUsd).toBeCloseTo(0.032)
+    expect(d1Scalar(db, "SELECT cost_usd FROM meal_plan_version")).toBeCloseTo(0.032)
+    const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))
+    expect(planMessage?.text).toContain("Cost: $0.0320")
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/alpha/decisions"))).toHaveLength(1)
   })
 
   it("does not expose a prior plan's provisional meals to a new initial plan", async () => {
@@ -1285,8 +1322,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       inputTokens: 2,
       outputTokens: 2,
       model: "~openai/gpt-luna-latest",
-      reportedCostUsd: null,
-      decisionsCostUsd: 0,
+      costUsd: null,
     })
     // The v2 message reports the cumulative run total (v1 + v2 usage), like LinkedIn drafts.
     const planMessages = telegramMessages.filter((message) => message.text.includes("School week of"))
