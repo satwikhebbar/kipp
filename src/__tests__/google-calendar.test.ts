@@ -1016,6 +1016,28 @@ describe("Google Calendar client", () => {
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
+  it("completes a replayed move already at the target despite a changed ETag", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(
+      response(200, {
+        id: "single",
+        etag: "etag-2",
+        start: { dateTime: "2026-07-28T15:00:00.000Z" },
+        end: { dateTime: "2026-07-28T15:30:00.000Z" },
+      }),
+    )
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+        "etag-1",
+      ),
+    ).resolves.toEqual({ ok: true, etag: "etag-2" })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
   it("refuses to convert an all-day event into a timed event", async () => {
     const fetch = vi.fn().mockResolvedValueOnce(
       response(200, {

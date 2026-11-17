@@ -693,8 +693,9 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     if (!current) return { ok: false, reason: "not-found" }
     if (current.allDay) return { ok: false, reason: "permanent" }
     if (current.etag === undefined) return { ok: false, reason: "permanent" }
-    if (expectedEtag !== undefined && current.etag !== expectedEtag) return { ok: false, reason: "precondition-failed" }
+    // A lost checkpoint can replay an already-applied move with a new ETag.
     if (sameInstant(current.start, start) && sameInstant(current.end, end)) return { ok: true, etag: current.etag }
+    if (expectedEtag !== undefined && current.etag !== expectedEtag) return { ok: false, reason: "precondition-failed" }
     const timeZone = current.timeZone
     let response: Response
     try {
