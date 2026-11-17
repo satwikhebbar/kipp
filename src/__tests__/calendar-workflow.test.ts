@@ -1138,7 +1138,7 @@ describe("agent-centered CalendarWorkflow", () => {
     )
     const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
     expect(disclosure?.text).toContain("Standup (19:00–19:30)")
-    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    const labels = disclosure?.reply_markup?.inline_keyboard.flat().map((button) => button.text)
     expect(labels).toEqual(["Try another time", "Cancel"])
     expect(messages.some((candidate) => candidate.text.includes("Cancelled"))).toBe(true)
     expect(messages.every((candidate) => !candidate.text.includes("series-1"))).toBe(true)
@@ -1188,7 +1188,7 @@ describe("agent-centered CalendarWorkflow", () => {
     )
     const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
     expect(disclosure?.text).toContain("Standup (19:00–19:30)")
-    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    const labels = disclosure?.reply_markup?.inline_keyboard.flat().map((button) => button.text)
     expect(labels).toEqual(["Try another time", "Cancel"])
     expect(messages.some((candidate) => candidate.text.includes("Availability changed"))).toBe(false)
   })
@@ -1248,7 +1248,7 @@ describe("agent-centered CalendarWorkflow", () => {
     const disclosure = messages.find((candidate) => candidate.text.includes("occupied by"))
     expect(disclosure?.text).toContain("Standup (2026-08-04 19:00–19:30)")
     expect(disclosure?.text).toContain("Retro (2026-08-18 19:00–19:30)")
-    const labels = disclosure?.reply_markup?.inline_keyboard[0]?.map((button) => button.text)
+    const labels = disclosure?.reply_markup?.inline_keyboard.flat().map((button) => button.text)
     expect(labels).toEqual(["Try another time", "Cancel"])
     expect(messages.every((candidate) => !candidate.text.includes("series-a"))).toBe(true)
     expect(messages.every((candidate) => !candidate.text.includes("series-b"))).toBe(true)
@@ -1326,6 +1326,45 @@ describe("agent-centered CalendarWorkflow", () => {
       .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
       .filter(Boolean)
     expect(texts.some((text) => text.includes("couldn't create your block"))).toBe(true)
+  })
+
+  it("restores the moved event before surfacing an authorization failure during create", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    mockCreateManagedEvent.mockRejectedValueOnce(new MockGoogleCalendarError("disconnected", "authorization"))
+    queueChoice(ONE_OFF)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+      ),
+    )
+
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(2)
+    expect(mockMoveExistingEvent.mock.calls[1]).toEqual([
+      "existing-1",
+      "2026-07-28T13:30:00.000Z",
+      "2026-07-28T14:00:00.000Z",
+    ])
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("couldn't create your block, so I restored Standup"))).toBe(true)
   })
 
   it("surfaces a safe availability-changed outcome on a 412 precondition-failed move", async () => {

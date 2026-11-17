@@ -960,4 +960,57 @@ describe("Google Calendar client", () => {
     ).resolves.toEqual({ ok: true })
     expect(fetch).toHaveBeenCalledTimes(1)
   })
+
+  it("accepts equivalent non-UTC offsets when verifying an uncertain update", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, {
+          id: "single",
+          etag: "etag-1",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        }),
+      )
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockResolvedValueOnce(
+        response(200, {
+          id: "single",
+          etag: "etag-2",
+          start: { dateTime: "2026-07-28T20:30:00+05:30" },
+          end: { dateTime: "2026-07-28T21:00:00+05:30" },
+        }),
+      )
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: true })
+  })
+
+  it("treats an already-moved event with a non-UTC offset as complete", async () => {
+    const read = response(200, {
+      id: "single",
+      etag: "etag-1",
+      start: { dateTime: "2026-07-28T20:30:00+05:30" },
+      end: { dateTime: "2026-07-28T21:00:00+05:30" },
+    })
+    const fetch = vi.fn().mockResolvedValue(read)
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: true })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
 })

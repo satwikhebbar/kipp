@@ -1063,7 +1063,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     expect(mockMoveExistingEvent).toHaveBeenCalledTimes(2)
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockDeleteManagedEvent).toHaveBeenCalledTimes(1)
-    expect(network.getState().answeredCallbacks.length).toBeGreaterThan(0)
+    expect(network.getState().answeredCallbacks).toHaveLength(4)
     expect(network.getState().telegramMessages.every((candidate) => !candidate.text?.includes("existing-1"))).toBe(true)
   })
 
@@ -1099,7 +1099,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const disclosure = network.getState().telegramMessages[disclosureIndex]
     expect(disclosure?.text).toContain("Standup (19:00–19:30)")
     const keyboard = disclosure?.replyMarkup?.inline_keyboard as Array<Array<{ text: string }>>
-    const labels = keyboard[0]?.map((button) => button.text)
+    const labels = keyboard.flat().map((button) => button.text)
     expect(labels).toEqual(["Try another time", "Cancel"])
     await waitForWorkflowWait(calendar)
     await handleTelegramWebhook(callback(callbackToken(network, disclosureIndex, 1)), runtimeEnv)

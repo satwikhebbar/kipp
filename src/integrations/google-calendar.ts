@@ -1,4 +1,4 @@
-import { zonedDateTimeToMillis } from "../calendar/scheduling"
+import { calendarDayBounds } from "../calendar/scheduling"
 import { createTokenVault } from "../core/token-vault-client"
 import { type Env, type GoogleCalendarTokens, TOKEN_PROVIDER } from "../core/types"
 import { HTTP_STATUS, isTransientHttpStatus } from "../runtime/http"
@@ -113,7 +113,6 @@ interface GoogleCalendarEventResponse {
   start?: { dateTime?: string; date?: string; timeZone?: string }
   end?: { dateTime?: string; date?: string; timeZone?: string }
   originalStartTime?: { dateTime?: string }
-  recurrence?: string[]
   etag?: string
 }
 
@@ -185,7 +184,14 @@ function eventInstantMs(value: string, allDay: boolean, timeZone: string): numbe
     const parsed = Date.parse(value)
     return Number.isFinite(parsed) ? parsed : null
   }
-  return zonedDateTimeToMillis(value, "00:00", timeZone)
+  // Midnight can be skipped by a DST transition; the day's first instant is the correct fallback.
+  const bounds = calendarDayBounds(value, timeZone)
+  return bounds ? Date.parse(bounds.timeMin) : null
+}
+
+/** Compares two provider timestamps as instants so differing UTC offsets still match. */
+function sameInstant(left: string, right: string): boolean {
+  return Date.parse(left) === Date.parse(right)
 }
 
 /** Builds the Google Calendar API event payload from a managed event. */
@@ -654,8 +660,9 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
           etag: item.etag ?? "",
           movable: !item.recurrence && !item.originalStartTime && !allDay && Boolean(item.etag),
         })
+        if (snapshots.length >= MAX_VISIBLE_EVENTS) break
       }
-      pageToken = data.nextPageToken
+      pageToken = snapshots.length >= MAX_VISIBLE_EVENTS ? undefined : data.nextPageToken
     } while (pageToken)
     return snapshots
   }
@@ -672,7 +679,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     }
     if (!current) return { ok: false, reason: "not-found" }
     if (current.etag === undefined) return { ok: false, reason: "permanent" }
-    if (current.start === start && current.end === end) return { ok: true }
+    if (sameInstant(current.start, start) && sameInstant(current.end, end)) return { ok: true }
     const timeZone = current.timeZone
     let response: Response
     try {
@@ -690,7 +697,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       if (error instanceof GoogleCalendarError && error.kind === "transient") {
         try {
           const verified = await readExistingEvent(id)
-          if (verified && verified.start === start && verified.end === end) return { ok: true }
+          if (verified && sameInstant(verified.start, start) && sameInstant(verified.end, end)) return { ok: true }
         } catch {
           // verify-by-read failed; treat the ambiguous write as failed
         }

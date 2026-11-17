@@ -53,6 +53,11 @@ const CALENDAR_AGENT_UNAVAILABLE = "I couldn't reach the calendar agent. Please 
 const CALENDAR_AGENT_NO_DECISION = "The calendar agent didn't return a scheduling decision. Please retry your request."
 const CALENDAR_CANCELLED = "Cancelled. No calendar event was created."
 const CALENDAR_DISCLOSURE_LABEL = "Why this busy?"
+/** Bounds serial conflict reads for a long recurring series. */
+const MAX_DISCLOSURE_INTERVALS = 7
+/** Bounds the disclosure body below Telegram's 4096-character limit. */
+const MAX_DISCLOSURE_EVENTS = 10
+const MAX_MULTI_ACTION_LABEL_CHARACTERS = 16
 
 type CalendarActionResponse = ActionPromptOutcome
 
@@ -101,6 +106,7 @@ type ConflictDisclosureResult =
   | { status: "reply"; version: number; text: string }
 
 type ConflictMoveOutcome =
+  | { kind: "moved" }
   | { kind: "created"; createdEventId: string }
   | { kind: "undone"; message: string }
   | { kind: "availability-changed" }
@@ -907,28 +913,29 @@ function requestedDisclosureIntervals(
       },
     ]
   }
-  const conflicts = plan.requestedConflicts.length ? plan.requestedConflicts : plan.occurrences
   const intervals: Array<{ start: number; end: number; timeMin: string; timeMax: string }> = []
-  for (const occurrence of conflicts) {
+  for (const occurrence of plan.requestedConflicts) {
     const start = Date.parse(occurrence.start)
     const end = Date.parse(occurrence.end)
     const bounds = calendarDayBounds(occurrence.localDate, timeZone)
     if (!Number.isFinite(start) || !Number.isFinite(end) || !bounds) continue
     intervals.push({ start, end, timeMin: bounds.timeMin, timeMax: bounds.timeMax })
   }
-  return intervals
+  return intervals.slice(0, MAX_DISCLOSURE_INTERVALS)
 }
 
-/** Renders the owner-visible disclosure body listing every overlapping event as plain text. */
+/** Renders the owner-visible disclosure body listing overlapping events as plain text, bounded for Telegram. */
 function disclosureMessage(snapshots: ConflictEventSnapshot[], timeZone: string, showDates: boolean): string {
-  const lines = snapshots.map((snapshot) => {
+  const lines = snapshots.slice(0, MAX_DISCLOSURE_EVENTS).map((snapshot) => {
     const range = snapshot.allDay
       ? "all day"
       : `${localTimeAt(Date.parse(snapshot.start), timeZone)}–${localTimeAt(Date.parse(snapshot.end), timeZone)}`
     const when = showDates ? `${localDateAt(Date.parse(snapshot.start), timeZone)} ${range}` : range
     return `• ${snapshot.title} (${when})`
   })
-  return `Your requested time is occupied by:\n${lines.join("\n")}\n\nChoose an event to reschedule, try another time, or cancel.`
+  const hidden = snapshots.length - lines.length
+  const more = hidden > 0 ? `\n…and ${hidden} more event${hidden === 1 ? "" : "s"} overlap this time.` : ""
+  return `Your requested time is occupied by:\n${lines.join("\n")}${more}\n\nChoose an event to reschedule, try another time, or cancel.`
 }
 
 /** Returns a time-derived reschedule label, disambiguated only when movable events share a start time. */
@@ -973,7 +980,8 @@ async function handleConflictDisclosure(
 
   // Recurring requests are disclosed but never rescheduled: moving a single event
   // cannot free the whole series, so the disclosure is informational only.
-  const movable = plan.kind === "one_off" ? snapshots.filter((snapshot) => snapshot.movable) : []
+  const movable =
+    plan.kind === "one_off" ? snapshots.slice(0, MAX_DISCLOSURE_EVENTS).filter((snapshot) => snapshot.movable) : []
   const seenStarts = new Map<string, number>()
   const actions: Array<[string, WorkflowInteractionKind]> = movable.map((snapshot) => {
     const startTime = localTimeAt(Date.parse(snapshot.start), timeZone)
@@ -983,7 +991,7 @@ async function handleConflictDisclosure(
   })
   actions.push(["Try another time", replacementKind], ["Cancel", INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL])
 
-  const disclosure = await promptForActions(
+  const disclosure = await calendarPromptForActions(
     env,
     step,
     event,
@@ -995,7 +1003,7 @@ async function handleConflictDisclosure(
   if (disclosure.type === "timeout") return { status: "ended", version: v }
   if (disclosure.type === "reply") return { status: "reply", version: v, text: disclosure.text }
   if (disclosure.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL) {
-    await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED)
+    await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED, `calendar-conflict-disclose-cancel-${turn}`)
     return { status: "ended", version: v }
   }
   if (disclosure.kind === replacementKind) return { status: "replacement", version: v }
@@ -1025,12 +1033,13 @@ async function handleConflictDisclosure(
       step,
       event.payload.chatId,
       `I couldn't find a free slot to move ${snapshot.title} to. Please try another time or check your Calendar.`,
+      `calendar-conflict-no-slot-${turn}`,
     )
     return { status: "ended", version: v }
   }
 
   const proposeMessage = `Move ${snapshot.title} from ${localTimeAt(Date.parse(snapshot.start), timeZone)}–${localTimeAt(Date.parse(snapshot.end), timeZone)} to ${localTimeAt(Date.parse(target.start), timeZone)}–${localTimeAt(Date.parse(target.end), timeZone)}?`
-  const confirmation = await promptForActions(
+  const confirmation = await calendarPromptForActions(
     env,
     step,
     event,
@@ -1045,7 +1054,7 @@ async function handleConflictDisclosure(
   if (confirmation.type === "timeout") return { status: "ended", version: v }
   if (confirmation.type === "reply") return { status: "reply", version: v, text: confirmation.text }
   if (confirmation.kind === INTERACTION_KIND.CALENDAR_CONFLICT_CANCEL) {
-    await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED)
+    await notify(env, step, event.payload.chatId, CALENDAR_CANCELLED, `calendar-conflict-propose-cancel-${turn}`)
     return { status: "ended", version: v }
   }
   if (confirmation.kind !== INTERACTION_KIND.CALENDAR_CONFLICT_MOVE) return { status: "ended", version: v }
@@ -1058,7 +1067,9 @@ async function handleConflictDisclosure(
   }
   const requestedPlan: CalendarPlan = { kind: "one_off", proposal: plan.proposal, scheduled: requestedScheduled }
   const identity = await managedEventIdentity(event.payload.chatId, event.payload.telegramMessageId)
-  const outcome = (await step.do(`calendar-conflict-move-${turn}`, async () => {
+  // The move and create are separate durable steps so a retried step never repeats
+  // a verified move; the already-at-target read makes a replayed move a no-op.
+  const moved = (await step.do(`calendar-conflict-move-${turn}`, async () => {
     const client = createGoogleCalendarClient(env)
     const move = await client.moveExistingEvent(snapshot.id, target.start, target.end)
     if (!move.ok) {
@@ -1071,10 +1082,8 @@ async function handleConflictDisclosure(
         message: `I couldn't move ${snapshot.title}. Please try again shortly.`,
       } as ConflictMoveOutcome
     }
-    const restore = async (): Promise<boolean> =>
-      (await client.moveExistingEvent(snapshot.id, snapshot.start, snapshot.end)).ok
     if (!(await revalidateExactPlan(client, requestedPlan, null, timeZone, expiresAt))) {
-      if (await restore())
+      if ((await client.moveExistingEvent(snapshot.id, snapshot.start, snapshot.end)).ok)
         return {
           kind: "undone",
           message: `I couldn't create your block at the freed time, so I restored ${snapshot.title} to its original time.`,
@@ -1084,38 +1093,65 @@ async function handleConflictDisclosure(
         message: `I moved ${snapshot.title} to ${localTimeAt(Date.parse(target.start), timeZone)} but couldn't create your block or restore it. Please check your Calendar.`,
       } as ConflictMoveOutcome
     }
-    try {
-      await client.createManagedEvent(managedEvent(identity, plan.proposal, requestedScheduled, timeZone))
-    } catch (error) {
-      if (error instanceof GoogleCalendarError && error.kind === "authorization") throw error
-      if (await restore())
-        return {
-          kind: "undone",
-          message: `I couldn't create your block, so I restored ${snapshot.title} to its original time.`,
-        } as ConflictMoveOutcome
-      return {
-        kind: "failed",
-        message: `I moved ${snapshot.title} to ${localTimeAt(Date.parse(target.start), timeZone)} but couldn't create your block or restore it. Please check your Calendar.`,
-      } as ConflictMoveOutcome
-    }
-    return { kind: "created", createdEventId: identity.id } as ConflictMoveOutcome
+    return { kind: "moved" } as ConflictMoveOutcome
   })) as ConflictMoveOutcome
 
-  if (outcome.kind === "availability-changed") return { status: "availability-changed", version: v }
-  if (outcome.kind === "undone" || outcome.kind === "failed") {
-    if (outcome.kind === "failed")
+  if (moved.kind === "availability-changed") return { status: "availability-changed", version: v }
+  if (moved.kind === "undone" || moved.kind === "failed") {
+    if (moved.kind === "failed")
       logRuntime(env, {
         workflow: event.instanceId,
         event: "calendar-conflict-operation",
         outcome: "failed",
         failureCategory: "calendar-conflict-phase-failed",
       })
-    await notify(env, step, event.payload.chatId, outcome.message)
+    await notify(env, step, event.payload.chatId, moved.message, `calendar-conflict-move-failed-${turn}`)
     return { status: "ended", version: v }
   }
 
+  let createFailure: unknown = null
+  try {
+    await step.do(`calendar-conflict-create-${turn}`, async () => {
+      const client = createGoogleCalendarClient(env)
+      await client.createManagedEvent(managedEvent(identity, plan.proposal, requestedScheduled, timeZone))
+    })
+  } catch (error) {
+    createFailure = error
+  }
+  if (createFailure) {
+    const restored = (await step.do(`calendar-conflict-restore-${turn}`, async () => {
+      const client = createGoogleCalendarClient(env)
+      return (await client.moveExistingEvent(snapshot.id, snapshot.start, snapshot.end)).ok
+    })) as boolean
+    if (restored) {
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        `I couldn't create your block, so I restored ${snapshot.title} to its original time.`,
+        `calendar-conflict-create-restored-${turn}`,
+      )
+      return { status: "ended", version: v }
+    }
+    logRuntime(env, {
+      workflow: event.instanceId,
+      event: "calendar-conflict-operation",
+      outcome: "failed",
+      failureCategory: "calendar-conflict-phase-failed",
+    })
+    await notify(
+      env,
+      step,
+      event.payload.chatId,
+      `I moved ${snapshot.title} to ${localTimeAt(Date.parse(target.start), timeZone)} but couldn't create your block or restore it. Please check your Calendar.`,
+      `calendar-conflict-create-failed-${turn}`,
+    )
+    return { status: "ended", version: v }
+  }
+  const outcome = { kind: "created" as const, createdEventId: identity.id }
+
   const createdMessage = `${confirmationMessage(requestedPlan, false)}\nMoved ${snapshot.title} from ${localTimeAt(Date.parse(snapshot.start), timeZone)}–${localTimeAt(Date.parse(snapshot.end), timeZone)} to ${localTimeAt(Date.parse(target.start), timeZone)}–${localTimeAt(Date.parse(target.end), timeZone)} to make room.`
-  const after = await promptForActions(
+  const after = await calendarPromptForActions(
     env,
     step,
     event,
@@ -1149,7 +1185,7 @@ async function handleConflictDisclosure(
     }
     return { message: `Restored ${snapshot.title} to its original time and removed the created block.` }
   })) as { message: string }
-  await notify(env, step, event.payload.chatId, undo.message)
+  await notify(env, step, event.payload.chatId, undo.message, `calendar-conflict-undo-result-${turn}`)
   return { status: "ended", version: v }
 }
 
