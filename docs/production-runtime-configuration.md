@@ -54,3 +54,18 @@ Provision actual values in Dashboard and local development separately; a dry-run
 cannot establish that they exist or that the Buffer account has permission.
 See [setup, recovery and release prerequisites](buffer-setup.md#release-prerequisites)
 before enabling the workflow for real submissions.
+
+## Version-cost migration rollout
+
+Migration 0006 is expand-only: `cost_usd` and `cost_status` become authoritative
+for the new Worker, while the old cost columns remain available to the previous
+Worker and in-flight workflows. Compatibility triggers translate late writes
+from the old schema into the new cost fields. New Worker writes use only the
+unified fields.
+
+After this Worker is deployed, verify that the previous Worker version and all
+workflows executing its code have drained before preparing a separate release
+that drops both `meal_plan_version_legacy_cost_*` triggers and the three retired
+columns (`decisions_cost_usd`, `usage_reported_cost_usd`, and
+`usage_reported_cost_status`). Do not include that contraction migration in the
+same release: deployment applies every pending migration before uploading code.

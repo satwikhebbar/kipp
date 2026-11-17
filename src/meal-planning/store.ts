@@ -65,7 +65,17 @@ export interface VersionUsage {
 
 export type VersionCostStatus = "legacy" | "reported" | "unavailable"
 
-/** Distinguishes pre-reporting rows from a new request whose cost was unavailable. */
+/** Reject incomplete or invalid reported charges before any persistence side effect. */
+function assertReportedCostIsNumeric(usage: VersionUsage | null | undefined): void {
+  if (
+    usage?.costStatus === "reported" &&
+    (typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0)
+  ) {
+    throw new Error("reported usage cost requires a finite non-negative numeric costUsd")
+  }
+}
+
+/** Derives the persistence state for omitted, missing, or reported cost. */
 function versionCostStatus(cost: number | null | undefined): VersionCostStatus {
   return cost === undefined ? "legacy" : cost === null ? "unavailable" : "reported"
 }
@@ -948,6 +958,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async createActivePlan(input) {
+      assertReportedCostIsNumeric(input.usage)
       const now = nowIso()
       // Every mutating statement is guarded on the profile row existing, so a
       // missing profile (a programming error — the workflow always calls
@@ -1073,6 +1084,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async promotePlanVersion(input) {
+      assertReportedCostIsNumeric(input.usage)
       const now = nowIso()
       const newVersion = input.baseVersion + 1
       const batchId = input.feedbackBatch?.batchId ?? null
@@ -1732,6 +1744,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async createActivePlan(input) {
+      assertReportedCostIsNumeric(input.usage)
       throwIfFailing("createActivePlan")
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
@@ -1774,6 +1787,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async promotePlanVersion(input) {
+      assertReportedCostIsNumeric(input.usage)
       throwIfFailing("promotePlanVersion")
       const plan = backing.plans.get(input.planId)
       const stale =

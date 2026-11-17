@@ -145,12 +145,15 @@ function addUsage(left: LLMUsage, right: LLMUsage, hasLeftUsage: boolean): LLMUs
 }
 
 /** Records one generated plan version's token usage under the meal-planner model, plus any reported classifier cost. */
-function makeVersionUsage(usage: LLMUsage, decisionsCostUsd = 0): VersionUsage {
+function makeVersionUsage(usage: LLMUsage, decisionsCostUsd: number | null = 0): VersionUsage {
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     model: MEAL_PLANNER_MODEL,
-    costUsd: typeof usage.reportedCostUsd === "number" ? usage.reportedCostUsd + decisionsCostUsd : null,
+    costUsd:
+      typeof usage.reportedCostUsd === "number" && decisionsCostUsd !== null
+        ? usage.reportedCostUsd + decisionsCostUsd
+        : null,
   }
 }
 
@@ -519,7 +522,7 @@ async function runPlanningSession(
     allowWeekContextUpdate?: boolean
     occurrence: string
   },
-): Promise<{ outcome: PlanningOutcome; usage: LLMUsage; decisionsCostUsd: number }> {
+): Promise<{ outcome: PlanningOutcome; usage: LLMUsage; decisionsCostUsd: number | null }> {
   const notifyPrefix = `meal-planning-notify-${options.occurrence}`
   const sessionDeadline = await stepDo(
     step,
@@ -528,7 +531,7 @@ async function runPlanningSession(
   )
   let usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
   let hasUsage = false
-  let decisionsCostUsd = 0
+  let decisionsCostUsd: number | null = 0
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
     if (
       await stepDo(
@@ -582,7 +585,10 @@ async function runPlanningSession(
     }
     usage = addUsage(usage, session.usage, hasUsage)
     hasUsage = true
-    decisionsCostUsd += session.decisionUsage.costUsd
+    decisionsCostUsd =
+      decisionsCostUsd === null || session.decisionUsage.costUsd === null
+        ? null
+        : decisionsCostUsd + session.decisionUsage.costUsd
     options.messages = session.messages
     if (session.decisionUsage.inputTokens || session.decisionUsage.costUsd)
       logRuntime(env, {
@@ -592,7 +598,8 @@ async function runPlanningSession(
         details: {
           inputTokens: session.decisionUsage.inputTokens,
           outputTokens: session.decisionUsage.outputTokens,
-          costUsd: session.decisionUsage.costUsd,
+          ...(session.decisionUsage.costUsd !== null ? { costUsd: session.decisionUsage.costUsd } : {}),
+          costAvailable: session.decisionUsage.costUsd !== null,
         },
       })
     logAgentSession(env, event.instanceId, session)
@@ -1000,7 +1007,7 @@ async function runRevision(
   contextAlreadyUpdated = false,
   feedbackBatch?: FeedbackBatchRecord,
   priorUsage: LLMUsage = ZERO_USAGE,
-  priorDecisionsCostUsd = 0,
+  priorDecisionsCostUsd: number | null = 0,
 ): Promise<number | null> {
   const occurrence = `revision-${iteration}${contextAlreadyUpdated ? "-after-context" : ""}`
   const notifyPrefix = `meal-planning-notify-${occurrence}`
@@ -1052,7 +1059,10 @@ async function runRevision(
   const hasPriorUsage =
     priorUsage.inputTokens > 0 || priorUsage.outputTokens > 0 || priorUsage.reportedCostUsd !== undefined
   const roundUsage = addUsage(priorUsage, planning.usage, hasPriorUsage)
-  const roundDecisionsCostUsd = priorDecisionsCostUsd + planning.decisionsCostUsd
+  const roundDecisionsCostUsd =
+    priorDecisionsCostUsd === null || planning.decisionsCostUsd === null
+      ? null
+      : priorDecisionsCostUsd + planning.decisionsCostUsd
   if (outcome.kind === "week_context_updated") {
     const updatedContext = outcome.update
     const persisted = await stepDo(step, `meal-planning-update-week-context-${occurrence}`, () =>

@@ -232,7 +232,7 @@ describe("bounded meal-planning agent session", () => {
     if (result.terminal?.kind === "propose_plan") expect(result.terminal.evaluation.pass).toBe(true)
   })
 
-  it("rides the semantic classifier's easy-buy failure through the session", async () => {
+  it.each([0.002, null])("preserves classifier cost availability through a session (%s)", async (costUsd) => {
     const candidate: MealPlanCandidate = {
       ...passingCandidate(),
       grid: gridWith("Mon", "breakfast", cell("paratha", ["dried apricots"], "breakfast")),
@@ -247,7 +247,7 @@ describe("bounded meal-planning agent session", () => {
           model: "openai/gpt-6-luna-decisions",
           provider: "OpenAI",
           answers,
-          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+          usage: { inputTokens: 5, outputTokens: 0, costUsd },
         }
       },
     }
@@ -264,7 +264,7 @@ describe("bounded meal-planning agent session", () => {
       easyBuyClassifier: createEasyBuyClassifier(decisions),
     })
     expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["easy_buy_not_ordinary"] })
-    expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
+    expect(result.decisionUsage.costUsd).toBe(costUsd)
   })
 
   it("classifies a candidate's easy buys once across evaluate and propose", async () => {

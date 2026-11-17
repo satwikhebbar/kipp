@@ -62,7 +62,7 @@ export interface DecisionUsage {
   inputTokens: number
   outputTokens: number
   /** Cost in USD as returned by the endpoint; not recomputed from tokens. */
-  costUsd: number
+  costUsd: number | null
 }
 
 export interface DecisionResult {
@@ -191,7 +191,10 @@ export function createOpenRouterDecisionsClient(
         usage: {
           inputTokens: data.usage?.input_tokens ?? 0,
           outputTokens: data.usage?.output_tokens ?? 0,
-          costUsd: data.usage?.cost ?? 0,
+          costUsd:
+            typeof data.usage?.cost === "number" && Number.isFinite(data.usage.cost) && data.usage.cost >= 0
+              ? data.usage.cost
+              : null,
         },
       }
     },

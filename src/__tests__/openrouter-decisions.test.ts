@@ -59,6 +59,7 @@ describe("OpenRouter Decisions client", () => {
         urgency: { type: "score", instructions: "How urgent?", criteria: ["low", "high"] },
       },
     })
+    expect(result.usage.costUsd).toBeNull()
     expect(result.answers.team).toEqual({
       type: "choice",
       choice: "payments",

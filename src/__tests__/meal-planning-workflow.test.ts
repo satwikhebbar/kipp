@@ -262,7 +262,7 @@ function jsonResponse(body: unknown) {
   } as unknown as Response
 }
 
-function stubNetwork(deepseekResponses: unknown[]) {
+function stubNetwork(deepseekResponses: unknown[], decisionsCost: number | null = 0.002) {
   const telegramMessages: Array<{ chatId: string; text: string; replyMarkup?: unknown }> = []
   const deepseekBodies: Array<{
     messages: Array<{
@@ -290,7 +290,7 @@ function stubNetwork(deepseekResponses: unknown[]) {
       const body = JSON.parse(init?.body as string)
       return jsonResponse({
         answers: Object.fromEntries(Object.keys(body.questions).map((id) => [id, { type: "noul", noul: 1 }])),
-        usage: { input_tokens: 10, output_tokens: 2, cost: 0.002 },
+        usage: { input_tokens: 10, output_tokens: 2, ...(decisionsCost === null ? {} : { cost: decisionsCost }) },
       })
     }
     if (urlStr.includes("api.deepseek.com") || urlStr.includes("openrouter.ai/api/v1")) {
@@ -930,7 +930,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
   })
 
-  it("persists and reports planner plus classifier cost as one complete version charge", async () => {
+  it.each([
+    0.002,
+    0,
+    null,
+  ])("persists complete version cost only when classifier cost is available (%s)", async (decisionsCost) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -949,16 +953,26 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     base.easyBuys.push("carrot")
     const evaluate = deepseekResponse([{ name: "evaluate_meal_plan", input: base }])
     const propose = deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }])
-    const { telegramMessages } = stubNetwork([
-      { ...evaluate, usage: { ...evaluate.usage, cost: 0.01 } },
-      { ...propose, usage: { ...propose.usage, cost: 0.02 } },
-    ])
+    const { telegramMessages } = stubNetwork(
+      [
+        { ...evaluate, usage: { ...evaluate.usage, cost: 0.01 } },
+        { ...propose, usage: { ...propose.usage, cost: 0.02 } },
+      ],
+      decisionsCost,
+    )
     await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
     const active = await store.activePlan(CHAT)
-    expect(active?.version.usage?.costUsd).toBeCloseTo(0.032)
-    expect(d1Scalar(db, "SELECT cost_usd FROM meal_plan_version")).toBeCloseTo(0.032)
+    if (decisionsCost === null) {
+      expect(active?.version.usage?.costUsd).toBeNull()
+      expect(d1Scalar(db, "SELECT cost_usd FROM meal_plan_version")).toBeNull()
+    } else {
+      expect(active?.version.usage?.costUsd).toBeCloseTo(0.03 + decisionsCost)
+      expect(d1Scalar(db, "SELECT cost_usd FROM meal_plan_version")).toBeCloseTo(0.03 + decisionsCost)
+    }
     const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))
-    expect(planMessage?.text).toContain("Cost: $0.0320")
+    expect(planMessage?.text).toContain(
+      decisionsCost === null ? "Cost unavailable" : `Cost: $${(0.03 + decisionsCost).toFixed(4)}`,
+    )
     expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/alpha/decisions"))).toHaveLength(1)
   })
 

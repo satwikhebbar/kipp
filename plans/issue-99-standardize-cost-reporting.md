@@ -23,8 +23,10 @@ fallback for records that predate reported cost.
   New rows store the complete charge in `cost_usd`; `cost_status` distinguishes
   reported, unavailable, and legacy records. Tokens and model labels remain
   diagnostic data and support historical estimates.
-- Migration 0006 replaces the prior planner-only cost columns and removes
-  `decisions_cost_usd`. It folds prior reported planner and classifier charges
+- Migration 0006 supersedes the old cost columns while retaining all three
+  for deployment compatibility. Triggers synchronize late writes from the old
+  Worker; a separate release removes them after old workflows drain. It folds
+  prior reported planner and classifier charges
   together. For legacy rows, it preserves the classifier component in
   `cost_usd` with legacy status, so reports add token pricing exactly once.
   It does not estimate or backfill historical planner costs. Migration 0005

@@ -549,6 +549,31 @@ it.each([
   })
 })
 
+describe.each([
+  ["in-memory", () => createInMemoryMealPlanningStore()],
+  ["D1", () => createD1Store().store],
+])("%s reported cost validation", (_name, makeStore) => {
+  it.each([
+    undefined,
+    null,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    -1,
+  ])("rejects invalid reported cost %s before creating or promoting", async (costUsd) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput())
+    const usage = { inputTokens: 1, outputTokens: 1, model: "test", costStatus: "reported" as const, costUsd }
+    await expect(createPlan(store, createInput({ planId: "invalid", usage }))).rejects.toThrow(
+      /reported usage cost requires/,
+    )
+    expect((await store.activePlan(CHAT))?.plan.planId).toBe("plan-1")
+    await expect(store.promotePlanVersion(promoteInput({ usage }))).rejects.toThrow(/reported usage cost requires/)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    expect(await store.sumPlanUsage("plan-1")).toBeNull()
+  })
+})
+
 describe("createMealPlanningStore (D1, real SQL)", () => {
   it("persists the recurring Saturday rule when loading an existing profile", async () => {
     const { store, db } = createD1Store()
@@ -672,9 +697,27 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       .prepare("PRAGMA table_info(meal_plan_version)")
       .all()
       .map((row) => row.name)
-    expect(columns).not.toContain("decisions_cost_usd")
-    expect(columns).not.toContain("usage_reported_cost_usd")
-    expect(columns).not.toContain("usage_reported_cost_status")
+    expect(columns).toContain("decisions_cost_usd")
+    expect(columns).toContain("usage_reported_cost_usd")
+    expect(columns).toContain("usage_reported_cost_status")
+    // The previous Worker can still insert/read/update its schema after 0006.
+    insert.run(4, 0.005, 0.02, "reported")
+    expect(
+      db.prepare("SELECT cost_usd, cost_status, decisions_cost_usd FROM meal_plan_version WHERE version = 4").get(),
+    ).toEqual({ cost_usd: 0.025, cost_status: "reported", decisions_cost_usd: 0.005 })
+    db.prepare("UPDATE meal_plan_version SET decisions_cost_usd = 0.01 WHERE version = 4").run()
+    expect(d1Scalar(db, "SELECT cost_usd FROM meal_plan_version WHERE version = 4")).toBeCloseTo(0.03)
+    insert.run(5, 0.006, null, "legacy")
+    expect(db.prepare("SELECT cost_usd, cost_status FROM meal_plan_version WHERE version = 5").get()).toEqual({
+      cost_usd: 0.006,
+      cost_status: "legacy",
+    })
+    insert.run(6, 0.007, null, "unavailable")
+    expect(db.prepare("SELECT cost_usd, cost_status FROM meal_plan_version WHERE version = 6").get()).toEqual({
+      cost_usd: null,
+      cost_status: "unavailable",
+    })
+    db.prepare("DELETE FROM meal_plan_version WHERE version >= 4").run()
     const total = await store.sumPlanUsage("plan-1")
     expect(computeVersionCost(total?.byModel ?? []).totalCostUsd).toBeNull()
     db.prepare("DELETE FROM meal_plan_version WHERE version = 3").run()
