@@ -83,12 +83,13 @@ export interface ConflictEventSnapshot {
 
 export type ExistingEventUpdateReason = "precondition-failed" | "not-found" | "authorization" | "permanent"
 
-export type ExistingEventUpdateResult = { ok: true } | { ok: false; reason: ExistingEventUpdateReason }
+export type ExistingEventUpdateResult = { ok: true; etag?: string } | { ok: false; reason: ExistingEventUpdateReason }
 
 interface ExistingEventRead {
   id: string
   start: string
   end: string
+  allDay: boolean
   etag?: string
   timeZone?: string
 }
@@ -159,7 +160,7 @@ export interface GoogleCalendarClient {
     requestedEnd: string,
     timeZone: string,
   ): Promise<ConflictEventSnapshot[]>
-  moveExistingEvent(id: string, start: string, end: string): Promise<ExistingEventUpdateResult>
+  moveExistingEvent(id: string, start: string, end: string, expectedEtag?: string): Promise<ExistingEventUpdateResult>
 }
 
 /** Returns the epoch ms at which the token expires. */
@@ -601,7 +602,14 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     const start = data.start?.dateTime ?? data.start?.date
     const end = data.end?.dateTime ?? data.end?.date
     if (!data.id || !start || !end) return null
-    return { id: data.id, start, end, etag: data.etag, timeZone: data.start?.timeZone }
+    return {
+      id: data.id,
+      start,
+      end,
+      allDay: Boolean(data.start?.date && data.end?.date),
+      etag: data.etag,
+      timeZone: data.start?.timeZone,
+    }
   }
 
   /** Reads every primary-calendar event overlapping the requested interval with the workflow-only snapshot fields. */
@@ -668,7 +676,12 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
   }
 
   /** ETag-guarded patch that changes only start/end and verifies-by-read on an uncertain write. */
-  async function moveExistingEvent(id: string, start: string, end: string): Promise<ExistingEventUpdateResult> {
+  async function moveExistingEvent(
+    id: string,
+    start: string,
+    end: string,
+    expectedEtag?: string,
+  ): Promise<ExistingEventUpdateResult> {
     let current: ExistingEventRead | null
     try {
       current = await readExistingEvent(id)
@@ -678,8 +691,10 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       throw error
     }
     if (!current) return { ok: false, reason: "not-found" }
+    if (current.allDay) return { ok: false, reason: "permanent" }
     if (current.etag === undefined) return { ok: false, reason: "permanent" }
-    if (sameInstant(current.start, start) && sameInstant(current.end, end)) return { ok: true }
+    if (expectedEtag !== undefined && current.etag !== expectedEtag) return { ok: false, reason: "precondition-failed" }
+    if (sameInstant(current.start, start) && sameInstant(current.end, end)) return { ok: true, etag: current.etag }
     const timeZone = current.timeZone
     let response: Response
     try {
@@ -697,18 +712,32 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       if (error instanceof GoogleCalendarError && error.kind === "transient") {
         try {
           const verified = await readExistingEvent(id)
-          if (verified && sameInstant(verified.start, start) && sameInstant(verified.end, end)) return { ok: true }
+          if (verified && sameInstant(verified.start, start) && sameInstant(verified.end, end))
+            return { ok: true, etag: verified.etag }
         } catch {
           // verify-by-read failed; treat the ambiguous write as failed
         }
       }
       return { ok: false, reason: "permanent" }
     }
-    if (response.status === HTTP_STATUS.PRECONDITION_FAILED) return { ok: false, reason: "precondition-failed" }
+    if (response.status === HTTP_STATUS.PRECONDITION_FAILED) {
+      // A retried PATCH can return 412 after the first attempt applied upstream
+      // and changed the ETag; verify the target before reporting failure.
+      try {
+        const verified = await readExistingEvent(id)
+        if (verified && sameInstant(verified.start, start) && sameInstant(verified.end, end))
+          return { ok: true, etag: verified.etag }
+      } catch (error) {
+        if (error instanceof GoogleCalendarError && error.kind === "authorization")
+          return { ok: false, reason: "authorization" }
+      }
+      return { ok: false, reason: "precondition-failed" }
+    }
     if (response.status === HTTP_STATUS.NOT_FOUND) return { ok: false, reason: "not-found" }
-    if (response.ok) return { ok: true }
-    if (response.status === HTTP_STATUS.UNAUTHORIZED || response.status === HTTP_STATUS.FORBIDDEN)
-      return { ok: false, reason: "authorization" }
+    if (response.ok) {
+      const data = (await response.json().catch(() => ({}))) as GoogleCalendarEventResponse
+      return { ok: true, etag: data.etag }
+    }
     return { ok: false, reason: "permanent" }
   }
 

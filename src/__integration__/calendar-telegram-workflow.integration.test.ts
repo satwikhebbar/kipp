@@ -246,6 +246,14 @@ function liveWorkflowBinding() {
   const runs: Promise<void>[] = []
   let rejectWait: ((reason: Error) => void) | undefined
   let waiter: ((event: unknown) => void) | undefined
+  const waitForQueuedEvent = () =>
+    new Promise((resolve, reject) => {
+      rejectWait = reject
+      const queued = events.shift()
+      if ((queued as { type?: string })?.type === "timeout") reject(workflowTimeoutError())
+      else if (queued) resolve(queued)
+      else waiter = resolve
+    })
   return {
     connect: (env: Env) => {
       connected = env
@@ -263,10 +271,7 @@ function liveWorkflowBinding() {
             { instanceId: id, payload: input.params } as never,
             {
               do: async (_: string, fn: () => unknown) => fn(),
-              waitForEvent: () =>
-                new Promise((resolve) => {
-                  waiter = resolve
-                }),
+              waitForEvent: waitForQueuedEvent,
             } as never,
           ),
         )
@@ -283,14 +288,7 @@ function liveWorkflowBinding() {
         } else events.push(event)
       }),
     })),
-    waitForEvent: () =>
-      new Promise((resolve, reject) => {
-        rejectWait = reject
-        const queued = events.shift()
-        if ((queued as { type?: string })?.type === "timeout") reject(workflowTimeoutError())
-        else if (queued) resolve(queued)
-        else waiter = resolve
-      }),
+    waitForEvent: waitForQueuedEvent,
     timeout: () => {
       if (waiter) {
         waiter = undefined
@@ -350,6 +348,18 @@ function callbackToken(network: ReturnType<typeof createFakeNetwork>, messageInd
   const markup = network.getState().telegramMessages[messageIndex]?.replyMarkup
   const keyboard = markup?.inline_keyboard as Array<Array<{ callback_data: string }>>
   return keyboard.flat()[buttonIndex]?.callback_data as string
+}
+
+function callbackTokenByLabel(
+  network: ReturnType<typeof createFakeNetwork>,
+  messageIndex: number,
+  label: string,
+): string {
+  const markup = network.getState().telegramMessages[messageIndex]?.replyMarkup
+  const keyboard = markup?.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>
+  const button = keyboard?.flat().find((candidate) => candidate.text === label)
+  if (!button) throw new Error(`No button labelled  on message `)
+  return button.callback_data
 }
 
 describe("Calendar HTTP sanity in workerd", () => {
@@ -582,7 +592,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const choiceIndex = await waitForMessageText(network, "safe alternative")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 1)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, choiceIndex, "Try another time")), runtimeEnv)
     const replacementIndex = await waitForMessageText(network, "Reply with another time")
     await waitForWorkflowWait(calendar)
     await handleTelegramWebhook(message("Use 8pm", 2), runtimeEnv)
@@ -611,7 +621,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const choiceIndex = await waitForMessageText(network, "safe alternative")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 3)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, choiceIndex, "Cancel")), runtimeEnv)
     await waitForMessageText(network, "Cancelled")
     await run
 
@@ -636,7 +646,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const reconnectIndex = await waitForMessageText(network, "Google Calendar is not connected")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, reconnectIndex, 1)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, reconnectIndex, "Cancel")), runtimeEnv)
     await waitForMessageText(network, "Cancelled")
     await run
 
@@ -1047,7 +1057,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const conflictIndex = await waitForMessageText(network, "safe alternative")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, conflictIndex, 2)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, conflictIndex, "Why this busy?")), runtimeEnv)
     const disclosureIndex = await waitForMessageText(network, "occupied by", conflictIndex)
     await waitForWorkflowWait(calendar)
     await handleTelegramWebhook(callback(callbackToken(network, disclosureIndex)), runtimeEnv)
@@ -1061,8 +1071,20 @@ describe("agent-centered Calendar Telegram integration", () => {
     await run
 
     expect(mockMoveExistingEvent).toHaveBeenCalledTimes(2)
+    expect(mockMoveExistingEvent.mock.calls[0]).toEqual([
+      "existing-1",
+      "2026-07-28T14:15:00.000Z",
+      "2026-07-28T14:45:00.000Z",
+      "etag-1",
+    ])
+    expect(mockMoveExistingEvent.mock.calls[1]).toEqual([
+      "existing-1",
+      "2026-07-28T13:30:00.000Z",
+      "2026-07-28T14:00:00.000Z",
+    ])
     expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
     expect(mockDeleteManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockDeleteManagedEvent).toHaveBeenCalledWith(mockCreateManagedEvent.mock.calls[0]?.[0].id)
     expect(network.getState().answeredCallbacks).toHaveLength(4)
     expect(network.getState().telegramMessages.every((candidate) => !candidate.text?.includes("existing-1"))).toBe(true)
   })
@@ -1094,7 +1116,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const choiceIndex = await waitForMessageText(network, "safe alternative")
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, choiceIndex, 2)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, choiceIndex, "Why this busy?")), runtimeEnv)
     const disclosureIndex = await waitForMessageText(network, "occupied by", choiceIndex)
     const disclosure = network.getState().telegramMessages[disclosureIndex]
     expect(disclosure?.text).toContain("Standup (19:00–19:30)")
@@ -1102,7 +1124,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const labels = keyboard.flat().map((button) => button.text)
     expect(labels).toEqual(["Try another time", "Cancel"])
     await waitForWorkflowWait(calendar)
-    await handleTelegramWebhook(callback(callbackToken(network, disclosureIndex, 1)), runtimeEnv)
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, disclosureIndex, "Cancel")), runtimeEnv)
     await waitForMessageText(network, "Cancelled", disclosureIndex)
     await run
 

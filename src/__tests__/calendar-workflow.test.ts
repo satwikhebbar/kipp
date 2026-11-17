@@ -229,9 +229,11 @@ function telegramMock() {
   return telegram
 }
 
-async function run(step: ReturnType<typeof createStep>, requestText?: string): Promise<void> {
+async function run(step: ReturnType<typeof createStep>, requestText?: string, timeZone?: string): Promise<void> {
   const workflow = new CalendarWorkflow({} as never, {} as never)
-  Object.assign(workflow, { env: environment() })
+  const env = environment()
+  if (timeZone) env.TIMEZONE = timeZone
+  Object.assign(workflow, { env })
   await (workflow as unknown as { run: (event: unknown, step: unknown) => Promise<void> }).run(
     workflowEvent(requestText),
     step,
@@ -383,6 +385,31 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(
       [...decisions[0].ledger.records, ...decisions[0].ledger.options].some((record) => record.status === "used"),
     ).toBe(true)
+  })
+
+  it("does not offer conflict disclosure inside an Edit session", async () => {
+    queueReady(ONE_OFF)
+    await run(createStep())
+    const telegram = telegramMock()
+    mockBusyIntervals.mockResolvedValue([{ start: "2026-07-28T13:45:00.000Z", end: "2026-07-28T14:15:00.000Z" }])
+    queueChoice(ONE_OFF)
+
+    await editSaved("Move this to 7pm", createStep({ type: "timeout" }))
+
+    const bodies = telegram.mock.calls
+      .map(
+        ([, init]) =>
+          JSON.parse((init as RequestInit).body as string) as {
+            reply_markup?: { inline_keyboard: Array<Array<{ text: string }>> }
+          },
+      )
+      .filter((body) => body.reply_markup)
+    const labels = bodies
+      .at(-1)
+      ?.reply_markup?.inline_keyboard.flat()
+      .map((button) => button.text)
+    expect(labels).not.toContain("Why this busy?")
+    expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
   })
 
   it("replays clarification and authorization recovery after creation without a late no-decision message", async () => {
@@ -1075,6 +1102,7 @@ describe("agent-centered CalendarWorkflow", () => {
       "existing-1",
       "2026-07-28T14:15:00.000Z",
       "2026-07-28T14:45:00.000Z",
+      "etag-1",
     ])
     expect(mockMoveExistingEvent.mock.calls[1]).toEqual([
       "existing-1",
@@ -1095,6 +1123,201 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(texts.some((text) => text.includes("Moved Standup"))).toBe(true)
     expect(texts.some((text) => text.includes("Restored Standup"))).toBe(true)
     expect(texts.every((text) => !text.includes("existing-1"))).toBe(true)
+  })
+
+  it("resolves a reschedule action by its position among multiple movable events", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+      {
+        id: "existing-2",
+        title: "Retro",
+        start: "2026-07-28T13:45:00.000Z",
+        end: "2026-07-28T14:15:00.000Z",
+        allDay: false,
+        etag: "etag-2",
+        movable: true,
+      },
+    ])
+    queueChoice(ONE_OFF)
+    telegramMock()
+    let wait = 0
+    const step = {
+      do: vitest.fn(async (_name: string, fn: () => unknown) => fn()),
+      waitForEvent: vitest.fn(async () => {
+        if (wait++ === 0) {
+          const disclose = testRouter.registrations.find(
+            (registration) => registration.kind === INTERACTION_KIND.CALENDAR_CONFLICT_DISCLOSE,
+          )
+          return {
+            type: "telegram-reply",
+            payload: { text: "__calendar-conflict-disclose__", interactionId: disclose?.interactionId },
+          }
+        }
+        if (wait === 2) {
+          const reschedules = testRouter.registrations.filter(
+            (registration) => registration.kind === INTERACTION_KIND.CALENDAR_CONFLICT_RESCHEDULE,
+          )
+          return {
+            type: "telegram-reply",
+            payload: { text: "__calendar-conflict-reschedule__", interactionId: reschedules[1]?.interactionId },
+          }
+        }
+        return { type: "event", payload: { text: "__calendar-conflict-move__" } }
+      }),
+    }
+
+    await run(step as never)
+
+    expect(mockMoveExistingEvent.mock.calls[0]?.[0]).toBe("existing-2")
+  })
+
+  it("rechecks the target before moving after the owner confirmation", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce([{ start: "2026-07-28T14:15:00.000Z", end: "2026-07-28T14:45:00.000Z" }])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    queueChoice(ONE_OFF)
+    queueQuestion("Which time should I try?")
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+        { type: "timeout" },
+      ),
+    )
+
+    expect(mockMoveExistingEvent).not.toHaveBeenCalled()
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+  })
+
+  it("reserves the requested interval when suggesting a displacement target", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict)
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    queueChoice({ ...ONE_OFF, proposal: { ...ONE_OFF.proposal, durationMinutes: 120 } })
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+        { type: "timeout" },
+      ),
+    )
+
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(1)
+    const targetStart = Date.parse(mockMoveExistingEvent.mock.calls[0]?.[1] as string)
+    const targetEnd = Date.parse(mockMoveExistingEvent.mock.calls[0]?.[2] as string)
+    expect(
+      targetEnd <= Date.parse("2026-07-28T13:30:00.000Z") || targetStart >= Date.parse("2026-07-28T15:30:00.000Z"),
+    ).toBe(true)
+  })
+
+  it("routes a reply after creation through the saved Edit flow", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    queueChoice(ONE_OFF)
+    queueReady({ ...ONE_OFF, proposal: { ...ONE_OFF.proposal, startTime: "20:00" } })
+    telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+        { type: "event", payload: { text: "Change it to 20:00" } },
+      ),
+    )
+
+    expect(mockCreateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent).toHaveBeenCalledTimes(1)
+    expect(mockUpdateManagedEvent.mock.calls[0]?.[0]).toMatchObject({ start: "2026-07-28T14:30:00.000Z" })
+  })
+
+  it("resumes Undo deletion after reconnecting without repeating the restore", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    mockDeleteManagedEvent
+      .mockRejectedValueOnce(new MockGoogleCalendarError("revoked", "authorization"))
+      .mockResolvedValueOnce(undefined)
+    queueChoice(ONE_OFF)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+        { type: "event", payload: { text: "__calendar-conflict-undo__" } },
+        { type: "event", payload: { text: "__calendar-retry__" } },
+      ),
+    )
+
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(2)
+    expect(mockDeleteManagedEvent).toHaveBeenCalledTimes(2)
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("Restored Standup to its original time and removed"))).toBe(true)
+    expect(texts.some((text) => text.includes("may remain"))).toBe(false)
   })
 
   it("discloses a recurring conflict as disclosure-only and never offers a reschedule action", async () => {
@@ -1255,6 +1478,42 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(labels).toEqual(["Try another time", "Cancel"])
     expect(messages.every((candidate) => !candidate.text.includes("series-a"))).toBe(true)
     expect(messages.every((candidate) => !candidate.text.includes("series-b"))).toBe(true)
+  })
+
+  it("keeps an all-day civil date in a dated disclosure across negative offsets", async () => {
+    mockBusyIntervals.mockResolvedValue([
+      { start: "2026-07-29T02:00:00.000Z", end: "2026-07-29T02:30:00.000Z" },
+      { start: "2026-08-05T02:00:00.000Z", end: "2026-08-05T02:30:00.000Z" },
+      { start: "2026-08-12T02:00:00.000Z", end: "2026-08-12T02:30:00.000Z" },
+    ])
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "all-day-1",
+        title: "Holiday",
+        start: "2026-07-28",
+        end: "2026-07-29",
+        allDay: true,
+        etag: "etag-all",
+        movable: false,
+      },
+    ])
+    queueChoice(RECURRING)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-cancel__" } },
+      ),
+      "Weekly review every Tuesday at 7pm for 3 occurrences",
+      "America/Los_Angeles",
+    )
+
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("Holiday (2026-07-28 all day)"))).toBe(true)
+    expect(texts.some((text) => text.includes("2026-07-27"))).toBe(false)
   })
 
   it("discloses non-movable events without a reschedule action and cancels cleanly", async () => {
@@ -1527,6 +1786,7 @@ describe("agent-centered CalendarWorkflow", () => {
     mockBusyIntervals
       .mockResolvedValueOnce(conflict)
       .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce([])
       .mockRejectedValueOnce(new MockGoogleCalendarError("expired", "authorization"))
       .mockResolvedValueOnce([])
     mockFindConflictingEvents.mockResolvedValue([
@@ -1565,6 +1825,7 @@ describe("agent-centered CalendarWorkflow", () => {
     mockBusyIntervals
       .mockResolvedValueOnce(conflict)
       .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce([])
       .mockRejectedValueOnce(new MockGoogleCalendarError("unavailable", "permanent"))
     mockFindConflictingEvents.mockResolvedValue([
       {
@@ -1606,6 +1867,7 @@ describe("agent-centered CalendarWorkflow", () => {
     mockBusyIntervals
       .mockResolvedValueOnce(conflict)
       .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce([])
       .mockRejectedValueOnce(new MockGoogleCalendarError("revoked", "authorization"))
     mockFindConflictingEvents.mockResolvedValue([
       {

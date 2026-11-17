@@ -937,7 +937,7 @@ describe("Google Calendar client", () => {
         "2026-07-28T15:00:00.000Z",
         "2026-07-28T15:30:00.000Z",
       ),
-    ).resolves.toEqual({ ok: true })
+    ).resolves.toEqual({ ok: true, etag: "etag-2" })
     expect(fetch).toHaveBeenCalledTimes(5)
   })
 
@@ -957,7 +957,7 @@ describe("Google Calendar client", () => {
         "2026-07-28T15:00:00.000Z",
         "2026-07-28T15:30:00.000Z",
       ),
-    ).resolves.toEqual({ ok: true })
+    ).resolves.toEqual({ ok: true, etag: "etag-1" })
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
@@ -991,7 +991,81 @@ describe("Google Calendar client", () => {
         "2026-07-28T15:00:00.000Z",
         "2026-07-28T15:30:00.000Z",
       ),
-    ).resolves.toEqual({ ok: true })
+    ).resolves.toEqual({ ok: true, etag: "etag-2" })
+  })
+
+  it("rejects a move when the event changed since the owner approved it", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(
+      response(200, {
+        id: "single",
+        etag: "etag-2",
+        start: { dateTime: "2026-07-28T13:30:00.000Z" },
+        end: { dateTime: "2026-07-28T14:00:00.000Z" },
+      }),
+    )
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+        "etag-1",
+      ),
+    ).resolves.toEqual({ ok: false, reason: "precondition-failed" })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("refuses to convert an all-day event into a timed event", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(
+      response(200, {
+        id: "single",
+        etag: "etag-1",
+        start: { date: "2026-07-28" },
+        end: { date: "2026-07-29" },
+      }),
+    )
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: false, reason: "permanent" })
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("verifies a retried 412 against the target before reporting a precondition failure", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(200, {
+          id: "single",
+          etag: "etag-1",
+          start: { dateTime: "2026-07-28T13:30:00.000Z" },
+          end: { dateTime: "2026-07-28T14:00:00.000Z" },
+        }),
+      )
+      .mockResolvedValueOnce(response(HTTP_STATUS.PRECONDITION_FAILED))
+      .mockResolvedValueOnce(
+        response(200, {
+          id: "single",
+          etag: "etag-2",
+          start: { dateTime: "2026-07-28T15:00:00.000Z" },
+          end: { dateTime: "2026-07-28T15:30:00.000Z" },
+        }),
+      )
+    vi.stubGlobal("fetch", fetch)
+
+    await expect(
+      createGoogleCalendarClient(await environment()).moveExistingEvent(
+        "single",
+        "2026-07-28T15:00:00.000Z",
+        "2026-07-28T15:30:00.000Z",
+      ),
+    ).resolves.toEqual({ ok: true, etag: "etag-2" })
   })
 
   it("treats an already-moved event with a non-UTC offset as complete", async () => {
@@ -1010,7 +1084,7 @@ describe("Google Calendar client", () => {
         "2026-07-28T15:00:00.000Z",
         "2026-07-28T15:30:00.000Z",
       ),
-    ).resolves.toEqual({ ok: true })
+    ).resolves.toEqual({ ok: true, etag: "etag-1" })
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 })
