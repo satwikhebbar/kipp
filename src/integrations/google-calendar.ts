@@ -1,3 +1,4 @@
+import { calendarDayBounds } from "../calendar/scheduling"
 import { createTokenVault } from "../core/token-vault-client"
 import { type Env, type GoogleCalendarTokens, TOKEN_PROVIDER } from "../core/types"
 import { HTTP_STATUS, isTransientHttpStatus } from "../runtime/http"
@@ -68,6 +69,31 @@ export interface CalendarEventList {
   truncated: boolean
 }
 
+/** Minimal workflow-owned snapshot of an existing event overlapping the requested time. */
+export interface ConflictEventSnapshot {
+  id: string
+  title: string
+  start: string
+  end: string
+  allDay: boolean
+  etag: string
+  /** Server-side only: whether a single non-recurring, non-all-day event may be rescheduled. */
+  movable: boolean
+}
+
+export type ExistingEventUpdateReason = "precondition-failed" | "not-found" | "authorization" | "permanent"
+
+export type ExistingEventUpdateResult = { ok: true; etag?: string } | { ok: false; reason: ExistingEventUpdateReason }
+
+interface ExistingEventRead {
+  id: string
+  start: string
+  end: string
+  allDay: boolean
+  etag?: string
+  timeZone?: string
+}
+
 interface ManagedCalendarInstance {
   id: string
   originalStart: string
@@ -88,6 +114,7 @@ interface GoogleCalendarEventResponse {
   start?: { dateTime?: string; date?: string; timeZone?: string }
   end?: { dateTime?: string; date?: string; timeZone?: string }
   originalStartTime?: { dateTime?: string }
+  etag?: string
 }
 
 interface GoogleCalendarInstancesResponse {
@@ -126,6 +153,14 @@ export interface GoogleCalendarClient {
   updateManagedEvent(event: ManagedCalendarEvent): Promise<void>
   reconcileManagedSeries(event: ManagedCalendarEvent, exceptions: ManagedCalendarException[]): Promise<void>
   deleteManagedEvent(id: string): Promise<void>
+  findConflictingEvents(
+    timeMin: string,
+    timeMax: string,
+    requestedStart: string,
+    requestedEnd: string,
+    timeZone: string,
+  ): Promise<ConflictEventSnapshot[]>
+  moveExistingEvent(id: string, start: string, end: string, expectedEtag?: string): Promise<ExistingEventUpdateResult>
 }
 
 /** Returns the epoch ms at which the token expires. */
@@ -142,6 +177,22 @@ function isGoogleCalendarTokens(tokens: GoogleCalendarTokens | null | unknown): 
       typeof (tokens as GoogleCalendarTokens).created_at === "string" &&
       typeof (tokens as GoogleCalendarTokens).expires_in === "number",
   )
+}
+
+/** Returns the epoch ms for a provider event boundary; all-day dates are interpreted in the calendar time zone. */
+function eventInstantMs(value: string, allDay: boolean, timeZone: string): number | null {
+  if (!allDay) {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  // Midnight can be skipped by a DST transition; the day's first instant is the correct fallback.
+  const bounds = calendarDayBounds(value, timeZone)
+  return bounds ? Date.parse(bounds.timeMin) : null
+}
+
+/** Compares two provider timestamps as instants so differing UTC offsets still match. */
+function sameInstant(left: string, right: string): boolean {
+  return Date.parse(left) === Date.parse(right)
 }
 
 /** Builds the Google Calendar API event payload from a managed event. */
@@ -542,6 +593,155 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       throw new GoogleCalendarError("Calendar event could not be removed", "permanent")
   }
 
+  /** Returns a fresh read of one existing event carrying its current ETag and timezone, or null when gone. */
+  async function readExistingEvent(id: string): Promise<ExistingEventRead | null> {
+    const response = await request(`/calendars/primary/events/${encodeURIComponent(id)}`, { method: "GET" })
+    if (response.status === HTTP_STATUS.NOT_FOUND) return null
+    if (!response.ok) throw new GoogleCalendarError("Calendar event could not be read", "permanent")
+    const data = (await response.json()) as GoogleCalendarEventResponse
+    const start = data.start?.dateTime ?? data.start?.date
+    const end = data.end?.dateTime ?? data.end?.date
+    if (!data.id || !start || !end) return null
+    return {
+      id: data.id,
+      start,
+      end,
+      allDay: Boolean(data.start?.date && data.end?.date),
+      etag: data.etag,
+      timeZone: data.start?.timeZone,
+    }
+  }
+
+  /** Reads every primary-calendar event overlapping the requested interval with the workflow-only snapshot fields. */
+  async function findConflictingEvents(
+    timeMin: string,
+    timeMax: string,
+    requestedStart: string,
+    requestedEnd: string,
+    timeZone: string,
+  ): Promise<ConflictEventSnapshot[]> {
+    const rangeStart = Date.parse(timeMin)
+    const rangeEnd = Date.parse(timeMax)
+    const requestedStartMs = Date.parse(requestedStart)
+    const requestedEndMs = Date.parse(requestedEnd)
+    if (
+      !Number.isFinite(rangeStart) ||
+      !Number.isFinite(rangeEnd) ||
+      rangeEnd <= rangeStart ||
+      rangeEnd - rangeStart > MAX_EVENT_LIST_RANGE_MS ||
+      !Number.isFinite(requestedStartMs) ||
+      !Number.isFinite(requestedEndMs) ||
+      requestedEndMs <= requestedStartMs
+    )
+      throw new GoogleCalendarError("Calendar event range is invalid", "permanent")
+
+    const snapshots: ConflictEventSnapshot[] = []
+    let pageToken: string | undefined
+    do {
+      const query = new URLSearchParams({
+        timeMin: new Date(rangeStart).toISOString(),
+        timeMax: new Date(rangeEnd).toISOString(),
+        singleEvents: "true",
+        orderBy: "startTime",
+        showDeleted: "false",
+        maxResults: MAX_CALENDAR_INSTANCES_PER_PAGE,
+      })
+      if (pageToken) query.set("pageToken", pageToken)
+      const response = await request(`/calendars/primary/events?${query.toString()}`, { method: "GET" })
+      if (!response.ok) throw new GoogleCalendarError("Calendar events could not be read", "permanent")
+      const data = (await response.json()) as GoogleCalendarEventsResponse
+      for (const item of data.items ?? []) {
+        const allDay = Boolean(item.start?.date && item.end?.date)
+        const start = item.start?.dateTime ?? item.start?.date
+        const end = item.end?.dateTime ?? item.end?.date
+        if (!item.id || !start || !end) continue
+        const startMs = eventInstantMs(start, allDay, timeZone)
+        const endMs = eventInstantMs(end, allDay, timeZone)
+        if (startMs === null || endMs === null) continue
+        if (!(startMs < requestedEndMs && endMs > requestedStartMs)) continue
+        snapshots.push({
+          id: item.id,
+          title: item.summary ?? "(untitled)",
+          start,
+          end,
+          allDay,
+          etag: item.etag ?? "",
+          movable: !item.recurrence && !item.originalStartTime && !allDay && Boolean(item.etag),
+        })
+        if (snapshots.length >= MAX_VISIBLE_EVENTS) break
+      }
+      pageToken = snapshots.length >= MAX_VISIBLE_EVENTS ? undefined : data.nextPageToken
+    } while (pageToken)
+    return snapshots
+  }
+
+  /** ETag-guarded patch that changes only start/end and verifies-by-read on an uncertain write. */
+  async function moveExistingEvent(
+    id: string,
+    start: string,
+    end: string,
+    expectedEtag?: string,
+  ): Promise<ExistingEventUpdateResult> {
+    let current: ExistingEventRead | null
+    try {
+      current = await readExistingEvent(id)
+    } catch (error) {
+      if (error instanceof GoogleCalendarError && error.kind === "authorization")
+        return { ok: false, reason: "authorization" }
+      throw error
+    }
+    if (!current) return { ok: false, reason: "not-found" }
+    if (current.allDay) return { ok: false, reason: "permanent" }
+    if (current.etag === undefined) return { ok: false, reason: "permanent" }
+    // A lost checkpoint can replay an already-applied move with a new ETag.
+    if (sameInstant(current.start, start) && sameInstant(current.end, end)) return { ok: true, etag: current.etag }
+    if (expectedEtag !== undefined && current.etag !== expectedEtag) return { ok: false, reason: "precondition-failed" }
+    const timeZone = current.timeZone
+    let response: Response
+    try {
+      response = await request(`/calendars/primary/events/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "If-Match": current.etag },
+        body: JSON.stringify({
+          start: { dateTime: start, ...(timeZone ? { timeZone } : {}) },
+          end: { dateTime: end, ...(timeZone ? { timeZone } : {}) },
+        }),
+      })
+    } catch (error) {
+      if (error instanceof GoogleCalendarError && error.kind === "authorization")
+        return { ok: false, reason: "authorization" }
+      if (error instanceof GoogleCalendarError && error.kind === "transient") {
+        try {
+          const verified = await readExistingEvent(id)
+          if (verified && sameInstant(verified.start, start) && sameInstant(verified.end, end))
+            return { ok: true, etag: verified.etag }
+        } catch {
+          // verify-by-read failed; treat the ambiguous write as failed
+        }
+      }
+      return { ok: false, reason: "permanent" }
+    }
+    if (response.status === HTTP_STATUS.PRECONDITION_FAILED) {
+      // A retried PATCH can return 412 after the first attempt applied upstream
+      // and changed the ETag; verify the target before reporting failure.
+      try {
+        const verified = await readExistingEvent(id)
+        if (verified && sameInstant(verified.start, start) && sameInstant(verified.end, end))
+          return { ok: true, etag: verified.etag }
+      } catch (error) {
+        if (error instanceof GoogleCalendarError && error.kind === "authorization")
+          return { ok: false, reason: "authorization" }
+      }
+      return { ok: false, reason: "precondition-failed" }
+    }
+    if (response.status === HTTP_STATUS.NOT_FOUND) return { ok: false, reason: "not-found" }
+    if (response.ok) {
+      const data = (await response.json().catch(() => ({}))) as GoogleCalendarEventResponse
+      return { ok: true, etag: data.etag }
+    }
+    return { ok: false, reason: "permanent" }
+  }
+
   return {
     getBusyIntervals,
     listEvents,
@@ -550,5 +750,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     updateManagedEvent,
     reconcileManagedSeries,
     deleteManagedEvent,
+    findConflictingEvents,
+    moveExistingEvent,
   }
 }

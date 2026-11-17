@@ -12,6 +12,7 @@ export type CalendarPlan =
       proposal: RecurringProposal
       occurrences: RecurringOccurrence[]
       adjustments: RecurrenceAdjustment[]
+      requestedConflicts: RecurringOccurrence[]
       rrule: string
       humanCadence: string
       reminderMinutes: number
