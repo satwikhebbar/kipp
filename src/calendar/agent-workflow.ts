@@ -1154,6 +1154,7 @@ async function handleConflictDisclosure(
   }
 
   let stillValid = false
+  let authorizationUnresolved = false
   let reconnectAttempt = 0
   while (true) {
     try {
@@ -1164,19 +1165,31 @@ async function handleConflictDisclosure(
       break
     } catch (error) {
       if (isWorkflowInterruption(error)) throw error
+      if (!isAuthorizationFailure(error)) {
+        stillValid = false
+        break
+      }
       if (
-        !isAuthorizationFailure(error) ||
         reconnectAttempt > 0 ||
         !(await promptConflictReconnect(env, step, event, ++v, turn, `revalidate-${reconnectAttempt}`))
       ) {
         stillValid = false
+        authorizationUnresolved = true
         break
       }
       reconnectAttempt++
     }
   }
   if (!stillValid) {
-    const { restored, version } = await restoreConflictEvent(env, step, event, v, turn, "revalidate", snapshot)
+    // A declined/expired reconnect must not attempt a Calendar write with
+    // authorization still revoked, so only ordinary failures compensate.
+    let restored = false
+    let version = v
+    if (!authorizationUnresolved) {
+      const compensation = await restoreConflictEvent(env, step, event, v, turn, "revalidate", snapshot)
+      restored = compensation.restored
+      version = compensation.version
+    }
     if (restored) {
       await notify(
         env,

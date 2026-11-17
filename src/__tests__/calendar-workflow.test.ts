@@ -1601,6 +1601,50 @@ describe("agent-centered CalendarWorkflow", () => {
     expect(texts.some((text) => text.includes("couldn't create your block, so I restored Standup"))).toBe(true)
   })
 
+  it("does not restore when revalidation authorization reconnect is declined", async () => {
+    const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
+    mockBusyIntervals
+      .mockResolvedValueOnce(conflict)
+      .mockResolvedValueOnce(conflict)
+      .mockRejectedValueOnce(new MockGoogleCalendarError("revoked", "authorization"))
+    mockFindConflictingEvents.mockResolvedValue([
+      {
+        id: "existing-1",
+        title: "Standup",
+        start: "2026-07-28T13:30:00.000Z",
+        end: "2026-07-28T14:00:00.000Z",
+        allDay: false,
+        etag: "etag-1",
+        movable: true,
+      },
+    ])
+    queueChoice(ONE_OFF)
+    const telegram = telegramMock()
+
+    await run(
+      createStep(
+        { type: "event", payload: { text: "__calendar-conflict-disclose__" } },
+        { type: "event", payload: { text: "__calendar-conflict-reschedule__" } },
+        { type: "event", payload: { text: "__calendar-conflict-move__" } },
+        { type: "event", payload: { text: "__calendar-cancel__" } },
+      ),
+    )
+
+    expect(mockMoveExistingEvent).toHaveBeenCalledTimes(1)
+    expect(mockCreateManagedEvent).not.toHaveBeenCalled()
+    expect(mockDeleteManagedEvent).not.toHaveBeenCalled()
+    const texts = telegram.mock.calls
+      .map(([, init]) => (JSON.parse((init as RequestInit).body as string) as { text: string }).text)
+      .filter(Boolean)
+    expect(texts.some((text) => text.includes("Reconnect, then tap Retry"))).toBe(true)
+    expect(
+      texts.some(
+        (text) => text.includes("I moved Standup to") && text.includes("couldn't create your block or restore it"),
+      ),
+    ).toBe(true)
+    expect(texts.some((text) => text.includes("couldn't create your block, so I restored"))).toBe(false)
+  })
+
   it("resumes reconciliation after reconnect when authorization remains revoked", async () => {
     const conflict = [{ start: "2026-07-28T13:30:00.000Z", end: "2026-07-28T14:00:00.000Z" }]
     mockBusyIntervals.mockResolvedValueOnce(conflict).mockResolvedValueOnce(conflict).mockResolvedValueOnce([])
