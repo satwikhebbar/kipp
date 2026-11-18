@@ -193,6 +193,8 @@ function instructionClauses(text: string): { text: string; targetText: string }[
     if (readingClause) {
       const dependentSelection =
         /^\s*(?:please\s+)?(?:use|choose|prefer|serve|put|include)\b.*\binstead\b/.test(part) &&
+        // "Instead of poha" supplies its own target, independently of a prior fact.
+        !/\binstead\s+of\s+\S/.test(part) &&
         !new RegExp(`\\b(?:${DAY_WORDS}|${MEAL_WORDS})\\b`).test(part)
       if (dependentSelection && clauses.length > 0) clauses[clauses.length - 1].text += separator + part
       else clauses.push({ text: part, targetText: part })

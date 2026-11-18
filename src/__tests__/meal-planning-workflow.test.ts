@@ -1640,7 +1640,18 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(deepseekBodies).toHaveLength(5)
   })
 
-  it("preserves the requested new dish in dependent raw Telegram feedback after a context-only handoff", async () => {
+  it.each([
+    { fact: "We have no pears.", instruction: "Replace poha and use idli instead.", calendar: false, replan: false },
+    ...[false, true].flatMap((replan) => [
+      { fact: "We have no pears.", instruction: "Use idli instead of poha.", calendar: false, replan },
+      { fact: "Thursday is closed.", instruction: "Use idli instead of poha.", calendar: true, replan },
+    ]),
+  ])("preserves the requested new dish after a context handoff: $fact $instruction replan=$replan", async ({
+    fact,
+    instruction,
+    calendar,
+    replan,
+  }) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -1655,7 +1666,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         {
           interactionKind: "meal-feedback-reply",
           source: "telegram-reply",
-          text: "We have no pears. Replace poha and use idli instead.",
+          text: `${fact} ${instruction}`,
           messageId: 214,
         },
       ],
@@ -1668,9 +1679,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         {
           name: "update_week_context",
           input: {
-            inventoryChanges: [{ name: "pear", status: "unavailable" }],
-            exceptionAdds: [],
-            replan: false,
+            inventoryChanges: calendar ? [] : [{ name: "pear", status: "unavailable" }],
+            exceptionAdds: calendar
+              ? [{ kind: "school_closed", appliesTo: { day: "Thu" }, instruction: "Thursday is closed" }]
+              : [],
+            replan,
           },
         },
       ]),
@@ -1690,13 +1703,18 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ).toBe(false)
     expect(SEED_PROFILE.mealDefinitions?.some((definition) => definition.name === "idli")).toBe(true)
     const followUpText = deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")
-    expect(followUpText).toContain("Replace poha and use idli instead.")
-    expect(followUpText).toContain("Carry out the requested replan: Replace poha and use idli instead.")
+    expect(followUpText).toContain(instruction)
+    expect(followUpText).toContain(`Carry out the requested replan: ${instruction}`)
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.currentVersion).toBe(2)
     expect(active?.version.candidate.grid.Mon["home-lunch"].dish).toBe("idli")
     expect(active?.version.candidate.grid.Tue).toEqual(initial.grid.Tue)
-    expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "pear", status: "unavailable" })
+    if (calendar) {
+      expect(active?.version.candidate.grid.Thu).toBeUndefined()
+      expect(active?.plan.weeklyExceptions.items).toContainEqual(
+        expect.objectContaining({ kind: "school_closed", appliesTo: { day: "Thu" } }),
+      )
+    } else expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "pear", status: "unavailable" })
     expect(deepseekBodies).toHaveLength(5)
   })
 

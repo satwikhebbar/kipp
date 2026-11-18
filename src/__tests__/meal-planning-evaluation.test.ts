@@ -1047,6 +1047,28 @@ describe("meal-planning evaluator", () => {
     ])
   })
 
+  it.each([
+    "We have no pears.",
+    "Thursday is closed.",
+  ])("retains an independent dish-targeted selection after a context fact: %s", (fact) => {
+    const text = `${fact} Use idli instead of poha.`
+    const context = baseContext({
+      recentPlan: gridFrom([["Mon", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "raw", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(true)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([
+      { id: "raw", text: "Use idli instead of poha." },
+    ])
+    const result = evaluateMealPlan(
+      { grid: gridFrom([["Mon", "breakfast", "idli"]]), easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(failureCodes(result)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(result)).not.toContain("unaddressed_feedback")
+  })
+
   it("does not attach an explicitly targeted meal request to an inventory fact", () => {
     const context = { recentPlan: gridFrom([["Fri", "breakfast", "banana"]]) }
     const text = "We have no pears and use idli for Friday breakfast instead."
