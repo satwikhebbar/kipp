@@ -1651,6 +1651,12 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         calendar: false,
         replan,
       },
+      {
+        fact: "We have no pears.",
+        instruction: "Make poha lighter instead of something heavy.",
+        calendar: false,
+        replan,
+      },
     ]),
   ])("preserves the requested new dish after a context handoff: $fact $instruction replan=$replan", async ({
     fact,
@@ -1887,10 +1893,14 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(deepseekBodies).toHaveLength(5)
   })
 
-  it.each([
-    false,
-    true,
-  ])("does not revive a removed replacement target from a selected dish elsewhere: replan=%s", async (replan) => {
+  it.each(
+    [false, true].flatMap((replan) =>
+      ["Use idli instead of poha.", "Make poha lighter instead of something heavy."].map((instruction) => ({
+        replan,
+        instruction,
+      })),
+    ),
+  )("does not revive a projected-away target: $instruction replan=$replan", async ({ replan, instruction }) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -1909,7 +1919,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         {
           interactionKind: "meal-feedback-reply",
           source: "telegram-reply",
-          text: "Thursday is closed. Use idli instead of poha.",
+          text: `Thursday is closed. ${instruction}`,
           messageId: 215,
         },
       ],
@@ -1958,7 +1968,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     if (replan) {
       expect(active?.version.candidate.grid.Thu).toBeUndefined()
       const followUpText = deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")
-      expect(followUpText).not.toContain("Use idli instead of poha")
+      expect(followUpText).not.toContain(instruction)
       expect(followUpText).toContain("Reconcile the grid with the updated schedule")
     }
   })

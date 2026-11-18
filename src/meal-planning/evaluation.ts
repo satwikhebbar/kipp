@@ -238,6 +238,13 @@ function inheritsInventoryQuantity(text: string): boolean {
   )
 }
 
+/** Uses the same dish-name recognition for primary targets and replacement sources. */
+function mentionsDish(text: string, grid: MealGrid | null | undefined): boolean {
+  return Object.values(grid ?? {}).some((slots) =>
+    Object.values(slots).some((cell) => text.includes(cell.dish.toLowerCase())),
+  )
+}
+
 /** Classifies a clause so inventory actions cannot borrow plan targets from unrelated facts. */
 function isPlanChangeClause(
   text: string,
@@ -259,27 +266,21 @@ function isPlanChangeClause(
   const replacementSource = text.match(/\binstead\s+of\s+(.+)/)
   const sourceNamesReviewedDish =
     replacementSource &&
-    [context.recentPlan, context.feedbackReferencePlan].some((grid) =>
-      Object.values(grid ?? {}).some((slots) =>
-        Object.values(slots).some((cell) => replacementSource[1].includes(cell.dish.toLowerCase())),
-      ),
-    )
+    [context.recentPlan, context.feedbackReferencePlan].some((grid) => mentionsDish(replacementSource[1], grid))
+  const primaryInstruction = text.slice(0, replacementSource?.index)
+  const primaryHasTarget = PLAN_TARGET.test(primaryInstruction) || mentionsDish(primaryInstruction, context.recentPlan)
   // A named source owns replacement eligibility even after projection removes
   // it. A generic contrast ("something heavy") must not erase an explicit meal
-  // target in the instruction before "instead of".
+  // or eligible named-dish target in the instruction before "instead of".
   const applicabilityTarget =
-    replacementSource && (sourceNamesReviewedDish || !PLAN_TARGET.test(text.slice(0, replacementSource.index)))
-      ? replacementSource[1]
-      : text
+    replacementSource && (sourceNamesReviewedDish || !primaryHasTarget) ? replacementSource[1] : text
   const mealOrDay = PLAN_TARGET.test(applicabilityTarget)
   // A move can rescue a dish from a closed day. A replacement of a removed dish
   // is already satisfied by projection and must not survive as stale feedback.
   const referencePlan = /\b(?:move|moving|shift)\b/.test(text)
     ? (context.feedbackReferencePlan ?? context.recentPlan)
     : context.recentPlan
-  const dish = Object.values(referencePlan ?? {}).some((slots) =>
-    Object.values(slots).some((cell) => applicabilityTarget.includes(cell.dish.toLowerCase())),
-  )
+  const dish = mentionsDish(applicabilityTarget, referencePlan)
   const selectedOption = /\b(?:prefer|choose|use|serve|put)\s+(?:the\s+)?[a-z][a-z -]*/.test(text)
   const specificPreference =
     /\b(?:less|more|lighter|faster|simpler|healthier|spicier)\b/.test(text) ||
