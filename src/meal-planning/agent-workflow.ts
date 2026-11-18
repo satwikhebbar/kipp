@@ -1020,7 +1020,10 @@ async function runRevision(
   // applies a week-context fact (for example, an item going out of season).
   // Keep those authoritative items in the follow-up evaluation so the
   // requested cells cannot be silently dropped after the context update.
-  const feedbackItems = contextAlreadyUpdated && !feedbackBatch ? [] : submission.items
+  // Scoped Telegram items also retain their authority; only unscoped context
+  // facts are retired after applying their inventory or calendar update.
+  const feedbackItems =
+    contextAlreadyUpdated && !feedbackBatch ? submission.items.filter((item) => item.scope) : submission.items
   // A stored plan can predate a recurring schedule rule. Start every revision
   // from the cells still eligible under the household's current schedule.
   const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)

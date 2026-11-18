@@ -1504,6 +1504,52 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
   })
 
+  it("retains scoped Telegram feedback after an inventory-only handoff before promoting the revision", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "Mon snack1: use vegetable cutlet instead.",
+          items: [{ id: "tg-211", text: "Use vegetable cutlet instead.", scope: { day: "Mon", slot: "snack1" } }],
+          messageId: 211,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: { inventoryChanges: [{ name: "pear", status: "unavailable" }], exceptionAdds: [], replan: false },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(revised) }]),
+    ])
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.candidate.grid.Mon.snack1.dish).toBe("vegetable cutlet")
+    const initial = db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as {
+      candidate_json: string
+    }
+    expect(active?.version.candidate.grid.Tue).toEqual(JSON.parse(initial.candidate_json).grid.Tue)
+    expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "pear", status: "unavailable" })
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(deepseekBodies).toHaveLength(5)
+  })
+
   it("R09: records a reported next-day holiday without creating a revised plan", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed; tomorrow is Thu

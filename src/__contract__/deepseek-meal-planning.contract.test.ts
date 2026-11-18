@@ -34,6 +34,7 @@ import {
 } from "../providers"
 import { messages, parseLLMJson, ToolProviderHttpError, toolDeclaration } from "../providers/llm"
 import { stripNullProperties } from "../runtime/tool-runner"
+import { continueScopedRevision, withCorpusCatalog } from "./helpers/meal-planning-context"
 
 const EXPECTED_CONTEXT_INVENTORY_CHANGES = 4
 const EXPECTED_CONTEXT_EXCEPTION_ADDS = 2
@@ -641,6 +642,7 @@ function assertRequestedRepresented(requested: string[], candidate: MealPlanCand
 async function runLive(
   context: MealPlanContext,
   planningTime: LivePlanningTime = DEFAULT_LIVE_PLANNING_TIME,
+  contextAlreadyUpdated = false,
 ): Promise<MealPlanningAgentSessionResult> {
   // Corpus fixtures intentionally retain hydrated MealCells as evaluator
   // examples. Live agent runs must instead receive the real established
@@ -675,16 +677,19 @@ async function runLive(
       : undefined
   const userText =
     catalogContext.request.kind === "revision"
-      ? `${renderPlanningTimeContext(new Date(planningTime.currentInstant), planningTime.timezone, planningTime.weekStart, planningTime.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(catalogContext.feedbackItems ?? [])}\n\n${renderHouseholdContext(catalogContext)}`
+      ? `${renderPlanningTimeContext(new Date(planningTime.currentInstant), planningTime.timezone, planningTime.weekStart, planningTime.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(catalogContext.feedbackItems ?? [])}\n${contextAlreadyUpdated ? catalogContext.request.text : ""}\n\n${renderHouseholdContext(catalogContext)}`
       : `${renderPlanningTimeContext(new Date(planningTime.currentInstant), planningTime.timezone, planningTime.weekStart, planningTime.weekEnd)}\nRequest: ${catalogContext.request.text}\n\n${renderHouseholdContext(catalogContext)}`
   try {
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: userText }], {
       context: catalogContext,
+      allowWeekContextUpdate: !contextAlreadyUpdated,
       ...(revisionBaseCandidate ? { revisionBaseCandidate } : {}),
       ...(evalDebug ? { retainReasoning: true } : {}),
     })
     if (evalDebug) dumpResult(result)
-    return result
+    return contextAlreadyUpdated
+      ? result
+      : continueScopedRevision(catalogContext, result, (updated) => runLive(updated, planningTime, true))
   } catch (error) {
     if (error instanceof ToolProviderHttpError && error.providerMessage)
       throw new Error(`${error.message}: ${error.providerMessage}`)
@@ -964,7 +969,7 @@ describe("DeepSeek agent-centered meal-planning live contract", () => {
   contractIt(
     "B1/T01: builds a full plan from context alone (no re-asking) with policy outcomes and short easy-buys",
     async () => {
-      const ctx = scenario("baseline-week").context
+      const ctx = withCorpusCatalog(scenario("baseline-week"))
       const result = await runLive(ctx)
       const terminal = requireProposal(result)
       noOpaqueLeak(result.messages)
