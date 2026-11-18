@@ -80,10 +80,10 @@ it.each([
   expect(timingInstructionSchema.safeParse({ kind: "relative-duration", minutes }).success).toBe(false)
 })
 
-it("defaults to immediate, preserves a queue/schedule on prose edits, and changes mode explicitly", () => {
+it("defaults to queue, preserves a queue/schedule on prose edits, and changes mode explicitly", () => {
   expect(resolveNoteTiming({ kind: "unchanged" }, null, receipt, null, now)).toEqual({
     kind: "ready",
-    timing: { kind: "now" },
+    timing: { kind: "queue" },
   })
   for (const current of [
     { kind: "queue" } as const,
