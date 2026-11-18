@@ -24,7 +24,9 @@ unit tests remain in place for expiry, authorization, stale actions and recovery
 ## Real-model checks
 
 The separate, opt-in contract suite reuses the LinkedIn and Calendar journeys
-with real DeepSeek, and the Notes journey with GPT-6 Luna through OpenRouter.
+with real DeepSeek through OpenRouter, and the Notes journeys with GPT-6 Luna
+through OpenRouter. Each model request must use the selected OpenRouter model,
+request usage details and return a finite, non-negative reported cost.
 External account APIs remain intercepted. Notes covers necessary clarification,
 a prose revision that retains the first embedded card and queue intent, queue assigned-time
 confirmation, a separate exact-schedule extraction/revision/approval journey,
@@ -46,9 +48,10 @@ To load the ignored local credentials file without printing its contents:
 WORKFLOW_SANITY_LIVE=1 node --env-file=.dev.vars node_modules/vitest/vitest.mjs run src/__contract__/workflow-sanity.contract.test.ts
 ```
 
-LinkedIn and Calendar use `DEEPSEEK_API_KEY`, or `LLM_API_KEY` containing a DeepSeek key.
-`SANITY_MODEL` overrides their default model (`deepseek-flash`). Notes uses
-`OPENROUTER_API_KEY` and its pinned production model, `openai/gpt-6-luna`. Enabling the
+All five journeys use `OPENROUTER_API_KEY`. LinkedIn and Calendar default to
+`~deepseek/deepseek-flash-latest`; `SANITY_MODEL` accepts an OpenRouter model ID
+or a model name supported by the production OpenRouter resolver. Notes uses
+its pinned production model, `openai/gpt-6-luna`. Enabling the
 suite without a key fails explicitly; ordinary test runs skip the live cases.
 Run these checks for prompt, provider and orchestration changes and before release.
 
