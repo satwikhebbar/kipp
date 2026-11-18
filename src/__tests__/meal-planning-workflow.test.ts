@@ -1640,6 +1640,66 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(deepseekBodies).toHaveLength(5)
   })
 
+  it("preserves the requested new dish in dependent raw Telegram feedback after a context-only handoff", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    base.grid.Tue["school-lunch"] = { mealDefinitionId: SEED_MEAL_IDS["vegetable cutlet"] }
+    const revised = revisionPatch("Mon", "home-lunch", SEED_MEAL_IDS.idli)
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "We have no pears. Replace poha and use idli instead.",
+          messageId: 214,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: {
+            inventoryChanges: [{ name: "pear", status: "unavailable" }],
+            exceptionAdds: [],
+            replan: false,
+          },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(revised) }]),
+    ])
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    const initial = JSON.parse(
+      (db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as { candidate_json: string })
+        .candidate_json,
+    )
+    expect(initial.grid.Mon["home-lunch"].dish).toBe("poha")
+    expect(
+      Object.values(initial.grid)
+        .flatMap((slots) => Object.values(slots as Record<string, MealCell>))
+        .some((cell) => cell.dish === "idli"),
+    ).toBe(false)
+    expect(SEED_PROFILE.mealDefinitions?.some((definition) => definition.name === "idli")).toBe(true)
+    const followUpText = deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")
+    expect(followUpText).toContain("Replace poha and use idli instead.")
+    expect(followUpText).toContain("Carry out the requested replan: Replace poha and use idli instead.")
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.candidate.grid.Mon["home-lunch"].dish).toBe("idli")
+    expect(active?.version.candidate.grid.Tue).toEqual(initial.grid.Tue)
+    expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "pear", status: "unavailable" })
+    expect(deepseekBodies).toHaveLength(5)
+  })
+
   it.each([
     "We have no pears.",
     "We have more pears than Monday and Friday.",

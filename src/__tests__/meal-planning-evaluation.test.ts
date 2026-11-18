@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import {
+  applicablePlanFeedback,
   evaluateMealPlan,
   evaluateMealPlanSelection,
   evaluateMealPlanSelectionPatch,
@@ -1028,6 +1029,30 @@ describe("meal-planning evaluator", () => {
       candidate.grid.Mon.breakfast = cellFor("breakfast", "poha")
       expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
     }
+  })
+
+  it.each(["use", "choose", "serve"])("retains a dependent %s selection with its applicable target", (selection) => {
+    const context = { recentPlan: gridFrom([["Mon", "breakfast", "poha"]]) }
+    const text = `We have no pears. Replace poha and ${selection} idli instead.`
+    const retained = applicablePlanFeedback([{ id: "raw", text }], context)
+    expect(retained).toEqual([{ id: "raw", text: `Replace poha and ${selection} idli instead.` }])
+    expect(isConcretePlanFeedback(retained[0], context)).toBe(true)
+  })
+
+  it.each(["banana", "idli"])("retires a stale replacement even when its selection is already planned (%s)", (dish) => {
+    const context = { recentPlan: gridFrom([["Fri", "breakfast", dish]]) }
+    const text = "Thursday is closed. Replace poha and use idli instead. Put vegetable cutlet on Friday breakfast."
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([
+      { id: "raw", text: "Put vegetable cutlet on Friday breakfast." },
+    ])
+  })
+
+  it("does not attach an explicitly targeted meal request to an inventory fact", () => {
+    const context = { recentPlan: gridFrom([["Fri", "breakfast", "banana"]]) }
+    const text = "We have no pears and use idli for Friday breakfast instead."
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([
+      { id: "raw", text: "use idli for Friday breakfast instead." },
+    ])
   })
 
   it("authorizes slot-only feedback across days while rejecting other slots", () => {
