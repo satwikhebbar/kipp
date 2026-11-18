@@ -1645,6 +1645,12 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ...[false, true].flatMap((replan) => [
       { fact: "We have no pears.", instruction: "Use idli instead of poha.", calendar: false, replan },
       { fact: "Thursday is closed.", instruction: "Use idli instead of poha.", calendar: true, replan },
+      {
+        fact: "We have no pears.",
+        instruction: "Use a lighter dish for Friday lunch instead of something heavy.",
+        calendar: false,
+        replan,
+      },
     ]),
   ])("preserves the requested new dish after a context handoff: $fact $instruction replan=$replan", async ({
     fact,
@@ -1660,7 +1666,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
     base.grid.Tue["school-lunch"] = { mealDefinitionId: SEED_MEAL_IDS["vegetable cutlet"] }
-    const revised = revisionPatch("Mon", "home-lunch", SEED_MEAL_IDS.idli)
+    const targetDay = instruction.includes("Friday") ? "Fri" : "Mon"
+    const targetSlot = instruction.includes("Friday") ? "school-lunch" : "home-lunch"
+    const revised = revisionPatch(targetDay, targetSlot, SEED_MEAL_IDS.idli)
     const step = createFakeStep(
       [
         {
@@ -1707,7 +1715,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(followUpText).toContain(`Carry out the requested replan: ${instruction}`)
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.currentVersion).toBe(2)
-    expect(active?.version.candidate.grid.Mon["home-lunch"].dish).toBe("idli")
+    expect(active?.version.candidate.grid[targetDay][targetSlot].dish).toBe("idli")
     expect(active?.version.candidate.grid.Tue).toEqual(initial.grid.Tue)
     if (calendar) {
       expect(active?.version.candidate.grid.Thu).toBeUndefined()

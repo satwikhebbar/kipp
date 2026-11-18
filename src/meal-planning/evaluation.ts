@@ -180,6 +180,8 @@ const PLAN_ACTION_WORDS =
 const PLAN_CONSTRAINT_WORDS = "(?:no|avoid|without)\\s+repeat(?:ed)?\\s+(?:dishes|meals)"
 const PLAN_ACTION = new RegExp(`\\b(?:${PLAN_ACTION_WORDS})\\b`)
 const PLAN_CONSTRAINT = new RegExp(`\\b${PLAN_CONSTRAINT_WORDS}\\b`)
+const PLAN_TARGET =
+  /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/
 const PLAN_INSTRUCTION_START = `(?=(?:please\\s+)?(?:${PLAN_ACTION_WORDS}|${PLAN_CONSTRAINT_WORDS})\\b)`
 const PLAN_CLAUSE_BOUNDARY = new RegExp(`[;.!?]+|\\b(?:and|but|so)\\s+${PLAN_INSTRUCTION_START}`)
 
@@ -254,13 +256,22 @@ function isPlanChangeClause(
   if (isPlanConstraint(text)) return true
   const action = PLAN_ACTION.test(text)
   const destination = /\b(?:with|to|for|instead|from|on|into|another|other)\b/.test(text)
-  // An explicit replacement applies to its source, not to an already planned
-  // selection or a day/meal mentioned only with that selection.
-  const applicabilityTarget = text.match(/\binstead\s+of\s+(.+)/)?.[1] ?? text
-  const mealOrDay =
-    /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/.test(
-      applicabilityTarget,
+  const replacementSource = text.match(/\binstead\s+of\s+(.+)/)
+  const sourceNamesReviewedDish =
+    replacementSource &&
+    [context.recentPlan, context.feedbackReferencePlan].some((grid) =>
+      Object.values(grid ?? {}).some((slots) =>
+        Object.values(slots).some((cell) => replacementSource[1].includes(cell.dish.toLowerCase())),
+      ),
     )
+  // A named source owns replacement eligibility even after projection removes
+  // it. A generic contrast ("something heavy") must not erase an explicit meal
+  // target in the instruction before "instead of".
+  const applicabilityTarget =
+    replacementSource && (sourceNamesReviewedDish || !PLAN_TARGET.test(text.slice(0, replacementSource.index)))
+      ? replacementSource[1]
+      : text
+  const mealOrDay = PLAN_TARGET.test(applicabilityTarget)
   // A move can rescue a dish from a closed day. A replacement of a removed dish
   // is already satisfied by projection and must not survive as stale feedback.
   const referencePlan = /\b(?:move|moving|shift)\b/.test(text)

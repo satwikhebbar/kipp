@@ -1097,6 +1097,38 @@ describe("meal-planning evaluator", () => {
     }
   })
 
+  it.each([
+    "Use a lighter dish for Friday lunch instead of something heavy.",
+    "Make Friday lunch lighter instead of something heavy.",
+  ])("preserves the meal target of a qualitative contrast: %s", (instruction) => {
+    const text = `We have no pears. ${instruction}`
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "raw", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(true)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([{ id: "raw", text: instruction }])
+    const candidate = baseCandidate()
+    candidate.grid.Fri["school-lunch"] = cellFor("school-lunch", "roasted moong")
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).not.toContain("unscoped_cell_changed")
+    expect(codes).not.toContain("unaddressed_feedback")
+  })
+
+  it("does not let a qualitative destination revive a named source removed by projection", () => {
+    const text = "Use lighter idli for Friday lunch instead of poha."
+    const context = {
+      recentPlan: gridFrom([["Fri", "school-lunch", "idli"]]),
+      feedbackReferencePlan: gridFrom([
+        ["Thu", "breakfast", "poha"],
+        ["Fri", "school-lunch", "idli"],
+      ]),
+    }
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(false)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([])
+  })
+
   it("does not attach an explicitly targeted meal request to an inventory fact", () => {
     const context = { recentPlan: gridFrom([["Fri", "breakfast", "banana"]]) }
     const text = "We have no pears and use idli for Friday breakfast instead."
