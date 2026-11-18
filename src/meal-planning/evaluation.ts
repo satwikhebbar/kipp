@@ -254,9 +254,12 @@ function isPlanChangeClause(
   if (isPlanConstraint(text)) return true
   const action = PLAN_ACTION.test(text)
   const destination = /\b(?:with|to|for|instead|from|on|into|another|other)\b/.test(text)
+  // An explicit replacement applies to its source, not to an already planned
+  // selection or a day/meal mentioned only with that selection.
+  const applicabilityTarget = text.match(/\binstead\s+of\s+(.+)/)?.[1] ?? text
   const mealOrDay =
     /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/.test(
-      text,
+      applicabilityTarget,
     )
   // A move can rescue a dish from a closed day. A replacement of a removed dish
   // is already satisfied by projection and must not survive as stale feedback.
@@ -264,15 +267,17 @@ function isPlanChangeClause(
     ? (context.feedbackReferencePlan ?? context.recentPlan)
     : context.recentPlan
   const dish = Object.values(referencePlan ?? {}).some((slots) =>
-    Object.values(slots).some((cell) => text.includes(cell.dish.toLowerCase())),
+    Object.values(slots).some((cell) => applicabilityTarget.includes(cell.dish.toLowerCase())),
   )
   const selectedOption = /\b(?:prefer|choose|use|serve|put)\s+(?:the\s+)?[a-z][a-z -]*/.test(text)
   const specificPreference =
     /\b(?:less|more|lighter|faster|simpler|healthier|spicier)\b/.test(text) ||
     /\b(?:too|less|more)\s+(?:oily|spicy|heavy|slow|wet|dry)\b/.test(text)
   const namedDays =
-    text.match(/\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g) ?? []
-  const namedMeals = text.match(/\b(?:breakfast|snack|lunch|dinner)\b/g) ?? []
+    applicabilityTarget.match(
+      /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g,
+    ) ?? []
+  const namedMeals = applicabilityTarget.match(/\b(?:breakfast|snack|lunch|dinner)\b/g) ?? []
   const explicitSwap =
     /\b(?:swap|switch|trade)\b/.test(text) && (new Set(namedDays).size >= 2 || new Set(namedMeals).size >= 2)
   return (

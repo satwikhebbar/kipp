@@ -1069,6 +1069,34 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(result)).not.toContain("unaddressed_feedback")
   })
 
+  it.each(
+    [false, true].flatMap((targetEligible) =>
+      [false, true].map((replacementPlanned) => ({ targetEligible, replacementPlanned })),
+    ),
+  )("uses the replaced dish for eligibility: %j", ({ targetEligible, replacementPlanned }) => {
+    const text = "Thursday is closed. Use idli instead of poha."
+    const recentPlan = gridFrom([
+      ["Fri", "breakfast", replacementPlanned ? "idli" : "banana"],
+      ...(targetEligible ? [["Mon", "breakfast", "poha"] as [string, string, string]] : []),
+    ])
+    const context = baseContext({
+      recentPlan,
+      feedbackReferencePlan: gridFrom([["Thu", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "raw", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(targetEligible)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual(
+      targetEligible ? [{ id: "raw", text: "Use idli instead of poha." }] : [],
+    )
+    if (!targetEligible) {
+      const candidate = { grid: gridFrom([["Fri", "breakfast", "roasted moong"]]), easyBuys: [], policyOutcomes: {} }
+      const codes = failureCodes(evaluateMealPlan(candidate, context))
+      expect(codes).toContain("unscoped_cell_changed")
+      expect(codes).toContain("unaddressed_feedback")
+    }
+  })
+
   it("does not attach an explicitly targeted meal request to an inventory fact", () => {
     const context = { recentPlan: gridFrom([["Fri", "breakfast", "banana"]]) }
     const text = "We have no pears and use idli for Friday breakfast instead."

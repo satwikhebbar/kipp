@@ -1879,6 +1879,82 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(deepseekBodies).toHaveLength(5)
   })
 
+  it.each([
+    false,
+    true,
+  ])("does not revive a removed replacement target from a selected dish elsewhere: replan=%s", async (replan) => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    base.grid.Mon["home-lunch"] = { mealDefinitionId: SEED_MEAL_IDS["vegetable cutlet"] }
+    base.grid.Thu.breakfast = { mealDefinitionId: SEED_MEAL_IDS.poha }
+    const fridayLunch = base.grid.Fri["school-lunch"]
+    base.grid.Fri["school-lunch"] = base.grid.Tue["school-lunch"]
+    base.grid.Tue["school-lunch"] = fridayLunch
+    const revised = { grid: {} }
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "Thursday is closed. Use idli instead of poha.",
+          messageId: 215,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: {
+            inventoryChanges: [],
+            exceptionAdds: [{ kind: "school_closed", appliesTo: { day: "Thu" }, instruction: "Thursday is closed" }],
+            replan,
+          },
+        },
+      ]),
+      ...(replan
+        ? [
+            deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+            deepseekResponse([{ name: "propose_plan", input: proposeInput(revised) }]),
+          ]
+        : []),
+    ])
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    const initial = JSON.parse(
+      (db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as { candidate_json: string })
+        .candidate_json,
+    )
+    expect(initial.grid.Thu.breakfast.dish).toBe("poha")
+    expect(
+      Object.entries(initial.grid)
+        .filter(([day]) => day !== "Thu")
+        .flatMap(([, slots]) => Object.values(slots as Record<string, MealCell>))
+        .some((cell) => cell.dish === "poha"),
+    ).toBe(false)
+    expect(initial.grid.Fri["school-lunch"].dish).toBe("idli")
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(replan ? 2 : 1)
+    expect(active?.plan.weeklyExceptions.items).toContainEqual(
+      expect.objectContaining({ kind: "school_closed", appliesTo: { day: "Thu" } }),
+    )
+    expect(active?.version.candidate.grid.Fri).toEqual(initial.grid.Fri)
+    expect(deepseekBodies).toHaveLength(replan ? 5 : 3)
+    if (replan) {
+      expect(active?.version.candidate.grid.Thu).toBeUndefined()
+      const followUpText = deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")
+      expect(followUpText).not.toContain("Use idli instead of poha")
+      expect(followUpText).toContain("Reconcile the grid with the updated schedule")
+    }
+  })
+
   it("recognizes a dish restored by a full-day exception before deciding whether to revise", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
