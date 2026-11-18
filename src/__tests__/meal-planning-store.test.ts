@@ -552,7 +552,44 @@ it.each([
 describe.each([
   ["in-memory", () => createInMemoryMealPlanningStore()],
   ["D1", () => createD1Store().store],
-])("%s reported cost validation", (_name, makeStore) => {
+])("%s cost validation", (_name, makeStore) => {
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    -1,
+  ])("rejects invalid legacy cost %s before creating or promoting", async (costUsd) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput())
+    const usage = { inputTokens: 1, outputTokens: 1, model: "test", costStatus: "legacy" as const, costUsd }
+    await expect(createPlan(store, createInput({ planId: "invalid", usage }))).rejects.toThrow(
+      /legacy usage cost requires/,
+    )
+    expect((await store.activePlan(CHAT))?.plan.planId).toBe("plan-1")
+    await expect(store.promotePlanVersion(promoteInput({ usage }))).rejects.toThrow(/legacy usage cost requires/)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    expect(await store.sumPlanUsage("plan-1")).toBeNull()
+  })
+
+  it.each([undefined, null, 0, 0.004])("accepts legacy cost %s when creating and promoting", async (costUsd) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    const usage = {
+      inputTokens: 1,
+      outputTokens: 1,
+      model: "test",
+      costStatus: "legacy" as const,
+      ...(costUsd === undefined ? {} : { costUsd }),
+    }
+    await createPlan(store, createInput({ usage }))
+    expect((await store.activePlan(CHAT))?.version.usage?.costUsd ?? 0).toBe(costUsd ?? 0)
+    expect(await store.promotePlanVersion(promoteInput({ usage }))).toMatchObject({ ok: true })
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(2)
+    expect((await store.activePlan(CHAT))?.version.usage?.costUsd ?? 0).toBe(costUsd ?? 0)
+    expect((await store.sumPlanUsage("plan-1"))?.byModel[0]?.costUsd ?? 0).toBe((costUsd ?? 0) * 2)
+  })
+
   it.each([
     undefined,
     null,
