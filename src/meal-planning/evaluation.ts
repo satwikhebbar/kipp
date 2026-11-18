@@ -152,18 +152,24 @@ export function isConcretePlanFeedback(
   return planFeedbackClauses(item.text).some((text) => isPlanChangeClause(text, context))
 }
 
+// Clause boundaries and intent classification must support the same instructions.
+const PLAN_ACTION_WORDS =
+  "replace|move|moving|swap|trade|switch|shift|use|serve|put|add|remove|include|omit|change|prefer|choose|make"
+const PLAN_CONSTRAINT_WORDS = "(?:no|avoid|without)\\s+repeat(?:ed)?\\s+(?:dishes|meals)"
+const PLAN_ACTION = new RegExp(`\\b(?:${PLAN_ACTION_WORDS})\\b`)
+const PLAN_CONSTRAINT = new RegExp(`\\b${PLAN_CONSTRAINT_WORDS}\\b`)
+const PLAN_INSTRUCTION_START = `(?=(?:please\\s+)?(?:${PLAN_ACTION_WORDS}|${PLAN_CONSTRAINT_WORDS})\\b)`
+const PLAN_CLAUSE_BOUNDARY = new RegExp(`[;.!?]+|\\b(?:and|but|so)\\s+${PLAN_INSTRUCTION_START}`)
+const PLAN_COMMA_BOUNDARY = new RegExp(`,\\s+${PLAN_INSTRUCTION_START}`)
+
 /** Keeps inventory facts separate from the plan instructions they accompany. */
 function planFeedbackClauses(text: string): string[] {
   return text
     .toLowerCase()
-    .split(
-      /[;.!?]+|\b(?:and|but|so)\s+(?=(?:please\s+)?(?:swap|replace|trade|switch|make|move|use|serve|choose|prefer|shift|add|remove)\b)/,
-    )
+    .split(PLAN_CLAUSE_BOUNDARY)
     .flatMap((clause) =>
       /^\s*(?:we (?:have|had)|there (?:are|is))\b|\b(?:inventory|pantry|stock)\b/.test(clause)
-        ? clause.split(
-            /,\s+(?=(?:please\s+)?(?:swap|replace|trade|switch|make|move|use|serve|choose|prefer|shift|add|remove)\b)/,
-          )
+        ? clause.split(PLAN_COMMA_BOUNDARY)
         : [clause],
     )
 }
@@ -177,10 +183,7 @@ function isPlanChangeClause(
   if (/^\s*(?:we (?:have|had)|there (?:are|is))\s+(?:more|less|fewer|no|some|enough|\d+)\b/.test(text)) return false
   if (/\b(?:make\s+(?:this|it)\s+better|(?:something|anything)\s+better)\b/.test(text)) return false
   if (isPlanConstraint(text)) return true
-  const action =
-    /\b(?:replace|move|moving|swap|trade|switch|shift|use|serve|put|add|remove|include|omit|change|prefer|choose)\b/.test(
-      text,
-    )
+  const action = PLAN_ACTION.test(text)
   const destination = /\b(?:with|to|for|instead|from|on|into|another|other)\b/.test(text)
   const mealOrDay =
     /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/.test(
@@ -206,13 +209,13 @@ function isPlanChangeClause(
   return (
     explicitSwap ||
     (action && ((mealOrDay && destination) || dish || (mealOrDay && selectedOption))) ||
-    (specificPreference && (/\b(?:breakfast|snack|lunch|dinner|meal|dish)\b/.test(text) || dish))
+    (specificPreference && (mealOrDay || dish))
   )
 }
 
 /** Explicit plan-wide constraints do not need a replacement verb or a named cell. */
 function isPlanConstraint(text: string): boolean {
-  return /\b(?:no|avoid|without)\s+repeat(?:ed)?\s+(?:dishes|meals)\b/.test(text)
+  return PLAN_CONSTRAINT.test(text)
 }
 
 /** A concrete plan-wide request is addressed only when a changed cell touches a named day or dish. */

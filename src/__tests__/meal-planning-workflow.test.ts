@@ -1554,6 +1554,24 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
   })
 
   it.each([
+    { text: "Make Friday lighter. We have no pears.", day: "Fri", slot: "breakfast" },
+    ...[" and ", ", "].flatMap((separator) => [
+      ...["no repeat dishes this week", "avoid repeated meals", "without repeat dishes"].map((constraint) => ({
+        text: `We have no pears${separator}${constraint}`,
+        day: "Wed",
+        slot: "breakfast",
+      })),
+      ...[
+        "put vegetable cutlet on Friday breakfast",
+        "include vegetable cutlet for Friday breakfast",
+        "omit the planned dish on Friday breakfast",
+        "change Friday breakfast to vegetable cutlet",
+      ].map((instruction) => ({
+        text: `Remove pears from inventory${separator}${instruction}`,
+        day: "Fri",
+        slot: "breakfast",
+      })),
+    ]),
     { text: "We have no pears. For Monday snack1, use vegetable cutlet instead.", day: "Mon", slot: "snack1" },
     { text: "We have no pears. Please trade the paratha for vegetable cutlet.", day: "Wed", slot: "breakfast" },
     { text: "No repeat dishes this week; we are out of pears.", day: "Wed", slot: "breakfast" },

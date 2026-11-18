@@ -833,7 +833,21 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.failures[0]).toMatchObject({ code: "unscoped_cell_changed", day: "Wed", slot: "breakfast" })
   })
 
-  it.each([
+  it.each<[string, boolean]>([
+    ["Make Friday lighter. We have no pears.", true],
+    ["Friday should be lighter", true],
+    ...[" and ", ", "].flatMap((separator) => [
+      ...["no repeat dishes this week", "avoid repeated meals", "without repeat dishes"].map(
+        (constraint) => [`We have no pears${separator}${constraint}`, true] as [string, boolean],
+      ),
+      ...[
+        "put idli on Friday breakfast",
+        "include idli for Friday breakfast",
+        "omit the planned dish on Friday breakfast",
+        "change Friday breakfast to idli",
+        "moving poha to Friday breakfast",
+      ].map((instruction) => [`Remove pears from inventory${separator}${instruction}`, true] as [string, boolean]),
+    ]),
     ["We have no pears. Please trade the poha for idli.", true],
     ["Trade poha for idli", true],
     ["Swap Friday lunch to pasta", true],
@@ -855,6 +869,21 @@ describe("meal-planning evaluator", () => {
     expect(isConcretePlanFeedback({ id: "raw", text }, { recentPlan: gridFrom([["Mon", "breakfast", "poha"]]) })).toBe(
       expected,
     )
+  })
+
+  it("authorizes and matches a day-only preference while leaving inventory comparisons ineligible", () => {
+    const text = "Make Friday lighter. We have no pears."
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "day-only", text }],
+    })
+    const candidate = baseCandidate()
+    candidate.grid.Fri.breakfast = cellFor("breakfast", "banana")
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).not.toContain("unscoped_cell_changed")
+    expect(codes).not.toContain("unaddressed_feedback")
+    expect(isConcretePlanFeedback({ id: "inventory", text: "We have more pears than Friday." }, context)).toBe(false)
   })
 
   it("resolves moves from the reviewed plan while retiring replacements of removed dishes", () => {
