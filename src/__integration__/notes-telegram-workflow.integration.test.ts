@@ -4,7 +4,12 @@ import { createWorkflowSanity, toolResponse } from "./helpers/workflow-sanity"
 import { notesReceipt, notesRelativeJourney, notesScheduledJourney } from "./helpers/workflow-sanity-scenarios"
 
 const NOTE = "A small release is easier to understand. Keep *the decision* human. 😀"
-const model = () => toolResponse("submit_note", { commentary: "One concrete idea, in the author's voice.", text: NOTE })
+const model = () =>
+  toolResponse("submit_note", {
+    commentary: "One concrete idea, in the author's voice.",
+    text: NOTE,
+    timing: { kind: "now" },
+  })
 
 it("keeps the relative receipt fixed when the bounded writing session retries", async () => {
   const h = await createWorkflowSanity({
@@ -89,7 +94,12 @@ it("preserves the initial relative anchor through clarification, reboot and publ
 it("splits only oversized reviews and publishes the literal Note without commentary or separators", async () => {
   const note = `${"a".repeat(3999)}😀 ${"b".repeat(4500)}TAIL`
   const h = await createWorkflowSanity({
-    model: () => toolResponse("submit_note", { commentary: "Kept every supplied detail.", text: note }),
+    model: () =>
+      toolResponse("submit_note", {
+        commentary: "Kept every supplied detail.",
+        text: note,
+        timing: { kind: "now" },
+      }),
   })
   try {
     await h.message("/note Keep this longer thought intact.")
@@ -317,6 +327,7 @@ it("keeps Revise separate from writing and rejects the old Publish button", asyn
       toolResponse("submit_note", {
         commentary: call === 1 ? "One clear idea." : "Tighter wording.",
         text: call === 1 ? NOTE : revised,
+        timing: { kind: "now" },
       }),
   })
   try {
@@ -441,6 +452,7 @@ it("retains a masked first card through prose revision, replaces it from feedbac
       toolResponse("submit_note", {
         commentary: `Draft ${call}`,
         text: `Version ${call}: small releases teach us faster.`,
+        timing: { kind: "now" },
         linkCardAction: call === 3 ? "use-input" : call === 4 ? "remove" : "keep",
       }),
   })
@@ -649,6 +661,35 @@ it.each(["Asia/Kolkata", null])("queues a Note and displays Buffer's assigned sl
     expect(confirmation.text).toContain(timeZone ? "2030-01-01 19:00 Asia/Kolkata" : "2030-01-01 13:30 UTC")
     expect(h.state.bufferWrites).toHaveLength(1)
     expect(h.state.bufferWrites[0]).toMatchObject({ mode: "addToQueue", schedulingType: "automatic" })
+    expect(h.state.bufferWrites[0]).not.toHaveProperty("dueAt")
+  } finally {
+    await h.dispose()
+  }
+}, 30_000)
+
+it("defaults unchanged initial timing to queue and submits only after Add to queue approval", async () => {
+  const h = await createWorkflowSanity({
+    model: () =>
+      toolResponse("submit_note", {
+        commentary: "A clear point.",
+        text: NOTE,
+        timing: { kind: "unchanged" },
+      }),
+  })
+  try {
+    await h.message("/note Small releases make feedback easier to act on.")
+    const review = await h.waitMessage(/A small release/)
+    expect(review.replyMarkup?.inline_keyboard).toEqual([
+      [{ text: "Add to queue", callback_data: expect.any(String) }],
+      [{ text: "Revise", callback_data: expect.any(String) }],
+    ])
+    expect(review.text).toContain("Timing: next available slot in your Buffer queue.")
+    expect(h.state.bufferWrites).toHaveLength(0)
+
+    await h.click(review, /^Add to queue$/)
+    await h.waitStatus("notes")
+    expect(h.state.bufferWrites).toHaveLength(1)
+    expect(h.state.bufferWrites[0]).toMatchObject({ mode: "addToQueue", schedulingType: "automatic", text: NOTE })
     expect(h.state.bufferWrites[0]).not.toHaveProperty("dueAt")
   } finally {
     await h.dispose()

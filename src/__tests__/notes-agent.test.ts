@@ -64,6 +64,7 @@ it("hands off a necessary clarification without creating a draft", async () => {
 it("names link card actions and extracts publication timing separately", async () => {
   const messages = createNotesConversation("plain", "thoughts")
   expect(messages[0]).toMatchObject({ text: expect.stringContaining("linkCardAction controls the embedded link card") })
+  expect(messages[0]).toMatchObject({ text: expect.stringContaining("initial default: add to the Buffer queue") })
   expect(messages[0]).not.toMatchObject({ text: expect.stringContaining("ask them to confirm immediate publication") })
   const generate = vi.fn(async () => ({
     toolCalls: [

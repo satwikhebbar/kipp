@@ -64,7 +64,7 @@ export function resolveNoteTiming(
 ): TimingResolution {
   if (instruction.kind === "clarify") return { kind: "clarification", question: instruction.question }
   if (instruction.kind === "unchanged") {
-    const timing = current ?? { kind: "now" as const }
+    const timing = current ?? { kind: "queue" as const }
     return isNoteTimingFuture(timing, now)
       ? { kind: "ready", timing }
       : {

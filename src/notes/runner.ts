@@ -274,7 +274,7 @@ export async function runNotesWorkflow(
       return
     }
     version++
-    const reviewTiming = timing ?? { kind: "now" as const }
+    const reviewTiming = timing ?? { kind: "queue" as const }
     const command: BufferCreateCommand = {
       destination,
       text: draft?.text ?? "Clarification pending",

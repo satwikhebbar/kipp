@@ -88,7 +88,7 @@ session by itself. Repeated failed connection checks preserve the fixed review
 deadline. Subsequent changes to a pinned destination still require a new run,
 as described in publication repair below.
 Posting intent is returned as a separate structured timing proposal by the writer.
-With no posting instruction, publication defaults to immediate; prose-only revisions preserve timing.
+With no posting instruction, publication defaults to the Buffer queue; prose-only revisions preserve timing.
 Queue approval delegates the next slot to Buffer. If Buffer returns its assigned
 `dueAt`, the Telegram confirmation shows it using configured `TIMEZONE`, or
 explicit UTC when no valid display zone is configured. Missing `dueAt` still
