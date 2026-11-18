@@ -834,6 +834,12 @@ describe("meal-planning evaluator", () => {
   })
 
   it.each<[string, boolean]>([
+    ...[" and ", ", ", " but ", " so "].flatMap((separator) => [
+      ...["Friday should be lighter", "school lunch should be lighter", "poha should be lighter"].map(
+        (preference) => [`We have no pears${separator}${preference}`, true] as [string, boolean],
+      ),
+      [`We have more pears than Monday${separator}Friday`, false] as [string, boolean],
+    ]),
     ["Make Friday lighter. We have no pears.", true],
     ["Friday should be lighter", true],
     ...[" and ", ", "].flatMap((separator) => [
@@ -871,8 +877,11 @@ describe("meal-planning evaluator", () => {
     )
   })
 
-  it("authorizes and matches a day-only preference while leaving inventory comparisons ineligible", () => {
-    const text = "Make Friday lighter. We have no pears."
+  it.each([
+    "Make Friday lighter. We have no pears.",
+    "We have no pears and Friday should be lighter",
+    "We have no pears, Friday should be lighter",
+  ])("authorizes and matches a day-only preference without borrowing inventory context: %s", (text) => {
     const context = baseContext({
       recentPlan: baseCandidate().grid,
       request: { kind: "revision", text },

@@ -1554,6 +1554,10 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
   })
 
   it.each([
+    ...[" and ", ", ", " but ", " so "].flatMap((separator) => [
+      { text: `We have no pears${separator}Friday should be lighter`, day: "Fri", slot: "breakfast" },
+      { text: `We have no pears${separator}school lunch should be lighter`, day: "Mon", slot: "school-lunch" },
+    ]),
     { text: "Make Friday lighter. We have no pears.", day: "Fri", slot: "breakfast" },
     ...[" and ", ", "].flatMap((separator) => [
       ...["no repeat dishes this week", "avoid repeated meals", "without repeat dishes"].map((constraint) => ({
@@ -1628,6 +1632,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
 
   it.each([
     "We have no pears.",
+    "We have more pears than Monday and Friday.",
+    "We have more pears than Monday, Friday.",
     "We have more pears than we had on Monday.",
     "We have more pears for Monday breakfast.",
     "Remove pears from inventory; we ran out before Friday.",

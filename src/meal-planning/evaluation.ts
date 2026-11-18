@@ -149,7 +149,7 @@ export function isConcretePlanFeedback(
   context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
 ): boolean {
   if (item.scope || item.target?.kind === "cell") return false
-  return planFeedbackClauses(item.text).some((text) => isPlanChangeClause(text, context))
+  return planFeedbackClauses(item.text, context).some((text) => isPlanChangeClause(text, context))
 }
 
 // Clause boundaries and intent classification must support the same instructions.
@@ -160,18 +160,28 @@ const PLAN_ACTION = new RegExp(`\\b(?:${PLAN_ACTION_WORDS})\\b`)
 const PLAN_CONSTRAINT = new RegExp(`\\b${PLAN_CONSTRAINT_WORDS}\\b`)
 const PLAN_INSTRUCTION_START = `(?=(?:please\\s+)?(?:${PLAN_ACTION_WORDS}|${PLAN_CONSTRAINT_WORDS})\\b)`
 const PLAN_CLAUSE_BOUNDARY = new RegExp(`[;.!?]+|\\b(?:and|but|so)\\s+${PLAN_INSTRUCTION_START}`)
-const PLAN_COMMA_BOUNDARY = new RegExp(`,\\s+${PLAN_INSTRUCTION_START}`)
 
 /** Keeps inventory facts separate from the plan instructions they accompany. */
-function planFeedbackClauses(text: string): string[] {
+function planFeedbackClauses(
+  text: string,
+  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
+): string[] {
   return text
     .toLowerCase()
     .split(PLAN_CLAUSE_BOUNDARY)
-    .flatMap((clause) =>
-      /^\s*(?:we (?:have|had)|there (?:are|is))\b|\b(?:inventory|pantry|stock)\b/.test(clause)
-        ? clause.split(PLAN_COMMA_BOUNDARY)
-        : [clause],
-    )
+    .flatMap((clause) => {
+      if (!/^\s*(?:we (?:have|had)|there (?:are|is))\b|\b(?:inventory|pantry|stock)\b/.test(clause)) return [clause]
+      // Ask the classifier itself whether the suffix is an instruction. This
+      // includes day-, meal-, and dish-led preferences without another verb list.
+      // Do this only for inventory clauses so a leading "Friday lunch, ..."
+      // stays attached to its instruction and swaps keep both named days.
+      for (const boundary of clause.matchAll(/,\s+|\b(?:and|but|so)\s+/g)) {
+        const suffix = clause.slice(boundary.index + boundary[0].length)
+        if (isPlanChangeClause(suffix, context))
+          return [clause.slice(0, boundary.index), ...planFeedbackClauses(suffix, context)]
+      }
+      return [clause]
+    })
 }
 
 /** Classifies a clause so inventory actions cannot borrow plan targets from unrelated facts. */
@@ -225,7 +235,7 @@ function concreteFeedbackMatchesChangedCell(
   candidate: MealPlanCandidate,
   context: MealPlanContext,
 ): boolean {
-  return planFeedbackClauses(item.text).some((text) => {
+  return planFeedbackClauses(item.text, context).some((text) => {
     if (!isPlanChangeClause(text, context)) return false
     const currentDish = candidate.grid[changedCell.day]?.[changedCell.slotId]?.dish
     const currentDishMatches = currentDish !== undefined && text.includes(currentDish.toLowerCase())
