@@ -74,6 +74,8 @@ describe("live meal-planning context", () => {
   it("projects a closed day out of both the follow-up context and hydrated patch base", async () => {
     const context = loadScenarios().find((entry) => entry.id === "midweek-shortage")?.context
     if (!context?.recentPlan) throw new Error("missing midweek-shortage plan")
+    expect(Object.keys(context.recentPlan.Thu ?? {}).length).toBeGreaterThan(0)
+    expect(Object.keys(context.recentPlan.Fri ?? {}).length).toBeGreaterThan(0)
     const result = {
       providerTurns: 2,
       terminal: {

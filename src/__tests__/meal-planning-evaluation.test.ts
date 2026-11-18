@@ -4,6 +4,7 @@ import {
   evaluateMealPlan,
   evaluateMealPlanSelection,
   evaluateMealPlanSelectionPatch,
+  isConcretePlanFeedback,
 } from "../meal-planning/evaluation"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "../meal-planning/hydration"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
@@ -830,6 +831,85 @@ describe("meal-planning evaluator", () => {
     const evaluation = evaluateMealPlan(outOfScope, context)
     expect(failureCodes(evaluation)).toEqual(["unscoped_cell_changed"])
     expect(evaluation.failures[0]).toMatchObject({ code: "unscoped_cell_changed", day: "Wed", slot: "breakfast" })
+  })
+
+  it.each([
+    ["We have no pears. Please trade the poha for idli.", true],
+    ["Trade poha for idli", true],
+    ["Swap Friday lunch to pasta", true],
+    ["Swap Monday and Tuesday breakfast", true],
+    ["No repeat dishes this week; we are out of paneer", true],
+    ["Avoid repeated meals this week", true],
+    ["Make school lunch lighter; paneer is out", true],
+    ["Remove paneer from inventory and swap Friday lunch to pasta", true],
+    ["We have more pears than we had on Monday", false],
+    ["We have more poha for Monday breakfast", false],
+    ["We have more pears than Monday, please make lunch lighter", true],
+    ["We have no pears so use idli for Friday lunch", true],
+    ["We have less paneer than Friday", false],
+    ["Remove paneer from inventory; we ran out before Friday", false],
+    ["Add paneer to inventory for Friday lunch", false],
+    ["We are out of paneer", false],
+    ["Make this better", false],
+  ])("classifies raw plan intent independently of inventory wording: %s", (text, expected) => {
+    expect(isConcretePlanFeedback({ id: "raw", text }, { recentPlan: gridFrom([["Mon", "breakfast", "poha"]]) })).toBe(
+      expected,
+    )
+  })
+
+  it("resolves moves from the reviewed plan while retiring replacements of removed dishes", () => {
+    const stored = gridFrom([
+      ["Thu", "breakfast", "poha"],
+      ["Fri", "breakfast", "banana"],
+    ])
+    const projected = gridFrom([["Fri", "breakfast", "banana"]])
+    const context = baseContext({
+      recentPlan: projected,
+      feedbackReferencePlan: stored,
+      request: { kind: "revision", text: "Move poha to another spot" },
+      feedbackItems: [{ id: "move", text: "Move poha to another spot" }],
+    })
+    expect(isConcretePlanFeedback({ id: "replace", text: "Replace poha" }, context)).toBe(false)
+    expect(isConcretePlanFeedback({ id: "move", text: "Move poha to another spot" }, context)).toBe(true)
+    const result = evaluateMealPlan(
+      { grid: gridFrom([["Fri", "breakfast", "poha"]]), easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(failureCodes(result)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(result)).not.toContain("unaddressed_feedback")
+    expect(projected.Thu).toBeUndefined()
+  })
+
+  it.each([
+    "Make school lunch lighter; paneer is out.",
+    "Make school lunch lighter; we ran out of paneer before Friday.",
+    "Remove paneer from inventory before Friday and make school lunch lighter.",
+  ])("matches meal-only feedback without borrowing inventory days: %s", (text) => {
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "meal-only", text }],
+    })
+    const breakfast = baseCandidate()
+    breakfast.grid.Mon.breakfast = cellFor("breakfast", "banana")
+    expect(failureCodes(evaluateMealPlan(breakfast, context))).toContain("unaddressed_feedback")
+    const lunch = baseCandidate()
+    lunch.grid.Mon["school-lunch"] = cellFor("school-lunch", "roasted moong")
+    expect(failureCodes(evaluateMealPlan(lunch, context))).not.toContain("unaddressed_feedback")
+  })
+
+  it("recognizes a plan-wide no-repeat constraint as addressed by a revision", () => {
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text: "No repeat dishes this week" },
+      feedbackItems: [{ id: "no-repeat", text: "No repeat dishes this week" }],
+    })
+    const candidate = baseCandidate()
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+    candidate.grid.Mon.breakfast = cellFor("breakfast", "banana")
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).not.toContain("unaddressed_feedback")
+    expect(codes).not.toContain("unscoped_cell_changed")
   })
 
   it("authorizes slot-only feedback across days while rejecting other slots", () => {

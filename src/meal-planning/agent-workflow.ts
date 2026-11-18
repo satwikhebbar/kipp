@@ -1023,15 +1023,17 @@ async function runRevision(
   // requested cells cannot be silently dropped after the context update.
   // Scoped and concrete plan-wide Telegram requests retain their authority;
   // context-only facts are retired after applying their inventory or calendar update.
-  const feedbackItems =
-    contextAlreadyUpdated && !feedbackBatch
-      ? submission.items.filter(
-          (item) => item.scope || isConcretePlanFeedback(item, { recentPlan: active.version.candidate.grid }),
-        )
-      : submission.items
   // A stored plan can predate a recurring schedule rule. Start every revision
   // from the cells still eligible under the household's current schedule.
   const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)
+  const feedbackReference = {
+    recentPlan: revisionBaseCandidate.grid,
+    feedbackReferencePlan: active.version.candidate.grid,
+  }
+  const feedbackItems =
+    contextAlreadyUpdated && !feedbackBatch
+      ? submission.items.filter((item) => item.scope || isConcretePlanFeedback(item, feedbackReference))
+      : submission.items
   const priorWeek = await stepDo(step, `meal-planning-read-prior-week-${occurrence}`, () =>
     store.latestPlanForWeek(
       event.payload.chatId,
@@ -1045,6 +1047,7 @@ async function runRevision(
     weeklyInventory: active.plan.weeklyInventory,
     weeklyExceptions: active.plan.weeklyExceptions,
     recentPlan: revisionBaseCandidate.grid,
+    feedbackReferencePlan: active.version.candidate.grid,
     priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
     request: { kind: "revision", text: submission.items.map((item) => item.text).join(" ") },
     feedbackItems,

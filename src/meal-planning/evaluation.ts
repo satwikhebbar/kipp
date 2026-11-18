@@ -144,12 +144,41 @@ function inFeedbackScope(scope: { day?: string; slot?: string }, day: string, sl
 }
 
 /** A plan target authorizes a revision only when the parent's text names a concrete change. */
-export function isConcretePlanFeedback(item: FeedbackItem, context: Pick<MealPlanContext, "recentPlan">): boolean {
+export function isConcretePlanFeedback(
+  item: FeedbackItem,
+  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
+): boolean {
   if (item.scope || item.target?.kind === "cell") return false
-  const text = item.text.toLowerCase()
+  return planFeedbackClauses(item.text).some((text) => isPlanChangeClause(text, context))
+}
+
+/** Keeps inventory facts separate from the plan instructions they accompany. */
+function planFeedbackClauses(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(
+      /[;.!?]+|\b(?:and|but|so)\s+(?=(?:please\s+)?(?:swap|replace|trade|switch|make|move|use|serve|choose|prefer|shift|add|remove)\b)/,
+    )
+    .flatMap((clause) =>
+      /^\s*(?:we (?:have|had)|there (?:are|is))\b|\b(?:inventory|pantry|stock)\b/.test(clause)
+        ? clause.split(
+            /,\s+(?=(?:please\s+)?(?:swap|replace|trade|switch|make|move|use|serve|choose|prefer|shift|add|remove)\b)/,
+          )
+        : [clause],
+    )
+}
+
+/** Classifies a clause so inventory actions cannot borrow plan targets from unrelated facts. */
+function isPlanChangeClause(
+  text: string,
+  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
+): boolean {
+  if (/\b(?:remove|add|put|update)\b.*\b(?:inventory|pantry|stock)\b/.test(text)) return false
+  if (/^\s*(?:we (?:have|had)|there (?:are|is))\s+(?:more|less|fewer|no|some|enough|\d+)\b/.test(text)) return false
   if (/\b(?:make\s+(?:this|it)\s+better|(?:something|anything)\s+better)\b/.test(text)) return false
+  if (isPlanConstraint(text)) return true
   const action =
-    /\b(?:replace|move|moving|swap|switch|shift|use|serve|put|add|remove|include|omit|change|prefer|choose)\b/.test(
+    /\b(?:replace|move|moving|swap|trade|switch|shift|use|serve|put|add|remove|include|omit|change|prefer|choose)\b/.test(
       text,
     )
   const destination = /\b(?:with|to|for|instead|from|on|into|another|other)\b/.test(text)
@@ -157,7 +186,12 @@ export function isConcretePlanFeedback(item: FeedbackItem, context: Pick<MealPla
     /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/.test(
       text,
     )
-  const dish = Object.values(context.recentPlan ?? {}).some((slots) =>
+  // A move can rescue a dish from a closed day. A replacement of a removed dish
+  // is already satisfied by projection and must not survive as stale feedback.
+  const referencePlan = /\b(?:move|moving|shift)\b/.test(text)
+    ? (context.feedbackReferencePlan ?? context.recentPlan)
+    : context.recentPlan
+  const dish = Object.values(referencePlan ?? {}).some((slots) =>
     Object.values(slots).some((cell) => text.includes(cell.dish.toLowerCase())),
   )
   const selectedOption = /\b(?:prefer|choose|use|serve|put)\s+(?:the\s+)?[a-z][a-z -]*/.test(text)
@@ -172,8 +206,13 @@ export function isConcretePlanFeedback(item: FeedbackItem, context: Pick<MealPla
   return (
     explicitSwap ||
     (action && ((mealOrDay && destination) || dish || (mealOrDay && selectedOption))) ||
-    (mealOrDay && specificPreference)
+    (specificPreference && (/\b(?:breakfast|snack|lunch|dinner|meal|dish)\b/.test(text) || dish))
   )
+}
+
+/** Explicit plan-wide constraints do not need a replacement verb or a named cell. */
+function isPlanConstraint(text: string): boolean {
+  return /\b(?:no|avoid|without)\s+repeat(?:ed)?\s+(?:dishes|meals)\b/.test(text)
 }
 
 /** A concrete plan-wide request is addressed only when a changed cell touches a named day or dish. */
@@ -183,36 +222,39 @@ function concreteFeedbackMatchesChangedCell(
   candidate: MealPlanCandidate,
   context: MealPlanContext,
 ): boolean {
-  const text = item.text.toLowerCase()
-  const currentDish = candidate.grid[changedCell.day]?.[changedCell.slotId]?.dish
-  const currentDishMatches = currentDish !== undefined && text.includes(currentDish.toLowerCase())
-  const priorDish = context.recentPlan?.[changedCell.day]?.[changedCell.slotId]?.dish
-  const priorDishMatches = priorDish !== undefined && text.includes(priorDish.toLowerCase())
-  const namedDays =
-    text.match(/\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g) ?? []
-  const dayNames: Record<string, string> = {
-    mon: "mon",
-    monday: "mon",
-    tue: "tue",
-    tuesday: "tue",
-    wed: "wed",
-    wednesday: "wed",
-    thu: "thu",
-    thursday: "thu",
-    fri: "fri",
-    friday: "fri",
-    sat: "sat",
-    saturday: "sat",
-  }
-  const dayMatches = namedDays.some((day) => changedCell.day.toLowerCase().startsWith(dayNames[day]))
-  const namedMeals = text.match(/\b(?:breakfast|snack\s*[12]?|lunch|dinner)\b/g) ?? []
-  const slotMatches = namedMeals.some((meal) => {
-    const normalizedMeal = meal.replace(/\s+/g, "")
-    return changedCell.slotId.toLowerCase().includes(normalizedMeal)
+  return planFeedbackClauses(item.text).some((text) => {
+    if (!isPlanChangeClause(text, context)) return false
+    const currentDish = candidate.grid[changedCell.day]?.[changedCell.slotId]?.dish
+    const currentDishMatches = currentDish !== undefined && text.includes(currentDish.toLowerCase())
+    const priorDish = context.recentPlan?.[changedCell.day]?.[changedCell.slotId]?.dish
+    const priorDishMatches = priorDish !== undefined && text.includes(priorDish.toLowerCase())
+    const namedDays =
+      text.match(/\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g) ?? []
+    const dayNames: Record<string, string> = {
+      mon: "mon",
+      monday: "mon",
+      tue: "tue",
+      tuesday: "tue",
+      wed: "wed",
+      wednesday: "wed",
+      thu: "thu",
+      thursday: "thu",
+      fri: "fri",
+      friday: "fri",
+      sat: "sat",
+      saturday: "sat",
+    }
+    const dayMatches = namedDays.some((day) => changedCell.day.toLowerCase().startsWith(dayNames[day]))
+    const namedMeals = text.match(/\b(?:breakfast|snack\s*[12]?|lunch|dinner)\b/g) ?? []
+    const slotMatches = namedMeals.some((meal) => {
+      const normalizedMeal = meal.replace(/\s+/g, "")
+      return changedCell.slotId.toLowerCase().includes(normalizedMeal)
+    })
+    if (namedDays.length > 0 && namedMeals.length > 0) return dayMatches && slotMatches
+    if (namedDays.length > 0) return dayMatches
+    if (namedMeals.length > 0) return slotMatches
+    return currentDishMatches || priorDishMatches || isPlanConstraint(text)
   })
-  if (namedDays.length > 0 && namedMeals.length > 0) return dayMatches && slotMatches
-  if (namedDays.length > 0) return dayMatches
-  return dayMatches || currentDishMatches || priorDishMatches
 }
 
 /** Locale-independent total ordering for two optional strings (empty sorts first). */
