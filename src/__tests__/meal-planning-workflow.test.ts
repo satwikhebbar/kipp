@@ -1558,6 +1558,14 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       { text: `We have no pears${separator}Friday should be lighter`, day: "Fri", slot: "breakfast" },
       { text: `We have no pears${separator}school lunch should be lighter`, day: "Mon", slot: "school-lunch" },
     ]),
+    ...[" and ", ", "].flatMap((separator) => [
+      { text: `We have no pears${separator}less oily meals for Friday`, day: "Fri", slot: "breakfast" },
+      {
+        text: `We have no pears${separator}more apples than Monday and Friday should be lighter`,
+        day: "Fri",
+        slot: "breakfast",
+      },
+    ]),
     { text: "Make Friday lighter. We have no pears.", day: "Fri", slot: "breakfast" },
     ...[" and ", ", "].flatMap((separator) => [
       ...["no repeat dishes this week", "avoid repeated meals", "without repeat dishes"].map((constraint) => ({
@@ -1634,6 +1642,13 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     "We have no pears.",
     "We have more pears than Monday and Friday.",
     "We have more pears than Monday, Friday.",
+    ...[" and ", ", "].flatMap((separator) => [
+      `We have more pears than Monday${separator}more apples than Friday.`,
+      `We have more pears${separator}less paneer for Friday.`,
+      `We have more pears${separator}fewer apples for Friday lunch.`,
+      `We have more pears${separator}no more poha for Friday.`,
+      `We have more pears${separator}2 more apples than Friday.`,
+    ]),
     "We have more pears than we had on Monday.",
     "We have more pears for Monday breakfast.",
     "Remove pears from inventory; we ran out before Friday.",

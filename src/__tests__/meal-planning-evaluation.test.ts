@@ -840,6 +840,17 @@ describe("meal-planning evaluator", () => {
       ),
       [`We have more pears than Monday${separator}Friday`, false] as [string, boolean],
     ]),
+    ...[" and ", ", "].flatMap((separator) => [
+      ...[
+        "more apples than Friday",
+        "less paneer for Friday",
+        "fewer apples for Friday lunch",
+        "no more poha for Friday",
+        "2 more apples than Friday",
+      ].map((quantity) => [`We have more pears than Monday${separator}${quantity}`, false] as [string, boolean]),
+      [`We have more pears${separator}less oily meals for Friday`, true] as [string, boolean],
+      [`We have more pears${separator}more apples than Monday and Friday should be lighter`, true] as [string, boolean],
+    ]),
     ["Make Friday lighter. We have no pears.", true],
     ["Friday should be lighter", true],
     ...[" and ", ", "].flatMap((separator) => [
@@ -893,6 +904,20 @@ describe("meal-planning evaluator", () => {
     expect(codes).not.toContain("unscoped_cell_changed")
     expect(codes).not.toContain("unaddressed_feedback")
     expect(isConcretePlanFeedback({ id: "inventory", text: "We have more pears than Friday." }, context)).toBe(false)
+  })
+
+  it.each([" and ", ", "])("does not let compound inventory quantities authorize Friday edits (%s)", (separator) => {
+    const text = `We have more pears than Monday${separator}more apples than Friday`
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "inventory", text }],
+    })
+    const candidate = baseCandidate()
+    candidate.grid.Fri.breakfast = cellFor("breakfast", "banana")
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).toContain("unscoped_cell_changed")
+    expect(codes).toContain("unaddressed_feedback")
   })
 
   it("resolves moves from the reviewed plan while retiring replacements of removed dishes", () => {

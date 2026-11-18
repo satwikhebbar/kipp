@@ -177,11 +177,23 @@ function planFeedbackClauses(
       // stays attached to its instruction and swaps keep both named days.
       for (const boundary of clause.matchAll(/,\s+|\b(?:and|but|so)\s+/g)) {
         const suffix = clause.slice(boundary.index + boundary[0].length)
+        // "We have more pears and less paneer" shares its inventory subject.
+        // Keep that quantity under the stock guard while still allowing an
+        // independent qualitative request such as "less oily meals on Friday".
+        if (inheritsInventoryQuantity(suffix)) continue
         if (isPlanChangeClause(suffix, context))
           return [clause.slice(0, boundary.index), ...planFeedbackClauses(suffix, context)]
       }
       return [clause]
     })
+}
+
+/** A quantity-led continuation inherits the inventory subject unless it describes meal quality. */
+function inheritsInventoryQuantity(text: string): boolean {
+  return (
+    /^\s*(?:no\s+)?(?:more|less|fewer|some|enough|\d+)\b/.test(text) &&
+    !/^\s*(?:less|more)\s+(?:oily|spicy|heavy|slow|wet|dry)\b/.test(text)
+  )
 }
 
 /** Classifies a clause so inventory actions cannot borrow plan targets from unrelated facts. */
