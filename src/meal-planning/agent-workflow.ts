@@ -15,8 +15,9 @@ import { createToolProvider, type ToolConversationMessage, type ToolProviderRequ
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
 import { logRuntime } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
-import { computeCoverageSet } from "./coverage"
+import { projectEligibleGrid } from "./coverage"
 import { createEasyBuyClassifier } from "./easy-buy-classifier"
+import { isConcretePlanFeedback } from "./evaluation"
 import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -1020,10 +1021,14 @@ async function runRevision(
   // applies a week-context fact (for example, an item going out of season).
   // Keep those authoritative items in the follow-up evaluation so the
   // requested cells cannot be silently dropped after the context update.
-  // Scoped Telegram items also retain their authority; only unscoped context
-  // facts are retired after applying their inventory or calendar update.
+  // Scoped and concrete plan-wide Telegram requests retain their authority;
+  // context-only facts are retired after applying their inventory or calendar update.
   const feedbackItems =
-    contextAlreadyUpdated && !feedbackBatch ? submission.items.filter((item) => item.scope) : submission.items
+    contextAlreadyUpdated && !feedbackBatch
+      ? submission.items.filter(
+          (item) => item.scope || isConcretePlanFeedback(item, { recentPlan: active.version.candidate.grid }),
+        )
+      : submission.items
   // A stored plan can predate a recurring schedule rule. Start every revision
   // from the cells still eligible under the household's current schedule.
   const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)
@@ -1083,10 +1088,11 @@ async function runRevision(
       return null
     }
     // Standalone Telegram context facts may intentionally stop after the
-    // context update. Mini App submissions, and scoped Telegram feedback,
+    // context update. Mini App submissions and concrete Telegram plan requests
     // still require a revision even when the model marks the context update
     // itself as replan:false.
-    const feedbackRequiresRevision = Boolean(feedbackBatch) || submission.items.some((item) => item.scope)
+    const feedbackRequiresRevision =
+      Boolean(feedbackBatch) || submission.items.some((item) => item.scope || isConcretePlanFeedback(item, context))
     if (!updatedContext.replan && !feedbackRequiresRevision) {
       if (feedbackBatch)
         await stepDo(step, `meal-planning-consume-mini-app-batch-${occurrence}`, () =>
@@ -1224,26 +1230,17 @@ function withoutIneligibleCells(
   plan: MealPlanRecord,
   profile: StoredMealProfile,
 ): MealPlanCandidate {
-  const coverage = computeCoverageSet({
-    schedule: profile.schedule,
-    profile: profile.profile,
-    customPolicies: profile.customPolicies,
-    weeklyInventory: plan.weeklyInventory,
-    weeklyExceptions: plan.weeklyExceptions,
-    recentPlan: candidate.grid,
-    request: { kind: "revision", text: "week context update" },
-  })
-  const eligible = new Set(coverage.required.map((cell) => `${cell.day}\u0000${cell.slotId}`))
   return {
     ...candidate,
-    grid: Object.fromEntries(
-      Object.entries(candidate.grid)
-        .map(([day, cells]) => [
-          day,
-          Object.fromEntries(Object.entries(cells).filter(([slot]) => eligible.has(`${day}\u0000${slot}`))),
-        ])
-        .filter(([, cells]) => Object.keys(cells).length),
-    ),
+    grid: projectEligibleGrid(candidate.grid, {
+      schedule: profile.schedule,
+      profile: profile.profile,
+      customPolicies: profile.customPolicies,
+      weeklyInventory: plan.weeklyInventory,
+      weeklyExceptions: plan.weeklyExceptions,
+      recentPlan: candidate.grid,
+      request: { kind: "revision", text: "week context update" },
+    }),
   }
 }
 

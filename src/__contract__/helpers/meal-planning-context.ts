@@ -1,4 +1,5 @@
 import type { MealPlanningTerminalOutcome } from "../../agent/meal-planning-session"
+import { projectEligibleGrid } from "../../meal-planning/coverage"
 import type { MealDefinition, MealPlanContext, MealPlanScenario } from "../../meal-planning/types"
 
 /** Restores the explicit repertoire facts of a hydrated corpus fixture for selection-based live sessions. */
@@ -39,15 +40,13 @@ export function withCorpusCatalog(scenario: MealPlanScenario): MealPlanContext {
 }
 
 /** Follows the production workflow's scoped-feedback replan after its context-update handoff. */
-export async function continueScopedRevision<T extends { terminal: MealPlanningTerminalOutcome | null }>(
-  context: MealPlanContext,
-  result: T,
-  runUpdatedSession: (updated: MealPlanContext) => Promise<T>,
-): Promise<T> {
+export async function continueScopedRevision<
+  T extends { terminal: MealPlanningTerminalOutcome | null; providerTurns: number },
+>(context: MealPlanContext, result: T, runUpdatedSession: (updated: MealPlanContext) => Promise<T>): Promise<T> {
   if (result.terminal?.kind !== "update_week_context" || !context.feedbackItems?.some((item) => item.scope))
     return result
   const update = result.terminal.update
-  return runUpdatedSession({
+  const updated: MealPlanContext = {
     ...context,
     weeklyInventory: update.weeklyInventory,
     weeklyExceptions: update.weeklyExceptions,
@@ -58,5 +57,8 @@ export async function continueScopedRevision<T extends { terminal: MealPlanningT
       kind: "revision",
       text: `Week-context updates from this message are already applied. Carry out the requested replan: ${context.feedbackItems.map((item) => item.text).join(" ")}`,
     },
-  })
+  }
+  if (updated.recentPlan) updated.recentPlan = projectEligibleGrid(updated.recentPlan, updated)
+  const followUp = await runUpdatedSession(updated)
+  return { ...followUp, providerTurns: result.providerTurns + followUp.providerTurns }
 }

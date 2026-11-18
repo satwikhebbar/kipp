@@ -42,6 +42,7 @@ describe("live meal-planning context", () => {
     const context = loadScenarios().find((entry) => entry.id === "midweek-shortage")?.context
     if (!context) throw new Error("missing midweek-shortage")
     const result = {
+      providerTurns: 2,
       terminal: {
         kind: "update_week_context",
         update: {
@@ -51,29 +52,66 @@ describe("live meal-planning context", () => {
         },
       } as MealPlanningTerminalOutcome,
     }
-    const final = { terminal: null as MealPlanningTerminalOutcome | null }
+    const final = { providerTurns: 8, terminal: null as MealPlanningTerminalOutcome | null }
     const runUpdatedSession = vi.fn(async (_updated: MealPlanContext) => final)
     expect(
-      await continueScopedRevision<{ terminal: MealPlanningTerminalOutcome | null }>(
+      await continueScopedRevision<{ terminal: MealPlanningTerminalOutcome | null; providerTurns: number }>(
         context,
         result,
         runUpdatedSession,
       ),
-    ).toBe(final)
+    ).toEqual({ ...final, providerTurns: 10 })
     expect(runUpdatedSession).toHaveBeenCalledOnce()
     const updated = runUpdatedSession.mock.calls[0][0]
     expect(updated.weeklyInventory.items).toEqual([{ name: "paneer", status: "unavailable" }])
-    expect(updated.recentPlan).toBe(context.recentPlan)
+    expect(updated.recentPlan).toEqual(context.recentPlan)
     expect(updated.feedbackItems).toEqual(context.feedbackItems)
     expect(updated.request.text).toContain("swap Friday's school lunch")
     expect(updated.request.text).toContain("already applied")
     expect(updated.request.text).not.toContain("fb-paneer")
   })
 
+  it("projects a closed day out of both the follow-up context and hydrated patch base", async () => {
+    const context = loadScenarios().find((entry) => entry.id === "midweek-shortage")?.context
+    if (!context?.recentPlan) throw new Error("missing midweek-shortage plan")
+    const result = {
+      providerTurns: 2,
+      terminal: {
+        kind: "update_week_context",
+        update: {
+          weeklyInventory: context.weeklyInventory,
+          weeklyExceptions: {
+            items: [{ kind: "school_closed", instruction: "Thursday is closed", appliesTo: { day: "Thu" } }],
+          },
+          replan: false,
+        },
+      } as MealPlanningTerminalOutcome,
+    }
+    const runUpdatedSession = vi.fn(async (updated: MealPlanContext) => {
+      expect(updated.recentPlan?.Thu).toBeUndefined()
+      expect(updated.recentPlan?.Fri).toEqual(context.recentPlan?.Fri)
+      // runLive reconstructs its patch base directly from this projected grid.
+      if (!updated.recentPlan) throw new Error("missing projected plan")
+      const base = { grid: updated.recentPlan, easyBuys: [], policyOutcomes: {} }
+      const { hydrateMealPlanPatch } = await import("../meal-planning/hydration")
+      const hydrated = hydrateMealPlanPatch({ grid: {} }, base, updated)
+      expect(hydrated.candidate?.grid.Thu).toBeUndefined()
+      expect(hydrated.candidate?.grid.Fri).toEqual(context.recentPlan?.Fri)
+      return { providerTurns: 1, terminal: null }
+    })
+    await continueScopedRevision<{ terminal: MealPlanningTerminalOutcome | null; providerTurns: number }>(
+      context,
+      result,
+      runUpdatedSession,
+    )
+    expect(runUpdatedSession).toHaveBeenCalledOnce()
+  })
+
   it("preserves a standalone context-only terminal without inventing a replan", async () => {
     const context = loadScenarios().find((entry) => entry.id === "midweek-shortage")?.context
     if (!context) throw new Error("missing midweek-shortage")
     const result = {
+      providerTurns: 2,
       terminal: {
         kind: "update_week_context",
         update: { weeklyInventory: context.weeklyInventory, weeklyExceptions: context.weeklyExceptions, replan: false },
@@ -82,5 +120,6 @@ describe("live meal-planning context", () => {
     const runUpdatedSession = vi.fn()
     expect(await continueScopedRevision({ ...context, feedbackItems: [] }, result, runUpdatedSession)).toBe(result)
     expect(runUpdatedSession).not.toHaveBeenCalled()
+    expect(result.providerTurns).toBe(2)
   })
 })

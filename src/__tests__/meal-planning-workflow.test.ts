@@ -1504,7 +1504,10 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
   })
 
-  it("retains scoped Telegram feedback after an inventory-only handoff before promoting the revision", async () => {
+  it.each([
+    { day: "Mon", slot: "snack1" },
+    { slot: "snack1" },
+  ])("retains scoped Telegram feedback %j after an inventory-only handoff before promoting the revision", async (scope) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -1519,7 +1522,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           interactionKind: "meal-feedback-reply",
           source: "telegram-reply",
           text: "Mon snack1: use vegetable cutlet instead.",
-          items: [{ id: "tg-211", text: "Use vegetable cutlet instead.", scope: { day: "Mon", slot: "snack1" } }],
+          items: [{ id: "tg-211", text: "Use vegetable cutlet instead.", scope }],
           messageId: 211,
         },
       ],
@@ -1548,6 +1551,92 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "pear", status: "unavailable" })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
     expect(deepseekBodies).toHaveLength(5)
+  })
+
+  it("preserves a webhook-shaped mixed inventory and swap request after a context-only handoff", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "We have no pears. For Monday snack1, use vegetable cutlet instead.",
+          messageId: 211,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: { inventoryChanges: [{ name: "pear", status: "unavailable" }], exceptionAdds: [], replan: false },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(revised) }]),
+    ])
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.candidate.grid.Mon.snack1.dish).toBe("vegetable cutlet")
+    const initial = db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as {
+      candidate_json: string
+    }
+    expect(active?.version.candidate.grid.Tue).toEqual(JSON.parse(initial.candidate_json).grid.Tue)
+    expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "pear", status: "unavailable" })
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
+    expect(deepseekBodies).toHaveLength(5)
+  })
+
+  it("keeps a webhook-shaped inventory-only reply on the no-revision path", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "We have no pears.",
+          messageId: 211,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: { inventoryChanges: [{ name: "pear", status: "unavailable" }], exceptionAdds: [], replan: false },
+        },
+      ]),
+    ])
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(1)
+    const initial = db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as {
+      candidate_json: string
+    }
+    expect(active?.version.candidate.grid.Tue).toEqual(JSON.parse(initial.candidate_json).grid.Tue)
+    expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "pear", status: "unavailable" })
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+    expect(deepseekBodies).toHaveLength(3)
   })
 
   it("R09: records a reported next-day holiday without creating a revised plan", async () => {

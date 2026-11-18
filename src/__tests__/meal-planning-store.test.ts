@@ -553,6 +553,33 @@ describe.each([
   ["in-memory", () => createInMemoryMealPlanningStore()],
   ["D1", () => createD1Store().store],
 ])("%s cost validation", (_name, makeStore) => {
+  it.each([0, 0.02])("rejects unavailable cost %s before mutation", async (costUsd) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput())
+    const usage = { inputTokens: 1, outputTokens: 1, model: "test", costStatus: "unavailable" as const, costUsd }
+    await expect(createPlan(store, createInput({ planId: "invalid", usage }))).rejects.toThrow(
+      /unavailable usage cost requires/,
+    )
+    expect((await store.activePlan(CHAT))?.plan.planId).toBe("plan-1")
+    await expect(store.promotePlanVersion(promoteInput({ usage }))).rejects.toThrow(/unavailable usage cost requires/)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    expect(await store.sumPlanUsage("plan-1")).toBeNull()
+  })
+
+  it.each([
+    ["unavailable", null],
+    ["reported", 0],
+    ["reported", 0.02],
+  ] as const)("accepts %s cost %s", async (costStatus, costUsd) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    const usage = { inputTokens: 1, outputTokens: 1, model: "test", costStatus, costUsd }
+    await createPlan(store, createInput({ usage }))
+    expect(await store.promotePlanVersion(promoteInput({ usage }))).toMatchObject({ ok: true })
+    expect((await store.activePlan(CHAT))?.version.usage).toMatchObject({ costUsd })
+  })
+
   it.each([
     Number.NaN,
     Number.POSITIVE_INFINITY,

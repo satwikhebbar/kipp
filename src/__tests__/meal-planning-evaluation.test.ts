@@ -832,6 +832,23 @@ describe("meal-planning evaluator", () => {
     expect(evaluation.failures[0]).toMatchObject({ code: "unscoped_cell_changed", day: "Wed", slot: "breakfast" })
   })
 
+  it("authorizes slot-only feedback across days while rejecting other slots", () => {
+    const context = baseContext({
+      request: { kind: "revision", text: "Change school lunches." },
+      feedbackItems: [{ id: "fb-slot", text: "Make school lunches lighter.", scope: { slot: "school-lunch" } }],
+    })
+    context.recentPlan = baseCandidate().grid
+    const candidate = baseCandidate()
+    candidate.grid.Mon["school-lunch"] = cellFor("school-lunch", "roasted moong")
+    candidate.grid.Tue["school-lunch"] = cellFor("school-lunch", "chickpeas")
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("unaddressed_feedback")
+    candidate.grid.Wed.breakfast = cellFor("breakfast", "banana")
+    expect(evaluateMealPlan(candidate, context).failures).toContainEqual(
+      expect.objectContaining({ code: "unscoped_cell_changed", day: "Wed", slot: "breakfast" }),
+    )
+  })
+
   it("allows a concrete plan-wide Telegram move across source and destination days", () => {
     const schedule = {
       days: ["Mon", "Tue"],

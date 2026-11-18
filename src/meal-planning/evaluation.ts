@@ -140,12 +140,11 @@ function cellsEqual(a: MealCell, b: MealCell): boolean {
 
 /** True when a (day, slot) position falls within a feedback scope. */
 function inFeedbackScope(scope: { day?: string; slot?: string }, day: string, slotId: string): boolean {
-  if (!scope.day || scope.day !== day) return false
-  return scope.slot === undefined || scope.slot === slotId
+  return Boolean(scope.day || scope.slot) && (!scope.day || scope.day === day) && (!scope.slot || scope.slot === slotId)
 }
 
 /** A plan target authorizes a revision only when the parent's text names a concrete change. */
-function isConcretePlanFeedback(item: FeedbackItem, context: MealPlanContext): boolean {
+export function isConcretePlanFeedback(item: FeedbackItem, context: Pick<MealPlanContext, "recentPlan">): boolean {
   if (item.scope || item.target?.kind === "cell") return false
   const text = item.text.toLowerCase()
   if (/\b(?:make\s+(?:this|it)\s+better|(?:something|anything)\s+better)\b/.test(text)) return false

@@ -1,5 +1,5 @@
 import { halfDayDroppedSlotIds, isHalfDay } from "./half-day"
-import type { MealPlanContext, MealSlot } from "./types"
+import type { MealGrid, MealPlanContext, MealSlot } from "./types"
 
 export interface CoverageSet {
   /** The required (day, slotId) cells the evaluator checks, minus closed days and half-day-dropped slots. */
@@ -58,4 +58,17 @@ export function computeCoverageSet(context: MealPlanContext): CoverageSet {
     }
   }
   return { required, closedDays, droppedSlots }
+}
+
+/** Projects a revision base onto the same eligible cells used by the evaluator. */
+export function projectEligibleGrid(grid: MealGrid, context: MealPlanContext): MealGrid {
+  const eligible = new Set(computeCoverageSet(context).required.map((cell) => `${cell.day}\u0000${cell.slotId}`))
+  return Object.fromEntries(
+    Object.entries(grid)
+      .map(([day, cells]) => [
+        day,
+        Object.fromEntries(Object.entries(cells).filter(([slot]) => eligible.has(`${day}\u0000${slot}`))),
+      ])
+      .filter(([, cells]) => Object.keys(cells).length),
+  )
 }

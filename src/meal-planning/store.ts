@@ -69,6 +69,8 @@ export type VersionCostStatus = "legacy" | "reported" | "unavailable"
 function assertVersionCostIsValid(usage: VersionUsage | null | undefined): void {
   if (!usage) return
   const status = usage.costStatus ?? versionCostStatus(usage.costUsd)
+  if (status === "unavailable" && usage.costUsd != null)
+    throw new Error("unavailable usage cost requires a null or omitted costUsd")
   if (
     (status === "reported" || usage.costUsd != null) &&
     (typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0)
