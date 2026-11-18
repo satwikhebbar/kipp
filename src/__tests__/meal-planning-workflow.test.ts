@@ -1587,6 +1587,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     { text: "We have no pears. For Monday snack1, use vegetable cutlet instead.", day: "Mon", slot: "snack1" },
     { text: "We have no pears. Please trade the paratha for vegetable cutlet.", day: "Wed", slot: "breakfast" },
     { text: "No repeat dishes this week; we are out of pears.", day: "Wed", slot: "breakfast" },
+    { text: "We have no pears, more variety for Friday lunch", day: "Fri", slot: "school-lunch" },
+    { text: "Add the paneer from the pantry to Friday lunch", day: "Fri", slot: "school-lunch" },
     { text: "Make school lunch lighter; pears are out.", day: "Mon", slot: "school-lunch" },
     {
       text: "Remove pears from inventory before Friday and swap Monday snack1 to vegetable cutlet.",
@@ -1700,6 +1702,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     "removed",
     "eligible",
     "move",
+    "mixed",
+    "calendar",
+    "cell",
   ])("filters closed-day feedback without losing eligible replacements or moves (%s)", async (mode) => {
     const eligible = mode === "eligible"
     vi.useFakeTimers()
@@ -1710,7 +1715,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
     const fridayDish = mode === "move" ? "masala oats" : "vegetable cutlet"
-    const revised = revisionPatch("Fri", "school-lunch", SEED_MEAL_IDS[fridayDish])
+    const revised = mode === "calendar" ? { grid: {} } : revisionPatch("Fri", "school-lunch", SEED_MEAL_IDS[fridayDish])
     if (eligible) revised.grid.Mon = { snack1: { mealDefinitionId: SEED_MEAL_IDS["sabudana cutlet"] } }
     const dish = eligible ? "banana" : "masala oats"
     const step = createFakeStep(
@@ -1719,13 +1724,34 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           interactionKind: "meal-feedback-reply",
           source: "telegram-reply",
           text: "Thursday is closed. Replace the dish and swap Friday lunch.",
-          items: [
-            { id: "closure", text: "Thursday is closed." },
-            { id: "dish", text: mode === "move" ? "Move masala oats to another spot." : `Replace ${dish}.` },
-            ...(mode === "move"
-              ? []
-              : [{ id: "friday", text: `Use ${fridayDish}.`, scope: { day: "Fri", slot: "school-lunch" } }]),
-          ],
+          items:
+            mode === "mixed"
+              ? [
+                  {
+                    id: "mixed",
+                    text: "Thursday is closed. Replace masala oats. Put vegetable cutlet on Friday lunch.",
+                  },
+                ]
+              : mode === "calendar"
+                ? [
+                    { id: "closure", text: "Thursday is closed." },
+                    { id: "dish", text: "Replace masala oats." },
+                  ]
+                : mode === "cell"
+                  ? [
+                      {
+                        id: "cell",
+                        text: "Use vegetable cutlet.",
+                        target: { kind: "cell", day: "Fri", slot: "school-lunch" },
+                      },
+                    ]
+                  : [
+                      { id: "closure", text: "Thursday is closed." },
+                      { id: "dish", text: mode === "move" ? "Move masala oats to another spot." : `Replace ${dish}.` },
+                      ...(mode === "move"
+                        ? []
+                        : [{ id: "friday", text: `Use ${fridayDish}.`, scope: { day: "Fri", slot: "school-lunch" } }]),
+                    ],
           messageId: 212,
         },
       ],
@@ -1740,7 +1766,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           input: {
             inventoryChanges: [],
             exceptionAdds: [{ kind: "school_closed", instruction: "Thursday is closed", appliesTo: { day: "Thu" } }],
-            replan: false,
+            replan: mode === "calendar",
           },
         },
       ]),
@@ -1756,19 +1782,91 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.currentVersion).toBe(2)
     expect(active?.version.candidate.grid.Thu).toBeUndefined()
-    expect(active?.version.candidate.grid.Fri["school-lunch"].dish).toBe(fridayDish)
+    expect(active?.version.candidate.grid.Fri["school-lunch"].dish).toBe(
+      mode === "calendar" ? initial.grid.Fri["school-lunch"].dish : fridayDish,
+    )
     expect(active?.version.candidate.grid.Mon.snack1.dish).toBe(
       eligible ? "sabudana cutlet" : initial.grid.Mon.snack1.dish,
     )
     const followUpText = deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")
-    if (mode === "removed") expect(followUpText).not.toContain("- Plan-wide feedback: Replace masala oats.")
-    else
+    if (["removed", "mixed", "calendar"].includes(mode)) expect(followUpText).not.toContain("Replace masala oats")
+    else if (mode !== "cell")
       expect(followUpText).toContain(
         mode === "move"
           ? "- Plan-wide feedback: Move masala oats to another spot."
           : "- Plan-wide feedback: Replace banana.",
       )
+    if (mode === "mixed") expect(followUpText).toContain("Put vegetable cutlet on Friday lunch")
+    if (mode === "calendar") expect(followUpText).toContain("Reconcile the grid with the updated schedule")
     expect(deepseekBodies).toHaveLength(5)
+  })
+
+  it("recognizes a dish restored by a full-day exception before deciding whether to revise", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    const env = makeEnv(namespace, d1)
+    const revised = revisionPatch("Thu", "school-lunch", SEED_MEAL_IDS["vegetable cutlet"])
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: {
+            inventoryChanges: [],
+            exceptionAdds: [
+              { kind: "full_day", appliesTo: { day: "Thu" }, instruction: "Thursday is a full day this week" },
+            ],
+            replan: false,
+          },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(revised) }]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(
+      env,
+      mealEvent(invokedAtMs),
+      createFakeStep([], Date.parse(week.weekEnd)) as never,
+    )
+    // The saved plan predates a newly configured recurring Thursday half-day.
+    db.prepare("UPDATE meal_profile SET schedule_json = ?").run(
+      JSON.stringify({ ...SEED_SCHEDULE, halfDays: ["Thu", "Sat"] }),
+    )
+    const before = await createMealPlanningStore(d1).activePlan(CHAT)
+    const dish = before?.version.candidate.grid.Thu["school-lunch"].dish
+    expect(dish).toBeDefined()
+    await runMealPlanningEditWorkflow(
+      env,
+      {
+        ...mealEvent(invokedAtMs),
+        instanceId: "edit-restored-cell",
+        payload: {
+          ...mealEvent(invokedAtMs).payload,
+          edit: {
+            planInstanceId: "wf-meal-1",
+            userId: "42",
+            feedback: {
+              interactionKind: "meal-feedback-reply",
+              source: "telegram-reply",
+              text: `Thursday is a full day this week. Replace ${dish}.`,
+              messageId: 213,
+            },
+          },
+        },
+      },
+      createMemoizingStep([], Date.now()) as never,
+    )
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.candidate.grid.Thu["school-lunch"].dish).toBe("vegetable cutlet")
+    expect(deepseekBodies).toHaveLength(5)
+    expect(deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")).toContain(`Replace ${dish}`)
   })
 
   it("R09: records a reported next-day holiday without creating a revised plan", async () => {

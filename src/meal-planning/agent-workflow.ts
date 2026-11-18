@@ -17,7 +17,7 @@ import { logRuntime } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
 import { projectEligibleGrid } from "./coverage"
 import { createEasyBuyClassifier } from "./easy-buy-classifier"
-import { isConcretePlanFeedback } from "./evaluation"
+import { applicablePlanFeedback, isConcretePlanFeedback } from "./evaluation"
 import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -990,7 +990,12 @@ async function failMiniAppBatch(
 /** Builds the canonical submission payload from a live-loop event, or null when it carries nothing. */
 function submissionFromPayload(payload: MealPlanningLiveEvent | undefined): Submission | null {
   if (!payload) return null
-  if (payload.items?.length) return { items: payload.items }
+  if (payload.items?.length)
+    return {
+      items: payload.items.map((item) =>
+        item.target?.kind === "cell" ? { ...item, scope: { day: item.target.day, slot: item.target.slot } } : item,
+      ),
+    }
   if (!payload.text) return null
   const source = payload.source === "telegram-reply" ? "telegram-reply" : "telegram-text"
   return coerceSubmission(payload.text, source, payload.messageId ?? 0)
@@ -1032,7 +1037,7 @@ async function runRevision(
   }
   const feedbackItems =
     contextAlreadyUpdated && !feedbackBatch
-      ? submission.items.filter((item) => item.scope || isConcretePlanFeedback(item, feedbackReference))
+      ? applicablePlanFeedback(submission.items, feedbackReference)
       : submission.items
   const priorWeek = await stepDo(step, `meal-planning-read-prior-week-${occurrence}`, () =>
     store.latestPlanForWeek(
@@ -1049,14 +1054,14 @@ async function runRevision(
     recentPlan: revisionBaseCandidate.grid,
     feedbackReferencePlan: active.version.candidate.grid,
     priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
-    request: { kind: "revision", text: submission.items.map((item) => item.text).join(" ") },
+    request: { kind: "revision", text: feedbackItems.map((item) => item.text).join(" ") },
     feedbackItems,
     provisionalMealDefinitions: active.version.provisionalMealDefinitions,
   }
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(feedbackItems)}${contextAlreadyUpdated ? `\nWeek-context updates from this message are already applied. Carry out the requested replan: ${submission.items.map((item) => item.text).join(" ")}` : ""}\n\n${renderHouseholdContext(context)}`,
+      text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(feedbackItems)}${contextAlreadyUpdated ? `\nWeek-context updates from this message are already applied. ${feedbackItems.length ? `Carry out the requested replan: ${feedbackItems.map((item) => item.text).join(" ")}` : "Reconcile the grid with the updated schedule and inventory."}` : ""}\n\n${renderHouseholdContext(context)}`,
     },
   ]
   const planning = await runPlanningSession(env, step, event, {
@@ -1094,8 +1099,19 @@ async function runRevision(
     // context update. Mini App submissions and concrete Telegram plan requests
     // still require a revision even when the model marks the context update
     // itself as replan:false.
+    const updatedRevisionBase = withoutIneligibleCells(
+      active.version.candidate,
+      {
+        ...active.plan,
+        weeklyInventory: updatedContext.weeklyInventory,
+        weeklyExceptions: updatedContext.weeklyExceptions,
+      },
+      profile,
+    )
+    const updatedFeedbackContext = { ...context, recentPlan: updatedRevisionBase.grid }
     const feedbackRequiresRevision =
-      Boolean(feedbackBatch) || submission.items.some((item) => item.scope || isConcretePlanFeedback(item, context))
+      Boolean(feedbackBatch) ||
+      submission.items.some((item) => item.scope || isConcretePlanFeedback(item, updatedFeedbackContext))
     if (!updatedContext.replan && !feedbackRequiresRevision) {
       if (feedbackBatch)
         await stepDo(step, `meal-planning-consume-mini-app-batch-${occurrence}`, () =>

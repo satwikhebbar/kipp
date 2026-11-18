@@ -152,6 +152,28 @@ export function isConcretePlanFeedback(
   return planFeedbackClauses(item.text, context).some((text) => isPlanChangeClause(text, context))
 }
 
+/** Retains only instructions applicable to the newly eligible revision base. */
+export function applicablePlanFeedback(
+  items: FeedbackItem[],
+  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
+): FeedbackItem[] {
+  return items.flatMap((item) => {
+    if (item.scope) return [item]
+    const clauses = planFeedbackClauses(item.text, context).filter((text) => isPlanChangeClause(text, context))
+    if (clauses.length === 0) return []
+    const original = item.text.toLowerCase()
+    const text = clauses
+      .map((clause) => {
+        const trimmed = clause.trim()
+        const start = original.indexOf(trimmed)
+        const end = start + trimmed.length
+        return item.text.slice(start, end) + (/^[.!?;]/.test(item.text.slice(end)) ? item.text[end] : "")
+      })
+      .join(". ")
+    return [{ ...item, text }]
+  })
+}
+
 // Clause boundaries and intent classification must support the same instructions.
 const PLAN_ACTION_WORDS =
   "replace|move|moving|swap|trade|switch|shift|use|serve|put|add|remove|include|omit|change|prefer|choose|make"
@@ -192,7 +214,7 @@ function planFeedbackClauses(
 function inheritsInventoryQuantity(text: string): boolean {
   return (
     /^\s*(?:no\s+)?(?:more|less|fewer|some|enough|\d+)\b/.test(text) &&
-    !/^\s*(?:less|more)\s+(?:oily|spicy|heavy|slow|wet|dry)\b/.test(text)
+    !/^\s*(?:less|more)\s+(?:oily|spicy|heavy|slow|wet|dry|variety|repetition)\b/.test(text)
   )
 }
 
@@ -201,7 +223,11 @@ function isPlanChangeClause(
   text: string,
   context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
 ): boolean {
-  if (/\b(?:remove|add|put|update)\b.*\b(?:inventory|pantry|stock)\b/.test(text)) return false
+  // A pantry mention after an action can be a source, rather than its target.
+  const inventoryDestination = /\b(?:remove|update)\b/.test(text)
+    ? text
+    : text.replace(/\bfrom\s+(?:the\s+)?(?:inventory|pantry|stock)\b/g, "")
+  if (/\b(?:remove|add|put|update)\b.*\b(?:inventory|pantry|stock)\b/.test(inventoryDestination)) return false
   if (/^\s*(?:we (?:have|had)|there (?:are|is))\s+(?:more|less|fewer|no|some|enough|\d+)\b/.test(text)) return false
   if (/\b(?:make\s+(?:this|it)\s+better|(?:something|anything)\s+better)\b/.test(text)) return false
   if (isPlanConstraint(text)) return true
@@ -240,7 +266,11 @@ function isPlanConstraint(text: string): boolean {
   return PLAN_CONSTRAINT.test(text)
 }
 
-/** A concrete plan-wide request is addressed only when a changed cell touches a named day or dish. */
+const DAY_WORDS = "(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)"
+const MEAL_WORDS = "(?:(?:school|home)\\s+lunch|breakfast|snack\\s*[12]?|lunch|dinner)"
+const DAY_ABBREVIATION_LENGTH = 3
+
+/** Matches requested destinations while preserving day/meal pairs and qualifiers. */
 function concreteFeedbackMatchesChangedCell(
   item: FeedbackItem,
   changedCell: { day: string; slotId: string },
@@ -253,32 +283,23 @@ function concreteFeedbackMatchesChangedCell(
     const currentDishMatches = currentDish !== undefined && text.includes(currentDish.toLowerCase())
     const priorDish = context.recentPlan?.[changedCell.day]?.[changedCell.slotId]?.dish
     const priorDishMatches = priorDish !== undefined && text.includes(priorDish.toLowerCase())
-    const namedDays =
-      text.match(/\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g) ?? []
-    const dayNames: Record<string, string> = {
-      mon: "mon",
-      monday: "mon",
-      tue: "tue",
-      tuesday: "tue",
-      wed: "wed",
-      wednesday: "wed",
-      thu: "thu",
-      thursday: "thu",
-      fri: "fri",
-      friday: "fri",
-      sat: "sat",
-      saturday: "sat",
-    }
-    const dayMatches = namedDays.some((day) => changedCell.day.toLowerCase().startsWith(dayNames[day]))
-    const namedMeals = text.match(/\b(?:breakfast|snack\s*[12]?|lunch|dinner)\b/g) ?? []
-    const slotMatches = namedMeals.some((meal) => {
-      const normalizedMeal = meal.replace(/\s+/g, "")
-      return changedCell.slotId.toLowerCase().includes(normalizedMeal)
-    })
-    if (namedDays.length > 0 && namedMeals.length > 0) return dayMatches && slotMatches
-    if (namedDays.length > 0) return dayMatches
-    if (namedMeals.length > 0) return slotMatches
-    return currentDishMatches || priorDishMatches || isPlanConstraint(text)
+    const moving = /\b(?:move|moving|shift)\b/.test(text)
+    // A source locates the old dish; it is not a requested destination.
+    const targetText = moving
+      ? text.replace(new RegExp(`\\bfrom\\s+${DAY_WORDS}(?:\\s+${MEAL_WORDS})?`, "g"), "")
+      : text
+    const namedDays = targetText.match(new RegExp(`\\b${DAY_WORDS}\\b`, "g")) ?? []
+    const namedMeals = targetText.match(new RegExp(`\\b${MEAL_WORDS}\\b`, "g")) ?? []
+    const dayMatches = (day: string) => changedCell.day.toLowerCase().startsWith(day.slice(0, DAY_ABBREVIATION_LENGTH))
+    const slotMatches = (meal: string) =>
+      changedCell.slotId.toLowerCase().includes(meal.replace(/\s+/g, "-").replace("snack-", "snack"))
+    const pairs = [...targetText.matchAll(new RegExp(`\\b(${DAY_WORDS})\\s+(${MEAL_WORDS})\\b`, "g"))]
+    if (pairs.length > 1 && new Set(namedMeals).size > 1)
+      return pairs.some((pair) => dayMatches(pair[1]) && slotMatches(pair[2]))
+    if (namedDays.length > 0 && namedMeals.length > 0) return namedDays.some(dayMatches) && namedMeals.some(slotMatches)
+    if (namedDays.length > 0) return namedDays.some(dayMatches)
+    if (namedMeals.length > 0) return namedMeals.some(slotMatches)
+    return moving ? currentDishMatches : currentDishMatches || priorDishMatches || isPlanConstraint(text)
   })
 }
 
@@ -575,10 +596,15 @@ export function evaluateMealPlan(
     }
     for (const item of feedbackItems) {
       const concrete = isConcretePlanFeedback(item, context)
-      const addressedByCell = concrete
-        ? revisionChangedCells.some((cell) => concreteFeedbackMatchesChangedCell(item, cell, candidate, context))
-        : revisionChangedCells.some(({ day, slotId }) => item.scope && inFeedbackScope(item.scope, day, slotId))
+      const explicitNoRepeat = planFeedbackClauses(item.text, context).some(isPlanConstraint)
+      const constraintSatisfied = !explicitNoRepeat || [...weekDishCounts.values()].every((count) => count <= 1)
+      const addressedByCell =
+        constraintSatisfied &&
+        (concrete
+          ? revisionChangedCells.some((cell) => concreteFeedbackMatchesChangedCell(item, cell, candidate, context))
+          : revisionChangedCells.some(({ day, slotId }) => item.scope && inFeedbackScope(item.scope, day, slotId)))
       const addressedByRationale =
+        constraintSatisfied &&
         (concrete || item.scope) &&
         Object.values(candidate.policyOutcomes).some((outcome) => outcome.rationale.includes(item.id))
       if (!addressedByCell && !addressedByRationale) {

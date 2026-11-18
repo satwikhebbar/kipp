@@ -851,6 +851,10 @@ describe("meal-planning evaluator", () => {
       [`We have more pears${separator}less oily meals for Friday`, true] as [string, boolean],
       [`We have more pears${separator}more apples than Monday and Friday should be lighter`, true] as [string, boolean],
     ]),
+    ["We have no pears, more variety for Friday lunch", true],
+    ["We have no pears and less repetition for Friday lunch", true],
+    ["Add the paneer from the pantry to Friday lunch", true],
+    ["Put paneer from stock into Friday lunch", true],
     ["Make Friday lighter. We have no pears.", true],
     ["Friday should be lighter", true],
     ...[" and ", ", "].flatMap((separator) => [
@@ -970,9 +974,60 @@ describe("meal-planning evaluator", () => {
     const candidate = baseCandidate()
     expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
     candidate.grid.Mon.breakfast = cellFor("breakfast", "banana")
+    candidate.policyOutcomes["snack-policy"].rationale = "Addressed no-repeat"
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+    for (const [day, slots] of Object.entries(candidate.grid))
+      for (const [slot, cell] of Object.entries(slots)) cell.dish = `${day} ${slot} unique`
     const codes = failureCodes(evaluateMealPlan(candidate, context))
     expect(codes).not.toContain("unaddressed_feedback")
     expect(codes).not.toContain("unscoped_cell_changed")
+  })
+
+  it.each([
+    ["Make school lunch lighter", "home-lunch", false],
+    ["Make school lunch lighter", "school-lunch", true],
+    ["Make home lunch lighter", "school-lunch", false],
+    ["Make home lunch lighter", "home-lunch", true],
+    ["Make lunch lighter", "school-lunch", true],
+    ["Make lunch lighter", "home-lunch", true],
+    ["Swap Friday lunch and Monday breakfast", "breakfast", false],
+    ["Swap Friday lunch and Monday breakfast", "school-lunch", true],
+  ] as const)("matches qualified and paired targets: %s / %s", (text, slot, addressed) => {
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "target", text }],
+    })
+    const candidate = baseCandidate()
+    candidate.grid.Fri[slot] = cellFor(slot, "roasted moong")
+    expect(failureCodes(evaluateMealPlan(candidate, context)).includes("unaddressed_feedback")).toBe(!addressed)
+  })
+
+  it.each([
+    "Move poha from Thursday to another spot",
+    "Move poha from Thursday to Friday breakfast",
+  ])("matches a move destination rather than the source: %s", (text) => {
+    const context = baseContext({
+      recentPlan: gridFrom([
+        ["Fri", "breakfast", "banana"],
+        ["Mon", "breakfast", "paratha"],
+      ]),
+      feedbackReferencePlan: gridFrom([["Thu", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "move", text }],
+    })
+    const candidate = baseCandidate({
+      grid: gridFrom([
+        ["Fri", "breakfast", "poha"],
+        ["Mon", "breakfast", "paratha"],
+      ]),
+    })
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("unaddressed_feedback")
+    if (text.includes("Friday")) {
+      candidate.grid.Fri.breakfast = cellFor("breakfast", "banana")
+      candidate.grid.Mon.breakfast = cellFor("breakfast", "poha")
+      expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+    }
   })
 
   it("authorizes slot-only feedback across days while rejecting other slots", () => {
