@@ -67,8 +67,9 @@ export type VersionCostStatus = "legacy" | "reported" | "unavailable"
 
 /** Reject incomplete or invalid reported charges before any persistence side effect. */
 function assertReportedCostIsNumeric(usage: VersionUsage | null | undefined): void {
+  if (!usage) return
   if (
-    usage?.costStatus === "reported" &&
+    (usage.costStatus ?? versionCostStatus(usage.costUsd)) === "reported" &&
     (typeof usage.costUsd !== "number" || !Number.isFinite(usage.costUsd) || usage.costUsd < 0)
   ) {
     throw new Error("reported usage cost requires a finite non-negative numeric costUsd")

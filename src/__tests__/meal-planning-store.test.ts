@@ -572,6 +572,23 @@ describe.each([
     expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
     expect(await store.sumPlanUsage("plan-1")).toBeNull()
   })
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    -1,
+  ])("rejects invalid inferred reported cost %s before creating or promoting", async (costUsd) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput())
+    const usage = { inputTokens: 1, outputTokens: 1, model: "test", costUsd }
+    await expect(createPlan(store, createInput({ planId: "invalid", usage }))).rejects.toThrow(
+      /reported usage cost requires/,
+    )
+    expect((await store.activePlan(CHAT))?.plan.planId).toBe("plan-1")
+    await expect(store.promotePlanVersion(promoteInput({ usage }))).rejects.toThrow(/reported usage cost requires/)
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    expect(await store.sumPlanUsage("plan-1")).toBeNull()
+  })
 })
 
 describe("createMealPlanningStore (D1, real SQL)", () => {

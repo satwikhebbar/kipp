@@ -1185,6 +1185,68 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ])
   })
 
+  it.each([
+    "skipped",
+    "reported",
+    "failed",
+  ] as const)("accounts for %s extraction before successful planning", async (extraction) => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = createFakeStep([], Date.parse(week.weekEnd))
+    const base = seedCandidate()
+    const extractionResponse = {
+      choices: [
+        {
+          message: {
+            tool_calls: [
+              {
+                id: "extract-1",
+                function: {
+                  name: "extract_week_context",
+                  arguments:
+                    extraction === "failed"
+                      ? "{malformed"
+                      : JSON.stringify({ inventoryChanges: [], exceptionAdds: [] }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, cost: 0.005 },
+    }
+    const evaluate = deepseekResponse([{ name: "evaluate_meal_plan", input: base }])
+    const propose = deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }])
+    const { telegramMessages, deepseekBodies } = stubNetwork([
+      ...(extraction === "skipped" ? [] : [extractionResponse]),
+      { ...evaluate, usage: { ...evaluate.usage, cost: 0.01 } },
+      { ...propose, usage: { ...propose.usage, cost: 0.02 } },
+    ])
+    await runAgentCenteredMealPlanningWorkflow(
+      makeEnv(namespace, d1, { LLM_MAX_RETRIES: "0" }),
+      mealEvent(invokedAtMs, extraction === "skipped" ? "" : "Plan this week."),
+      step as never,
+    )
+    const active = await createMealPlanningStore(d1).activePlan(CHAT)
+    expect(active?.version.version).toBe(1)
+    expect(deepseekBodies).toHaveLength(extraction === "skipped" ? 2 : 3)
+    const planMessage = telegramMessages.find((message) => message.text.includes("School week of"))
+    if (extraction === "failed") {
+      expect(active?.version.usage?.costUsd).toBeNull()
+      expect(d1Scalar(db, "SELECT cost_status FROM meal_plan_version")).toBe("unavailable")
+      expect(planMessage?.text).toContain("Cost unavailable")
+    } else {
+      const expectedCost = extraction === "skipped" ? 0.03 : 0.035
+      expect(active?.version.usage?.costUsd).toBeCloseTo(expectedCost)
+      expect(d1Scalar(db, "SELECT cost_status FROM meal_plan_version")).toBe("reported")
+      expect(planMessage?.text).toContain(`Cost: $${expectedCost.toFixed(4)}`)
+    }
+  })
+
   it("applies extracted initial inventory before evaluating and persisting the plan", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")

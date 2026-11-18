@@ -379,7 +379,8 @@ export async function runAgentCenteredMealPlanningWorkflow(
  * Extracts week-scoped facts (inventory changes and schedule exceptions) from
  * the parent's free-text request, merges them into the supplied context, and
  * returns the merged context alongside the extraction call's token usage.
- * Usage is null when there is no request text or the extraction call fails.
+ * Usage is null only when extraction is skipped. Failed attempts with no usage
+ * retain an unavailable reported cost so the complete version cost is unknown.
  */
 async function extractInitialWeekContext(
   env: Env,
@@ -389,7 +390,7 @@ async function extractInitialWeekContext(
 ): Promise<{ context: MealPlanContext; usage: LLMUsage | null }> {
   if (!event.payload.requestText?.trim()) return { context, usage: null }
   const result = await stepDo(step, "meal-planning-extract-week-context", async () => {
-    let usage: LLMUsage | null = null
+    let usage: LLMUsage = { ...ZERO_USAGE, reportedCostUsd: null }
     try {
       const provider = createToolProvider(
         env.OPENROUTER_API_KEY,
