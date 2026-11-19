@@ -401,6 +401,71 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal?.kind).toBe("needs_clarification")
   })
 
+  it.each([
+    ["unsuitable", "packed_slot_semantically_unsuitable"],
+    ["unverifiable", "packed_slot_unverified"],
+  ] as const)("rechecks changed packed-meal evidence at the proposal gate (%s)", async (outcome, expectedFailureCode) => {
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const answers = Object.fromEntries(
+          Object.keys(questions)
+            .filter((id) => !(decisionCalls === 2 && outcome === "unverifiable" && id === "packed_meal_0"))
+            .map((id) => [
+              id,
+              {
+                type: "noul" as const,
+                noul: decisionCalls === 2 && outcome === "unsuitable" && id === "packed_meal_0" ? 0.01 : 0.99,
+              },
+            ]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const evaluatedCandidate = passingCandidate()
+    const proposedCandidate = {
+      ...evaluatedCandidate,
+      grid: gridWith("Mon", "snack1", cell("poha", ["rice"], "snack1")),
+    }
+    const provider = providerWith(
+      evaluateResponse(evaluatedCandidate),
+      proposeResponse(proposeInput(proposedCandidate)),
+      clarifyResponse({
+        message: "Please choose a different packed meal that can be verified for this slot.",
+        reasonCodes: [],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), proposedCandidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(decisionCalls).toBe(2)
+    const proposalToolMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "propose_plan",
+    )
+    expect(proposalToolMessage?.role).toBe("tool")
+    if (proposalToolMessage?.role === "tool")
+      expect(proposalToolMessage.output).toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: [expectedFailureCode],
+      })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    expect(result.terminal?.kind).toBe("needs_clarification")
+    expect(result.terminal?.kind).not.toBe("propose_plan")
+  })
+
   it("requires needs_clarification to include every evaluator failure", async () => {
     const provider = providerWith(
       evaluateResponse(failingCandidate()),
