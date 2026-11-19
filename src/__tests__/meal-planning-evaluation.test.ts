@@ -922,6 +922,35 @@ describe("meal-planning evaluator", () => {
     )
   })
 
+  it.each(["Swap Saturday and Sunday", "Swap Sat and Sun"])("recognizes both weekend days in swaps: %s", (text) => {
+    expect(isConcretePlanFeedback({ id: "weekend-swap", text }, { recentPlan: null })).toBe(true)
+  })
+
+  it("recognizes a configured custom slot as a feedback target without a current dish name", () => {
+    const context = baseContext({
+      schedule: {
+        days: ["Sun"],
+        slots: [{ id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null }],
+      },
+      recentPlan: { Sun: { "morning-tea": cellFor("morning-tea", "existing food") } },
+    })
+    const item = { id: "custom-slot", text: "Change morning tea to poha" }
+    expect(isConcretePlanFeedback(item, context)).toBe(true)
+    expect(applicablePlanFeedback([item], context)).toEqual([item])
+    const candidate = {
+      grid: { Sun: { "morning-tea": cellFor("morning-tea", "poha") } },
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const evaluation = evaluateMealPlan(candidate, {
+      ...context,
+      request: { kind: "revision", text: item.text },
+      feedbackItems: [item],
+    })
+    expect(failureCodes(evaluation)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(evaluation)).not.toContain("unaddressed_feedback")
+  })
+
   it.each([
     "Make Friday lighter. We have no pears.",
     "We have no pears and Friday should be lighter",
