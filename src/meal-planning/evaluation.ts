@@ -181,7 +181,7 @@ const PLAN_CONSTRAINT_WORDS = "(?:no|avoid|without)\\s+repeat(?:ed)?\\s+(?:dishe
 const PLAN_ACTION = new RegExp(`\\b(?:${PLAN_ACTION_WORDS})\\b`)
 const PLAN_CONSTRAINT = new RegExp(`\\b${PLAN_CONSTRAINT_WORDS}\\b`)
 const PLAN_TARGET =
-  /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/
+  /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|breakfast|snack|lunch|dinner|meal|dish)\b/
 const PLAN_INSTRUCTION_START = `(?=(?:please\\s+)?(?:${PLAN_ACTION_WORDS}|${PLAN_CONSTRAINT_WORDS})\\b)`
 const PLAN_CLAUSE_BOUNDARY = new RegExp(`[;.!?]+|\\b(?:and|but|so)\\s+${PLAN_INSTRUCTION_START}`)
 
@@ -308,7 +308,7 @@ function isPlanConstraint(text: string): boolean {
   return PLAN_CONSTRAINT.test(text)
 }
 
-const DAY_WORDS = "(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)"
+const DAY_WORDS = "(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
 const MEAL_WORDS = "(?:(?:school|home)\\s+lunch|breakfast|snack\\s*[12]?|lunch|dinner)"
 const DAY_ABBREVIATION_LENGTH = 3
 
@@ -407,6 +407,7 @@ export function evaluateMealPlan(
   const persistentPolicies = context.customPolicies.filter((policy) => policy.scope === "persistent")
 
   const presentCells = new Set(refs.map((ref) => `${ref.day}\u0000${ref.slotId}`))
+  const allowedCells = new Set(coverage.required.map(({ day, slotId }) => `${day}\u0000${slotId}`))
   for (const cell of coverage.required) {
     if (!presentCells.has(`${cell.day}\u0000${cell.slotId}`)) {
       failures.push({
@@ -425,6 +426,10 @@ export function evaluateMealPlan(
     }
     if (coverage.droppedSlots.some((drop) => drop.day === day && drop.slotId === slotId)) {
       failures.push({ code: "extra_slot_for_half_day", day, slot: slotId, detail: `cell on half day ${day}` })
+    }
+    const droppedByHalfDay = coverage.droppedSlots.some((drop) => drop.day === day && drop.slotId === slotId)
+    if (!allowedCells.has(`${day}\u0000${slotId}`) && !closedDays.has(day) && !droppedByHalfDay) {
+      failures.push({ code: "unconfigured_cell", day, slot: slotId, detail: "cell is outside the configured schedule" })
     }
     for (const token of cell.items) {
       if (clearExclusionTokens.has(normalizeIngredient(token))) {
@@ -625,8 +630,13 @@ export function evaluateMealPlan(
   if (request.kind === "revision" && context.recentPlan) {
     const concretePlanFeedback = feedbackItems.some((item) => isConcretePlanFeedback(item, context))
     for (const { day, slotId } of revisionChangedCells) {
+      const invalidatedByNewExclusion = context.revisionRepairableCells?.some(
+        (cell) => cell.day === day && cell.slotId === slotId,
+      )
       const scoped =
-        concretePlanFeedback || feedbackItems.some((item) => item.scope && inFeedbackScope(item.scope, day, slotId))
+        invalidatedByNewExclusion ||
+        concretePlanFeedback ||
+        feedbackItems.some((item) => item.scope && inFeedbackScope(item.scope, day, slotId))
       if (!scoped) {
         failures.push({
           code: "unscoped_cell_changed",

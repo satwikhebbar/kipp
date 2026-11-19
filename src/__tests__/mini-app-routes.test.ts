@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
 import { createMealPlanningStore } from "../meal-planning/store"
-import type { MealGrid } from "../meal-planning/types"
+import type { MealGrid, MealSchedule, WeeklyExceptions } from "../meal-planning/types"
 import { createClockedD1TestDb } from "./d1-test-db"
 
 function env(): Env {
@@ -153,6 +153,62 @@ describe("Mini App HTTP boundary", () => {
       )
       const reducedBody = (await reducedResponse.json()) as { plan: { schedule: { halfDays: string[] } } }
       expect(reducedBody.plan.schedule.halfDays).toEqual(["Sat"])
+
+      const quickSchedule: MealSchedule = {
+        days: ["Sun"],
+        halfDays: ["Sun"],
+        slots: [
+          {
+            id: "morning-tea",
+            name: "Morning tea",
+            packed: true,
+            dry: true,
+            maxCookMinutes: null,
+            halfDayBehavior: { action: "quick", maxCookMinutes: 15 },
+          },
+        ],
+      }
+      const quick = await authenticatedPlanFixture(
+        "quick-sunday",
+        "2026-09-27T18:30:00.000Z",
+        "2026-10-04T18:29:59.000Z",
+        { Sun: { "morning-tea": cell } },
+      )
+      quick.d1
+        .prepare("UPDATE meal_plan SET schedule_json = ? WHERE plan_id = ?")
+        .bind(JSON.stringify(quickSchedule), "quick-sunday")
+        .run()
+      const quickResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan", { headers: { Authorization: `Bearer ${quick.token}` } }),
+        quick.testEnv,
+      )
+      const quickBody = (await quickResponse.json()) as { plan: { schedule: MealSchedule } }
+      expect(quickBody.plan.schedule.halfDays).toEqual(["Sun"])
+
+      const fullDay = await authenticatedPlanFixture(
+        "quick-sunday-full-day",
+        "2026-09-27T18:30:00.000Z",
+        "2026-10-04T18:29:59.000Z",
+        { Sun: { "morning-tea": cell } },
+      )
+      fullDay.d1
+        .prepare("UPDATE meal_plan SET schedule_json = ?, weekly_exceptions_json = ? WHERE plan_id = ?")
+        .bind(
+          JSON.stringify(quickSchedule),
+          JSON.stringify({
+            items: [{ kind: "full_day", appliesTo: { day: "Sun" }, instruction: "Sunday is a full school day" }],
+          } satisfies WeeklyExceptions),
+          "quick-sunday-full-day",
+        )
+        .run()
+      const fullDayResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan", {
+          headers: { Authorization: `Bearer ${fullDay.token}` },
+        }),
+        fullDay.testEnv,
+      )
+      const fullDayBody = (await fullDayResponse.json()) as { plan: { schedule: MealSchedule } }
+      expect(fullDayBody.plan.schedule.halfDays).toEqual([])
     } finally {
       vi.useRealTimers()
     }
@@ -181,8 +237,8 @@ describe("Mini App HTTP boundary", () => {
     expect(html).toContain('aria-label","Choose meal plan week')
     expect(html).not.toContain("Current plan — feedback is available.")
     expect(html).not.toContain("History · ")
-    expect(html).toContain("dayDate(i).getUTCDate()")
-    expect(html).not.toContain('dateLabel(i).split(" ").slice(-1)[0]')
+    expect(html).toContain("dayDate(day).getUTCDate()")
+    expect(html).not.toContain('dateLabel(day).split(" ").slice(-1)[0]')
     expect(html).not.toContain("mealplan-")
 
     const plan = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app/api/plan"), env())
@@ -226,6 +282,77 @@ describe("Mini App HTTP boundary", () => {
     expect(app.querySelector(".notice")).toBeNull()
   })
 
+  it("renders the correct date and half-day badge for a sparse Sunday custom schedule", async () => {
+    const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
+    const location = new URL("https://kipp.example/mini-app")
+    Object.defineProperty(window, "location", { value: location, configurable: true })
+    Object.defineProperty(window, "Telegram", {
+      value: { WebApp: { initData: "signed-launch-data", ready: vi.fn(), expand: vi.fn() } },
+      configurable: true,
+    })
+    const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
+    const plan = {
+      planId: "sunday-plan",
+      version: 1,
+      weekStart: "2026-09-06T18:30:00.000Z",
+      timezone: "Asia/Kolkata",
+      readOnly: false,
+      schedule: {
+        days: ["Sun"],
+        halfDays: ["Sun"],
+        slots: [
+          {
+            id: "morning-tea",
+            name: "Morning tea",
+            packed: true,
+            dry: true,
+            maxCookMinutes: null,
+            halfDayBehavior: { action: "quick", maxCookMinutes: 15 },
+          },
+        ],
+      },
+      candidate: {
+        grid: {
+          Sun: {
+            "morning-tea": {
+              dish: "Banana",
+              vegetarian: true,
+              items: ["banana"],
+              cookMinutes: 0,
+              priorNightPrep: false,
+            },
+          },
+        },
+        easyBuys: [],
+      },
+      weeklyExceptions: { items: [] },
+    }
+    client.fetch = async (input) =>
+      String(input) === "/mini-app/api/session"
+        ? new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
+        : new Response(JSON.stringify({ status: "current", plan, history: [] }))
+    const scripts = [...MINI_APP_SHELL.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
+    const context = {
+      window,
+      document: window.document,
+      MutationObserver: client.MutationObserver,
+      Event: window.Event,
+      Response,
+      URL,
+      fetch: (...args: Parameters<typeof fetch>) => client.fetch(...args),
+      localStorage: { getItem: () => null },
+    }
+    scripts.forEach((script) => {
+      runInNewContext(script, context)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const day = window.document.querySelector(".day")
+    expect(day?.querySelector("strong")?.textContent).toBe("Sun")
+    expect(day?.querySelector("small")?.textContent).toBe("13")
+    expect(day?.getAttribute("aria-label")).toContain("half day")
+    expect(day?.querySelector(".half-day-badge")?.textContent).toBe("◐")
+  })
+
   it("opens historical plans and returns to the current plan without replaying Telegram authentication", async () => {
     const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
     const location = new URL("https://kipp.example/mini-app#tgWebAppData=launch-data")
@@ -237,7 +364,7 @@ describe("Mini App HTTP boundary", () => {
     }
     Object.defineProperty(window, "history", { value: history })
     const telegram = { WebApp: { initData: "signed-launch-data", ready: vi.fn(), expand: vi.fn() } }
-    Object.defineProperty(window, "Telegram", { value: telegram })
+    Object.defineProperty(window, "Telegram", { value: telegram, configurable: true })
     const storage = { getItem: vi.fn(() => null) }
     const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
     const plan = (planId: string) => ({

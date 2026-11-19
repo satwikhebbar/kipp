@@ -88,8 +88,10 @@ function planDto(active: MealPlanRead, readOnly: boolean) {
   // Show the recurring half-day marker only when this version has the pinned
   // plan's omitted-slot shape for that day.
   const applicableHalfDays = schedule.halfDays?.filter((day) => {
+    if (active.plan.weeklyExceptions.items.some((item) => item.kind === "full_day" && item.appliesTo?.day === day))
+      return false
     const cells = active.version.candidate.grid[day]
-    return omittedSlots.length > 0 && omittedSlots.every((slot) => !cells?.[slot.id])
+    return omittedSlots.length === 0 || omittedSlots.every((slot) => !cells?.[slot.id])
   })
   return {
     planId: active.plan.planId,

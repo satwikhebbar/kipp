@@ -39,7 +39,7 @@ const gridSchema = z
         'one entry per slot id present that day, keyed by slot id (e.g. "breakfast", "snack1", "school-lunch")',
       ),
   )
-  .describe('one entry per school day, keyed by day ("Mon".."Sat")')
+  .describe("one entry per configured school day, keyed by its exact schedule day identifier")
 
 const policyOutcomeSchema = z
   .object({
@@ -480,7 +480,7 @@ export function createEvaluateMealPlanTool(
     name: MEAL_PLANNING_TOOL.EVALUATE,
     description: isRevision
       ? "Validate one revision patch against the active plan and household context. Omitted cells remain unchanged. Returns typed failures and measurements; it never persists a plan."
-      : "Validate exactly one complete Mon–Sat meal-plan candidate against the household context. Returns typed failures and measurements; it never persists a plan.",
+      : "Validate exactly one complete meal-plan candidate for the configured schedule days and slots against household context. Returns typed failures and measurements; it never persists a plan.",
     input: isRevision ? mealPlanSelectionWirePatchSchema : mealPlanSelectionWireCandidateSchema,
     output: mealPlanEvaluationSchema,
     privacy: "private",

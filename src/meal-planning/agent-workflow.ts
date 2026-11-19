@@ -15,9 +15,10 @@ import { createToolProvider, type ToolConversationMessage, type ToolProviderRequ
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
 import { logRuntime } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
-import { projectEligibleGrid } from "./coverage"
+import { computeCoverageSet, projectEligibleGrid } from "./coverage"
 import { createEasyBuyClassifier } from "./easy-buy-classifier"
 import { applicablePlanFeedback, isConcretePlanFeedback } from "./evaluation"
+import { effectiveMealSlot, isHalfDay } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -64,7 +65,7 @@ const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "~openai/gpt-luna-latest"
 const ZERO_USAGE: LLMUsage = { inputTokens: 0, outputTokens: 0 }
-const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, full school days, or schedule changes. When the parent explicitly says a recurring half-day is a full school day for this week, emit full_day for that day. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and the planner will treat school-lunch as the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
+const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, full school days, or schedule changes. When the parent explicitly says a recurring half-day is a full school day for this week, emit full_day for that day. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and let the configured half-day slot behavior determine coverage. Do not assume school-lunch is the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
 /** Render week context extraction prompt. */
 export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext, "schedule">): string {
@@ -192,6 +193,22 @@ export function renderHouseholdContext(context: MealPlanContext): string {
           `${s.id} (${s.packed ? "packed" : "not packed"}, ${s.dry ? "dry" : "not dry"}, maxCookMinutes: ${s.maxCookMinutes ?? "unlimited"})`,
       )
       .join(", ")}`,
+    `- Effective coverage: ${computeCoverageSet(context)
+      .required.map(({ day, slotId }) => `${day} ${slotId}`)
+      .join(", ")}`,
+    ...context.schedule.days
+      .filter((day) => isHalfDay(context, day))
+      .map((day) => {
+        const rules = context.schedule.slots.flatMap((slot) => {
+          const effective = effectiveMealSlot(context, day, slot.id)
+          if (!effective) return [`${slot.id}: omit`]
+          const behavior = slot.halfDayBehavior
+          return behavior?.action === "quick"
+            ? [`${slot.id}: keep, max ${behavior.maxCookMinutes} cook minutes`]
+            : [`${slot.id}: keep`]
+        })
+        return `- Half-day rules for ${day}: ${rules.join("; ")}`
+      }),
     `- Dietary exclusions (hard): ${p.dietaryExclusions.join(", ") || "none"}`,
     `- Established meal definitions (one JSON record per available catalog meal; select only by id):\n${
       (p.mealDefinitions ?? [])
@@ -228,10 +245,13 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       lines.push(`    ${exception.kind}${target}: "${exception.instruction}"`)
     }
   }
-  const halfDaySnacks = (p.mealDefinitions ?? []).filter((meal) => meal.status === "established" && meal.halfDaySnack)
-  if (halfDaySnacks.length) {
+  const quickSlots = context.schedule.slots.filter((slot) => slot.halfDayBehavior?.action === "quick")
+  for (const slot of quickSlots) {
+    const candidates = (p.mealDefinitions ?? []).filter(
+      (meal) => meal.status === "established" && (meal.suitableSlots.includes(slot.id) || meal.halfDaySnack),
+    )
     lines.push(
-      `- Half-day snack candidates (use only for snack1 on a half-day): ${halfDaySnacks.map((meal) => `${references.byId.get(meal.id)} (${meal.name})`).join(", ")}`,
+`- Quick half-day slot ${slot.id} candidates (max ${slot.halfDayBehavior?.action === "quick" ? slot.halfDayBehavior.maxCookMinutes : 0} cook minutes): ${candidates.map((meal) => `${references.byId.get(meal.id) ?? meal.id} (${meal.name})`).join(", ") || "none"}`,
     )
   }
   lines.push(`- Request kind: ${context.request.kind}`)
@@ -244,6 +264,11 @@ export function renderHouseholdContext(context: MealPlanContext): string {
         )
       }
     }
+  }
+  if (context.revisionRepairableCells?.length) {
+    lines.push(
+      `- Required hard-exclusion repairs (replace only these removed cells to eliminate the excluded ingredient): ${context.revisionRepairableCells.map(({ day, slotId }) => `${day} ${slotId}`).join(", ")}`,
+    )
   }
   if (context.priorWeekPlan) {
     lines.push(`- Previous week's dishes (avoid repeating cooked meals unless exempt):`)
@@ -1226,6 +1251,17 @@ async function runRevision(
     ...profile,
     profile: { ...profile.profile, mealDefinitions: active.plan.establishedMealDefinitions },
   }
+  const revisionRepairableCells = Object.entries(active.version.candidate.grid).flatMap(([day, cells]) =>
+    Object.entries(cells)
+      .filter(([, cell]) =>
+        cell.items.some((item) =>
+          profile.profile.dietaryExclusions.some(
+            (excluded) => normalizeIngredient(item) === normalizeIngredient(excluded),
+          ),
+        ),
+      )
+      .map(([slotId]) => ({ day, slotId })),
+  )
   const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, planProfile)
   const feedbackReference = {
     recentPlan: revisionBaseCandidate.grid,
@@ -1253,6 +1289,7 @@ async function runRevision(
     priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
     request: { kind: "revision", text: feedbackItems.map((item) => item.text).join(" ") },
     feedbackItems,
+    revisionRepairableCells,
     provisionalMealDefinitions: active.version.provisionalMealDefinitions,
   }
   const messages: ToolConversationMessage[] = [
@@ -1457,9 +1494,22 @@ function withoutIneligibleCells(
   plan: MealPlanRecord,
   profile: StoredMealProfile,
 ): MealPlanCandidate {
+  const excluded = new Set(profile.profile.dietaryExclusions.map(normalizeIngredient))
+  const exclusionCleanGrid = Object.fromEntries(
+    Object.entries(candidate.grid)
+      .map(([day, cells]) => [
+        day,
+        Object.fromEntries(
+          Object.entries(cells).filter(
+            ([, cell]) => !cell.items.some((item) => excluded.has(normalizeIngredient(item))),
+          ),
+        ),
+      ])
+      .filter(([, cells]) => Object.keys(cells).length),
+  )
   return {
     ...candidate,
-    grid: projectEligibleGrid(candidate.grid, {
+    grid: projectEligibleGrid(exclusionCleanGrid, {
       schedule: plan.schedule,
       profile: profile.profile,
       customPolicies: profile.customPolicies,

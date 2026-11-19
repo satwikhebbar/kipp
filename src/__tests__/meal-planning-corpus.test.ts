@@ -28,7 +28,8 @@ const REQUIRED_IDS = [
 // Scenario JSON represents the persisted MealCell contract so it can pin the
 // evaluator independently of model selection. Selection/hydration failures
 // are covered in the hydration and agent-session suites instead.
-const NON_EVALUATOR_FAILURE_CODES = new Set([
+const DIRECT_REGRESSION_FAILURE_CODES = new Set([
+  "unconfigured_cell",
   "unknown_meal_definition",
   "invalid_ingredient_choice",
   "invalid_ingredient_alias",
@@ -84,14 +85,14 @@ describe("meal-planning corpus health", () => {
     }
   })
 
-  it("exercises every evaluator failure code with a candidate expectation", () => {
+  it("exercises every corpus evaluator failure code with a candidate expectation", () => {
     const exercised = new Set<string>()
     for (const scenario of scenarios) {
       for (const candidate of scenario.candidates) {
         for (const failure of candidate.expect.failures ?? []) exercised.add(failure.code)
       }
     }
-    for (const code of FAILURE_CODES.filter((code) => !NON_EVALUATOR_FAILURE_CODES.has(code))) {
+    for (const code of FAILURE_CODES.filter((code) => !DIRECT_REGRESSION_FAILURE_CODES.has(code))) {
       expect(exercised.has(code), `failure code ${code} is not exercised by any fixture`).toBe(true)
     }
   })
