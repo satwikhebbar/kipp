@@ -14,8 +14,11 @@ export const FAILURE_CODES = [
   "use_early_ignored",
   "dish_repeated",
   "missing_policy_outcome",
+  "persistent_policy_outcome_unsubstantiated",
+  "persistent_policy_outcome_unverified",
   "unscoped_cell_changed",
   "unaddressed_feedback",
+  "feedback_unverified",
   "unknown_meal_definition",
   "invalid_ingredient_choice",
   "invalid_ingredient_alias",
@@ -23,6 +26,8 @@ export const FAILURE_CODES = [
   "new_meal_not_allowed",
   "invalid_new_meal",
   "packed_slot_unsuitable",
+  "packed_slot_semantically_unsuitable",
+  "packed_slot_unverified",
   "duplicate_meal_selection",
 ] as const
 
@@ -237,6 +242,8 @@ export interface MealPlanContext {
   recentPlan?: MealGrid | null
   /** Plan the parent reviewed; resolves explicit moves from cells removed by a context update. */
   feedbackReferencePlan?: MealGrid | null
+  /** Shopping list from the plan the parent reviewed; compared with the final revision list. */
+  feedbackReferenceEasyBuys?: string[]
   /** Plan from the immediately preceding week, when one exists; distinct from the revision base. */
   priorWeekPlan?: MealGrid | null
   request: PlanRequest

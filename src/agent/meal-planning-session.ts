@@ -1,14 +1,24 @@
-import type { EasyBuyClassification, EasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
+import type {
+  EasyBuyClassification,
+  EasyBuyClassifier,
+  FeedbackCheck,
+  PackedMealCheck,
+  PersistentPolicyCheck,
+} from "../meal-planning/easy-buy-classifier"
+import { findProhibitedEasyBuys } from "../meal-planning/easy-buys"
 import {
   evaluateMealPlan,
   evaluateMealPlanSelection,
   evaluateMealPlanSelectionPatch,
+  isConcretePlanFeedback,
 } from "../meal-planning/evaluation"
+import { effectiveMealSlot } from "../meal-planning/half-day"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
 import type {
   FailureCode,
   FeedbackItem,
   MealDefinition,
+  MealGrid,
   MealPlanCandidate,
   MealPlanContext,
   MealPlanEvaluation,
@@ -83,7 +93,7 @@ export interface MealPlanningAgentSessionOptions {
   retainReasoning?: boolean
   /** Ingredient naming locale; defaults to India. */
   ingredientLocale?: string
-  /** Semantic easy-buy classifier; when absent, only deterministic easy-buy validation runs. */
+  /** Batched Decisions classifier for semantic meal checks and easy-buy validation. */
   easyBuyClassifier?: EasyBuyClassifier
   /** Dev-only diagnostic: observes one Decisions call's returned usage and cost. */
   onDecisionUsage?: (usage: DecisionUsage) => void
@@ -139,14 +149,13 @@ export async function runMealPlanningAgentSession(
   const canUpdateWeekContext = options.context.request.kind === "revision" && options.allowWeekContextUpdate !== false
   let decisionUsage = ZERO_DECISION_USAGE
   // A candidate is classified once during evaluate_meal_plan and again during
-  // propose_plan; memoize the resolved verdict by its easy-buy list so the
-  // second pass reuses the first instead of paying for another Decisions
-  // request (and never depends on a second stochastic draw).
+  // propose_plan; key by all hydrated plan and authoritative feedback evidence
+  // so the second pass reuses the verdict only when every relevant fact matches.
   const classificationCache = new Map<string, EasyBuyClassification>()
-  // Runs one batched semantic easy-buy classification against the hydrated
-  // candidate and folds any rejected/uncertain items back through the pure
-  // evaluator, so failures sort and dedupe exactly as the deterministic ones.
-  const classifyEasyBuys = async (
+  // Runs one batched semantic classification against easy buys, packed meals,
+  // persistent policies, and scoped feedback. Deterministic evaluation remains
+  // pure; semantic failures are added at this asynchronous session boundary.
+  const classifySemanticChecks = async (
     selection: MealPlanSelectionEvaluation,
     context: MealPlanContext,
   ): Promise<MealPlanSelectionEvaluation> => {
@@ -154,23 +163,127 @@ export async function runMealPlanningAgentSession(
     // Only spend a Decisions request once the deterministic checks pass; a
     // plan that already fails them is blocked regardless.
     if (!classifier || !selection.candidate || !selection.evaluation.pass) return selection
-    const key = [...selection.candidate.easyBuys].sort().join("\u0000")
+    const packedMeals = packedMealChecks(selection, context)
+    const persistentPolicies = persistentPolicyChecks(selection, context)
+    const feedbackChecks = authoritativeFeedbackChecks(selection, context)
+    if (
+      selection.candidate.easyBuys.length === 0 &&
+      packedMeals.length === 0 &&
+      persistentPolicies.length === 0 &&
+      feedbackChecks.length === 0
+    )
+      return selection
+    // Persistent policy checks contain both current and prior-week plan cells,
+    // so the cache cannot reuse a verdict after the comparison baseline changes.
+    const key = JSON.stringify({ candidate: selection.candidate, packedMeals, persistentPolicies, feedbackChecks })
     let classification = classificationCache.get(key)
     if (!classification) {
-      classification = await classifier.classify(selection.candidate.easyBuys)
-      classificationCache.set(key, classification)
+      let requestSucceeded = false
+      try {
+        classification = await classifier.classify(
+          selection.candidate.easyBuys,
+          packedMeals,
+          persistentPolicies,
+          feedbackChecks,
+        )
+        classificationCache.set(key, classification)
+        requestSucceeded = true
+      } catch {
+        const deterministic = new Set(findProhibitedEasyBuys(selection.candidate.easyBuys))
+        classification = {
+          nonOrdinaryEasyBuys: selection.candidate.easyBuys
+            .filter((item) => !deterministic.has(item))
+            .map((item) => ({
+              item,
+              detail: `easy buy "${item}" could not be verified because the semantic classifier request failed`,
+            })),
+          unsuitablePackedMeals: [],
+          unverifiedPackedMeals: packedMeals.map((meal) => ({
+            day: meal.day,
+            slot: meal.slot,
+            dish: meal.dish,
+            detail: `packed meal "${meal.dish}" could not be verified because the semantic classifier request failed`,
+          })),
+          unsupportedPolicyOutcomes: [],
+          unverifiedPolicyOutcomes: persistentPolicies.map((policy) => ({
+            policyId: policy.policyId,
+            label: policy.label,
+            detail: `outcome "${policy.outcome}" for persistent policy "${policy.label}" could not be verified because the semantic classifier request failed`,
+          })),
+          unaddressedFeedback: [],
+          unverifiedFeedback: feedbackChecks.map((feedback) => ({
+            feedbackId: feedback.feedbackId,
+            detail: `authoritative feedback "${feedback.feedbackId}" could not be verified because the semantic classifier request failed`,
+          })),
+          usage: ZERO_DECISION_USAGE,
+        }
+      }
       decisionUsage = addDecisionUsage(decisionUsage, classification.usage)
-      options.onDecisionUsage?.(classification.usage)
+      if (requestSucceeded) options.onDecisionUsage?.(classification.usage)
     }
-    const { nonOrdinaryEasyBuys } = classification
-    if (nonOrdinaryEasyBuys.length === 0) return selection
+    const {
+      nonOrdinaryEasyBuys,
+      unsuitablePackedMeals,
+      unverifiedPackedMeals,
+      unsupportedPolicyOutcomes,
+      unverifiedPolicyOutcomes,
+      unaddressedFeedback,
+      unverifiedFeedback,
+    } = classification
+    if (
+      nonOrdinaryEasyBuys.length === 0 &&
+      unsuitablePackedMeals.length === 0 &&
+      unverifiedPackedMeals.length === 0 &&
+      unsupportedPolicyOutcomes.length === 0 &&
+      unverifiedPolicyOutcomes.length === 0 &&
+      unaddressedFeedback.length === 0 &&
+      unverifiedFeedback.length === 0
+    )
+      return selection
+    const semanticFailures = [
+      ...unsuitablePackedMeals.map((meal) => ({
+        code: "packed_slot_semantically_unsuitable" as const,
+        day: meal.day,
+        slot: meal.slot,
+        detail: meal.detail,
+      })),
+      ...unverifiedPackedMeals.map((meal) => ({
+        code: "packed_slot_unverified" as const,
+        day: meal.day,
+        slot: meal.slot,
+        detail: meal.detail,
+      })),
+      ...unsupportedPolicyOutcomes.map((policy) => ({
+        code: "persistent_policy_outcome_unsubstantiated" as const,
+        detail: `${policy.detail} (policy id: ${policy.policyId})`,
+      })),
+      ...unverifiedPolicyOutcomes.map((policy) => ({
+        code: "persistent_policy_outcome_unverified" as const,
+        detail: `${policy.detail} (policy id: ${policy.policyId})`,
+      })),
+      ...unaddressedFeedback.map((feedback) => ({
+        code: "unaddressed_feedback" as const,
+        detail: feedback.detail,
+      })),
+      ...unverifiedFeedback.map((feedback) => ({
+        code: "feedback_unverified" as const,
+        detail: feedback.detail,
+      })),
+    ]
+    const evaluation = nonOrdinaryEasyBuys.length
+      ? evaluateMealPlan(selection.candidate, context, { nonOrdinaryEasyBuys })
+      : selection.evaluation
     return {
       ...selection,
-      evaluation: evaluateMealPlan(selection.candidate, context, { nonOrdinaryEasyBuys }),
+      evaluation: {
+        ...evaluation,
+        pass: evaluation.pass && semanticFailures.length === 0,
+        failures: [...evaluation.failures, ...semanticFailures],
+      },
     }
   }
   const evaluationTool = createEvaluateMealPlanTool(options.context, options.revisionBaseCandidate, (selection) =>
-    classifyEasyBuys(selection, options.context),
+    classifySemanticChecks(selection, options.context),
   )
   const registry: ToolRegistry = {
     [MEAL_PLANNING_TOOL.EVALUATE]: {
@@ -215,7 +328,7 @@ export async function runMealPlanningAgentSession(
                 evaluationContext,
               )
             : evaluateMealPlanSelection(candidate as MealPlanSelectionCandidate, evaluationContext)
-        selectionEvaluation = await classifyEasyBuys(selectionEvaluation, evaluationContext)
+        selectionEvaluation = await classifySemanticChecks(selectionEvaluation, evaluationContext)
         if (!selectionEvaluation.candidate)
           throw new ToolHandlerError(
             "proposed plan could not be hydrated",
@@ -335,6 +448,129 @@ export async function runMealPlanningAgentSession(
     usage: result.usage,
     decisionUsage,
   }
+}
+
+/** Packs the hydrated actual meal and applicable slot requirements as classifier evidence. */
+function packedMealChecks(selection: MealPlanSelectionEvaluation, context: MealPlanContext): PackedMealCheck[] {
+  if (!selection.candidate) return []
+  const checks: PackedMealCheck[] = []
+  for (const [day, slots] of Object.entries(selection.candidate.grid)) {
+    for (const [slotId, cell] of Object.entries(slots)) {
+      const slot = effectiveMealSlot(context, day, slotId)
+      if (!slot?.packed) continue
+      checks.push({ day, slot: slotId, dish: cell.dish, ingredients: cell.items, drySlot: slot.dry })
+    }
+  }
+  return checks
+}
+
+/** Creates one semantic outcome check per persistent policy with a recorded decision. */
+function persistentPolicyChecks(
+  selection: MealPlanSelectionEvaluation,
+  context: MealPlanContext,
+): PersistentPolicyCheck[] {
+  if (!selection.candidate) return []
+  const candidate = selection.candidate
+  const planCells = (grid: MealGrid | null | undefined) =>
+    Object.entries(grid ?? {}).flatMap(([day, slots]) =>
+      Object.entries(slots).map(([slot, cell]) => ({
+        day,
+        slot,
+        dish: cell.dish,
+        ingredients: cell.items,
+        cookMinutes: cell.cookMinutes,
+        priorNightPrep: cell.priorNightPrep,
+      })),
+    )
+  const currentWeekPlanCells = planCells(candidate.grid)
+  const priorWeekPlanCells = planCells(context.priorWeekPlan)
+  return context.customPolicies.flatMap((policy) => {
+    if (policy.scope !== "persistent") return []
+    const outcome = candidate.policyOutcomes[policy.id]
+    if (!outcome || (outcome.outcome !== "satisfied" && outcome.outcome !== "trade-off")) return []
+    return [
+      {
+        policyId: policy.id,
+        label: policy.label,
+        value: policy.value,
+        outcome: outcome.outcome,
+        rationale: outcome.rationale,
+        easyBuys: candidate.easyBuys,
+        weeklyInventory: context.weeklyInventory,
+        planCells: currentWeekPlanCells,
+        priorWeekPlanCells,
+      },
+    ]
+  })
+}
+
+/** Builds semantic checks from authoritative feedback and its scoped before-and-after cells. */
+function authoritativeFeedbackChecks(
+  selection: MealPlanSelectionEvaluation,
+  context: MealPlanContext,
+): FeedbackCheck[] {
+  const candidate = selection.candidate
+  const beforePlan = context.feedbackReferencePlan ?? context.recentPlan
+  if (!candidate || !beforePlan || context.request.kind !== "revision") return []
+
+  const positions = new Map<string, { day: string; slot: string }>()
+  for (const plan of [beforePlan, candidate.grid])
+    for (const [day, slots] of Object.entries(plan))
+      for (const slot of Object.keys(slots)) positions.set(JSON.stringify([day, slot]), { day, slot })
+
+  return (context.feedbackItems ?? []).flatMap((item) => {
+    const scope =
+      item.scope ?? (item.target?.kind === "cell" ? { day: item.target.day, slot: item.target.slot } : undefined)
+    if (!scope && item.target?.kind !== "plan" && !isConcretePlanFeedback(item, context)) return []
+    const effectiveScope = scope ?? {}
+    const changes = [...positions.values()].flatMap(({ day, slot }) => {
+      if ((effectiveScope.day && effectiveScope.day !== day) || (effectiveScope.slot && effectiveScope.slot !== slot))
+        return []
+      const before = beforePlan[day]?.[slot]
+      const after = candidate.grid[day]?.[slot]
+      const asEvidence = (cell: typeof before) =>
+        cell
+          ? {
+              dish: cell.dish,
+              ingredients: cell.items,
+              cookMinutes: cell.cookMinutes,
+              priorNightPrep: cell.priorNightPrep,
+            }
+          : null
+      return [{ day, slot, before: asEvidence(before), after: asEvidence(after) }]
+    })
+    const reviewedEasyBuys = context.feedbackReferenceEasyBuys ?? []
+    const reviewedSet = new Set(reviewedEasyBuys.map(normalizeIngredient))
+    const finalSet = new Set(candidate.easyBuys.map(normalizeIngredient))
+    return [
+      {
+        feedbackId: item.id,
+        text: item.text,
+        scope: effectiveScope,
+        changes,
+        hasReferenceCells: changes.some((change) => change.before !== null),
+        hasCandidateCells: changes.some((change) => change.after !== null),
+        citedOutcomes: Object.entries(candidate.policyOutcomes).flatMap(([policyId, outcome]) => {
+          if (!outcome.rationale.includes(item.id)) return []
+          const policy = context.customPolicies.find((entry) => entry.id === policyId)
+          return [
+            {
+              policyId,
+              policyLabel: policy?.label ?? policyId,
+              policy: policy?.value ?? "",
+              outcome: outcome.outcome,
+              rationale: outcome.rationale,
+            },
+          ]
+        }),
+        weeklyInventory: context.weeklyInventory,
+        easyBuys: candidate.easyBuys,
+        reviewedEasyBuys,
+        addedEasyBuys: candidate.easyBuys.filter((item) => !reviewedSet.has(normalizeIngredient(item))),
+        removedEasyBuys: reviewedEasyBuys.filter((item) => !finalSet.has(normalizeIngredient(item))),
+      },
+    ]
+  })
 }
 
 /**

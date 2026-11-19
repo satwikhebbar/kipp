@@ -595,7 +595,7 @@ async function runPlanningSession(
     if (session.decisionUsage.inputTokens || session.decisionUsage.costUsd)
       logRuntime(env, {
         workflow: event.instanceId,
-        event: "meal-planning-easy-buy-classification",
+        event: "meal-planning-semantic-classification",
         outcome: "succeeded",
         details: {
           inputTokens: session.decisionUsage.inputTokens,
@@ -1053,6 +1053,7 @@ async function runRevision(
     weeklyExceptions: active.plan.weeklyExceptions,
     recentPlan: revisionBaseCandidate.grid,
     feedbackReferencePlan: active.version.candidate.grid,
+    feedbackReferenceEasyBuys: active.version.candidate.easyBuys,
     priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
     request: { kind: "revision", text: feedbackItems.map((item) => item.text).join(" ") },
     feedbackItems,

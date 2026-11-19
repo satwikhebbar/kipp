@@ -220,6 +220,61 @@ function proposeInput(candidate: unknown, feedbackItems?: unknown) {
   }
 }
 
+function feedbackDecisions(options: { failFirst?: boolean } = {}): { client: DecisionsClient; calls: () => number } {
+  let calls = 0
+  return {
+    calls: () => calls,
+    client: {
+      async decide({ questions }) {
+        calls += 1
+        if (options.failFirst && calls === 1) throw new Error("Decisions endpoint unavailable")
+        const question = questions.feedback_0
+        const instructions = question?.type === "noul" ? question.instructions : undefined
+        const changes =
+          instructions && typeof instructions !== "string"
+            ? (instructions.beforeAfter as { after: { ingredients: string[] } | null }[])
+            : []
+        const requestStillViolated = changes.some(({ after }) => after?.ingredients.includes("paneer"))
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && requestStillViolated ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.005 },
+        }
+      },
+    },
+  }
+}
+
+function noPaneerRevision() {
+  const base = passingCandidate()
+  const candidate = structuredClone(base)
+  candidate.grid.Wed["home-lunch"] = cell("paneer paratha", ["wheat flour", "paneer"], "home-lunch")
+  const feedback = {
+    id: "tg-no-paneer",
+    text: "No paneer in Wednesday home lunch",
+    target: { kind: "cell" as const, day: "Wed", slot: "home-lunch" },
+    scope: { day: "Wed", slot: "home-lunch" },
+  }
+  const ctx = contextWithCandidateDefinitions(
+    context({
+      request: { kind: "revision", text: feedback.text },
+      feedbackItems: [feedback],
+      recentPlan: base.grid,
+      feedbackReferencePlan: base.grid,
+      profile: { ...context().profile, pantryBaseline: ["wheat flour", "rice", "paneer"] },
+    }),
+    candidate,
+  )
+  return { base, candidate, feedback, context: ctx }
+}
+
 describe("bounded meal-planning agent session", () => {
   it("accepts propose_plan only when the candidate passes evaluation", async () => {
     const provider = providerWith(
@@ -240,7 +295,10 @@ describe("bounded meal-planning agent session", () => {
     const decisions: DecisionsClient = {
       async decide({ questions }) {
         const answers = Object.fromEntries(
-          Object.keys(questions).map((id) => [id, { type: "noul" as const, noul: 0.1 }]),
+          Object.keys(questions).map((id) => [
+            id,
+            { type: "noul" as const, noul: id.startsWith("easy_buy_") ? 0.1 : 0.99 },
+          ]),
         )
         return {
           id: "gen",
@@ -269,9 +327,11 @@ describe("bounded meal-planning agent session", () => {
 
   it("classifies a candidate's easy buys once across evaluate and propose", async () => {
     let decideCalls = 0
+    let classifiedQuestions: string[] = []
     const decisions: DecisionsClient = {
       async decide({ questions }) {
         decideCalls += 1
+        classifiedQuestions = Object.keys(questions)
         const answers = Object.fromEntries(
           Object.keys(questions).map((id) => [id, { type: "noul" as const, noul: 0.99 }]),
         )
@@ -296,7 +356,81 @@ describe("bounded meal-planning agent session", () => {
     expect(result.completed).toBe(true)
     expect(result.terminal).toMatchObject({ kind: "propose_plan" })
     expect(decideCalls).toBe(1)
+    expect(classifiedQuestions).toContain("easy_buy_0")
+    expect(classifiedQuestions.some((id) => id.startsWith("packed_meal_"))).toBe(true)
     expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
+  })
+
+  it("batches packed-meal checks with easy-buy questions and blocks an unsuitable packed meal", async () => {
+    let classifiedQuestions: string[] = []
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        classifiedQuestions = Object.keys(questions)
+        const answers = Object.fromEntries(
+          classifiedQuestions.map((id) => [id, { type: "noul" as const, noul: id === "packed_meal_0" ? 0.01 : 0.99 }]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const candidate = passingCandidate()
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      clarifyResponse({
+        message: "Please choose a different packed snack for Monday.",
+        reasonCodes: ["packed_slot_semantically_unsuitable"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(classifiedQuestions).toContain("packed_meal_0")
+    expect(classifiedQuestions).toContain("packed_meal_1")
+    expect(result.terminal).toMatchObject({
+      kind: "needs_clarification",
+      reasonCodes: ["packed_slot_semantically_unsuitable"],
+    })
+    expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
+  })
+
+  it.each([
+    "missing-answer",
+    "request-failure",
+  ] as const)("blocks packed meals when the classifier is unavailable (%s)", async (failureMode) => {
+    const decisions: DecisionsClient = {
+      async decide() {
+        if (failureMode === "request-failure") throw new Error("provider unavailable")
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: {},
+          usage: { inputTokens: 1, outputTokens: 0, costUsd: 0.001 },
+        }
+      },
+    }
+    const candidate = passingCandidate()
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      clarifyResponse({
+        message: "I could not verify the packed meals. Please choose a different option.",
+        reasonCodes: ["packed_slot_unverified"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["packed_slot_unverified"] })
+    expect(result.decisionUsage.inputTokens).toBe(failureMode === "missing-answer" ? 1 : 0)
   })
 
   it("truncates an overlong debug justification without rejecting the terminal proposal", async () => {
@@ -324,6 +458,334 @@ describe("bounded meal-planning agent session", () => {
       expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
     )
     expect(result.terminal?.kind).toBe("needs_clarification")
+  })
+
+  it.each([
+    ["unsuitable", "packed_slot_semantically_unsuitable"],
+    ["unverifiable", "packed_slot_unverified"],
+  ] as const)("rechecks changed packed-meal evidence at the proposal gate (%s)", async (outcome, expectedFailureCode) => {
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const answers = Object.fromEntries(
+          Object.keys(questions)
+            .filter((id) => !(decisionCalls === 2 && outcome === "unverifiable" && id === "packed_meal_0"))
+            .map((id) => [
+              id,
+              {
+                type: "noul" as const,
+                noul: decisionCalls === 2 && outcome === "unsuitable" && id === "packed_meal_0" ? 0.01 : 0.99,
+              },
+            ]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const evaluatedCandidate = passingCandidate()
+    const proposedCandidate = {
+      ...evaluatedCandidate,
+      grid: gridWith("Mon", "snack1", cell("poha", ["rice"], "snack1")),
+    }
+    const provider = providerWith(
+      evaluateResponse(evaluatedCandidate),
+      proposeResponse(proposeInput(proposedCandidate)),
+      clarifyResponse({
+        message: "Please choose a different packed meal that can be verified for this slot.",
+        reasonCodes: [],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), proposedCandidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(decisionCalls).toBe(2)
+    const proposalToolMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "propose_plan",
+    )
+    expect(proposalToolMessage?.role).toBe("tool")
+    if (proposalToolMessage?.role === "tool")
+      expect(proposalToolMessage.output).toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: [expectedFailureCode],
+      })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    expect(result.terminal?.kind).toBe("needs_clarification")
+    expect(result.terminal?.kind).not.toBe("propose_plan")
+  })
+
+  it.each([
+    "supported",
+    "unsupported",
+  ] as const)("checks whether the plan supports a persistent-policy outcome (%s)", async (claim) => {
+    const supported = claim === "supported"
+    let decisionCalls = 0
+    let policyEvidence: unknown
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const policyQuestion = questions.persistent_policy_0
+        let policySupportedFromEvidence = false
+        if (policyQuestion?.type === "noul" && typeof policyQuestion.instructions !== "string") {
+          policyEvidence = policyQuestion.instructions
+          const cells = policyQuestion.instructions.planCells as { slot: string; priorNightPrep: boolean }[]
+          const priorWeekCells = policyQuestion.instructions.priorWeekPlanCells as {
+            day: string
+            slot: string
+            dish: string
+          }[]
+          policySupportedFromEvidence =
+            cells.filter((cell) => cell.slot.startsWith("snack")).every((cell) => !cell.priorNightPrep) &&
+            priorWeekCells.some((cell) => cell.day === "Mon" && cell.slot === "snack1" && cell.dish === "banana")
+        }
+        const answers = Object.fromEntries(
+          Object.keys(questions).map((id) => [
+            id,
+            {
+              type: "noul" as const,
+              noul: id === "persistent_policy_0" && !policySupportedFromEvidence ? 0.01 : 0.99,
+            },
+          ]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const policy = {
+      id: "snack-policy",
+      label: "Quick school snacks",
+      scope: "persistent" as const,
+      value: "Every school snack requires no prior-night preparation.",
+    }
+    const candidate = passingCandidate()
+    if (!supported) candidate.grid.Mon.snack1.priorNightPrep = true
+    candidate.policyOutcomes[policy.id] = {
+      outcome: "satisfied",
+      rationale: "The planned snacks need no prior-night preparation.",
+    }
+    const responses = [evaluateResponse(candidate)]
+    if (supported) responses.push(proposeResponse(proposeInput(candidate)))
+    else {
+      responses.push(proposeResponse(proposeInput(candidate)))
+      responses.push(
+        clarifyResponse({
+          message: "Please revise the snack plan to meet the no-prior-prep policy.",
+          reasonCodes: ["persistent_policy_outcome_unsubstantiated"],
+          interaction: { kind: "reply" },
+        }),
+      )
+    }
+    const provider = providerWith(...responses)
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(
+        context({
+          customPolicies: [policy],
+          priorWeekPlan: { Mon: { snack1: cell("banana", ["banana"], "snack1") } },
+          profile: { ...context().profile, priorNightPrepAllowed: true },
+          weeklyInventory: {
+            items: [{ name: "carrots", status: "unavailable", quantityNote: "out this week" }],
+            notes: [],
+          },
+        }),
+        candidate,
+      ),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(decisionCalls).toBe(1)
+    expect(policyEvidence).toMatchObject({
+      policyId: policy.id,
+      policy: policy.value,
+      recordedOutcome: "satisfied",
+      rationale: "The planned snacks need no prior-night preparation.",
+      easyBuys: [],
+      weeklyInventory: {
+        items: [{ name: "carrots", status: "unavailable", quantityNote: "out this week" }],
+        notes: [],
+      },
+      priorWeekPlanCells: [
+        expect.objectContaining({
+          day: "Mon",
+          slot: "snack1",
+          dish: "banana",
+          ingredients: ["banana"],
+          cookMinutes: 0,
+          priorNightPrep: false,
+        }),
+      ],
+      planCells: expect.arrayContaining([
+        expect.objectContaining({
+          day: "Mon",
+          slot: "snack1",
+          dish: "paratha",
+          ingredients: ["wheat flour"],
+          cookMinutes: 0,
+          priorNightPrep: !supported,
+        }),
+      ]),
+    })
+    expect(result.terminal?.kind).toBe(supported ? "propose_plan" : "needs_clarification")
+    if (!supported) {
+      const evaluationMessage = result.messages.find(
+        (message) => message.role === "tool" && message.name === "evaluate_meal_plan",
+      )
+      if (evaluationMessage?.role === "tool")
+        expect(evaluationMessage.output).toMatchObject({
+          ok: true,
+          output: {
+            pass: false,
+            failures: [
+              expect.objectContaining({
+                code: "persistent_policy_outcome_unsubstantiated",
+                detail: expect.stringMatching(new RegExp(`${policy.label}.*${policy.id}`)),
+              }),
+            ],
+          },
+        })
+      const proposalMessage = result.messages.find(
+        (message) => message.role === "tool" && message.name === "propose_plan",
+      )
+      if (proposalMessage?.role === "tool")
+        expect(proposalMessage.output).toMatchObject({
+          ok: false,
+          category: "invalid-state",
+          rejectionCodes: ["persistent_policy_outcome_unsubstantiated"],
+        })
+    }
+  })
+
+  it("does not reuse a persistent-policy verdict after prior-week snack evidence changes", async () => {
+    const candidate = passingCandidate()
+    const policy = {
+      id: "prior-week-snacks",
+      label: "Compare weekday snacks",
+      scope: "persistent" as const,
+      value: "Consider the same weekday's prior-week snack when evaluating repetition.",
+    }
+    candidate.policyOutcomes[policy.id] = {
+      outcome: "satisfied",
+      rationale: "The current snack was assessed against the same weekday last week.",
+    }
+    const sessionContext = contextWithCandidateDefinitions(
+      context({
+        customPolicies: [policy],
+        priorWeekPlan: { Mon: { snack1: cell("apple", ["apple"], "snack1") } },
+      }),
+      candidate,
+    )
+    const priorWeekSnacks: string[][] = []
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        const question = questions.persistent_policy_0
+        const evidence =
+          question?.type === "noul" && typeof question.instructions !== "string" ? question.instructions : undefined
+        const priorCells = evidence?.priorWeekPlanCells as { day: string; slot: string; dish: string }[] | undefined
+        priorWeekSnacks.push(priorCells?.filter((cell) => cell.slot.startsWith("snack")).map((cell) => cell.dish) ?? [])
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: "noul" as const, noul: 0.99 }])),
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const responses = [evaluateResponse(candidate), proposeResponse(proposeInput(candidate))]
+    let providerCalls = 0
+    const provider: ToolProviderClient = {
+      async generate() {
+        providerCalls += 1
+        if (providerCalls === 2)
+          sessionContext.priorWeekPlan = { Mon: { snack1: cell("banana", ["banana"], "snack1") } }
+        const response = responses.shift()
+        if (!response) throw new Error("unexpected provider call")
+        return response
+      },
+    }
+
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: sessionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(priorWeekSnacks).toEqual([["apple"], ["banana"]])
+    expect(result.terminal?.kind).toBe("propose_plan")
+  })
+
+  it("blocks a proposal when a persistent-policy outcome cannot be verified", async () => {
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide() {
+        decisionCalls += 1
+        throw new Error("Decisions endpoint unavailable")
+      },
+    }
+    const policy = {
+      id: "snack-policy",
+      label: "Dry school snacks",
+      scope: "persistent" as const,
+      value: "Every school snack is dry.",
+    }
+    const candidate = passingCandidate()
+    candidate.policyOutcomes[policy.id] = { outcome: "satisfied", rationale: "The planned snacks are dry." }
+    const clarification = clarifyResponse({
+      message: "I could not verify the dry-snack policy claim or packed meals. Please review the plan.",
+      reasonCodes: ["persistent_policy_outcome_unverified", "packed_slot_unverified"],
+      interaction: { kind: "reply" },
+    })
+    const responses = [evaluateResponse(candidate), proposeResponse(proposeInput(candidate))]
+    const provider: ToolProviderClient = {
+      generate: vi.fn().mockImplementation(async () => responses.shift() ?? clarification),
+    }
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context({ customPolicies: [policy] }), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(decisionCalls).toBe(2)
+    expect(result.terminal).toMatchObject({
+      kind: "needs_clarification",
+      reasonCodes: ["persistent_policy_outcome_unverified", "packed_slot_unverified"],
+    })
+    const evaluationMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "evaluate_meal_plan",
+    )
+    if (evaluationMessage?.role === "tool")
+      expect(evaluationMessage.output).toMatchObject({
+        ok: true,
+        output: {
+          failures: expect.arrayContaining([
+            expect.objectContaining({
+              code: "persistent_policy_outcome_unverified",
+              detail: expect.stringContaining(policy.id),
+            }),
+          ]),
+        },
+      })
+    const proposalMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "propose_plan",
+    )
+    if (proposalMessage?.role === "tool")
+      expect(proposalMessage.output).toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: expect.arrayContaining(["persistent_policy_outcome_unverified", "packed_slot_unverified"]),
+      })
   })
 
   it("requires needs_clarification to include every evaluator failure", async () => {
@@ -383,6 +845,451 @@ describe("bounded meal-planning agent session", () => {
       expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
     )
     expect(result.terminal?.kind).toBe("needs_clarification")
+  })
+
+  it("rejects a scoped revision that changes the cell but still violates authoritative feedback", async () => {
+    const { candidate, feedback, context: revisionContext } = noPaneerRevision()
+    expect(evaluateMealPlan(candidate, revisionContext).pass).toBe(true)
+    const decisions = feedbackDecisions()
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+      clarifyResponse({
+        message: "The Wednesday home lunch still contains paneer. Please choose a paneer-free meal.",
+        reasonCodes: ["unaddressed_feedback"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: revisionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions.client),
+    })
+
+    expect(decisions.calls()).toBe(1)
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["unaddressed_feedback"] })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    const proposalMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "propose_plan",
+    )
+    if (proposalMessage?.role === "tool")
+      expect(proposalMessage.output).toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: ["unaddressed_feedback"],
+      })
+    expect(result.decisionUsage).toEqual({ inputTokens: 10, outputTokens: 2, costUsd: 0.005 })
+  })
+
+  it("classifies a feedback scope absent from both plans and rejects an ID-only rationale", async () => {
+    const candidate = passingCandidate()
+    const feedback = {
+      id: "tg-no-sunday-cell",
+      text: "Keep Sunday home lunch as planned and explain why the swap was impractical",
+      target: { kind: "cell" as const, day: "Sun", slot: "home-lunch" },
+      scope: { day: "Sun", slot: "home-lunch" },
+    }
+    const policy = {
+      id: "feedback-rationale",
+      label: "Feedback rationale",
+      scope: "current_week" as const,
+      value: "Provide a reason for an impractical request.",
+    }
+    candidate.policyOutcomes[policy.id] = { outcome: "trade-off", rationale: feedback.id }
+    const revisionContext = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback.text },
+        feedbackItems: [feedback],
+        recentPlan: candidate.grid,
+        feedbackReferencePlan: candidate.grid,
+        customPolicies: [policy],
+      }),
+      candidate,
+    )
+    expect(evaluateMealPlan(candidate, revisionContext).pass).toBe(true)
+    let capturedEvidence: unknown
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const question = questions.feedback_0
+        if (question?.type === "noul") capturedEvidence = question.instructions
+        const evidence =
+          question?.type === "noul" && typeof question.instructions !== "string"
+            ? (question.instructions as { hasCandidateCells?: boolean; citedOutcomes?: unknown[] })
+            : undefined
+        const accepted = evidence?.hasCandidateCells === true && Boolean(evidence.citedOutcomes?.length)
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && !accepted ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 7, outputTokens: 2, costUsd: 0.002 },
+        }
+      },
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+      clarifyResponse({
+        message: "There is no Sunday home lunch to keep. Please choose a scheduled meal to revise.",
+        reasonCodes: ["unaddressed_feedback"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: revisionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(capturedEvidence).toMatchObject({
+      scope: feedback.scope,
+      beforeAfter: [],
+      hasReferenceCells: false,
+      hasCandidateCells: false,
+      citedOutcomes: [expect.objectContaining({ policyId: policy.id, rationale: feedback.id })],
+    })
+    expect(decisionCalls).toBe(1)
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["unaddressed_feedback"] })
+    const proposalMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "propose_plan",
+    )
+    if (proposalMessage?.role === "tool")
+      expect(proposalMessage.output).toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: ["unaddressed_feedback"],
+      })
+  })
+
+  it("retries an unavailable feedback classification and accounts for only successful usage", async () => {
+    const { candidate, feedback, context: revisionContext } = noPaneerRevision()
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice"], "home-lunch")
+    const decisions = feedbackDecisions({ failFirst: true })
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: contextWithCandidateDefinitions(revisionContext, candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions.client),
+    })
+
+    expect(decisions.calls()).toBe(2)
+    expect(result.terminal?.kind).toBe("propose_plan")
+    expect(result.decisionUsage).toEqual({ inputTokens: 10, outputTokens: 2, costUsd: 0.005 })
+    const evaluationMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "evaluate_meal_plan",
+    )
+    expect(evaluationMessage?.role).toBe("tool")
+    if (evaluationMessage?.role === "tool")
+      expect(evaluationMessage.output).toMatchObject({
+        ok: true,
+        output: { failures: expect.arrayContaining([expect.objectContaining({ code: "feedback_unverified" })]) },
+      })
+  })
+
+  it("does not reuse a feedback verdict when the scoped before-plan evidence changes", async () => {
+    const base = passingCandidate()
+    const candidate = structuredClone(base)
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice"], "home-lunch")
+    const feedback = {
+      id: "tg-replace-lunch",
+      text: "Replace Wednesday home lunch paratha with poha",
+      target: { kind: "cell" as const, day: "Wed", slot: "home-lunch" },
+      scope: { day: "Wed", slot: "home-lunch" },
+    }
+    const revisionContext = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback.text },
+        feedbackItems: [feedback],
+        recentPlan: base.grid,
+        feedbackReferencePlan: structuredClone(base.grid),
+      }),
+      candidate,
+    )
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const question = questions.feedback_0
+        const instructions = question?.type === "noul" ? question.instructions : undefined
+        const changes =
+          instructions && typeof instructions !== "string"
+            ? (instructions.beforeAfter as { before: { dish: string } | null; after: { dish: string } | null }[])
+            : []
+        const supported = changes.some(({ before, after }) => before?.dish === "paratha" && after?.dish === "poha")
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && !supported ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.005 },
+        }
+      },
+    }
+    let providerTurns = 0
+    const clarification = clarifyResponse({
+      message: "The before-plan changed, so I can no longer verify that request.",
+      reasonCodes: ["unaddressed_feedback"],
+      interaction: { kind: "reply" },
+    })
+    const provider: ToolProviderClient = {
+      generate: vi.fn().mockImplementation(async () => {
+        providerTurns += 1
+        if (providerTurns === 1) return evaluateResponse(candidate)
+        if (providerTurns === 2) {
+          revisionContext.feedbackReferencePlan = structuredClone(candidate.grid)
+          return proposeResponse(
+            proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }]),
+          )
+        }
+        return clarification
+      }),
+    }
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: revisionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(decisionCalls).toBe(2)
+    expect(result.terminal?.kind).toBe("needs_clarification")
+    expect(result.decisionUsage).toEqual({ inputTokens: 20, outputTokens: 4, costUsd: 0.01 })
+  })
+
+  it.each([
+    "truthful rationale",
+    "bare feedback reference",
+  ] as const)("checks cited outcome rationales through the revision proposal tool (%s)", async (rationaleCase) => {
+    const candidate = passingCandidate()
+    const feedback = {
+      id: "tg-rationale",
+      text: "Keep Monday home lunch as planned and explain why a paneer paratha swap was impractical",
+      target: { kind: "cell" as const, day: "Mon", slot: "home-lunch" },
+      scope: { day: "Mon", slot: "home-lunch" },
+    }
+    const policy = {
+      id: "avoid-paneer-rationale",
+      label: "Avoid paneer",
+      scope: "current_week" as const,
+      value: "Avoid paneer in household meals.",
+    }
+    const rationale =
+      rationaleCase === "truthful rationale"
+        ? "tg-rationale: kept paratha because paneer is unavailable this week."
+        : "tg-rationale"
+    candidate.policyOutcomes[policy.id] = { outcome: "trade-off", rationale }
+    const revisionContext = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback.text },
+        feedbackItems: [feedback],
+        recentPlan: structuredClone(candidate.grid),
+        feedbackReferencePlan: structuredClone(candidate.grid),
+        customPolicies: [policy],
+        weeklyInventory: { items: [{ name: "paneer", status: "unavailable" as const }], notes: [] },
+        profile: { ...context().profile, dietaryExclusions: ["paneer"] },
+      }),
+      candidate,
+    )
+    let capturedFeedback: unknown
+    let capturedQuestionIds: string[] = []
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        capturedQuestionIds = Object.keys(questions)
+        const question = questions.feedback_0
+        if (question?.type === "noul") capturedFeedback = question.instructions
+        const instructions =
+          question?.type === "noul" && typeof question.instructions !== "string" ? question.instructions : undefined
+        const citedOutcomes = instructions?.citedOutcomes as { policy: string; rationale: string }[] | undefined
+        const inventory = instructions?.weeklyInventory as { items: { name: string; status: string }[] } | undefined
+        const planChanges = instructions?.beforeAfter as
+          | { before: { dish: string } | null; after: { dish: string } | null }[]
+          | undefined
+        const explained =
+          citedOutcomes?.some(
+            (entry) =>
+              entry.policy.includes("Avoid paneer") && entry.rationale.includes("because paneer is unavailable"),
+          ) === true &&
+          inventory?.items.some((item) => item.name === "paneer" && item.status === "unavailable") === true &&
+          !Object.keys(questions).some((id) => id.startsWith("persistent_policy_")) &&
+          planChanges?.some(({ before, after }) => before?.dish === "paratha" && after?.dish === "paratha") === true
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && !explained ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 8, outputTokens: 2, costUsd: 0.003 },
+        }
+      },
+    }
+    const responses = [
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+    ]
+    if (rationaleCase === "bare feedback reference")
+      responses.push(
+        clarifyResponse({
+          message: "Please provide a useful reason for keeping the current lunch.",
+          reasonCodes: ["unaddressed_feedback"],
+          interaction: { kind: "reply" },
+        }),
+      )
+    const result = await runMealPlanningAgentSession(
+      providerWith(...responses),
+      [{ role: "user", text: feedback.text }],
+      { context: revisionContext, easyBuyClassifier: createEasyBuyClassifier(decisions) },
+    )
+
+    expect(capturedFeedback).toMatchObject({
+      feedback: feedback.text,
+      beforeAfter: [
+        expect.objectContaining({
+          day: "Mon",
+          slot: "home-lunch",
+          before: expect.objectContaining({ dish: "paratha" }),
+          after: expect.objectContaining({ dish: "paratha" }),
+        }),
+      ],
+      citedOutcomes: [
+        expect.objectContaining({
+          policyId: policy.id,
+          policy: policy.value,
+          outcome: "trade-off",
+          rationale,
+        }),
+      ],
+    })
+    expect(decisionCalls).toBe(1)
+    expect(capturedQuestionIds).not.toContain("persistent_policy_0")
+    expect(result.terminal?.kind).toBe(rationaleCase === "truthful rationale" ? "propose_plan" : "needs_clarification")
+    if (rationaleCase === "bare feedback reference") {
+      const proposalMessage = result.messages.find(
+        (message) => message.role === "tool" && message.name === "propose_plan",
+      )
+      if (proposalMessage?.role === "tool")
+        expect(proposalMessage.output).toMatchObject({
+          ok: false,
+          category: "invalid-state",
+          rejectionCodes: ["unaddressed_feedback"],
+        })
+    }
+  })
+
+  it.each([
+    "already listed",
+    "newly added",
+    "equivalent ingredient spelling",
+  ] as const)("checks shopping-list feedback against reviewed and final lists (%s)", async (listCase) => {
+    const alreadyListed = listCase === "already listed"
+    const equivalentSpelling = listCase === "equivalent ingredient spelling"
+    const noNewItems = alreadyListed || equivalentSpelling
+    const finalEasyBuy = equivalentSpelling ? "tomato" : "spinach"
+    const reviewedEasyBuy = equivalentSpelling ? "tomatoes" : "spinach"
+    const base = passingCandidate()
+    if (noNewItems)
+      base.grid.Wed["home-lunch"] = cell("paratha", ["rice", equivalentSpelling ? "tomatoes" : "spinach"], "home-lunch")
+    const candidate = structuredClone(base)
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice", equivalentSpelling ? "tomato" : "spinach"], "home-lunch")
+    const feedback = {
+      id: "tg-empty-shopping-list",
+      text: "Replace Wednesday home lunch with poha without adding any shopping-list items",
+      target: { kind: "cell" as const, day: "Wed", slot: "home-lunch" },
+      scope: { day: "Wed", slot: "home-lunch" },
+    }
+    const revisionContext = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback.text },
+        feedbackItems: [feedback],
+        recentPlan: base.grid,
+        feedbackReferencePlan: base.grid,
+        feedbackReferenceEasyBuys: noNewItems ? [reviewedEasyBuy] : [],
+        profile: { ...context().profile, pantryBaseline: ["wheat flour", "rice"] },
+      }),
+      candidate,
+    )
+    let capturedEasyBuys: unknown
+    let capturedReviewedEasyBuys: unknown
+    let capturedAddedEasyBuys: unknown
+    let capturedQuestionIds: string[] = []
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        capturedQuestionIds = Object.keys(questions)
+        const question = questions.feedback_0
+        const feedbackInstructions =
+          question?.type === "noul" && typeof question.instructions !== "string" ? question.instructions : undefined
+        capturedEasyBuys = feedbackInstructions?.easyBuys
+        capturedReviewedEasyBuys = feedbackInstructions?.reviewedEasyBuys
+        capturedAddedEasyBuys = feedbackInstructions?.addedEasyBuys
+        const noNewShoppingItems = Array.isArray(capturedAddedEasyBuys) && capturedAddedEasyBuys.length === 0
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && !noNewShoppingItems ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 9, outputTokens: 2, costUsd: 0.003 },
+        }
+      },
+    }
+    const responses = [
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+    ]
+    if (!noNewItems)
+      responses.push(
+        clarifyResponse({
+          message: "This revision adds spinach to the shopping list. Please choose a meal that needs no new items.",
+          reasonCodes: ["unaddressed_feedback"],
+          interaction: { kind: "reply" },
+        }),
+      )
+    const provider = providerWith(...responses)
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: revisionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(capturedEasyBuys).toEqual([finalEasyBuy])
+    expect(capturedReviewedEasyBuys).toEqual(noNewItems ? [reviewedEasyBuy] : [])
+    expect(capturedAddedEasyBuys).toEqual(noNewItems ? [] : [finalEasyBuy])
+    expect(capturedQuestionIds).toContain("easy_buy_0")
+    expect(capturedQuestionIds).toContain("feedback_0")
+    expect(result.terminal?.kind).toBe(noNewItems ? "propose_plan" : "needs_clarification")
+    if (!noNewItems) {
+      const proposalMessage = result.messages.find(
+        (message) => message.role === "tool" && message.name === "propose_plan",
+      )
+      if (proposalMessage?.role === "tool")
+        expect(proposalMessage.output).toMatchObject({
+          ok: false,
+          category: "invalid-state",
+          rejectionCodes: ["unaddressed_feedback"],
+        })
+    } else if (result.terminal?.kind === "propose_plan") {
+      expect(result.terminal.candidate.easyBuys).toEqual([finalEasyBuy])
+    }
   })
 
   it("rejects propose_plan when a submitted feedback item alters the authoritative item", async () => {

@@ -104,8 +104,8 @@ const POLICY_IDS = [
 ]
 
 // These workflow fixtures deliberately keep one compact hydrated-cell grid.
-// Every catalog definition is made slot-compatible and pantry-backed so the
-// workflow tests exercise routing and persistence rather than meal suitability.
+// Every catalog definition is made slot-compatible and pantry-backed; the
+// Decisions stub approves packed meals so the tests focus on routing/persistence.
 SEED_PROFILE.mealDefinitions = (SEED_PROFILE.mealDefinitions ?? []).map((definition) => ({
   ...definition,
   suitableSlots: ["breakfast", "snack1", "snack2", "school-lunch", "home-lunch"],
@@ -455,13 +455,13 @@ describe("agent-centered meal-planning Telegram integration", () => {
     expect(active?.plan.currentVersion).toBe(2)
     expect(active?.version.requestKind).toBe("revision")
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
-    // Each queued LLM call reports 1000 in / 500 out: v1 usage = extract + session
-    // (3000/1500), v2 = its own revision session (2000/1000).
+    // Each queued LLM call reports 1000 in / 500 out, and the Decisions stub
+    // reports $0.000001 for the packed-meal batch in each plan session.
     expect(active?.version.usage).toEqual({
       inputTokens: 2000,
       outputTokens: 1000,
       model: "~openai/gpt-luna-latest",
-      costUsd: 0.002,
+      costUsd: 0.002001,
     })
     const plans = network.getState().telegramMessages.filter((candidate) => candidate.text.includes("School week of"))
     expect(plans).toHaveLength(2)
@@ -921,8 +921,22 @@ describe("meal edit recovery in the actual Workflow runtime", () => {
       workflowsPersist: join(persistence, "workflows"),
       durableObjectsPersist: join(persistence, "router"),
       outboundService: async (request: Request) => {
-        if (new URL(request.url).hostname !== "probe") throw new Error(`unexpected external request ${request.url}`)
-        const path = new URL(request.url).pathname
+        const url = new URL(request.url)
+        if (url.hostname === "openrouter.ai" && url.pathname === "/api/alpha/decisions") {
+          const body = (await request.json()) as { questions?: Record<string, unknown> }
+          const answers = Object.fromEntries(
+            Object.keys(body.questions ?? {}).map((id) => [id, { type: "noul", noul: 0.99 }]),
+          )
+          return Response.json({
+            id: "gen-dec-fake",
+            model: "openai/gpt-6-luna-decisions",
+            provider: "OpenAI",
+            answers,
+            usage: { input_tokens: 1, output_tokens: 0, cost: 0.000001 },
+          })
+        }
+        if (url.hostname !== "probe") throw new Error(`unexpected external request ${request.url}`)
+        const path = url.pathname
         if (path === "/entry") {
           entries.push(await request.text())
           return new Response("ok")

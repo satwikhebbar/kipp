@@ -42,6 +42,8 @@ describe("easy-buy classifier", () => {
     expect(seen).toHaveLength(1)
     expect(seen[0]).toEqual(["easy_buy_0", "easy_buy_1", "easy_buy_2"])
     expect(result.nonOrdinaryEasyBuys.map((entry) => entry.item)).toEqual(["dried apricots"])
+    expect(result.unsuitablePackedMeals).toEqual([])
+    expect(result.unverifiedPackedMeals).toEqual([])
     expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 0, costUsd: 0.0005 })
   })
 
@@ -81,6 +83,220 @@ describe("easy-buy classifier", () => {
     const classifier = createEasyBuyClassifier(decisionsReturning([0.7]), { threshold: 0.6 })
     const result = await classifier.classify(["curd"])
     expect(result.nonOrdinaryEasyBuys).toEqual([])
+  })
+
+  it("batch-classifies packed meals with easy buys and separates fail from uncertain", async () => {
+    const seen: string[][] = []
+    const classifier = createEasyBuyClassifier(decisionsReturning([0.99, 0.55, 0.1], seen))
+    const result = await classifier.classify(
+      ["carrot"],
+      [
+        { day: "Mon", slot: "snack1", dish: "banana", ingredients: ["banana"], drySlot: true },
+        { day: "Mon", slot: "school-lunch", dish: "wet curry", ingredients: ["rice", "curry"], drySlot: false },
+      ],
+    )
+    expect(seen).toEqual([["easy_buy_0", "packed_meal_0", "packed_meal_1"]])
+    expect(result.unsuitablePackedMeals).toMatchObject([{ dish: "wet curry", slot: "school-lunch" }])
+    expect(result.unverifiedPackedMeals).toMatchObject([{ dish: "banana", slot: "snack1" }])
+  })
+
+  it("marks missing and malformed packed-meal answers as unverified", async () => {
+    const decisions: DecisionsClient = {
+      async decide() {
+        return {
+          id: "gen-dec",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: { packed_meal_1: { type: "noul", noul: Number.NaN } },
+          usage: { inputTokens: 3, outputTokens: 0, costUsd: 0.001 },
+        }
+      },
+    }
+    const result = await createEasyBuyClassifier(decisions).classify(
+      [],
+      [
+        { day: "Mon", slot: "snack1", dish: "missing answer", ingredients: [], drySlot: true },
+        { day: "Tue", slot: "snack1", dish: "malformed answer", ingredients: [], drySlot: true },
+      ],
+    )
+    expect(result.unverifiedPackedMeals.map((meal) => meal.dish)).toEqual(["missing answer", "malformed answer"])
+  })
+
+  it("asks about ordinary lunchbox travel, independent eating, and preparation needs", async () => {
+    let instructions = ""
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        instructions = Object.values(questions)
+          .filter((question) => question.type === "noul")
+          .map((question) => question.instructions)
+          .join(" ")
+        return {
+          id: "gen-dec",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: { packed_meal_0: { type: "noul", noul: 0.99 } },
+          usage: { inputTokens: 3, outputTokens: 0, costUsd: 0.001 },
+        }
+      },
+    }
+    await createEasyBuyClassifier(decisions).classify(
+      [],
+      [{ day: "Mon", slot: "snack1", dish: "fruit", ingredients: ["banana"], drySlot: true }],
+    )
+    expect(instructions).toContain("ordinary school lunchbox")
+    expect(instructions).toContain("independently edible by hand or ordinary spoon")
+    expect(instructions).toContain("no reheating, cooking, assembly, or special equipment")
+    expect(instructions).toContain("dry and spill-resistant")
+  })
+
+  it("distinguishes supported from unsupported persistent-policy outcomes", async () => {
+    const check = {
+      policyId: "snack-policy",
+      label: "Dry snacks",
+      value: "Every school snack is dry.",
+      outcome: "satisfied" as const,
+      rationale: "The snack cells use dry, portable meals.",
+      easyBuys: ["banana"],
+      weeklyInventory: {
+        items: [{ name: "carrots", status: "unavailable" as const, quantityNote: "out this week" }],
+        notes: [],
+      },
+      priorWeekPlanCells: [],
+      planCells: [
+        {
+          day: "Mon",
+          slot: "snack1",
+          dish: "banana",
+          ingredients: ["banana"],
+          cookMinutes: 0,
+          priorNightPrep: false,
+        },
+        {
+          day: "Mon",
+          slot: "school-lunch",
+          dish: "rice",
+          ingredients: ["rice"],
+          cookMinutes: 15,
+          priorNightPrep: true,
+        },
+      ],
+    }
+    const supported = await createEasyBuyClassifier(decisionsReturning([0.99])).classify([], [], [check])
+    expect(supported.unsupportedPolicyOutcomes).toEqual([])
+    expect(supported.unverifiedPolicyOutcomes).toEqual([])
+
+    const unsupported = await createEasyBuyClassifier(decisionsReturning([0.01])).classify([], [], [check])
+    expect(unsupported.unsupportedPolicyOutcomes).toEqual([
+      {
+        policyId: "snack-policy",
+        label: "Dry snacks",
+        detail: 'outcome "satisfied" for persistent policy "Dry snacks" is not supported by the hydrated plan',
+      },
+    ])
+
+    const uncertain = await createEasyBuyClassifier(decisionsReturning([0.55])).classify([], [], [check])
+    expect(uncertain.unsupportedPolicyOutcomes).toEqual([])
+    expect(uncertain.unverifiedPolicyOutcomes).toMatchObject([{ policyId: "snack-policy", label: "Dry snacks" }])
+
+    const supportedTradeOff = await createEasyBuyClassifier(decisionsReturning([0.99])).classify(
+      [],
+      [],
+      [{ ...check, outcome: "trade-off", rationale: "One snack needed prior-night preparation." }],
+    )
+    expect(supportedTradeOff.unsupportedPolicyOutcomes).toEqual([])
+    expect(supportedTradeOff.unverifiedPolicyOutcomes).toEqual([])
+  })
+
+  it("batches feedback satisfaction with item, packed-meal, and policy checks", async () => {
+    let capturedQuestions: Record<string, { type: string; instructions: unknown }> | undefined
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        capturedQuestions = questions
+        return {
+          id: "gen-dec",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 17, outputTokens: 3, costUsd: 0.004 },
+        }
+      },
+    }
+    const feedback = {
+      feedbackId: "tg-request",
+      text: "No paneer in Wednesday home lunch",
+      scope: { day: "Wed", slot: "home-lunch" },
+      changes: [
+        {
+          day: "Wed",
+          slot: "home-lunch",
+          before: { dish: "paratha", ingredients: ["rice"], cookMinutes: 20, priorNightPrep: false },
+          after: {
+            dish: "paneer paratha",
+            ingredients: ["wheat flour", "paneer"],
+            cookMinutes: 20,
+            priorNightPrep: false,
+          },
+        },
+      ],
+      citedOutcomes: [],
+      weeklyInventory: { items: [{ name: "paneer", status: "unavailable" as const }], notes: [] },
+      easyBuys: [],
+      reviewedEasyBuys: [],
+      addedEasyBuys: [],
+      removedEasyBuys: [],
+      hasReferenceCells: true,
+      hasCandidateCells: true,
+    }
+    const policy = {
+      policyId: "policy-1",
+      label: "Dry snacks",
+      value: "Every snack is dry.",
+      outcome: "satisfied" as const,
+      rationale: "Snacks are dry.",
+      easyBuys: [],
+      weeklyInventory: {
+        items: [{ name: "carrots", status: "unavailable" as const }],
+        notes: ["No carrots available"],
+      },
+      priorWeekPlanCells: [],
+      planCells: [],
+    }
+    const result = await createEasyBuyClassifier(decisions).classify(
+      ["carrot"],
+      [{ day: "Mon", slot: "snack1", dish: "banana", ingredients: ["banana"], drySlot: true }],
+      [policy],
+      [feedback],
+    )
+
+    expect(Object.keys(capturedQuestions ?? {})).toEqual([
+      "easy_buy_0",
+      "packed_meal_0",
+      "persistent_policy_0",
+      "feedback_0",
+    ])
+    expect(capturedQuestions?.feedback_0?.instructions).toMatchObject({
+      feedback: feedback.text,
+      scope: feedback.scope,
+      beforeAfter: feedback.changes,
+    })
+    expect(capturedQuestions?.persistent_policy_0?.instructions).toMatchObject({
+      weeklyInventory: policy.weeklyInventory,
+    })
+    expect(result.unaddressedFeedback).toEqual([
+      {
+        feedbackId: feedback.feedbackId,
+        detail: 'authoritative feedback "tg-request" is not satisfied by the after-plan evidence in its scope',
+      },
+    ])
+    expect(result.usage).toEqual({ inputTokens: 17, outputTokens: 3, costUsd: 0.004 })
+
+    const uncertain = await createEasyBuyClassifier(decisionsReturning([0.55])).classify([], [], [], [feedback])
+    expect(uncertain.unverifiedFeedback).toMatchObject([{ feedbackId: feedback.feedbackId }])
   })
 
   it("skips the model entirely when no item is unresolved", async () => {
