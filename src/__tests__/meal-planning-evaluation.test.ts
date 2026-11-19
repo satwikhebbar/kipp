@@ -951,6 +951,52 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(evaluation)).not.toContain("unaddressed_feedback")
   })
 
+  it("matches a custom-slot move only at its named destination", () => {
+    const schedule = {
+      days: ["Sat", "Sun"],
+      slots: [
+        { id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null },
+        { id: "supper", name: "Supper", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    const priorGrid = {
+      Sat: { "morning-tea": cellFor("morning-tea", "idli"), supper: cellFor("supper", "rice and beans") },
+      Sun: { "morning-tea": cellFor("morning-tea", "banana"), supper: cellFor("supper", "paratha") },
+    }
+    const item = { id: "move-custom", text: "Move idli from Saturday morning tea to Sunday supper" }
+    const context = baseContext({
+      schedule,
+      recentPlan: priorGrid,
+      request: { kind: "revision", text: item.text },
+      feedbackItems: [item],
+    })
+    const incorrectDestination = evaluateMealPlan(
+      {
+        grid: {
+          Sat: { ...priorGrid.Sat, "morning-tea": cellFor("morning-tea", "poha") },
+          Sun: { ...priorGrid.Sun, "morning-tea": cellFor("morning-tea", "idli") },
+        },
+        easyBuys: [],
+        policyOutcomes: baseCandidate().policyOutcomes,
+      },
+      context,
+    )
+    expect(failureCodes(incorrectDestination)).toContain("unaddressed_feedback")
+
+    const correctDestination = evaluateMealPlan(
+      {
+        grid: {
+          Sat: { ...priorGrid.Sat, "morning-tea": cellFor("morning-tea", "poha") },
+          Sun: { ...priorGrid.Sun, supper: cellFor("supper", "idli") },
+        },
+        easyBuys: [],
+        policyOutcomes: baseCandidate().policyOutcomes,
+      },
+      context,
+    )
+    expect(failureCodes(correctDestination)).not.toContain("unaddressed_feedback")
+  })
+
   it.each([
     "Make Friday lighter. We have no pears.",
     "We have no pears and Friday should be lighter",

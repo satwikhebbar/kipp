@@ -1089,6 +1089,7 @@ async function runRevision(
   const feedbackReference = {
     recentPlan: revisionBaseCandidate.grid,
     feedbackReferencePlan: active.version.candidate.grid,
+    schedule: active.plan.schedule,
   }
   const feedbackItems =
     contextAlreadyUpdated && !feedbackBatch

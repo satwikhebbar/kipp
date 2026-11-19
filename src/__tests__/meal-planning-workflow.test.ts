@@ -557,6 +557,80 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(network.deepseekBodies[2]?.messages.at(-1)?.content).toContain("morning-tea")
   })
 
+  it("retains custom-slot Telegram feedback through a mixed context update and follow-up revision", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const store = createMealPlanningStore(d1)
+    const stored = await store.loadOrCreateProfile(CHAT)
+    const schedule = {
+      days: ["Sun"],
+      slots: [
+        { id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null },
+        { id: "supper", name: "Supper", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    stored.profile.mealDefinitions = (stored.profile.mealDefinitions ?? []).map((definition) => ({
+      ...definition,
+      suitableSlots: ["morning-tea", "supper"],
+    }))
+    db.prepare("UPDATE meal_profile SET profile_json = ?, schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(stored.profile),
+      JSON.stringify(schedule),
+      CHAT,
+    )
+    const policyOutcomes = Object.fromEntries(
+      stored.customPolicies
+        .filter((policy) => policy.scope === "persistent")
+        .map((policy) => [policy.id, { outcome: "satisfied" as const, rationale: "ok" }]),
+    )
+    const initial: MealPlanSelectionCandidate = {
+      grid: {
+        Sun: {
+          "morning-tea": { mealDefinitionId: SEED_MEAL_IDS.banana },
+          supper: { mealDefinitionId: SEED_MEAL_IDS.paratha },
+        },
+      },
+      easyBuys: [],
+      policyOutcomes,
+    }
+    const revised = revisionPatch("Sun", "morning-tea", SEED_MEAL_IDS.poha)
+    const week = resolvePlanningWeek(invokedAtMs, TZ, "", schedule)
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "We have no bananas. Change morning tea to poha.",
+          messageId: 413,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: initial }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(initial) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: { inventoryChanges: [{ name: "banana", status: "unavailable" }], exceptionAdds: [], replan: false },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(revised) }]),
+    ])
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.candidate.grid.Sun["morning-tea"].dish).toBe("poha")
+    expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "banana", status: "unavailable" })
+    const followUpText = deepseekBodies[3]?.messages.map((message) => message.content ?? "").join("\n") ?? ""
+    expect(followUpText).toContain("Change morning tea to poha")
+  })
+
   it.each([
     "other-user",
     "other-chat",
