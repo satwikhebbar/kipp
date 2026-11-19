@@ -18,6 +18,7 @@ export const FAILURE_CODES = [
   "persistent_policy_outcome_unverified",
   "unscoped_cell_changed",
   "unaddressed_feedback",
+  "feedback_unverified",
   "unknown_meal_definition",
   "invalid_ingredient_choice",
   "invalid_ingredient_alias",

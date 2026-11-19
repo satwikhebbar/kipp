@@ -202,6 +202,79 @@ describe("easy-buy classifier", () => {
     expect(supportedTradeOff.unverifiedPolicyOutcomes).toEqual([])
   })
 
+  it("batches feedback satisfaction with item, packed-meal, and policy checks", async () => {
+    let capturedQuestions: Record<string, { type: string; instructions: unknown }> | undefined
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        capturedQuestions = questions
+        return {
+          id: "gen-dec",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 17, outputTokens: 3, costUsd: 0.004 },
+        }
+      },
+    }
+    const feedback = {
+      feedbackId: "tg-request",
+      text: "No paneer in Wednesday home lunch",
+      scope: { day: "Wed", slot: "home-lunch" },
+      changes: [
+        {
+          day: "Wed",
+          slot: "home-lunch",
+          before: { dish: "paratha", ingredients: ["rice"], cookMinutes: 20, priorNightPrep: false },
+          after: {
+            dish: "paneer paratha",
+            ingredients: ["wheat flour", "paneer"],
+            cookMinutes: 20,
+            priorNightPrep: false,
+          },
+        },
+      ],
+    }
+    const policy = {
+      policyId: "policy-1",
+      label: "Dry snacks",
+      value: "Every snack is dry.",
+      outcome: "satisfied" as const,
+      rationale: "Snacks are dry.",
+      easyBuys: [],
+      planCells: [],
+    }
+    const result = await createEasyBuyClassifier(decisions).classify(
+      ["carrot"],
+      [{ day: "Mon", slot: "snack1", dish: "banana", ingredients: ["banana"], drySlot: true }],
+      [policy],
+      [feedback],
+    )
+
+    expect(Object.keys(capturedQuestions ?? {})).toEqual([
+      "easy_buy_0",
+      "packed_meal_0",
+      "persistent_policy_0",
+      "feedback_0",
+    ])
+    expect(capturedQuestions?.feedback_0?.instructions).toMatchObject({
+      feedback: feedback.text,
+      scope: feedback.scope,
+      beforeAfter: feedback.changes,
+    })
+    expect(result.unaddressedFeedback).toEqual([
+      {
+        feedbackId: feedback.feedbackId,
+        detail: 'authoritative feedback "tg-request" is not satisfied by the after-plan evidence in its scope',
+      },
+    ])
+    expect(result.usage).toEqual({ inputTokens: 17, outputTokens: 3, costUsd: 0.004 })
+  })
+
   it("skips the model entirely when no item is unresolved", async () => {
     const decisions = decisionsReturning([])
     const spy = vi.spyOn(decisions, "decide")

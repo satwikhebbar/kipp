@@ -1,6 +1,7 @@
 import type {
   EasyBuyClassification,
   EasyBuyClassifier,
+  FeedbackCheck,
   PackedMealCheck,
   PersistentPolicyCheck,
 } from "../meal-planning/easy-buy-classifier"
@@ -9,6 +10,7 @@ import {
   evaluateMealPlan,
   evaluateMealPlanSelection,
   evaluateMealPlanSelectionPatch,
+  isConcretePlanFeedback,
 } from "../meal-planning/evaluation"
 import { effectiveMealSlot } from "../meal-planning/half-day"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
@@ -146,12 +148,12 @@ export async function runMealPlanningAgentSession(
   const canUpdateWeekContext = options.context.request.kind === "revision" && options.allowWeekContextUpdate !== false
   let decisionUsage = ZERO_DECISION_USAGE
   // A candidate is classified once during evaluate_meal_plan and again during
-  // propose_plan; key by all hydrated plan evidence so the second pass reuses
-  // the verdict only when the easy buys and packed meals are unchanged.
+  // propose_plan; key by all hydrated plan and authoritative feedback evidence
+  // so the second pass reuses the verdict only when every relevant fact matches.
   const classificationCache = new Map<string, EasyBuyClassification>()
-  // Runs one batched semantic classification against easy buys and packed
-  // meals. Deterministic evaluation remains pure; semantic failures are added
-  // at this asynchronous session boundary.
+  // Runs one batched semantic classification against easy buys, packed meals,
+  // persistent policies, and scoped feedback. Deterministic evaluation remains
+  // pure; semantic failures are added at this asynchronous session boundary.
   const classifySemanticChecks = async (
     selection: MealPlanSelectionEvaluation,
     context: MealPlanContext,
@@ -162,14 +164,25 @@ export async function runMealPlanningAgentSession(
     if (!classifier || !selection.candidate || !selection.evaluation.pass) return selection
     const packedMeals = packedMealChecks(selection, context)
     const persistentPolicies = persistentPolicyChecks(selection, context)
-    if (selection.candidate.easyBuys.length === 0 && packedMeals.length === 0 && persistentPolicies.length === 0)
+    const feedbackChecks = authoritativeFeedbackChecks(selection, context)
+    if (
+      selection.candidate.easyBuys.length === 0 &&
+      packedMeals.length === 0 &&
+      persistentPolicies.length === 0 &&
+      feedbackChecks.length === 0
+    )
       return selection
-    const key = JSON.stringify({ candidate: selection.candidate, packedMeals, persistentPolicies })
+    const key = JSON.stringify({ candidate: selection.candidate, packedMeals, persistentPolicies, feedbackChecks })
     let classification = classificationCache.get(key)
     if (!classification) {
       let requestSucceeded = false
       try {
-        classification = await classifier.classify(selection.candidate.easyBuys, packedMeals, persistentPolicies)
+        classification = await classifier.classify(
+          selection.candidate.easyBuys,
+          packedMeals,
+          persistentPolicies,
+          feedbackChecks,
+        )
         classificationCache.set(key, classification)
         requestSucceeded = true
       } catch {
@@ -194,6 +207,11 @@ export async function runMealPlanningAgentSession(
             label: policy.label,
             detail: `outcome "${policy.outcome}" for persistent policy "${policy.label}" could not be verified because the semantic classifier request failed`,
           })),
+          unaddressedFeedback: [],
+          unverifiedFeedback: feedbackChecks.map((feedback) => ({
+            feedbackId: feedback.feedbackId,
+            detail: `authoritative feedback "${feedback.feedbackId}" could not be verified because the semantic classifier request failed`,
+          })),
           usage: ZERO_DECISION_USAGE,
         }
       }
@@ -206,13 +224,17 @@ export async function runMealPlanningAgentSession(
       unverifiedPackedMeals,
       unsupportedPolicyOutcomes,
       unverifiedPolicyOutcomes,
+      unaddressedFeedback,
+      unverifiedFeedback,
     } = classification
     if (
       nonOrdinaryEasyBuys.length === 0 &&
       unsuitablePackedMeals.length === 0 &&
       unverifiedPackedMeals.length === 0 &&
       unsupportedPolicyOutcomes.length === 0 &&
-      unverifiedPolicyOutcomes.length === 0
+      unverifiedPolicyOutcomes.length === 0 &&
+      unaddressedFeedback.length === 0 &&
+      unverifiedFeedback.length === 0
     )
       return selection
     const semanticFailures = [
@@ -235,6 +257,14 @@ export async function runMealPlanningAgentSession(
       ...unverifiedPolicyOutcomes.map((policy) => ({
         code: "persistent_policy_outcome_unverified" as const,
         detail: `${policy.detail} (policy id: ${policy.policyId})`,
+      })),
+      ...unaddressedFeedback.map((feedback) => ({
+        code: "unaddressed_feedback" as const,
+        detail: feedback.detail,
+      })),
+      ...unverifiedFeedback.map((feedback) => ({
+        code: "feedback_unverified" as const,
+        detail: feedback.detail,
       })),
     ]
     const evaluation = nonOrdinaryEasyBuys.length
@@ -463,6 +493,55 @@ function persistentPolicyChecks(
         planCells,
       },
     ]
+  })
+}
+
+/** Builds semantic checks from authoritative feedback and its scoped before-and-after cells. */
+function authoritativeFeedbackChecks(
+  selection: MealPlanSelectionEvaluation,
+  context: MealPlanContext,
+): FeedbackCheck[] {
+  const candidate = selection.candidate
+  const beforePlan = context.feedbackReferencePlan ?? context.recentPlan
+  if (!candidate || !beforePlan || context.request.kind !== "revision") return []
+
+  const positions = new Set<string>()
+  for (const plan of [beforePlan, candidate.grid])
+    for (const [day, slots] of Object.entries(plan))
+      for (const slot of Object.keys(slots)) positions.add(JSON.stringify([day, slot]))
+
+  return (context.feedbackItems ?? []).flatMap((item) => {
+    const scope =
+      item.scope ?? (item.target?.kind === "cell" ? { day: item.target.day, slot: item.target.slot } : undefined)
+    if (!scope && item.target?.kind !== "plan" && !isConcretePlanFeedback(item, context)) return []
+    const effectiveScope = scope ?? {}
+    const changes = [...positions].flatMap((position) => {
+      const [day, slot] = JSON.parse(position) as [string, string]
+      if ((effectiveScope.day && effectiveScope.day !== day) || (effectiveScope.slot && effectiveScope.slot !== slot))
+        return []
+      const before = beforePlan[day]?.[slot]
+      const after = candidate.grid[day]?.[slot]
+      const asEvidence = (cell: typeof before) =>
+        cell
+          ? {
+              dish: cell.dish,
+              ingredients: cell.items,
+              cookMinutes: cell.cookMinutes,
+              priorNightPrep: cell.priorNightPrep,
+            }
+          : null
+      return [{ day, slot, before: asEvidence(before), after: asEvidence(after) }]
+    })
+    return changes.length
+      ? [
+          {
+            feedbackId: item.id,
+            text: item.text,
+            scope: effectiveScope,
+            changes,
+          },
+        ]
+      : []
   })
 }
 

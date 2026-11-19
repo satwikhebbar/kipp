@@ -40,6 +40,7 @@ const NON_EVALUATOR_FAILURE_CODES = new Set([
   "packed_slot_unverified",
   "persistent_policy_outcome_unsubstantiated",
   "persistent_policy_outcome_unverified",
+  "feedback_unverified",
   "duplicate_meal_selection",
 ])
 

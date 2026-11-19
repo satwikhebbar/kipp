@@ -5,7 +5,7 @@ import { findProhibitedEasyBuys } from "./easy-buys"
 export const DEFAULT_ORDINARY_EASY_BUY_THRESHOLD = 0.8
 
 const MIN_THRESHOLD = 0.5
-const CLASSIFICATION_POLICY = `Answer each question using its question-specific criteria and only the supplied item, meal, policy, outcome, and plan facts. Judge packed-meal questions about the actual meal in its stated slot.`
+const CLASSIFICATION_POLICY = `Answer each question using its question-specific criteria and only the supplied item, meal, policy, outcome, feedback, and plan facts. Judge packed-meal questions about the actual meal in its stated slot. Judge feedback from the authoritative request and scoped before-and-after plan evidence; a changed cell alone does not prove the request was satisfied.`
 
 /** One easy buy the classifier judged not ordinary, with a repair-facing detail. */
 export interface NonOrdinaryEasyBuy {
@@ -19,6 +19,8 @@ export interface EasyBuyClassification {
   unverifiedPackedMeals: PackedMealClassification[]
   unsupportedPolicyOutcomes: PersistentPolicyClassification[]
   unverifiedPolicyOutcomes: PersistentPolicyClassification[]
+  unaddressedFeedback: FeedbackClassification[]
+  unverifiedFeedback: FeedbackClassification[]
   usage: DecisionUsage
 }
 
@@ -62,11 +64,40 @@ export interface PersistentPolicyClassification {
   detail: string
 }
 
+/** An authoritative feedback request that could not be semantically verified. */
+export interface FeedbackClassification {
+  feedbackId: string
+  detail: string
+}
+
+/** A scoped before-and-after cell change supplied for an authoritative feedback check. */
+export interface FeedbackPlanChange {
+  day: string
+  slot: string
+  before: FeedbackPlanCell | null
+  after: FeedbackPlanCell | null
+}
+
+export interface FeedbackPlanCell {
+  dish: string
+  ingredients: readonly string[]
+  cookMinutes: number
+  priorNightPrep: boolean
+}
+
+export interface FeedbackCheck {
+  feedbackId: string
+  text: string
+  scope: { day?: string; slot?: string }
+  changes: readonly FeedbackPlanChange[]
+}
+
 export interface EasyBuyClassifier {
   classify(
     easyBuys: readonly string[],
     packedMeals?: readonly PackedMealCheck[],
     persistentPolicies?: readonly PersistentPolicyCheck[],
+    feedbackChecks?: readonly FeedbackCheck[],
   ): Promise<EasyBuyClassification>
 }
 
@@ -85,16 +116,23 @@ export function createEasyBuyClassifier(
 ): EasyBuyClassifier {
   const threshold = clampThreshold(options.threshold)
   return {
-    async classify(easyBuys, packedMeals = [], persistentPolicies = []) {
+    async classify(easyBuys, packedMeals = [], persistentPolicies = [], feedbackChecks = []) {
       const deterministic = new Set(findProhibitedEasyBuys(easyBuys))
       const candidates = easyBuys.filter((buy) => !deterministic.has(buy))
-      if (candidates.length === 0 && packedMeals.length === 0 && persistentPolicies.length === 0)
+      if (
+        candidates.length === 0 &&
+        packedMeals.length === 0 &&
+        persistentPolicies.length === 0 &&
+        feedbackChecks.length === 0
+      )
         return {
           nonOrdinaryEasyBuys: [],
           unsuitablePackedMeals: [],
           unverifiedPackedMeals: [],
           unsupportedPolicyOutcomes: [],
           unverifiedPolicyOutcomes: [],
+          unaddressedFeedback: [],
+          unverifiedFeedback: [],
           usage: ZERO_USAGE,
         }
       const questions: Record<string, DecisionQuestion> = {}
@@ -133,6 +171,21 @@ export function createEasyBuyClassifier(
           criteria: {
             true: "The hydrated plan evidence supports the recorded outcome and rationale for this persistent policy.",
             false: "The hydrated plan contradicts or does not support the recorded outcome or rationale.",
+          },
+        }
+      })
+      feedbackChecks.forEach((check, index) => {
+        questions[`feedback_${index}`] = {
+          type: "noul",
+          instructions: {
+            question: `Does the after-plan evidence satisfy this authoritative feedback request? Compare it with the before-plan evidence only within the supplied scope. A change inside the scope is not enough if the resulting meal still violates the request.`,
+            feedback: check.text,
+            scope: check.scope,
+            beforeAfter: check.changes,
+          },
+          criteria: {
+            true: "The after-plan evidence satisfies the authoritative feedback request for its scope.",
+            false: "The after-plan evidence does not satisfy the request, even if a scoped cell changed.",
           },
         }
       })
@@ -205,12 +258,35 @@ export function createEasyBuyClassifier(
           })
         }
       })
+      const unaddressedFeedback: FeedbackClassification[] = []
+      const unverifiedFeedback: FeedbackClassification[] = []
+      feedbackChecks.forEach((check, index) => {
+        const answer = result.answers[`feedback_${index}`]
+        if (answer?.type !== "noul" || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1) {
+          unverifiedFeedback.push({
+            feedbackId: check.feedbackId,
+            detail: `authoritative feedback "${check.feedbackId}" could not be verified against its scoped before-and-after plan evidence`,
+          })
+        } else if (answer.noul <= 1 - threshold) {
+          unaddressedFeedback.push({
+            feedbackId: check.feedbackId,
+            detail: `authoritative feedback "${check.feedbackId}" is not satisfied by the after-plan evidence in its scope`,
+          })
+        } else if (answer.noul < threshold) {
+          unverifiedFeedback.push({
+            feedbackId: check.feedbackId,
+            detail: `authoritative feedback "${check.feedbackId}" could not be verified against its scoped before-and-after plan evidence`,
+          })
+        }
+      })
       return {
         nonOrdinaryEasyBuys,
         unsuitablePackedMeals,
         unverifiedPackedMeals,
         unsupportedPolicyOutcomes,
         unverifiedPolicyOutcomes,
+        unaddressedFeedback,
+        unverifiedFeedback,
         usage: result.usage,
       }
     },

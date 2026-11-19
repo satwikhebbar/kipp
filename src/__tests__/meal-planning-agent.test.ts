@@ -220,6 +220,61 @@ function proposeInput(candidate: unknown, feedbackItems?: unknown) {
   }
 }
 
+function feedbackDecisions(options: { failFirst?: boolean } = {}): { client: DecisionsClient; calls: () => number } {
+  let calls = 0
+  return {
+    calls: () => calls,
+    client: {
+      async decide({ questions }) {
+        calls += 1
+        if (options.failFirst && calls === 1) throw new Error("Decisions endpoint unavailable")
+        const question = questions.feedback_0
+        const instructions = question?.type === "noul" ? question.instructions : undefined
+        const changes =
+          instructions && typeof instructions !== "string"
+            ? (instructions.beforeAfter as { after: { ingredients: string[] } | null }[])
+            : []
+        const requestStillViolated = changes.some(({ after }) => after?.ingredients.includes("paneer"))
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && requestStillViolated ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.005 },
+        }
+      },
+    },
+  }
+}
+
+function noPaneerRevision() {
+  const base = passingCandidate()
+  const candidate = structuredClone(base)
+  candidate.grid.Wed["home-lunch"] = cell("paneer paratha", ["wheat flour", "paneer"], "home-lunch")
+  const feedback = {
+    id: "tg-no-paneer",
+    text: "No paneer in Wednesday home lunch",
+    target: { kind: "cell" as const, day: "Wed", slot: "home-lunch" },
+    scope: { day: "Wed", slot: "home-lunch" },
+  }
+  const ctx = contextWithCandidateDefinitions(
+    context({
+      request: { kind: "revision", text: feedback.text },
+      feedbackItems: [feedback],
+      recentPlan: base.grid,
+      feedbackReferencePlan: base.grid,
+      profile: { ...context().profile, pantryBaseline: ["wheat flour", "rice", "paneer"] },
+    }),
+    candidate,
+  )
+  return { base, candidate, feedback, context: ctx }
+}
+
 describe("bounded meal-planning agent session", () => {
   it("accepts propose_plan only when the candidate passes evaluation", async () => {
     const provider = providerWith(
@@ -692,6 +747,141 @@ describe("bounded meal-planning agent session", () => {
       expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
     )
     expect(result.terminal?.kind).toBe("needs_clarification")
+  })
+
+  it("rejects a scoped revision that changes the cell but still violates authoritative feedback", async () => {
+    const { candidate, feedback, context: revisionContext } = noPaneerRevision()
+    expect(evaluateMealPlan(candidate, revisionContext).pass).toBe(true)
+    const decisions = feedbackDecisions()
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+      clarifyResponse({
+        message: "The Wednesday home lunch still contains paneer. Please choose a paneer-free meal.",
+        reasonCodes: ["unaddressed_feedback"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: revisionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions.client),
+    })
+
+    expect(decisions.calls()).toBe(1)
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["unaddressed_feedback"] })
+    expect(result.toolExecutions).toContainEqual(
+      expect.objectContaining({ tool: "propose_plan", outcome: "failed", failureCategory: "invalid-state" }),
+    )
+    const proposalMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "propose_plan",
+    )
+    if (proposalMessage?.role === "tool")
+      expect(proposalMessage.output).toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: ["unaddressed_feedback"],
+      })
+    expect(result.decisionUsage).toEqual({ inputTokens: 10, outputTokens: 2, costUsd: 0.005 })
+  })
+
+  it("retries an unavailable feedback classification and accounts for only successful usage", async () => {
+    const { candidate, feedback, context: revisionContext } = noPaneerRevision()
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice"], "home-lunch")
+    const decisions = feedbackDecisions({ failFirst: true })
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: contextWithCandidateDefinitions(revisionContext, candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions.client),
+    })
+
+    expect(decisions.calls()).toBe(2)
+    expect(result.terminal?.kind).toBe("propose_plan")
+    expect(result.decisionUsage).toEqual({ inputTokens: 10, outputTokens: 2, costUsd: 0.005 })
+    const evaluationMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "evaluate_meal_plan",
+    )
+    expect(evaluationMessage?.role).toBe("tool")
+    if (evaluationMessage?.role === "tool")
+      expect(evaluationMessage.output).toMatchObject({
+        ok: true,
+        output: { failures: expect.arrayContaining([expect.objectContaining({ code: "feedback_unverified" })]) },
+      })
+  })
+
+  it("does not reuse a feedback verdict when the scoped before-plan evidence changes", async () => {
+    const base = passingCandidate()
+    const candidate = structuredClone(base)
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice"], "home-lunch")
+    const feedback = {
+      id: "tg-replace-lunch",
+      text: "Replace Wednesday home lunch paratha with poha",
+      target: { kind: "cell" as const, day: "Wed", slot: "home-lunch" },
+      scope: { day: "Wed", slot: "home-lunch" },
+    }
+    const revisionContext = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback.text },
+        feedbackItems: [feedback],
+        recentPlan: base.grid,
+        feedbackReferencePlan: structuredClone(base.grid),
+      }),
+      candidate,
+    )
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const question = questions.feedback_0
+        const instructions = question?.type === "noul" ? question.instructions : undefined
+        const changes =
+          instructions && typeof instructions !== "string"
+            ? (instructions.beforeAfter as { before: { dish: string } | null; after: { dish: string } | null }[])
+            : []
+        const supported = changes.some(({ before, after }) => before?.dish === "paratha" && after?.dish === "poha")
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && !supported ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 10, outputTokens: 2, costUsd: 0.005 },
+        }
+      },
+    }
+    let providerTurns = 0
+    const clarification = clarifyResponse({
+      message: "The before-plan changed, so I can no longer verify that request.",
+      reasonCodes: ["unaddressed_feedback"],
+      interaction: { kind: "reply" },
+    })
+    const provider: ToolProviderClient = {
+      generate: vi.fn().mockImplementation(async () => {
+        providerTurns += 1
+        if (providerTurns === 1) return evaluateResponse(candidate)
+        if (providerTurns === 2) {
+          revisionContext.feedbackReferencePlan = structuredClone(candidate.grid)
+          return proposeResponse(
+            proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }]),
+          )
+        }
+        return clarification
+      }),
+    }
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: revisionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(decisionCalls).toBe(2)
+    expect(result.terminal?.kind).toBe("needs_clarification")
+    expect(result.decisionUsage).toEqual({ inputTokens: 20, outputTokens: 4, costUsd: 0.01 })
   })
 
   it("rejects propose_plan when a submitted feedback item alters the authoritative item", async () => {
