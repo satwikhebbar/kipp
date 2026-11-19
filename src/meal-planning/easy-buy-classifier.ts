@@ -45,11 +45,14 @@ export interface PersistentPolicyCheck {
   value: string
   outcome: "satisfied" | "trade-off"
   rationale: string
+  easyBuys: readonly string[]
   planCells: readonly {
     day: string
     slot: string
     dish: string
     ingredients: readonly string[]
+    cookMinutes: number
+    priorNightPrep: boolean
   }[]
 }
 
@@ -124,6 +127,7 @@ export function createEasyBuyClassifier(
             policy: policy.value,
             recordedOutcome: policy.outcome,
             rationale: policy.rationale,
+            easyBuys: policy.easyBuys,
             planCells: policy.planCells,
           },
           criteria: {

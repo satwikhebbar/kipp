@@ -230,11 +230,11 @@ export async function runMealPlanningAgentSession(
       })),
       ...unsupportedPolicyOutcomes.map((policy) => ({
         code: "persistent_policy_outcome_unsubstantiated" as const,
-        detail: policy.detail,
+        detail: `${policy.detail} (policy id: ${policy.policyId})`,
       })),
       ...unverifiedPolicyOutcomes.map((policy) => ({
         code: "persistent_policy_outcome_unverified" as const,
-        detail: policy.detail,
+        detail: `${policy.detail} (policy id: ${policy.policyId})`,
       })),
     ]
     const evaluation = nonOrdinaryEasyBuys.length
@@ -437,12 +437,20 @@ function persistentPolicyChecks(
   context: MealPlanContext,
 ): PersistentPolicyCheck[] {
   if (!selection.candidate) return []
-  const planCells = Object.entries(selection.candidate.grid).flatMap(([day, slots]) =>
-    Object.entries(slots).map(([slot, cell]) => ({ day, slot, dish: cell.dish, ingredients: cell.items })),
+  const candidate = selection.candidate
+  const planCells = Object.entries(candidate.grid).flatMap(([day, slots]) =>
+    Object.entries(slots).map(([slot, cell]) => ({
+      day,
+      slot,
+      dish: cell.dish,
+      ingredients: cell.items,
+      cookMinutes: cell.cookMinutes,
+      priorNightPrep: cell.priorNightPrep,
+    })),
   )
   return context.customPolicies.flatMap((policy) => {
     if (policy.scope !== "persistent") return []
-    const outcome = selection.candidate?.policyOutcomes[policy.id]
+    const outcome = candidate.policyOutcomes[policy.id]
     if (!outcome || (outcome.outcome !== "satisfied" && outcome.outcome !== "trade-off")) return []
     return [
       {
@@ -451,6 +459,7 @@ function persistentPolicyChecks(
         value: policy.value,
         outcome: outcome.outcome,
         rationale: outcome.rationale,
+        easyBuys: candidate.easyBuys,
         planCells,
       },
     ]

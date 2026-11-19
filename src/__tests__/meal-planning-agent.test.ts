@@ -477,13 +477,20 @@ describe("bounded meal-planning agent session", () => {
       async decide({ questions }) {
         decisionCalls += 1
         const policyQuestion = questions.persistent_policy_0
-        if (policyQuestion?.type === "noul") policyEvidence = policyQuestion.instructions
+        let policySupportedFromEvidence = false
+        if (policyQuestion?.type === "noul" && typeof policyQuestion.instructions !== "string") {
+          policyEvidence = policyQuestion.instructions
+          const cells = policyQuestion.instructions.planCells as { slot: string; priorNightPrep: boolean }[]
+          policySupportedFromEvidence = cells
+            .filter((cell) => cell.slot.startsWith("snack"))
+            .every((cell) => !cell.priorNightPrep)
+        }
         const answers = Object.fromEntries(
           Object.keys(questions).map((id) => [
             id,
             {
               type: "noul" as const,
-              noul: id === "persistent_policy_0" && !supported ? 0.01 : 0.99,
+              noul: id === "persistent_policy_0" && !policySupportedFromEvidence ? 0.01 : 0.99,
             },
           ]),
         )
@@ -498,14 +505,15 @@ describe("bounded meal-planning agent session", () => {
     }
     const policy = {
       id: "snack-policy",
-      label: "Dry school snacks",
+      label: "Quick school snacks",
       scope: "persistent" as const,
-      value: "Every school snack is dry.",
+      value: "Every school snack requires no prior-night preparation.",
     }
     const candidate = passingCandidate()
+    if (!supported) candidate.grid.Mon.snack1.priorNightPrep = true
     candidate.policyOutcomes[policy.id] = {
       outcome: "satisfied",
-      rationale: "The planned snacks are dry.",
+      rationale: "The planned snacks need no prior-night preparation.",
     }
     const responses = [evaluateResponse(candidate)]
     if (supported) responses.push(proposeResponse(proposeInput(candidate)))
@@ -513,7 +521,7 @@ describe("bounded meal-planning agent session", () => {
       responses.push(proposeResponse(proposeInput(candidate)))
       responses.push(
         clarifyResponse({
-          message: "Please revise the snack plan to meet the dry-snack policy.",
+          message: "Please revise the snack plan to meet the no-prior-prep policy.",
           reasonCodes: ["persistent_policy_outcome_unsubstantiated"],
           interaction: { kind: "reply" },
         }),
@@ -521,7 +529,10 @@ describe("bounded meal-planning agent session", () => {
     }
     const provider = providerWith(...responses)
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
-      context: contextWithCandidateDefinitions(context({ customPolicies: [policy] }), candidate),
+      context: contextWithCandidateDefinitions(
+        context({ customPolicies: [policy], profile: { ...context().profile, priorNightPrepAllowed: true } }),
+        candidate,
+      ),
       easyBuyClassifier: createEasyBuyClassifier(decisions),
     })
 
@@ -530,9 +541,17 @@ describe("bounded meal-planning agent session", () => {
       policyId: policy.id,
       policy: policy.value,
       recordedOutcome: "satisfied",
-      rationale: "The planned snacks are dry.",
+      rationale: "The planned snacks need no prior-night preparation.",
+      easyBuys: [],
       planCells: expect.arrayContaining([
-        expect.objectContaining({ day: "Mon", slot: "snack1", dish: "paratha", ingredients: ["wheat flour"] }),
+        expect.objectContaining({
+          day: "Mon",
+          slot: "snack1",
+          dish: "paratha",
+          ingredients: ["wheat flour"],
+          cookMinutes: 0,
+          priorNightPrep: !supported,
+        }),
       ]),
     })
     expect(result.terminal?.kind).toBe(supported ? "propose_plan" : "needs_clarification")
@@ -548,7 +567,7 @@ describe("bounded meal-planning agent session", () => {
             failures: [
               expect.objectContaining({
                 code: "persistent_policy_outcome_unsubstantiated",
-                detail: expect.stringContaining(policy.label),
+                detail: expect.stringMatching(new RegExp(`${policy.label}.*${policy.id}`)),
               }),
             ],
           },
@@ -599,6 +618,21 @@ describe("bounded meal-planning agent session", () => {
       kind: "needs_clarification",
       reasonCodes: ["persistent_policy_outcome_unverified", "packed_slot_unverified"],
     })
+    const evaluationMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "evaluate_meal_plan",
+    )
+    if (evaluationMessage?.role === "tool")
+      expect(evaluationMessage.output).toMatchObject({
+        ok: true,
+        output: {
+          failures: expect.arrayContaining([
+            expect.objectContaining({
+              code: "persistent_policy_outcome_unverified",
+              detail: expect.stringContaining(policy.id),
+            }),
+          ]),
+        },
+      })
   })
 
   it("requires needs_clarification to include every evaluator failure", async () => {

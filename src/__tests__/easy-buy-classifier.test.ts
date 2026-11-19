@@ -156,9 +156,24 @@ describe("easy-buy classifier", () => {
       value: "Every school snack is dry.",
       outcome: "satisfied" as const,
       rationale: "The snack cells use dry, portable meals.",
+      easyBuys: ["banana"],
       planCells: [
-        { day: "Mon", slot: "snack1", dish: "banana", ingredients: ["banana"] },
-        { day: "Mon", slot: "school-lunch", dish: "rice", ingredients: ["rice"] },
+        {
+          day: "Mon",
+          slot: "snack1",
+          dish: "banana",
+          ingredients: ["banana"],
+          cookMinutes: 0,
+          priorNightPrep: false,
+        },
+        {
+          day: "Mon",
+          slot: "school-lunch",
+          dish: "rice",
+          ingredients: ["rice"],
+          cookMinutes: 15,
+          priorNightPrep: true,
+        },
       ],
     }
     const supported = await createEasyBuyClassifier(decisionsReturning([0.99])).classify([], [], [check])
