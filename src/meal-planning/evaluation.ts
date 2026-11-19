@@ -341,13 +341,11 @@ function concreteFeedbackMatchesChangedCell(
     const priorDish = context.recentPlan?.[changedCell.day]?.[changedCell.slotId]?.dish
     const priorDishMatches = priorDish !== undefined && text.includes(priorDish.toLowerCase())
     const moving = /\b(?:move|moving|shift)\b/.test(text)
-    // A source locates the old dish; it is not a requested destination.
-    const slotPattern = scheduleSlotPattern(context.schedule)
-    const sourceSlotWords = `(?:${MEAL_WORDS}${slotPattern ? `|${slotPattern}` : ""})`
-    const targetText = moving
-      ? text.replace(new RegExp(`\\bfrom\\s+${DAY_WORDS}(?:\\s+${sourceSlotWords})?\\b`, "gi"), "")
-      : text
+    // A move's destination follows "to". Restrict matching to that suffix so
+    // source days and slots cannot be mistaken for the requested destination.
+    const targetText = moving ? (text.match(/\bto\s+(.+)$/)?.[1] ?? text) : text
     const namedDays = targetText.match(new RegExp(`\\b${DAY_WORDS}\\b`, "g")) ?? []
+    const slotPattern = scheduleSlotPattern(context.schedule)
     const namedMeals =
       targetText.match(new RegExp(`\\b(?:${MEAL_WORDS}${slotPattern ? `|${slotPattern}` : ""})\\b`, "gi")) ?? []
     const dayMatches = (day: string) => changedCell.day.toLowerCase().startsWith(day.slice(0, DAY_ABBREVIATION_LENGTH))

@@ -951,7 +951,11 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(evaluation)).not.toContain("unaddressed_feedback")
   })
 
-  it("matches a custom-slot move only at its named destination", () => {
+  it.each([
+    "Move idli from Saturday morning tea to Sunday supper",
+    "Move idli from morning tea to Sunday supper",
+    "Move idli from Saturday's morning tea to Sunday supper",
+  ])("matches a custom-slot move only at its named destination: %s", (text) => {
     const schedule = {
       days: ["Sat", "Sun"],
       slots: [
@@ -963,7 +967,7 @@ describe("meal-planning evaluator", () => {
       Sat: { "morning-tea": cellFor("morning-tea", "idli"), supper: cellFor("supper", "rice and beans") },
       Sun: { "morning-tea": cellFor("morning-tea", "banana"), supper: cellFor("supper", "paratha") },
     }
-    const item = { id: "move-custom", text: "Move idli from Saturday morning tea to Sunday supper" }
+    const item = { id: "move-custom", text }
     const context = baseContext({
       schedule,
       recentPlan: priorGrid,
