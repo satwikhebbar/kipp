@@ -884,6 +884,196 @@ describe("bounded meal-planning agent session", () => {
     expect(result.decisionUsage).toEqual({ inputTokens: 20, outputTokens: 4, costUsd: 0.01 })
   })
 
+  it.each([
+    "truthful rationale",
+    "bare feedback reference",
+  ] as const)("checks cited outcome rationales through the revision proposal tool (%s)", async (rationaleCase) => {
+    const candidate = passingCandidate()
+    const feedback = {
+      id: "tg-rationale",
+      text: "Keep Monday home lunch as planned and explain why a paneer paratha swap was impractical",
+      target: { kind: "cell" as const, day: "Mon", slot: "home-lunch" },
+      scope: { day: "Mon", slot: "home-lunch" },
+    }
+    const policy = {
+      id: "avoid-paneer-rationale",
+      label: "Avoid paneer",
+      scope: "current_week" as const,
+      value: "Avoid paneer in household meals.",
+    }
+    const rationale =
+      rationaleCase === "truthful rationale"
+        ? "tg-rationale: kept paratha because paneer is excluded from household meals."
+        : "tg-rationale"
+    candidate.policyOutcomes[policy.id] = { outcome: "trade-off", rationale }
+    const revisionContext = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback.text },
+        feedbackItems: [feedback],
+        recentPlan: structuredClone(candidate.grid),
+        feedbackReferencePlan: structuredClone(candidate.grid),
+        customPolicies: [policy],
+        profile: { ...context().profile, dietaryExclusions: ["paneer"] },
+      }),
+      candidate,
+    )
+    let capturedFeedback: unknown
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const question = questions.feedback_0
+        if (question?.type === "noul") capturedFeedback = question.instructions
+        const instructions =
+          question?.type === "noul" && typeof question.instructions !== "string" ? question.instructions : undefined
+        const citedOutcomes = instructions?.citedOutcomes as { policy: string; rationale: string }[] | undefined
+        const planChanges = instructions?.beforeAfter as
+          | { before: { dish: string } | null; after: { dish: string } | null }[]
+          | undefined
+        const explained =
+          citedOutcomes?.some(
+            (entry) => entry.policy.includes("Avoid paneer") && entry.rationale.includes("because paneer is excluded"),
+          ) === true &&
+          planChanges?.some(({ before, after }) => before?.dish === "paratha" && after?.dish === "paratha") === true
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && !explained ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 8, outputTokens: 2, costUsd: 0.003 },
+        }
+      },
+    }
+    const responses = [
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+    ]
+    if (rationaleCase === "bare feedback reference")
+      responses.push(
+        clarifyResponse({
+          message: "Please provide a useful reason for keeping the current lunch.",
+          reasonCodes: ["unaddressed_feedback"],
+          interaction: { kind: "reply" },
+        }),
+      )
+    const result = await runMealPlanningAgentSession(
+      providerWith(...responses),
+      [{ role: "user", text: feedback.text }],
+      { context: revisionContext, easyBuyClassifier: createEasyBuyClassifier(decisions) },
+    )
+
+    expect(capturedFeedback).toMatchObject({
+      feedback: feedback.text,
+      beforeAfter: [
+        expect.objectContaining({
+          day: "Mon",
+          slot: "home-lunch",
+          before: expect.objectContaining({ dish: "paratha" }),
+          after: expect.objectContaining({ dish: "paratha" }),
+        }),
+      ],
+      citedOutcomes: [
+        expect.objectContaining({
+          policyId: policy.id,
+          policy: policy.value,
+          outcome: "trade-off",
+          rationale,
+        }),
+      ],
+    })
+    expect(decisionCalls).toBe(1)
+    expect(result.terminal?.kind).toBe(rationaleCase === "truthful rationale" ? "propose_plan" : "needs_clarification")
+    if (rationaleCase === "bare feedback reference") {
+      const proposalMessage = result.messages.find(
+        (message) => message.role === "tool" && message.name === "propose_plan",
+      )
+      if (proposalMessage?.role === "tool")
+        expect(proposalMessage.output).toMatchObject({
+          ok: false,
+          category: "invalid-state",
+          rejectionCodes: ["unaddressed_feedback"],
+        })
+    }
+  })
+
+  it("checks the final shopping list separately from whether an easy buy is ordinary", async () => {
+    const base = passingCandidate()
+    const candidate = structuredClone(base)
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice", "spinach"], "home-lunch")
+    const feedback = {
+      id: "tg-empty-shopping-list",
+      text: "Replace Wednesday home lunch with poha and keep the weekly shopping list empty",
+      target: { kind: "cell" as const, day: "Wed", slot: "home-lunch" },
+      scope: { day: "Wed", slot: "home-lunch" },
+    }
+    const revisionContext = contextWithCandidateDefinitions(
+      context({
+        request: { kind: "revision", text: feedback.text },
+        feedbackItems: [feedback],
+        recentPlan: base.grid,
+        feedbackReferencePlan: base.grid,
+        profile: { ...context().profile, pantryBaseline: ["wheat flour", "rice"] },
+      }),
+      candidate,
+    )
+    let capturedEasyBuys: unknown
+    let capturedQuestionIds: string[] = []
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        capturedQuestionIds = Object.keys(questions)
+        const question = questions.feedback_0
+        const feedbackInstructions =
+          question?.type === "noul" && typeof question.instructions !== "string" ? question.instructions : undefined
+        capturedEasyBuys = feedbackInstructions?.easyBuys
+        const omittedShoppingList = Array.isArray(capturedEasyBuys) && capturedEasyBuys.length === 0
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              { type: "noul" as const, noul: id === "feedback_0" && !omittedShoppingList ? 0.01 : 0.99 },
+            ]),
+          ),
+          usage: { inputTokens: 9, outputTokens: 2, costUsd: 0.003 },
+        }
+      },
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
+      clarifyResponse({
+        message: "The revision adds spinach to the shopping list. Please choose a pantry-only meal.",
+        reasonCodes: ["unaddressed_feedback"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: feedback.text }], {
+      context: revisionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(capturedEasyBuys).toEqual(["spinach"])
+    expect(capturedQuestionIds).toContain("easy_buy_0")
+    expect(capturedQuestionIds).toContain("feedback_0")
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["unaddressed_feedback"] })
+    const proposalMessage = result.messages.find(
+      (message) => message.role === "tool" && message.name === "propose_plan",
+    )
+    if (proposalMessage?.role === "tool")
+      expect(proposalMessage.output).toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: ["unaddressed_feedback"],
+      })
+  })
+
   it("rejects propose_plan when a submitted feedback item alters the authoritative item", async () => {
     const raw = [{ id: "tg-1", text: "Wed lunch: too oily" }]
     const provider = providerWith(

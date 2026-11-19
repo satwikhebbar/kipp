@@ -238,6 +238,8 @@ describe("easy-buy classifier", () => {
           },
         },
       ],
+      citedOutcomes: [],
+      easyBuys: [],
     }
     const policy = {
       policyId: "policy-1",
@@ -273,6 +275,9 @@ describe("easy-buy classifier", () => {
       },
     ])
     expect(result.usage).toEqual({ inputTokens: 17, outputTokens: 3, costUsd: 0.004 })
+
+    const uncertain = await createEasyBuyClassifier(decisionsReturning([0.55])).classify([], [], [], [feedback])
+    expect(uncertain.unverifiedFeedback).toMatchObject([{ feedbackId: feedback.feedbackId }])
   })
 
   it("skips the model entirely when no item is unresolved", async () => {

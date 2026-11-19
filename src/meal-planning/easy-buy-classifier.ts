@@ -1,5 +1,6 @@
 import type { DecisionQuestion, DecisionsClient, DecisionUsage } from "../providers/openrouter-decisions"
 import { findProhibitedEasyBuys } from "./easy-buys"
+import type { PolicyOutcomeValue } from "./types"
 
 /** Default probability above which an easy buy is accepted as ordinary; caller-overridable. */
 export const DEFAULT_ORDINARY_EASY_BUY_THRESHOLD = 0.8
@@ -90,6 +91,16 @@ export interface FeedbackCheck {
   text: string
   scope: { day?: string; slot?: string }
   changes: readonly FeedbackPlanChange[]
+  citedOutcomes: readonly FeedbackCitedOutcome[]
+  easyBuys: readonly string[]
+}
+
+export interface FeedbackCitedOutcome {
+  policyId: string
+  policyLabel: string
+  policy: string
+  outcome: PolicyOutcomeValue
+  rationale: string
 }
 
 export interface EasyBuyClassifier {
@@ -178,10 +189,12 @@ export function createEasyBuyClassifier(
         questions[`feedback_${index}`] = {
           type: "noul",
           instructions: {
-            question: `Does the after-plan evidence satisfy this authoritative feedback request? Compare it with the before-plan evidence only within the supplied scope. A change inside the scope is not enough if the resulting meal still violates the request.`,
+            question: `Does the final plan satisfy this authoritative feedback request? Compare before-and-after cells only within the supplied scope, check the final easy-buy list against the request, and evaluate any cited policy outcome and rationale against both the request and plan. A cell change or a rationale that only cites the feedback id is not sufficient.`,
             feedback: check.text,
             scope: check.scope,
             beforeAfter: check.changes,
+            citedOutcomes: check.citedOutcomes,
+            easyBuys: check.easyBuys,
           },
           criteria: {
             true: "The after-plan evidence satisfies the authoritative feedback request for its scope.",

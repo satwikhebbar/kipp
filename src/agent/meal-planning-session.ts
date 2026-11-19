@@ -505,18 +505,17 @@ function authoritativeFeedbackChecks(
   const beforePlan = context.feedbackReferencePlan ?? context.recentPlan
   if (!candidate || !beforePlan || context.request.kind !== "revision") return []
 
-  const positions = new Set<string>()
+  const positions = new Map<string, { day: string; slot: string }>()
   for (const plan of [beforePlan, candidate.grid])
     for (const [day, slots] of Object.entries(plan))
-      for (const slot of Object.keys(slots)) positions.add(JSON.stringify([day, slot]))
+      for (const slot of Object.keys(slots)) positions.set(JSON.stringify([day, slot]), { day, slot })
 
   return (context.feedbackItems ?? []).flatMap((item) => {
     const scope =
       item.scope ?? (item.target?.kind === "cell" ? { day: item.target.day, slot: item.target.slot } : undefined)
     if (!scope && item.target?.kind !== "plan" && !isConcretePlanFeedback(item, context)) return []
     const effectiveScope = scope ?? {}
-    const changes = [...positions].flatMap((position) => {
-      const [day, slot] = JSON.parse(position) as [string, string]
+    const changes = [...positions.values()].flatMap(({ day, slot }) => {
       if ((effectiveScope.day && effectiveScope.day !== day) || (effectiveScope.slot && effectiveScope.slot !== slot))
         return []
       const before = beforePlan[day]?.[slot]
@@ -539,6 +538,20 @@ function authoritativeFeedbackChecks(
             text: item.text,
             scope: effectiveScope,
             changes,
+            citedOutcomes: Object.entries(candidate.policyOutcomes).flatMap(([policyId, outcome]) => {
+              if (!outcome.rationale.includes(item.id)) return []
+              const policy = context.customPolicies.find((entry) => entry.id === policyId)
+              return [
+                {
+                  policyId,
+                  policyLabel: policy?.label ?? policyId,
+                  policy: policy?.value ?? "",
+                  outcome: outcome.outcome,
+                  rationale: outcome.rationale,
+                },
+              ]
+            }),
+            easyBuys: candidate.easyBuys,
           },
         ]
       : []
