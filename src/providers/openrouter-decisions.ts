@@ -202,10 +202,10 @@ export function createOpenRouterDecisionsClient(
 }
 
 /**
- * Validates the response answer set against the questions that were sent: every
- * requested id must return an answer whose `type` matches, and the type's
- * payload must be present. A missing key or unexpected type is an error, never a
- * default (per the Decisions API contract).
+ * Parses answers for the questions that were sent. An absent answer id is left
+ * out so its caller can mark only that check unverified; a missing answers
+ * object, unexpected type, or malformed type-specific payload remains a
+ * protocol error.
  */
 function parseAnswers(
   raw: OpenRouterDecisionsResponse["answers"],
@@ -217,8 +217,9 @@ function parseAnswers(
   for (const id of questionIds) {
     const answer = raw[id]
     const expected = questions[id]?.type
-    if (!answer || answer.type !== expected)
-      throw new ToolProviderProtocolError(`OpenRouter Decisions answer "${id}" is missing or has an unexpected type`)
+    if (!answer) continue
+    if (answer.type !== expected)
+      throw new ToolProviderProtocolError(`OpenRouter Decisions answer "${id}" has an unexpected type`)
     if (answer.type === "noul") {
       if (typeof answer.noul !== "number") throw new ToolProviderProtocolError(`answer "${id}" has no noul probability`)
       answers[id] = { type: "noul", noul: answer.noul }

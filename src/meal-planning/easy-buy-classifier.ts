@@ -1,6 +1,6 @@
 import type { DecisionQuestion, DecisionsClient, DecisionUsage } from "../providers/openrouter-decisions"
 import { findProhibitedEasyBuys } from "./easy-buys"
-import type { PolicyOutcomeValue } from "./types"
+import type { PolicyOutcomeValue, WeeklyInventory } from "./types"
 
 /** Default probability above which an easy buy is accepted as ordinary; caller-overridable. */
 export const DEFAULT_ORDINARY_EASY_BUY_THRESHOLD = 0.8
@@ -49,6 +49,7 @@ export interface PersistentPolicyCheck {
   outcome: "satisfied" | "trade-off"
   rationale: string
   easyBuys: readonly string[]
+  weeklyInventory: WeeklyInventory
   planCells: readonly {
     day: string
     slot: string
@@ -93,6 +94,11 @@ export interface FeedbackCheck {
   changes: readonly FeedbackPlanChange[]
   citedOutcomes: readonly FeedbackCitedOutcome[]
   easyBuys: readonly string[]
+  reviewedEasyBuys: readonly string[]
+  addedEasyBuys: readonly string[]
+  removedEasyBuys: readonly string[]
+  hasReferenceCells: boolean
+  hasCandidateCells: boolean
 }
 
 export interface FeedbackCitedOutcome {
@@ -177,6 +183,7 @@ export function createEasyBuyClassifier(
             recordedOutcome: policy.outcome,
             rationale: policy.rationale,
             easyBuys: policy.easyBuys,
+            weeklyInventory: policy.weeklyInventory,
             planCells: policy.planCells,
           },
           criteria: {
@@ -189,12 +196,17 @@ export function createEasyBuyClassifier(
         questions[`feedback_${index}`] = {
           type: "noul",
           instructions: {
-            question: `Does the final plan satisfy this authoritative feedback request? Compare before-and-after cells only within the supplied scope, check the final easy-buy list against the request, and evaluate any cited policy outcome and rationale against both the request and plan. A cell change or a rationale that only cites the feedback id is not sufficient.`,
+            question: `Does the final plan satisfy this authoritative feedback request? Compare before-and-after cells only within the supplied scope, including whether any reference or candidate cell exists there. Compare the reviewed and final easy-buy lists and their additions/removals against the request. Evaluate any cited policy outcome and rationale against the request, inventory facts, and plan. A cell change or a rationale that only cites the feedback id is not sufficient.`,
             feedback: check.text,
             scope: check.scope,
             beforeAfter: check.changes,
             citedOutcomes: check.citedOutcomes,
             easyBuys: check.easyBuys,
+            reviewedEasyBuys: check.reviewedEasyBuys,
+            addedEasyBuys: check.addedEasyBuys,
+            removedEasyBuys: check.removedEasyBuys,
+            hasReferenceCells: check.hasReferenceCells,
+            hasCandidateCells: check.hasCandidateCells,
           },
           criteria: {
             true: "The after-plan evidence satisfies the authoritative feedback request for its scope.",

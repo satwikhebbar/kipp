@@ -157,6 +157,10 @@ describe("easy-buy classifier", () => {
       outcome: "satisfied" as const,
       rationale: "The snack cells use dry, portable meals.",
       easyBuys: ["banana"],
+      weeklyInventory: {
+        items: [{ name: "carrots", status: "unavailable" as const, quantityNote: "out this week" }],
+        notes: [],
+      },
       planCells: [
         {
           day: "Mon",
@@ -240,6 +244,11 @@ describe("easy-buy classifier", () => {
       ],
       citedOutcomes: [],
       easyBuys: [],
+      reviewedEasyBuys: [],
+      addedEasyBuys: [],
+      removedEasyBuys: [],
+      hasReferenceCells: true,
+      hasCandidateCells: true,
     }
     const policy = {
       policyId: "policy-1",
@@ -248,6 +257,10 @@ describe("easy-buy classifier", () => {
       outcome: "satisfied" as const,
       rationale: "Snacks are dry.",
       easyBuys: [],
+      weeklyInventory: {
+        items: [{ name: "carrots", status: "unavailable" as const }],
+        notes: ["No carrots available"],
+      },
       planCells: [],
     }
     const result = await createEasyBuyClassifier(decisions).classify(
@@ -267,6 +280,9 @@ describe("easy-buy classifier", () => {
       feedback: feedback.text,
       scope: feedback.scope,
       beforeAfter: feedback.changes,
+    })
+    expect(capturedQuestions?.persistent_policy_0?.instructions).toMatchObject({
+      weeklyInventory: policy.weeklyInventory,
     })
     expect(result.unaddressedFeedback).toEqual([
       {

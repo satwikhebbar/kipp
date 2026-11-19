@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { createEasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
 import type { ToolProviderRequestEvent } from "../providers/llm"
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
 
@@ -74,7 +75,40 @@ describe("OpenRouter Decisions client", () => {
     })
   })
 
-  it("treats a missing or wrong-type answer as a protocol error", async () => {
+  it("retains a valid verdict when another requested answer is omitted", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          answers: { easy_buy_0: { type: "noul", noul: 0.99 } },
+          usage: { input_tokens: 8, output_tokens: 2, cost: 0.001 },
+        }),
+    })
+    const classifier = createEasyBuyClassifier(createOpenRouterDecisionsClient("key"))
+    const result = await classifier.classify(
+      ["carrot"],
+      [{ day: "Mon", slot: "snack1", dish: "banana", ingredients: ["banana"], drySlot: true }],
+    )
+
+    expect(result.nonOrdinaryEasyBuys).toEqual([])
+    expect(result.unverifiedPackedMeals).toMatchObject([{ dish: "banana", slot: "snack1" }])
+    expect(result.usage).toEqual({ inputTokens: 8, outputTokens: 2, costUsd: 0.001 })
+  })
+
+  it("treats a missing answers object as a protocol error", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ usage: {} }),
+    })
+    const client = createOpenRouterDecisionsClient("key")
+    await expect(client.decide({ state: "policy", questions: NOUL_QUESTIONS })).rejects.toThrow(
+      "OpenRouter Decisions returned no answers",
+    )
+  })
+
+  it("treats a wrong-type answer as a protocol error", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -82,7 +116,7 @@ describe("OpenRouter Decisions client", () => {
     })
     const client = createOpenRouterDecisionsClient("key")
     await expect(client.decide({ state: "policy", questions: NOUL_QUESTIONS })).rejects.toThrow(
-      /missing or has an unexpected type/,
+      /has an unexpected type/,
     )
   })
 

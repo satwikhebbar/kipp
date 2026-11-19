@@ -490,6 +490,7 @@ function persistentPolicyChecks(
         outcome: outcome.outcome,
         rationale: outcome.rationale,
         easyBuys: candidate.easyBuys,
+        weeklyInventory: context.weeklyInventory,
         planCells,
       },
     ]
@@ -531,30 +532,36 @@ function authoritativeFeedbackChecks(
           : null
       return [{ day, slot, before: asEvidence(before), after: asEvidence(after) }]
     })
-    return changes.length
-      ? [
-          {
-            feedbackId: item.id,
-            text: item.text,
-            scope: effectiveScope,
-            changes,
-            citedOutcomes: Object.entries(candidate.policyOutcomes).flatMap(([policyId, outcome]) => {
-              if (!outcome.rationale.includes(item.id)) return []
-              const policy = context.customPolicies.find((entry) => entry.id === policyId)
-              return [
-                {
-                  policyId,
-                  policyLabel: policy?.label ?? policyId,
-                  policy: policy?.value ?? "",
-                  outcome: outcome.outcome,
-                  rationale: outcome.rationale,
-                },
-              ]
-            }),
-            easyBuys: candidate.easyBuys,
-          },
-        ]
-      : []
+    const reviewedEasyBuys = context.feedbackReferenceEasyBuys ?? []
+    const reviewedSet = new Set(reviewedEasyBuys)
+    const finalSet = new Set(candidate.easyBuys)
+    return [
+      {
+        feedbackId: item.id,
+        text: item.text,
+        scope: effectiveScope,
+        changes,
+        hasReferenceCells: changes.some((change) => change.before !== null),
+        hasCandidateCells: changes.some((change) => change.after !== null),
+        citedOutcomes: Object.entries(candidate.policyOutcomes).flatMap(([policyId, outcome]) => {
+          if (!outcome.rationale.includes(item.id)) return []
+          const policy = context.customPolicies.find((entry) => entry.id === policyId)
+          return [
+            {
+              policyId,
+              policyLabel: policy?.label ?? policyId,
+              policy: policy?.value ?? "",
+              outcome: outcome.outcome,
+              rationale: outcome.rationale,
+            },
+          ]
+        }),
+        easyBuys: candidate.easyBuys,
+        reviewedEasyBuys,
+        addedEasyBuys: candidate.easyBuys.filter((item) => !reviewedSet.has(item)),
+        removedEasyBuys: reviewedEasyBuys.filter((item) => !finalSet.has(item)),
+      },
+    ]
   })
 }
 

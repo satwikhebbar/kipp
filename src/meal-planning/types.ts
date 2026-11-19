@@ -242,6 +242,8 @@ export interface MealPlanContext {
   recentPlan?: MealGrid | null
   /** Plan the parent reviewed; resolves explicit moves from cells removed by a context update. */
   feedbackReferencePlan?: MealGrid | null
+  /** Shopping list from the plan the parent reviewed; compared with the final revision list. */
+  feedbackReferenceEasyBuys?: string[]
   /** Plan from the immediately preceding week, when one exists; distinct from the revision base. */
   priorWeekPlan?: MealGrid | null
   request: PlanRequest

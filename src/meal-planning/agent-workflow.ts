@@ -1053,6 +1053,7 @@ async function runRevision(
     weeklyExceptions: active.plan.weeklyExceptions,
     recentPlan: revisionBaseCandidate.grid,
     feedbackReferencePlan: active.version.candidate.grid,
+    feedbackReferenceEasyBuys: active.version.candidate.easyBuys,
     priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
     request: { kind: "revision", text: feedbackItems.map((item) => item.text).join(" ") },
     feedbackItems,
