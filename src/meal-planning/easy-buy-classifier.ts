@@ -50,6 +50,14 @@ export interface PersistentPolicyCheck {
   rationale: string
   easyBuys: readonly string[]
   weeklyInventory: WeeklyInventory
+  priorWeekPlanCells: readonly {
+    day: string
+    slot: string
+    dish: string
+    ingredients: readonly string[]
+    cookMinutes: number
+    priorNightPrep: boolean
+  }[]
   planCells: readonly {
     day: string
     slot: string
@@ -178,13 +186,14 @@ export function createEasyBuyClassifier(
         questions[`persistent_policy_${index}`] = {
           type: "noul",
           instructions: {
-            question: `Does the hydrated plan support the recorded ${policy.outcome} claim for persistent policy "${policy.label}"? For satisfied, check that the plan meets the policy. For trade-off, check that the plan and rationale accurately describe a real compromise. Judge the claim against the policy text and rationale; do not treat the existence of a rationale as proof.`,
+            question: `Does the hydrated plan support the recorded ${policy.outcome} claim for persistent policy "${policy.label}"? For satisfied, check that the plan meets the policy. For trade-off, check that the plan and rationale accurately describe a real compromise. Judge the claim against the policy text, rationale, and both current and prior-week plan evidence. When comparing a repeated snack, match the same weekday and slot. Do not treat the existence of a rationale as proof.`,
             policyId: policy.policyId,
             policy: policy.value,
             recordedOutcome: policy.outcome,
             rationale: policy.rationale,
             easyBuys: policy.easyBuys,
             weeklyInventory: policy.weeklyInventory,
+            priorWeekPlanCells: policy.priorWeekPlanCells,
             planCells: policy.planCells,
           },
           criteria: {

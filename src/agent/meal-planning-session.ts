@@ -18,6 +18,7 @@ import type {
   FailureCode,
   FeedbackItem,
   MealDefinition,
+  MealGrid,
   MealPlanCandidate,
   MealPlanContext,
   MealPlanEvaluation,
@@ -172,6 +173,8 @@ export async function runMealPlanningAgentSession(
       feedbackChecks.length === 0
     )
       return selection
+    // Persistent policy checks contain both current and prior-week plan cells,
+    // so the cache cannot reuse a verdict after the comparison baseline changes.
     const key = JSON.stringify({ candidate: selection.candidate, packedMeals, persistentPolicies, feedbackChecks })
     let classification = classificationCache.get(key)
     if (!classification) {
@@ -468,16 +471,19 @@ function persistentPolicyChecks(
 ): PersistentPolicyCheck[] {
   if (!selection.candidate) return []
   const candidate = selection.candidate
-  const planCells = Object.entries(candidate.grid).flatMap(([day, slots]) =>
-    Object.entries(slots).map(([slot, cell]) => ({
-      day,
-      slot,
-      dish: cell.dish,
-      ingredients: cell.items,
-      cookMinutes: cell.cookMinutes,
-      priorNightPrep: cell.priorNightPrep,
-    })),
-  )
+  const planCells = (grid: MealGrid | null | undefined) =>
+    Object.entries(grid ?? {}).flatMap(([day, slots]) =>
+      Object.entries(slots).map(([slot, cell]) => ({
+        day,
+        slot,
+        dish: cell.dish,
+        ingredients: cell.items,
+        cookMinutes: cell.cookMinutes,
+        priorNightPrep: cell.priorNightPrep,
+      })),
+    )
+  const currentWeekPlanCells = planCells(candidate.grid)
+  const priorWeekPlanCells = planCells(context.priorWeekPlan)
   return context.customPolicies.flatMap((policy) => {
     if (policy.scope !== "persistent") return []
     const outcome = candidate.policyOutcomes[policy.id]
@@ -491,7 +497,8 @@ function persistentPolicyChecks(
         rationale: outcome.rationale,
         easyBuys: candidate.easyBuys,
         weeklyInventory: context.weeklyInventory,
-        planCells,
+        planCells: currentWeekPlanCells,
+        priorWeekPlanCells,
       },
     ]
   })

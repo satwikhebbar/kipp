@@ -540,9 +540,14 @@ describe("bounded meal-planning agent session", () => {
         if (policyQuestion?.type === "noul" && typeof policyQuestion.instructions !== "string") {
           policyEvidence = policyQuestion.instructions
           const cells = policyQuestion.instructions.planCells as { slot: string; priorNightPrep: boolean }[]
-          policySupportedFromEvidence = cells
-            .filter((cell) => cell.slot.startsWith("snack"))
-            .every((cell) => !cell.priorNightPrep)
+          const priorWeekCells = policyQuestion.instructions.priorWeekPlanCells as {
+            day: string
+            slot: string
+            dish: string
+          }[]
+          policySupportedFromEvidence =
+            cells.filter((cell) => cell.slot.startsWith("snack")).every((cell) => !cell.priorNightPrep) &&
+            priorWeekCells.some((cell) => cell.day === "Mon" && cell.slot === "snack1" && cell.dish === "banana")
         }
         const answers = Object.fromEntries(
           Object.keys(questions).map((id) => [
@@ -591,6 +596,7 @@ describe("bounded meal-planning agent session", () => {
       context: contextWithCandidateDefinitions(
         context({
           customPolicies: [policy],
+          priorWeekPlan: { Mon: { snack1: cell("banana", ["banana"], "snack1") } },
           profile: { ...context().profile, priorNightPrepAllowed: true },
           weeklyInventory: {
             items: [{ name: "carrots", status: "unavailable", quantityNote: "out this week" }],
@@ -613,6 +619,16 @@ describe("bounded meal-planning agent session", () => {
         items: [{ name: "carrots", status: "unavailable", quantityNote: "out this week" }],
         notes: [],
       },
+      priorWeekPlanCells: [
+        expect.objectContaining({
+          day: "Mon",
+          slot: "snack1",
+          dish: "banana",
+          ingredients: ["banana"],
+          cookMinutes: 0,
+          priorNightPrep: false,
+        }),
+      ],
       planCells: expect.arrayContaining([
         expect.objectContaining({
           day: "Mon",
@@ -652,6 +668,64 @@ describe("bounded meal-planning agent session", () => {
           rejectionCodes: ["persistent_policy_outcome_unsubstantiated"],
         })
     }
+  })
+
+  it("does not reuse a persistent-policy verdict after prior-week snack evidence changes", async () => {
+    const candidate = passingCandidate()
+    const policy = {
+      id: "prior-week-snacks",
+      label: "Compare weekday snacks",
+      scope: "persistent" as const,
+      value: "Consider the same weekday's prior-week snack when evaluating repetition.",
+    }
+    candidate.policyOutcomes[policy.id] = {
+      outcome: "satisfied",
+      rationale: "The current snack was assessed against the same weekday last week.",
+    }
+    const sessionContext = contextWithCandidateDefinitions(
+      context({
+        customPolicies: [policy],
+        priorWeekPlan: { Mon: { snack1: cell("apple", ["apple"], "snack1") } },
+      }),
+      candidate,
+    )
+    const priorWeekSnacks: string[][] = []
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        const question = questions.persistent_policy_0
+        const evidence =
+          question?.type === "noul" && typeof question.instructions !== "string" ? question.instructions : undefined
+        const priorCells = evidence?.priorWeekPlanCells as { day: string; slot: string; dish: string }[] | undefined
+        priorWeekSnacks.push(priorCells?.filter((cell) => cell.slot.startsWith("snack")).map((cell) => cell.dish) ?? [])
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: Object.fromEntries(Object.keys(questions).map((id) => [id, { type: "noul" as const, noul: 0.99 }])),
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const responses = [evaluateResponse(candidate), proposeResponse(proposeInput(candidate))]
+    let providerCalls = 0
+    const provider: ToolProviderClient = {
+      async generate() {
+        providerCalls += 1
+        if (providerCalls === 2)
+          sessionContext.priorWeekPlan = { Mon: { snack1: cell("banana", ["banana"], "snack1") } }
+        const response = responses.shift()
+        if (!response) throw new Error("unexpected provider call")
+        return response
+      },
+    }
+
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: sessionContext,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(priorWeekSnacks).toEqual([["apple"], ["banana"]])
+    expect(result.terminal?.kind).toBe("propose_plan")
   })
 
   it("blocks a proposal when a persistent-policy outcome cannot be verified", async () => {

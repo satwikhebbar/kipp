@@ -161,6 +161,7 @@ describe("easy-buy classifier", () => {
         items: [{ name: "carrots", status: "unavailable" as const, quantityNote: "out this week" }],
         notes: [],
       },
+      priorWeekPlanCells: [],
       planCells: [
         {
           day: "Mon",
@@ -262,6 +263,7 @@ describe("easy-buy classifier", () => {
         items: [{ name: "carrots", status: "unavailable" as const }],
         notes: ["No carrots available"],
       },
+      priorWeekPlanCells: [],
       planCells: [],
     }
     const result = await createEasyBuyClassifier(decisions).classify(
