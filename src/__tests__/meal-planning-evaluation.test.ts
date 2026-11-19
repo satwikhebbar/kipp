@@ -1097,6 +1097,65 @@ describe("meal-planning evaluator", () => {
     }
   })
 
+  it.each(
+    ["Use idli for Friday lunch instead of poha.", "Use idli instead of poha for Friday lunch."].flatMap((text) =>
+      [false, true].map((eligible) => ({ text, eligible })),
+    ),
+  )("separates replacement source from destination: %j", ({ text, eligible }) => {
+    const context = baseContext({
+      recentPlan: gridFrom([
+        ["Fri", "school-lunch", "idli"],
+        ...(eligible ? [["Mon", "breakfast", "poha"] as [string, string, string]] : []),
+      ]),
+      feedbackReferencePlan: gridFrom([["Thu", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "replacement", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "replacement", text }, context)).toBe(eligible)
+    expect(applicablePlanFeedback([{ id: "replacement", text }], context)).toEqual(
+      eligible ? [{ id: "replacement", text }] : [],
+    )
+    const candidate = { grid: gridFrom([["Fri", "school-lunch", "roasted moong"]]), easyBuys: [], policyOutcomes: {} }
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes.includes("unscoped_cell_changed")).toBe(!eligible)
+    expect(codes.includes("unaddressed_feedback")).toBe(!eligible)
+  })
+
+  it.each([
+    { scope: { day: "Fri" }, repeatedInside: false, addressed: true },
+    { scope: { day: "Fri" }, repeatedInside: true, addressed: false },
+    { scope: { slot: "school-lunch" }, repeatedInside: false, addressed: true },
+    { scope: { slot: "school-lunch" }, repeatedInside: true, addressed: false },
+    { scope: { day: "Fri", slot: "school-lunch" }, repeatedInside: false, addressed: true },
+    { scope: undefined, repeatedInside: false, addressed: false },
+  ])("checks no-repeat within the requested scope: %j", ({ scope, repeatedInside, addressed }) => {
+    const candidate = baseCandidate()
+    // Repeated favourites outside Friday remain untouched.
+    expect(candidate.grid.Mon.breakfast.dish).toBe(candidate.grid.Tue.breakfast.dish)
+    const context = baseContext({
+      recentPlan: structuredClone(candidate.grid),
+      request: { kind: "revision", text: "Avoid repeated meals" },
+      feedbackItems: [{ id: "variety", text: "Avoid repeated meals", ...(scope ? { scope } : {}) }],
+    })
+    if (scope?.slot && !scope.day) {
+      for (const [day, slots] of Object.entries(candidate.grid)) {
+        if (slots[scope.slot]) slots[scope.slot].dish = `${day} unique lunch`
+      }
+      if (repeatedInside) candidate.grid.Tue[scope.slot].dish = candidate.grid.Mon[scope.slot].dish
+    } else {
+      for (const [slot, cell] of Object.entries(candidate.grid.Fri)) {
+        if (!scope?.slot || scope.slot === slot) cell.dish = `Friday unique ${slot}`
+      }
+      if (repeatedInside) candidate.grid.Fri.snack2.dish = candidate.grid.Fri.snack1.dish
+    }
+    candidate.policyOutcomes["snack-policy"].rationale = "Addressed variety"
+    expect(candidate.grid.Mon.breakfast).toEqual(context.recentPlan?.Mon.breakfast)
+    expect(candidate.grid.Tue.breakfast).toEqual(context.recentPlan?.Tue.breakfast)
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes.includes("unaddressed_feedback")).toBe(!addressed)
+    if (scope) expect(codes).not.toContain("unscoped_cell_changed")
+  })
+
   it.each([
     "Use a lighter dish for Friday lunch instead of something heavy.",
     "Make Friday lunch lighter instead of something heavy.",

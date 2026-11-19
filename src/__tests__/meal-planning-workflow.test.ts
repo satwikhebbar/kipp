@@ -1895,7 +1895,12 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
 
   it.each(
     [false, true].flatMap((replan) =>
-      ["Use idli instead of poha.", "Make poha lighter instead of something heavy."].map((instruction) => ({
+      [
+        "Use idli instead of poha.",
+        "Make poha lighter instead of something heavy.",
+        "Use idli for Friday lunch instead of poha.",
+        "Use idli instead of poha for Friday lunch.",
+      ].map((instruction) => ({
         replan,
         instruction,
       })),

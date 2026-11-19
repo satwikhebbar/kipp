@@ -264,16 +264,20 @@ function isPlanChangeClause(
   const action = PLAN_ACTION.test(text)
   const destination = /\b(?:with|to|for|instead|from|on|into|another|other)\b/.test(text)
   const replacementSource = text.match(/\binstead\s+of\s+(.+)/)
+  // Destination qualifiers locate the new meal, not the dish being replaced.
+  const sourceTarget = replacementSource?.[1].split(
+    new RegExp(`\\s+(?:for|on|at)\\s+(?=(?:${DAY_WORDS}|${MEAL_WORDS})\\b)`),
+  )[0]
   const sourceNamesReviewedDish =
     replacementSource &&
-    [context.recentPlan, context.feedbackReferencePlan].some((grid) => mentionsDish(replacementSource[1], grid))
+    [context.recentPlan, context.feedbackReferencePlan].some((grid) => mentionsDish(sourceTarget ?? "", grid))
   const primaryInstruction = text.slice(0, replacementSource?.index)
   const primaryHasTarget = PLAN_TARGET.test(primaryInstruction) || mentionsDish(primaryInstruction, context.recentPlan)
   // A named source owns replacement eligibility even after projection removes
   // it. A generic contrast ("something heavy") must not erase an explicit meal
   // or eligible named-dish target in the instruction before "instead of".
   const applicabilityTarget =
-    replacementSource && (sourceNamesReviewedDish || !primaryHasTarget) ? replacementSource[1] : text
+    replacementSource && (sourceNamesReviewedDish || !primaryHasTarget) ? (sourceTarget ?? "") : text
   const mealOrDay = PLAN_TARGET.test(applicabilityTarget)
   // A move can rescue a dish from a closed day. A replacement of a removed dish
   // is already satisfied by projection and must not survive as stale feedback.
@@ -635,7 +639,11 @@ export function evaluateMealPlan(
     for (const item of feedbackItems) {
       const concrete = isConcretePlanFeedback(item, context)
       const explicitNoRepeat = planFeedbackClauses(item.text, context).some(isPlanConstraint)
-      const constraintSatisfied = !explicitNoRepeat || [...weekDishCounts.values()].every((count) => count <= 1)
+      const constraintRefs = item.scope
+        ? refs.filter(({ day, slotId }) => inFeedbackScope(item.scope ?? {}, day, slotId))
+        : refs
+      const constraintDishes = constraintRefs.map(({ cell }) => dishIdentity(cell.dish))
+      const constraintSatisfied = !explicitNoRepeat || new Set(constraintDishes).size === constraintDishes.length
       const addressedByCell =
         constraintSatisfied &&
         (concrete
