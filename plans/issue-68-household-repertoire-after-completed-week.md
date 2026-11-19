@@ -2,47 +2,72 @@
 
 ## Goal
 
-When a household has approved and completed a meal-planning week, add eligible newly tried dishes from that week to the durable household meal repertoire. Subsequent weekly plans should be able to select those dishes as established meals, with their validated meal definitions and existing household constraints intact.
+After a planning week has elapsed, promote eligible newly introduced dishes from that week's final plan into the household's established meal catalog. Promotion is based on the exact final version and the historical new-food policy that applied when it was planned. It must be repeat-safe and must not let a later profile-policy change rewrite the decision for an already-planned week.
 
-The plan treats “approved, completed week” as a required gate: an unapproved, incomplete, superseded, or merely generated week must not change the household repertoire. The exact user-facing approval/completion signal and whether dishes are added automatically or individually confirmed must follow the issue’s acceptance criteria when available; the issue page and local Beads record were inaccessible during planning.
+The issue's rule is: consider an active plan after `week_end` when its final version was either revision-free or explicitly accepted. “Tried” is best-effort: an approved plan plus the elapsed week is sufficient evidence that its planned dishes were implemented. Partial weeks are not inferred as fully cooked from telemetry; after the elapsed-week gate, the plan's final grid is the candidate set, with explicitly rejected dishes removed.
 
 ## Current architecture and constraints
 
-- `MealProfile` in `src/meal-planning/types.ts` owns the persistent `mealDefinitions` catalog. Definitions have `established` and `provisional` statuses; the legacy `dishRepertoire` string array is deprecated.
-- New definitions are hydrated as plan-local provisional definitions (`src/meal-planning/hydration.ts`). They are stored with immutable `meal_plan_version` snapshots and can be inherited by revisions of that plan. They should not silently become household-owned just because a plan was generated or revised.
-- `meal_profile.profile_json` is the D1 persistence boundary for household definitions. `createMealPlanningStore` has both D1 and in-memory implementations; any new state transition must preserve parity and existing serialized profile shape.
-- A household definition should use the existing server-side validation/establishment rules in `src/meal-planning/catalog.ts`. Keep model-authored definitions validated; the completion path must not accept client-authored definition fields or bypass dietary/schedule validation.
-- Workflow operations are durable and can replay. The transition must be idempotent, scoped to the correct chat and exact plan/week, and safe if the completion signal is delivered more than once. Existing plan/version immutability, feedback CAS, and active-plan generation behavior must remain unchanged.
-- No new Worker binding, `Env` setting, workflow, cron, or Durable Object is presumed by this design. Revisit `docs/production-runtime-configuration.md`, `config/runtime-variables.json`, and provisioning requirements if implementation changes that scope.
+- `MealProfile.mealDefinitions` owns the durable household catalog. Definitions carry `established` or `provisional` status; `dishRepertoire` is deprecated.
+- New definitions are stored as plan-local provisional definitions in immutable `meal_plan_version` snapshots. Revisions inherit previous provisional definitions even when a definition is no longer present in the grid (`src/meal-planning/hydration.ts`), so promotion must join against the final grid rather than promote the entire snapshot.
+- A plan stores its current version and may be changed by a CAS-guarded revision. Creating another plan replaces the previous active plan regardless of its week. Initial and revision workflow runs are bounded and finish after sending the plan; no existing live process remains to run at `week_end`.
+- The household catalog is persisted in `meal_profile.profile_json`; the store has D1 and in-memory implementations. The store is the trust boundary for atomic checks and profile writes.
+- Existing planner validation and catalog conversion in `src/meal-planning/catalog.ts` must remain authoritative. A completion job must not accept client-authored meal definitions.
+- Durable workflow operations replay. Completion processing must be idempotent and must couple eligibility checks to the profile write so an approval change, revision, or concurrent profile write cannot produce an invalid promotion.
 
 ## Proposed design
 
-1. Trace the existing end-of-week and approval interaction paths before choosing the trigger. Reuse an existing authenticated parent action and persisted plan identity if one exists; do not infer completion from wall-clock week-end alone. If no durable approval/completion signal currently exists, add the smallest explicit server-owned state transition needed to represent it.
-2. On that authorized transition, read the exact plan/version and its plan-local provisional meal definitions. Filter to dishes that were actually tried during that week according to the established completion signal. Do not promote every generated proposal automatically when it was not cooked/tried.
-3. Convert only eligible definitions using existing validation and establishment semantics. Merge into `profile.mealDefinitions` while retaining existing definitions and profile preferences. Deduplicate by stable ID and normalized name/aliases so retries or equivalent names cannot create duplicate catalog entries. Do not mutate the immutable plan-version snapshot.
-4. Persist the profile merge and completion marker atomically (or use an equivalent compare-and-set/idempotency guard) so a retry cannot lose concurrent profile updates or promote the same week twice. Keep the operation scoped by chat ID and plan ID, and reject stale, replaced, or mismatched plan actions.
-5. Return a narrow result suitable for the existing workflow response: newly added dish names and any skipped/duplicate dishes as appropriate. Avoid exposing internal definition payloads or adding a separate catalog-management interface unless required by issue acceptance criteria.
+### 1. Persist version-scoped approval and historical policy
 
-## Implementation areas to inspect/change
+Add forward-only persistence for the decision inputs on each plan version:
 
-- `src/meal-planning/agent-workflow.ts` and the workflow entry/interaction routing: locate the actual week approval/completion signal and ensure only the authorized path invokes promotion.
-- `src/meal-planning/store.ts`: add a typed store operation for atomic, idempotent promotion; implement it in both D1 and in-memory stores. Add a migration only if a durable completion/idempotency record cannot fit safely in current state.
-- `src/meal-planning/types.ts` and `src/meal-planning/catalog.ts`: reuse or extend the validated established-definition conversion without weakening current constraints.
-- Existing workflow/store tests and migration tests: cover correct gating, retry behavior, and new-plan visibility.
+- `allow_new_foods_snapshot`: the boolean profile policy used to evaluate that version. Populate it on initial plan creation and each successful revision from the exact profile/context used for that run. Do not read the current profile setting when processing a completed week.
+- `approved_version`: a plan-level nullable version pointer (or equivalent explicit approval record). Initial version is approved when created, matching the existing “created plan is approved by default” behavior. A successful revision clears approval of the prior version and leaves the new version pending acceptance. An authenticated parent “Accept this version” action sets the pointer only if the submitted plan ID/version is still the active current version. Explicit rejection clears approval for that exact version; stale acceptance/rejection actions do nothing.
+- `rejected_meal_ids`: durable, plan-scoped rejection evidence. Add an authenticated structured rejection action for a dish shown in the plan, and persist the canonical provisional meal ID. Preserve these IDs through revisions. If existing free-text feedback explicitly rejects a dish, implementation may map it only when it unambiguously names a provisional definition; ambiguous text must not be guessed. Rejection applies across versions of the same plan and is irreversible for that plan.
+
+A version is eligible for approval at completion when it is the final current version and either no revision was ever made (version 1 remains approved by creation) or the current version was explicitly accepted. Any revision invalidates the preceding version's approval. A rejection of the current version makes that version ineligible until a later version is accepted. A later version does not erase prior dish rejection evidence.
+
+Legacy versions with no policy snapshot are ineligible for automatic promotion. This fail-closed behavior avoids applying today's policy retroactively. Existing rows with no approval metadata are likewise ineligible unless the store can prove their version-1 revision-free status from existing authoritative data and the issue explicitly permits that compatibility path.
+
+### 2. Run completion on a scheduled path and preserve eligible history
+
+Add a scheduled Worker trigger at a bounded interval to find plans whose `week_end` has elapsed and process them. Read `docs/production-runtime-configuration.md` before implementation because this adds/changes a cron trigger; update `wrangler.prod.toml`, `Env`/runtime-variable registry and provisioning only if required by the selected implementation. Do not leave completion dependent on a workflow that currently exits after publishing.
+
+The completion query considers the latest plan for each chat/week, even if that plan later has status `replaced` because the household started another week. This preserves a completed prior week until the scheduler catches up. It excludes an older plan version chain for the same week when a later replacement plan exists for that same chat/week. A plan superseded by a different week's plan remains eligible based on its own week and final version. Keep the completion marker on the plan (or a small durable completion ledger) so delayed scheduler runs can recover it.
+
+The scheduled processor passes `(chat_id, plan_id, expected_current_version, approved_version, week_end)` to one store transaction. The store reads the plan/version evidence and current profile version, derives candidates by joining final-grid dish names/IDs to that version's provisional definitions, then removes plan-scoped rejected IDs and definitions already represented by stable ID or normalized name/alias. It attempts a profile-version compare-and-set that merges those definitions into the just-read profile only while the plan guards still hold: week end is due; the target is still the latest plan for that chat/week; expected version is still current; it is approved under the rule above; policy snapshot permits new foods; and it has not already been processed. Couple the successful profile update to the completion marker in the same SQLite transaction (for D1, use a guarded SQL statement/trigger or equivalent atomic mechanism, not separate read-then-write calls). If the profile version changed, retry from a fresh profile read; if any plan guard fails, make no profile or completion-state change.
+
+A revision or same-week replacement racing completion changes the current/latest-version guard and makes the old completion attempt a no-op. A different-week plan replacement does not make an otherwise eligible past week disappear. A profile update racing completion is serialized by the same D1 transaction, and the merge starts from the profile row as it exists inside that transaction. Replayed jobs observe the processed marker and do nothing. Delayed processing after `week_end` is allowed if all durable eligibility facts still match.
+
+### 3. Derive only dishes represented in the final grid
+
+Use the final version's grid as the source of planned dishes. Resolve each cell's canonical dish against that version's provisional definitions, including the existing normalized aliases where needed. Promote only definitions referenced by at least one final-grid cell. Definitions inherited from an earlier revision but dropped from the final grid are not candidates. Existing established definitions are never demoted or rewritten.
+
+Convert eligible definitions through existing trusted establishment semantics, preserving the validated ingredients, slot suitability, and preparation attributes. Deduplicate deterministically against current established definitions by stable ID and normalized name/aliases. Do not alter immutable version JSON. A missing/invalid definition mapping is skipped and logged as a typed completion failure, not synthesized from the dish label.
+
+### 4. Report the result narrowly
+
+The scheduled path has no synchronous parent request. Record a compact processed result (added names/count, skipped count, and reason category) sufficient for runtime diagnostics and retry investigation. Do not store provider prose or duplicate full definition payloads in a new log. A user-facing notification is out of scope unless issue acceptance explicitly requires it.
+
+## Implementation areas
+
+- `migrations/`: add the version policy snapshot, version approval/rejection state, and plan completion state/ledger with safe defaults for legacy rows.
+- `src/meal-planning/store.ts`: add approval/rejection methods and one atomic `completeEligiblePlan` operation; implement the same guards and merge in D1 and in-memory stores.
+- `src/meal-planning/agent-workflow.ts`, Worker scheduled entry point, and runtime types/configuration: persist the policy snapshot on every version, expose authenticated accept/reject actions, and dispatch due-plan processing.
+- `src/meal-planning/types.ts`, `src/meal-planning/catalog.ts`, and hydration: preserve trusted definition conversion and use final-grid references for eligibility.
+- Store, workflow, Worker scheduled-trigger, and migration tests: exercise transition guards and concurrency boundaries.
 
 ## Acceptance criteria for implementation
 
-- Newly tried provisional dishes become established household definitions only after the exact week has both the required approval and completion evidence.
-- Generated-but-not-tried dishes, unapproved weeks, incomplete weeks, replaced plans, and stale/mismatched actions do not alter the repertoire.
-- Re-delivery/replay of the same completion action is safe and does not duplicate definitions or lose profile data.
-- Existing established meals, household preferences, policies, and definition validity are preserved.
-- Newly promoted definitions are available to later plans and remain separate from old immutable version snapshots.
-- D1 and in-memory store behavior agree; tests cover positive, negative, duplicate/replay, and stale-plan cases.
+- No repertoire mutation occurs before the plan's `week_end`.
+- A revision-free version 1 is eligible under the existing default-approved behavior; after any revision, only the explicitly accepted current final version is eligible. Stale accept/reject actions cannot change the current plan's approval.
+- The policy snapshot, not the current household setting, determines eligibility. Missing historical policy evidence fails closed.
+- Candidate dishes come from the approved final grid intersected with its provisional definitions; dropped definitions and explicitly rejected meal IDs are excluded.
+- A different-week replacement cannot erase a due eligible week before processing; a newer plan for the same week supersedes the older chain. Revisions/replacements racing the transaction fail the expected-version/latest-plan checks.
+- Delayed and replayed scheduler delivery is safe. Profile changes are merged without overwriting concurrent preference, policy, or catalog changes.
+- Promoted definitions become available to later plans, retain existing validation constraints, and do not mutate historical plan versions.
+- D1 and in-memory behavior match. Tests cover policy changes, absent policy, initial versus revised approval, rejection, final-grid intersection, replacement, same-week supersession, races, and replay.
 
 ## Validation
 
-Run focused meal-planning store/workflow tests and migration tests for the changed paths, then the repository quality gates (`pnpm check` and relevant integration tests) as directed for implementation. Planning only: no implementation or validation commands that mutate runtime configuration are in scope here.
-
-## Open point for plan review
-
-The issue body could not be retrieved from GitHub (`gh` reported an API connectivity failure; browser fetch returned a cache miss), and `bd show bd-68` could not open the local Dolt database due to a lock permission error. The plan therefore uses the title’s approval/completion gate and current architecture as its basis. Reviewer/coordinator should compare the issue’s exact acceptance wording—especially whether parents mark individual dishes tried or approve the whole week—before implementation begins.
+During implementation, run focused store/workflow/scheduled-trigger tests and migration tests, then `pnpm check` and the relevant integration suite. Because the design adds a scheduled trigger, follow the production runtime configuration documentation and verify the deployment manifest and runtime-variable registry/provisioning impact. This planning turn makes no runtime configuration changes.
