@@ -1,11 +1,11 @@
-import type { DecisionsClient, DecisionUsage } from "../providers/openrouter-decisions"
+import type { DecisionQuestion, DecisionsClient, DecisionUsage } from "../providers/openrouter-decisions"
 import { findProhibitedEasyBuys } from "./easy-buys"
 
 /** Default probability above which an easy buy is accepted as ordinary; caller-overridable. */
 export const DEFAULT_ORDINARY_EASY_BUY_THRESHOLD = 0.8
 
 const MIN_THRESHOLD = 0.5
-const CLASSIFICATION_POLICY = `Answer each question using its question-specific criteria and only the supplied item or meal facts. Treat packed-meal questions as judgments about the actual meal in its stated slot.`
+const CLASSIFICATION_POLICY = `Answer each question using its question-specific criteria and only the supplied item, meal, policy, outcome, and plan facts. Judge packed-meal questions about the actual meal in its stated slot.`
 
 /** One easy buy the classifier judged not ordinary, with a repair-facing detail. */
 export interface NonOrdinaryEasyBuy {
@@ -17,6 +17,8 @@ export interface EasyBuyClassification {
   nonOrdinaryEasyBuys: NonOrdinaryEasyBuy[]
   unsuitablePackedMeals: PackedMealClassification[]
   unverifiedPackedMeals: PackedMealClassification[]
+  unsupportedPolicyOutcomes: PersistentPolicyClassification[]
+  unverifiedPolicyOutcomes: PersistentPolicyClassification[]
   usage: DecisionUsage
 }
 
@@ -36,18 +38,43 @@ export interface PackedMealClassification {
   detail: string
 }
 
+/** A persistent outcome claim and the complete hydrated plan evidence used to judge it. */
+export interface PersistentPolicyCheck {
+  policyId: string
+  label: string
+  value: string
+  outcome: "satisfied" | "trade-off"
+  rationale: string
+  planCells: readonly {
+    day: string
+    slot: string
+    dish: string
+    ingredients: readonly string[]
+  }[]
+}
+
+export interface PersistentPolicyClassification {
+  policyId: string
+  label: string
+  detail: string
+}
+
 export interface EasyBuyClassifier {
-  classify(easyBuys: readonly string[], packedMeals?: readonly PackedMealCheck[]): Promise<EasyBuyClassification>
+  classify(
+    easyBuys: readonly string[],
+    packedMeals?: readonly PackedMealCheck[],
+    persistentPolicies?: readonly PersistentPolicyCheck[],
+  ): Promise<EasyBuyClassification>
 }
 
 const ZERO_USAGE: DecisionUsage = { inputTokens: 0, outputTokens: 0, costUsd: 0 }
 
 /**
- * Creates a batched semantic classifier for easy buys and packed meals. It is
- * the open-vocabulary complement to deterministic easy-buy token matching:
- * items already rejected deterministically are skipped, and remaining checks
- * become separate `noul` questions. A `noul` probability above the threshold
- * accepts; a low or uncertain probability never permits unverified evidence.
+ * Creates a batched semantic classifier for easy buys, packed meals, and
+ * persistent-policy outcome claims. Deterministically rejected easy buys are
+ * skipped; each remaining check becomes a separate `noul` question. A `noul`
+ * probability above the threshold accepts; a low or uncertain probability
+ * never permits unverified evidence.
  */
 export function createEasyBuyClassifier(
   decisions: DecisionsClient,
@@ -55,15 +82,19 @@ export function createEasyBuyClassifier(
 ): EasyBuyClassifier {
   const threshold = clampThreshold(options.threshold)
   return {
-    async classify(easyBuys, packedMeals = []) {
+    async classify(easyBuys, packedMeals = [], persistentPolicies = []) {
       const deterministic = new Set(findProhibitedEasyBuys(easyBuys))
       const candidates = easyBuys.filter((buy) => !deterministic.has(buy))
-      if (candidates.length === 0 && packedMeals.length === 0)
-        return { nonOrdinaryEasyBuys: [], unsuitablePackedMeals: [], unverifiedPackedMeals: [], usage: ZERO_USAGE }
-      const questions: Record<
-        string,
-        { type: "noul"; instructions: string; criteria: { true: string; false: string } }
-      > = {}
+      if (candidates.length === 0 && packedMeals.length === 0 && persistentPolicies.length === 0)
+        return {
+          nonOrdinaryEasyBuys: [],
+          unsuitablePackedMeals: [],
+          unverifiedPackedMeals: [],
+          unsupportedPolicyOutcomes: [],
+          unverifiedPolicyOutcomes: [],
+          usage: ZERO_USAGE,
+        }
+      const questions: Record<string, DecisionQuestion> = {}
       candidates.forEach((item, index) => {
         questions[`easy_buy_${index}`] = {
           type: "noul",
@@ -81,6 +112,23 @@ export function createEasyBuyClassifier(
           criteria: {
             true: "The actual meal meets every stated transport, eating, preparation, and slot requirement.",
             false: "The actual meal violates any stated transport, eating, preparation, or slot requirement.",
+          },
+        }
+      })
+      persistentPolicies.forEach((policy, index) => {
+        questions[`persistent_policy_${index}`] = {
+          type: "noul",
+          instructions: {
+            question: `Does the hydrated plan support the recorded ${policy.outcome} claim for persistent policy "${policy.label}"? For satisfied, check that the plan meets the policy. For trade-off, check that the plan and rationale accurately describe a real compromise. Judge the claim against the policy text and rationale; do not treat the existence of a rationale as proof.`,
+            policyId: policy.policyId,
+            policy: policy.value,
+            recordedOutcome: policy.outcome,
+            rationale: policy.rationale,
+            planCells: policy.planCells,
+          },
+          criteria: {
+            true: "The hydrated plan evidence supports the recorded outcome and rationale for this persistent policy.",
+            false: "The hydrated plan contradicts or does not support the recorded outcome or rationale.",
           },
         }
       })
@@ -131,7 +179,36 @@ export function createEasyBuyClassifier(
           })
         }
       })
-      return { nonOrdinaryEasyBuys, unsuitablePackedMeals, unverifiedPackedMeals, usage: result.usage }
+      const unsupportedPolicyOutcomes: PersistentPolicyClassification[] = []
+      const unverifiedPolicyOutcomes: PersistentPolicyClassification[] = []
+      persistentPolicies.forEach((policy, index) => {
+        const base = { policyId: policy.policyId, label: policy.label }
+        const answer = result.answers[`persistent_policy_${index}`]
+        if (answer?.type !== "noul" || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1) {
+          unverifiedPolicyOutcomes.push({
+            ...base,
+            detail: `outcome "${policy.outcome}" for persistent policy "${policy.label}" could not be verified`,
+          })
+        } else if (answer.noul <= 1 - threshold) {
+          unsupportedPolicyOutcomes.push({
+            ...base,
+            detail: `outcome "${policy.outcome}" for persistent policy "${policy.label}" is not supported by the hydrated plan`,
+          })
+        } else if (answer.noul < threshold) {
+          unverifiedPolicyOutcomes.push({
+            ...base,
+            detail: `outcome "${policy.outcome}" for persistent policy "${policy.label}" could not be verified`,
+          })
+        }
+      })
+      return {
+        nonOrdinaryEasyBuys,
+        unsuitablePackedMeals,
+        unverifiedPackedMeals,
+        unsupportedPolicyOutcomes,
+        unverifiedPolicyOutcomes,
+        usage: result.usage,
+      }
     },
   }
 }

@@ -38,6 +38,8 @@ const NON_EVALUATOR_FAILURE_CODES = new Set([
   "packed_slot_unsuitable",
   "packed_slot_semantically_unsuitable",
   "packed_slot_unverified",
+  "persistent_policy_outcome_unsubstantiated",
+  "persistent_policy_outcome_unverified",
   "duplicate_meal_selection",
 ])
 

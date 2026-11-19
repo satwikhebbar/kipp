@@ -14,6 +14,8 @@ export const FAILURE_CODES = [
   "use_early_ignored",
   "dish_repeated",
   "missing_policy_outcome",
+  "persistent_policy_outcome_unsubstantiated",
+  "persistent_policy_outcome_unverified",
   "unscoped_cell_changed",
   "unaddressed_feedback",
   "unknown_meal_definition",

@@ -149,6 +149,44 @@ describe("easy-buy classifier", () => {
     expect(instructions).toContain("dry and spill-resistant")
   })
 
+  it("distinguishes supported from unsupported persistent-policy outcomes", async () => {
+    const check = {
+      policyId: "snack-policy",
+      label: "Dry snacks",
+      value: "Every school snack is dry.",
+      outcome: "satisfied" as const,
+      rationale: "The snack cells use dry, portable meals.",
+      planCells: [
+        { day: "Mon", slot: "snack1", dish: "banana", ingredients: ["banana"] },
+        { day: "Mon", slot: "school-lunch", dish: "rice", ingredients: ["rice"] },
+      ],
+    }
+    const supported = await createEasyBuyClassifier(decisionsReturning([0.99])).classify([], [], [check])
+    expect(supported.unsupportedPolicyOutcomes).toEqual([])
+    expect(supported.unverifiedPolicyOutcomes).toEqual([])
+
+    const unsupported = await createEasyBuyClassifier(decisionsReturning([0.01])).classify([], [], [check])
+    expect(unsupported.unsupportedPolicyOutcomes).toEqual([
+      {
+        policyId: "snack-policy",
+        label: "Dry snacks",
+        detail: 'outcome "satisfied" for persistent policy "Dry snacks" is not supported by the hydrated plan',
+      },
+    ])
+
+    const uncertain = await createEasyBuyClassifier(decisionsReturning([0.55])).classify([], [], [check])
+    expect(uncertain.unsupportedPolicyOutcomes).toEqual([])
+    expect(uncertain.unverifiedPolicyOutcomes).toMatchObject([{ policyId: "snack-policy", label: "Dry snacks" }])
+
+    const supportedTradeOff = await createEasyBuyClassifier(decisionsReturning([0.99])).classify(
+      [],
+      [],
+      [{ ...check, outcome: "trade-off", rationale: "One snack needed prior-night preparation." }],
+    )
+    expect(supportedTradeOff.unsupportedPolicyOutcomes).toEqual([])
+    expect(supportedTradeOff.unverifiedPolicyOutcomes).toEqual([])
+  })
+
   it("skips the model entirely when no item is unresolved", async () => {
     const decisions = decisionsReturning([])
     const spy = vi.spyOn(decisions, "decide")

@@ -1,4 +1,9 @@
-import type { EasyBuyClassification, EasyBuyClassifier, PackedMealCheck } from "../meal-planning/easy-buy-classifier"
+import type {
+  EasyBuyClassification,
+  EasyBuyClassifier,
+  PackedMealCheck,
+  PersistentPolicyCheck,
+} from "../meal-planning/easy-buy-classifier"
 import { findProhibitedEasyBuys } from "../meal-planning/easy-buys"
 import {
   evaluateMealPlan,
@@ -156,13 +161,15 @@ export async function runMealPlanningAgentSession(
     // plan that already fails them is blocked regardless.
     if (!classifier || !selection.candidate || !selection.evaluation.pass) return selection
     const packedMeals = packedMealChecks(selection, context)
-    if (selection.candidate.easyBuys.length === 0 && packedMeals.length === 0) return selection
-    const key = JSON.stringify({ candidate: selection.candidate, packedMeals })
+    const persistentPolicies = persistentPolicyChecks(selection, context)
+    if (selection.candidate.easyBuys.length === 0 && packedMeals.length === 0 && persistentPolicies.length === 0)
+      return selection
+    const key = JSON.stringify({ candidate: selection.candidate, packedMeals, persistentPolicies })
     let classification = classificationCache.get(key)
     if (!classification) {
       let requestSucceeded = false
       try {
-        classification = await classifier.classify(selection.candidate.easyBuys, packedMeals)
+        classification = await classifier.classify(selection.candidate.easyBuys, packedMeals, persistentPolicies)
         classificationCache.set(key, classification)
         requestSucceeded = true
       } catch {
@@ -181,16 +188,34 @@ export async function runMealPlanningAgentSession(
             dish: meal.dish,
             detail: `packed meal "${meal.dish}" could not be verified because the semantic classifier request failed`,
           })),
+          unsupportedPolicyOutcomes: [],
+          unverifiedPolicyOutcomes: persistentPolicies.map((policy) => ({
+            policyId: policy.policyId,
+            label: policy.label,
+            detail: `outcome "${policy.outcome}" for persistent policy "${policy.label}" could not be verified because the semantic classifier request failed`,
+          })),
           usage: ZERO_DECISION_USAGE,
         }
       }
       decisionUsage = addDecisionUsage(decisionUsage, classification.usage)
       if (requestSucceeded) options.onDecisionUsage?.(classification.usage)
     }
-    const { nonOrdinaryEasyBuys, unsuitablePackedMeals, unverifiedPackedMeals } = classification
-    if (nonOrdinaryEasyBuys.length === 0 && unsuitablePackedMeals.length === 0 && unverifiedPackedMeals.length === 0)
+    const {
+      nonOrdinaryEasyBuys,
+      unsuitablePackedMeals,
+      unverifiedPackedMeals,
+      unsupportedPolicyOutcomes,
+      unverifiedPolicyOutcomes,
+    } = classification
+    if (
+      nonOrdinaryEasyBuys.length === 0 &&
+      unsuitablePackedMeals.length === 0 &&
+      unverifiedPackedMeals.length === 0 &&
+      unsupportedPolicyOutcomes.length === 0 &&
+      unverifiedPolicyOutcomes.length === 0
+    )
       return selection
-    const packedFailures = [
+    const semanticFailures = [
       ...unsuitablePackedMeals.map((meal) => ({
         code: "packed_slot_semantically_unsuitable" as const,
         day: meal.day,
@@ -203,6 +228,14 @@ export async function runMealPlanningAgentSession(
         slot: meal.slot,
         detail: meal.detail,
       })),
+      ...unsupportedPolicyOutcomes.map((policy) => ({
+        code: "persistent_policy_outcome_unsubstantiated" as const,
+        detail: policy.detail,
+      })),
+      ...unverifiedPolicyOutcomes.map((policy) => ({
+        code: "persistent_policy_outcome_unverified" as const,
+        detail: policy.detail,
+      })),
     ]
     const evaluation = nonOrdinaryEasyBuys.length
       ? evaluateMealPlan(selection.candidate, context, { nonOrdinaryEasyBuys })
@@ -211,8 +244,8 @@ export async function runMealPlanningAgentSession(
       ...selection,
       evaluation: {
         ...evaluation,
-        pass: evaluation.pass && packedFailures.length === 0,
-        failures: [...evaluation.failures, ...packedFailures],
+        pass: evaluation.pass && semanticFailures.length === 0,
+        failures: [...evaluation.failures, ...semanticFailures],
       },
     }
   }
@@ -396,6 +429,32 @@ function packedMealChecks(selection: MealPlanSelectionEvaluation, context: MealP
     }
   }
   return checks
+}
+
+/** Creates one semantic outcome check per persistent policy with a recorded decision. */
+function persistentPolicyChecks(
+  selection: MealPlanSelectionEvaluation,
+  context: MealPlanContext,
+): PersistentPolicyCheck[] {
+  if (!selection.candidate) return []
+  const planCells = Object.entries(selection.candidate.grid).flatMap(([day, slots]) =>
+    Object.entries(slots).map(([slot, cell]) => ({ day, slot, dish: cell.dish, ingredients: cell.items })),
+  )
+  return context.customPolicies.flatMap((policy) => {
+    if (policy.scope !== "persistent") return []
+    const outcome = selection.candidate?.policyOutcomes[policy.id]
+    if (!outcome || (outcome.outcome !== "satisfied" && outcome.outcome !== "trade-off")) return []
+    return [
+      {
+        policyId: policy.id,
+        label: policy.label,
+        value: policy.value,
+        outcome: outcome.outcome,
+        rationale: outcome.rationale,
+        planCells,
+      },
+    ]
+  })
 }
 
 /**

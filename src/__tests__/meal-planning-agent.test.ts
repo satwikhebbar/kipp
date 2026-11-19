@@ -466,6 +466,141 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal?.kind).not.toBe("propose_plan")
   })
 
+  it.each([
+    "supported",
+    "unsupported",
+  ] as const)("checks whether the plan supports a persistent-policy outcome (%s)", async (claim) => {
+    const supported = claim === "supported"
+    let decisionCalls = 0
+    let policyEvidence: unknown
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        decisionCalls += 1
+        const policyQuestion = questions.persistent_policy_0
+        if (policyQuestion?.type === "noul") policyEvidence = policyQuestion.instructions
+        const answers = Object.fromEntries(
+          Object.keys(questions).map((id) => [
+            id,
+            {
+              type: "noul" as const,
+              noul: id === "persistent_policy_0" && !supported ? 0.01 : 0.99,
+            },
+          ]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const policy = {
+      id: "snack-policy",
+      label: "Dry school snacks",
+      scope: "persistent" as const,
+      value: "Every school snack is dry.",
+    }
+    const candidate = passingCandidate()
+    candidate.policyOutcomes[policy.id] = {
+      outcome: "satisfied",
+      rationale: "The planned snacks are dry.",
+    }
+    const responses = [evaluateResponse(candidate)]
+    if (supported) responses.push(proposeResponse(proposeInput(candidate)))
+    else {
+      responses.push(proposeResponse(proposeInput(candidate)))
+      responses.push(
+        clarifyResponse({
+          message: "Please revise the snack plan to meet the dry-snack policy.",
+          reasonCodes: ["persistent_policy_outcome_unsubstantiated"],
+          interaction: { kind: "reply" },
+        }),
+      )
+    }
+    const provider = providerWith(...responses)
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context({ customPolicies: [policy] }), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+
+    expect(decisionCalls).toBe(1)
+    expect(policyEvidence).toMatchObject({
+      policyId: policy.id,
+      policy: policy.value,
+      recordedOutcome: "satisfied",
+      rationale: "The planned snacks are dry.",
+      planCells: expect.arrayContaining([
+        expect.objectContaining({ day: "Mon", slot: "snack1", dish: "paratha", ingredients: ["wheat flour"] }),
+      ]),
+    })
+    expect(result.terminal?.kind).toBe(supported ? "propose_plan" : "needs_clarification")
+    if (!supported) {
+      const evaluationMessage = result.messages.find(
+        (message) => message.role === "tool" && message.name === "evaluate_meal_plan",
+      )
+      if (evaluationMessage?.role === "tool")
+        expect(evaluationMessage.output).toMatchObject({
+          ok: true,
+          output: {
+            pass: false,
+            failures: [
+              expect.objectContaining({
+                code: "persistent_policy_outcome_unsubstantiated",
+                detail: expect.stringContaining(policy.label),
+              }),
+            ],
+          },
+        })
+      const proposalMessage = result.messages.find(
+        (message) => message.role === "tool" && message.name === "propose_plan",
+      )
+      if (proposalMessage?.role === "tool")
+        expect(proposalMessage.output).toMatchObject({
+          ok: false,
+          category: "invalid-state",
+          rejectionCodes: ["persistent_policy_outcome_unsubstantiated"],
+        })
+    }
+  })
+
+  it("blocks a proposal when a persistent-policy outcome cannot be verified", async () => {
+    let decisionCalls = 0
+    const decisions: DecisionsClient = {
+      async decide() {
+        decisionCalls += 1
+        throw new Error("Decisions endpoint unavailable")
+      },
+    }
+    const policy = {
+      id: "snack-policy",
+      label: "Dry school snacks",
+      scope: "persistent" as const,
+      value: "Every school snack is dry.",
+    }
+    const candidate = passingCandidate()
+    candidate.policyOutcomes[policy.id] = { outcome: "satisfied", rationale: "The planned snacks are dry." }
+    const clarification = clarifyResponse({
+      message: "I could not verify the dry-snack policy claim or packed meals. Please review the plan.",
+      reasonCodes: ["persistent_policy_outcome_unverified", "packed_slot_unverified"],
+      interaction: { kind: "reply" },
+    })
+    const responses = [evaluateResponse(candidate)]
+    const provider: ToolProviderClient = {
+      generate: vi.fn().mockImplementation(async () => responses.shift() ?? clarification),
+    }
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context({ customPolicies: [policy] }), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(decisionCalls).toBe(1)
+    expect(result.terminal).toMatchObject({
+      kind: "needs_clarification",
+      reasonCodes: ["persistent_policy_outcome_unverified", "packed_slot_unverified"],
+    })
+  })
+
   it("requires needs_clarification to include every evaluator failure", async () => {
     const provider = providerWith(
       evaluateResponse(failingCandidate()),
