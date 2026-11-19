@@ -1,11 +1,10 @@
+import { legacyHalfDayBehavior } from "./schedule"
 import type { MealDefinition, MealPlanContext, MealSlot } from "./types"
 
 export const HALF_DAY_SNACK_SLOT_ID = "snack1"
 export const HALF_DAY_SNACK_MAX_COOK_MINUTES = 20
 
-const HALF_DAY_DROPPED_SLOT_IDS = ["snack2", "school-lunch"]
-
-/** Whether a configured day has the standard half-day schedule. */
+/** Whether a configured day is a recurring or one-off half day. */
 export function isHalfDay(context: Pick<MealPlanContext, "schedule" | "weeklyExceptions">, day: string): boolean {
   if (
     context.weeklyExceptions.items.some(
@@ -26,6 +25,7 @@ export function halfDayDroppedSlotIds(slots: Pick<MealSlot, "id">[]): string[] {
   const configured = new Set(slots.map((slot) => slot.id))
   return HALF_DAY_DROPPED_SLOT_IDS.filter((slotId) => configured.has(slotId))
 }
+}
 
 /** Resolves the rules that apply to one slot on one day. */
 export function effectiveMealSlot(
@@ -35,8 +35,12 @@ export function effectiveMealSlot(
 ): MealSlot | undefined {
   const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
   if (!slot) return undefined
-  if (isHalfDay(context, day) && slotId === HALF_DAY_SNACK_SLOT_ID)
-    return { ...slot, maxCookMinutes: HALF_DAY_SNACK_MAX_COOK_MINUTES }
+  if (!isHalfDay(context, day)) return slot
+  const behavior = slot.halfDayBehavior ?? legacyHalfDayBehavior(slotId)
+  if (behavior.action === "omit") return undefined
+  if (behavior.action === "quick") {
+    return { ...slot, maxCookMinutes: behavior.maxCookMinutes }
+  }
   return slot
 }
 
@@ -47,8 +51,10 @@ export function mealDefinitionFitsSlot(
   day: string,
   slotId: string,
 ): boolean {
+  const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
+  const behavior = slot?.halfDayBehavior ?? legacyHalfDayBehavior(slotId)
   return (
     definition.suitableSlots.includes(slotId) ||
-    (definition.halfDaySnack === true && isHalfDay(context, day) && slotId === HALF_DAY_SNACK_SLOT_ID)
+    (definition.halfDaySnack === true && isHalfDay(context, day) && behavior.action === "quick")
   )
 }

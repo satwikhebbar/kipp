@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { mealScheduleSchema } from "../schedule"
 import {
   type CustomPolicy,
   EXCEPTION_KINDS,
@@ -15,8 +16,6 @@ import {
   type MealPlanFailureExpectation,
   type MealPlanScenario,
   type MealProfile,
-  type MealSchedule,
-  type MealSlot,
   type PlanRequest,
   POLICY_OUTCOMES,
   type PolicyOutcome,
@@ -27,23 +26,6 @@ import {
   type WeeklyExceptions,
   type WeeklyInventory,
 } from "../types"
-
-export const mealSlotSchema: z.ZodType<MealSlot> = z
-  .object({
-    id: z.string().min(1),
-    name: z.string().min(1),
-    packed: z.boolean(),
-    dry: z.boolean(),
-    maxCookMinutes: z.number().int().min(0).nullable(),
-  })
-  .strict()
-
-export const mealScheduleSchema: z.ZodType<MealSchedule> = z
-  .object({
-    days: z.array(z.string().min(1)).min(1),
-    slots: z.array(mealSlotSchema).min(1),
-  })
-  .strict()
 
 export const foodPreferencesSchema: z.ZodType<FoodPreferences> = z
   .object({

@@ -32,6 +32,7 @@ import {
   renderPlanLaunchMessage,
 } from "./messages"
 import { mealSessionReferences } from "./session-references"
+import { validateMealSchedule } from "./schedule"
 import {
   type ActivePlanRecord,
   createMealPlanningStore,
@@ -358,6 +359,17 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const profile = await stepDo(step, "meal-planning-load-profile", () =>
     store.loadOrCreateProfile(event.payload.chatId),
   )
+  const scheduleIssues = validateMealSchedule(profile.schedule, profile.profile)
+  if (scheduleIssues.length > 0) {
+    await notify(
+      env,
+      step,
+      event.payload.chatId,
+      `Your meal schedule needs an eligible established meal for each slot when new foods are disabled. ${scheduleIssues.join("; ")}`,
+      "meal-planning-invalid-schedule",
+    )
+    return
+  }
   const generationId = event.instanceId
   await stepDo(step, "meal-planning-start-generation-lease", () =>
     store.startPlanGeneration({
@@ -368,7 +380,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
   )
   let generationFinished = false
   try {
-    const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText)
+    const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText, profile.schedule)
     const recent = await stepDo(step, "meal-planning-read-recent", () => store.activePlan(event.payload.chatId))
     const priorWeek = await stepDo(step, "meal-planning-read-prior-week", () =>
       store.latestPlanForWeek(event.payload.chatId, previousPlanningWeekStart(week.weekStart, timezone)),
@@ -422,6 +434,9 @@ export async function runAgentCenteredMealPlanningWorkflow(
           weekStart: week.weekStart,
           weekEnd: week.weekEnd,
           timezone,
+          schedule: context.schedule,
+          establishedMealDefinitions:
+            context.profile.mealDefinitions?.filter((definition) => definition.status === "established") ?? [],
           instanceId: event.instanceId,
           generationId,
           candidate: enriched.candidate,
@@ -1205,9 +1220,13 @@ async function runRevision(
   // requested cells cannot be silently dropped after the context update.
   // Scoped and concrete plan-wide Telegram requests retain their authority;
   // context-only facts are retired after applying their inventory or calendar update.
-  // A stored plan can predate a recurring schedule rule. Start every revision
-  // from the cells still eligible under the household's current schedule.
-  const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)
+  // Keep the plan's captured slot shape and established catalog. Current
+  // dietary/profile rules below still apply when the next revision is evaluated.
+  const planProfile: StoredMealProfile = {
+    ...profile,
+    profile: { ...profile.profile, mealDefinitions: active.plan.establishedMealDefinitions },
+  }
+  const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, planProfile)
   const feedbackReference = {
     recentPlan: revisionBaseCandidate.grid,
     feedbackReferencePlan: active.version.candidate.grid,
@@ -1223,8 +1242,8 @@ async function runRevision(
     ),
   )
   const context: MealPlanContext = {
-    schedule: profile.schedule,
-    profile: profile.profile,
+    schedule: active.plan.schedule,
+    profile: planProfile.profile,
     customPolicies: profile.customPolicies,
     weeklyInventory: active.plan.weeklyInventory,
     weeklyExceptions: active.plan.weeklyExceptions,
@@ -1441,7 +1460,7 @@ function withoutIneligibleCells(
   return {
     ...candidate,
     grid: projectEligibleGrid(candidate.grid, {
-      schedule: profile.schedule,
+      schedule: plan.schedule,
       profile: profile.profile,
       customPolicies: profile.customPolicies,
       weeklyInventory: plan.weeklyInventory,

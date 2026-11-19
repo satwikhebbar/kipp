@@ -1,4 +1,5 @@
 import { localDateAt, zonedDateTimeToMillis } from "../calendar/scheduling"
+import type { MealSchedule } from "./types"
 
 /** The pinned Mon 00:00 – Sat 23:59:59 school-week bounds in the profile timezone, as ISO-8601 UTC strings. */
 export interface ResolvedPlanningWeek {
@@ -22,6 +23,7 @@ const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const DAYS_PER_WEEK = 7
 const DAYS_BETWEEN_MONDAY_AND_SUNDAY = 6
 const DAYS_FROM_MONDAY_TO_SATURDAY = 5
+const DAYS_FROM_MONDAY_TO_SUNDAY = 6
 /** The default rule switches to the next week from Thursday (weekday index 4) onward. */
 const NEXT_WEEK_FROM_THURSDAY = 4
 
@@ -68,7 +70,12 @@ function defaultMonday(invokedDate: string): string {
  * deterministic: `invokedAtMs` is captured by the webhook and never replaced
  * with `Date.now()` inside the workflow (replay-safe).
  */
-export function resolvePlanningWeek(invokedAtMs: number, timezone: string, requestText?: string): ResolvedPlanningWeek {
+export function resolvePlanningWeek(
+  invokedAtMs: number,
+  timezone: string,
+  requestText?: string,
+  schedule?: MealSchedule,
+): ResolvedPlanningWeek {
   const invokedDate = localDateAt(invokedAtMs, timezone)
   const normalized = (requestText ?? "").trim().toLowerCase()
   const overrideDate = parseDateOverride(normalized)
@@ -79,21 +86,22 @@ export function resolvePlanningWeek(invokedAtMs: number, timezone: string, reque
   else if (normalized === "next week") monday = addDays(mondayOfWeek(invokedDate), DAYS_PER_WEEK)
   else monday = defaultMonday(invokedDate)
 
-  const weekEndMs = weekEndMillis(monday, timezone)
+  const includesSunday = schedule?.days.includes("Sun") ?? false
+  const weekEndMs = weekEndMillis(monday, timezone, includesSunday)
   if (weekEndMs < invokedAtMs) {
     // Clamp: the resolved week already ended; fall back to the default rule.
     monday = defaultMonday(invokedDate)
   }
   const resolvedStart = zonedDateTimeToMillis(monday, "00:00", timezone)
   if (resolvedStart === null) throw new Error(`cannot resolve week start for ${monday}`)
-  const resolvedEnd = weekEndMillis(monday, timezone)
+  const resolvedEnd = weekEndMillis(monday, timezone, includesSunday)
   return { weekStart: new Date(resolvedStart).toISOString(), weekEnd: new Date(resolvedEnd).toISOString() }
 }
 
 /** Returns the epoch millisecond instant of the Saturday 23:59:59 end of the week starting on `monday`. */
-function weekEndMillis(monday: string, timezone: string): number {
-  const saturday = addDays(monday, DAYS_FROM_MONDAY_TO_SATURDAY)
-  const end = zonedDateTimeToMillis(saturday, "23:59", timezone)
-  if (end === null) throw new Error(`cannot resolve week end for ${saturday}`)
+function weekEndMillis(monday: string, timezone: string, includesSunday: boolean): number {
+  const lastDay = addDays(monday, includesSunday ? DAYS_FROM_MONDAY_TO_SUNDAY : DAYS_FROM_MONDAY_TO_SATURDAY)
+  const end = zonedDateTimeToMillis(lastDay, "23:59", timezone)
+  if (end === null) throw new Error(`cannot resolve week end for ${lastDay}`)
   return end + SCHOOL_DAY_END_OFFSET_MS
 }

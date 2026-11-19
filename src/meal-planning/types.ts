@@ -63,7 +63,11 @@ export interface MealSlot {
   packed: boolean
   dry: boolean
   maxCookMinutes: number | null
+  /** How this slot changes on a recurring or one-off half day; absent only on legacy schedule JSON. */
+  halfDayBehavior?: HalfDayBehavior
 }
+
+export type HalfDayBehavior = { action: "keep" } | { action: "omit" } | { action: "quick"; maxCookMinutes: number }
 
 export interface MealSchedule {
   days: string[]
