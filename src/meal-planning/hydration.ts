@@ -1,3 +1,4 @@
+import { computeCoverageSet } from "./coverage"
 import { effectiveMealSlot, mealDefinitionFitsSlot } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import type {
@@ -109,11 +110,25 @@ export function hydrateMealPlan(
       .filter((item) => item.status === "unavailable")
       .map((item) => normalizeIngredient(item.name)),
   )
+  const coverage = computeCoverageSet(context)
+  const allowedCells = new Set(coverage.required.map(({ day, slotId }) => `${day}\u0000${slotId}`))
+  const closedDays = new Set(coverage.closedDays)
+  const droppedCells = new Set(coverage.droppedSlots.map(({ day, slotId }) => `${day}\u0000${slotId}`))
 
   for (const [day, selections] of Object.entries(selectionCandidate.grid)) {
     const cells: Record<string, MealCell> = {}
     grid[day] = cells
     for (const [slotId, selection] of Object.entries(selections)) {
+      const position = `${day}\u0000${slotId}`
+      if (!allowedCells.has(position) && !closedDays.has(day) && !droppedCells.has(position)) {
+        failures.push({
+          code: "unconfigured_cell",
+          day,
+          slot: slotId,
+          detail: "cell is outside the configured schedule",
+        })
+        continue
+      }
       let definition: MealDefinition | undefined
       if (isKnown(selection)) {
         definition = definitionById.get(selection.mealDefinitionId)

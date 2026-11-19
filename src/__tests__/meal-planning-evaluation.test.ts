@@ -219,6 +219,35 @@ describe("meal-planning evaluator", () => {
     expect(failureCodes(evaluateMealPlan(candidate, baseContext()))).toEqual(["extra_slot_for_closed_day"])
   })
 
+  it("rejects cells for unconfigured days or slots in both selection hydration and final evaluation", () => {
+    const context = baseContext({
+      schedule: {
+        days: ["Sun"],
+        slots: [{ id: "morning-tea", name: "Morning tea", packed: false, dry: false, maxCookMinutes: null }],
+      },
+      profile: { ...baseContext().profile, mealDefinitions: SEED_PROFILE.mealDefinitions },
+    })
+    const definitionId = context.profile.mealDefinitions?.[0]?.id
+    if (!definitionId) throw new Error("missing seed meal definition")
+    const selection = evaluateMealPlanSelection(
+      { grid: { Mon: { "morning-tea": { mealDefinitionId: definitionId } } }, easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(failureCodes(selection.evaluation)).toContain("unconfigured_cell")
+    expect(selection.failures).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "unconfigured_cell", day: "Mon" })]),
+    )
+
+    const candidate = baseCandidate({
+      grid: {
+        Mon: { "morning-tea": cellFor("breakfast", "banana") },
+      },
+    })
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual(
+      expect.arrayContaining(["missing_slot", "unconfigured_cell"]),
+    )
+  })
+
   it("flags combined morning cooking over the budget", () => {
     const candidate = baseCandidate()
     candidate.grid.Mon["school-lunch"].cookMinutes = 30
@@ -1353,6 +1382,36 @@ describe("meal-planning evaluator", () => {
 
     expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unscoped_cell_changed")
     expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+  })
+
+  it("allows a scoped revision to replace a cell invalidated by a new hard exclusion", () => {
+    const original = baseCandidate()
+    original.grid.Tue.breakfast.items = ["peanut"]
+    const recentPlan = structuredClone(original.grid)
+    delete recentPlan.Tue.breakfast
+    const context = baseContext({
+      profile: { ...baseContext().profile, dietaryExclusions: ["peanut"] },
+      recentPlan,
+      request: { kind: "revision", text: "Use banana for Monday breakfast." },
+      feedbackItems: [
+        { id: "monday-breakfast", text: "Use banana for Monday breakfast.", scope: { day: "Mon", slot: "breakfast" } },
+      ],
+      revisionRepairableCells: [{ day: "Tue", slotId: "breakfast" }],
+    })
+    const candidate = structuredClone(original)
+    candidate.grid.Tue.breakfast = cellFor("breakfast", "paratha")
+    candidate.grid.Mon.breakfast = cellFor("breakfast", "banana")
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(failureCodes(evaluation)).not.toContain("hard_exclusion")
+    expect(failureCodes(evaluation)).not.toContain("unscoped_cell_changed")
+    expect(evaluation.failures).not.toContainEqual(expect.objectContaining({ code: "unaddressed_feedback" }))
+    for (const day of Object.keys(original.grid)) {
+      for (const slot of Object.keys(original.grid[day] ?? {})) {
+        if (day === "Mon" && slot === "breakfast") continue
+        if (day === "Tue" && slot === "breakfast") continue
+        expect(candidate.grid[day]?.[slot]).toEqual(original.grid[day]?.[slot])
+      }
+    }
   })
 
   it("flags feedback that no changed cell or outcome rationale addresses", () => {
