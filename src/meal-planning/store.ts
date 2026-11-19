@@ -23,6 +23,7 @@ import type {
 
 /** The empty per-cell video record written when enrichment is absent. */
 const NO_VIDEOS: Record<string, RecipeVideo> = {}
+const MAX_PROFILE_HYDRATION_CAS_ATTEMPTS = 8
 /** Maximum number of current/replaced plans exposed by one history read. */
 export const MAX_MEAL_PLAN_HISTORY = 12
 const MAX_MEAL_REJECTION_MERGE_ATTEMPTS = 4
@@ -41,6 +42,8 @@ export interface StoredMealProfile {
   customPolicies: CustomPolicy[]
   schedule: MealSchedule
   location: StoredLocation | null
+  /** Optimistic configuration version stored in `meal_profile.version`. */
+  configurationVersion: number
   /** Chat-scoped plan-message generation (§6): bumped exactly once per persisted plan message. */
   interactionGeneration: number
   createdAt: string
@@ -197,14 +200,38 @@ export interface MiniAppSessionRecord {
   tokenHash: string
   telegramUserId: string
   chatId: string
-  planId: string
+  planId: string | null
+  scope: "review" | "settings"
   expiresAt: string
   createdAt: string
 }
 
-export interface CreateMiniAppSessionInput extends Omit<MiniAppSessionRecord, "createdAt"> {
+export interface CreateMiniAppSessionInput extends Omit<MiniAppSessionRecord, "createdAt" | "scope"> {
+  scope?: MiniAppSessionRecord["scope"]
   createdAt?: string
 }
+
+/** A private-chat launch reference consumed once when a settings session is exchanged. */
+export interface MiniAppSettingsLaunchRecord {
+  tokenHash: string
+  telegramUserId: string
+  chatId: string
+  expiresAt: string
+  createdAt: string
+}
+
+export interface SaveMealProfileConfigurationInput {
+  chatId: string
+  expectedVersion: number
+  profile: MealProfile
+  customPolicies: CustomPolicy[]
+  schedule: MealSchedule
+  location: StoredLocation | null
+}
+
+export type SaveMealProfileConfigurationResult =
+  | { ok: true; profile: StoredMealProfile }
+  | { ok: false; reason: "conflict" | "unavailable" }
 
 export interface AcceptFeedbackBatchInput {
   batchId: string
@@ -335,6 +362,7 @@ export interface MealPlanningStore {
   loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
   claimDueMealCompletion(seen: ReadonlySet<string>): Promise<MealCompletionTarget | null>
   completeEligibleMealPlan(target: MealCompletionTarget): Promise<CompletionCounts | null>
+  saveMealProfileConfiguration(input: SaveMealProfileConfigurationInput): Promise<SaveMealProfileConfigurationResult>
   createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
   promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
   decidePlanVersion(input: {
@@ -364,6 +392,14 @@ export interface MealPlanningStore {
   resolveMiniAppReviewContext(telegramUserId: string): Promise<MiniAppReviewContext | null>
   createMiniAppSession(input: CreateMiniAppSessionInput): Promise<MiniAppSessionRecord>
   readMiniAppSession(tokenHash: string, now: string): Promise<MiniAppSessionRecord | null>
+  createMiniAppSettingsLaunch(
+    input: Omit<MiniAppSettingsLaunchRecord, "createdAt"> & { createdAt?: string },
+  ): Promise<void>
+  consumeMiniAppSettingsLaunch(
+    tokenHash: string,
+    telegramUserId: string,
+    now: string,
+  ): Promise<MiniAppSettingsLaunchRecord | null>
   /** Atomically consumes a replay fingerprint until its supplied expiry. */
   consumeMiniAppInitDataFingerprint(fingerprintHash: string, expiresAt: string, now: string): Promise<boolean>
   acceptFeedbackBatch(input: AcceptFeedbackBatchInput): Promise<AcceptFeedbackBatchResult>
@@ -389,6 +425,7 @@ export interface InMemoryMealPlanningBacking {
   batches: Map<string, FeedbackBatchRecord>
   reviewContexts?: Map<string, MiniAppReviewContext>
   sessions?: Map<string, MiniAppSessionRecord>
+  settingsLaunches?: Map<string, MiniAppSettingsLaunchRecord>
   initDataFingerprints?: Map<string, string>
   generations?: Map<string, MealPlanGenerationRecord>
   completedPlans?: Set<string>
@@ -1165,53 +1202,98 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           now,
         )
         .run()
-      const row = await db
-        .prepare(
-          `SELECT chat_id, profile_json, custom_policies_json, schedule_json, location_json,
-                  interaction_generation, created_at, updated_at
-           FROM meal_profile WHERE chat_id = ?`,
-        )
-        .bind(chatId)
-        .first()
-      const profile = parseJson<MealProfile>(String(row?.profile_json), SEED_PROFILE)
-      const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(profile)
-      const schedule = parseJson<MealSchedule>(String(row?.schedule_json), SEED_SCHEDULE)
-      const upgradedSchedule = upgradeLegacyMealSchedule(schedule)
-      if (upgradedProfile !== profile) {
-        const normalized = await db
+      for (let attempt = 0; attempt < MAX_PROFILE_HYDRATION_CAS_ATTEMPTS; attempt++) {
+        const row = await db
           .prepare(
-            "UPDATE meal_profile SET profile_json = ?, updated_at = ?, version = version + 1 WHERE chat_id = ? AND profile_json = ?",
+            `SELECT chat_id, profile_json, custom_policies_json, schedule_json, location_json,
+                    interaction_generation, version, created_at, updated_at
+             FROM meal_profile WHERE chat_id = ?`,
           )
-          .bind(JSON.stringify(upgradedProfile), now, chatId, row?.profile_json)
-          .run()
-        if (normalized.meta.changes !== 1) return this.loadOrCreateProfile(chatId)
-      }
-      if (upgradedSchedule !== schedule) {
+          .bind(chatId)
+          .first()
+        if (!row) throw new Error("meal profile unavailable")
+        const profile = parseJson<MealProfile>(String(row.profile_json), SEED_PROFILE)
+        const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(profile)
+        const schedule = parseJson<MealSchedule>(String(row.schedule_json), SEED_SCHEDULE)
+        const upgradedSchedule = upgradeLegacyMealSchedule(schedule)
+        const version = Number(row.version)
+        if (upgradedProfile !== profile || upgradedSchedule !== schedule) {
+          const hydrated = await db
+            .prepare(
+              `UPDATE meal_profile SET profile_json = ?, schedule_json = ?, version = version + 1, updated_at = ?
+               WHERE chat_id = ? AND version = ?`,
+            )
+            .bind(JSON.stringify(upgradedProfile), JSON.stringify(upgradedSchedule), now, chatId, version)
+            .run()
+          if (Number(hydrated.meta.changes) !== 1) continue
+        }
         await db
-          .prepare("UPDATE meal_profile SET schedule_json = ?, updated_at = ? WHERE chat_id = ?")
-          .bind(JSON.stringify(upgradedSchedule), now, chatId)
+          .prepare(
+            `UPDATE meal_plan
+             SET schedule_json = COALESCE(schedule_json, ?),
+                 established_meal_definitions_json = COALESCE(established_meal_definitions_json, ?)
+             WHERE chat_id = ?
+               AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)`,
+          )
+          .bind(JSON.stringify(upgradedSchedule), JSON.stringify(upgradedProfile.mealDefinitions ?? []), chatId)
           .run()
+        const unfrozen = await db
+          .prepare(
+            `SELECT count(*) AS count FROM meal_plan
+             WHERE chat_id = ? AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)`,
+          )
+          .bind(chatId)
+          .first<{ count: number }>()
+        if (Number(unfrozen?.count ?? 0) !== 0) throw new Error("meal plan snapshot unavailable")
+        return {
+          chatId: String(row.chat_id),
+          profile: upgradedProfile,
+          customPolicies: parseJson<CustomPolicy[]>(String(row.custom_policies_json), []),
+          schedule: upgradedSchedule,
+          location: parseJson<StoredLocation | null>(String(row.location_json), null),
+          configurationVersion: version + (upgradedProfile !== profile || upgradedSchedule !== schedule ? 1 : 0),
+          interactionGeneration: Number(row.interaction_generation),
+          createdAt: String(row.created_at),
+          updatedAt: upgradedProfile !== profile || upgradedSchedule !== schedule ? now : String(row.updated_at),
+        }
       }
-      await db
+      throw new Error("meal profile hydration conflict")
+    },
+
+    async saveMealProfileConfiguration(input) {
+      const canonical = await this.loadOrCreateProfile(input.chatId)
+      if (canonical.configurationVersion !== input.expectedVersion)
+        return { ok: false as const, reason: "conflict" as const }
+      const now = nowIso()
+      const result = await db
         .prepare(
-          `UPDATE meal_plan
-           SET schedule_json = COALESCE(schedule_json, ?),
-               established_meal_definitions_json = COALESCE(established_meal_definitions_json, ?)
-           WHERE chat_id = ?
-             AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)`,
+          `UPDATE meal_profile
+           SET profile_json = ?, custom_policies_json = ?, schedule_json = ?, location_json = ?,
+               version = version + 1, updated_at = ?
+           WHERE chat_id = ? AND version = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM meal_plan
+               WHERE chat_id = meal_profile.chat_id
+                 AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)
+             )`,
         )
-        .bind(JSON.stringify(upgradedSchedule), JSON.stringify(upgradedProfile.mealDefinitions ?? []), chatId)
+        .bind(
+          JSON.stringify(input.profile),
+          JSON.stringify(input.customPolicies),
+          JSON.stringify(input.schedule),
+          input.location === null ? null : JSON.stringify(input.location),
+          now,
+          input.chatId,
+          input.expectedVersion,
+        )
         .run()
-      return {
-        chatId: String(row?.chat_id),
-        profile: upgradedProfile,
-        customPolicies: parseJson<CustomPolicy[]>(String(row?.custom_policies_json), []),
-        schedule: upgradedSchedule,
-        location: parseJson<StoredLocation | null>(String(row?.location_json), null),
-        interactionGeneration: Number(row?.interaction_generation),
-        createdAt: String(row?.created_at),
-        updatedAt: String(row?.updated_at),
+      if (Number(result.meta.changes) !== 1) {
+        const latest = await this.loadOrCreateProfile(input.chatId)
+        return latest.configurationVersion === input.expectedVersion
+          ? { ok: false as const, reason: "unavailable" as const }
+          : { ok: false as const, reason: "conflict" as const }
       }
+      return { ok: true as const, profile: await this.loadOrCreateProfile(input.chatId) }
     },
 
     async createActivePlan(input) {
@@ -1764,10 +1846,11 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
 
     async createMiniAppSession(input) {
       const createdAt = input.createdAt ?? nowIso()
+      const scope = input.scope ?? "review"
       await db
         .prepare(
-          `INSERT INTO mini_app_session (session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO mini_app_session (session_id, token_hash, telegram_user_id, chat_id, plan_id, scope, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.sessionId,
@@ -1775,18 +1858,19 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.telegramUserId,
           input.chatId,
           input.planId,
+          scope,
           input.expiresAt,
           createdAt,
         )
         .run()
-      return { ...input, createdAt }
+      return { ...input, scope, createdAt }
     },
 
     async readMiniAppSession(tokenHash, now) {
       await db.prepare("DELETE FROM mini_app_session WHERE expires_at <= ?").bind(now).run()
       const row = await db
         .prepare(
-          `SELECT session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at
+          `SELECT session_id, token_hash, telegram_user_id, chat_id, plan_id, scope, expires_at, created_at
            FROM mini_app_session WHERE token_hash = ? AND expires_at > ?`,
         )
         .bind(tokenHash, now)
@@ -1797,7 +1881,38 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         tokenHash: String(row.token_hash),
         telegramUserId: String(row.telegram_user_id),
         chatId: String(row.chat_id),
-        planId: String(row.plan_id),
+        planId: row.plan_id === null ? null : String(row.plan_id),
+        scope: String(row.scope) as MiniAppSessionRecord["scope"],
+        expiresAt: String(row.expires_at),
+        createdAt: String(row.created_at),
+      }
+    },
+
+    async createMiniAppSettingsLaunch(input) {
+      await db
+        .prepare(
+          `INSERT INTO mini_app_settings_launch (token_hash, telegram_user_id, chat_id, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(input.tokenHash, input.telegramUserId, input.chatId, input.expiresAt, input.createdAt ?? nowIso())
+        .run()
+    },
+
+    async consumeMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      await db.prepare("DELETE FROM mini_app_settings_launch WHERE expires_at <= ?").bind(now).run()
+      const row = await db
+        .prepare(
+          `DELETE FROM mini_app_settings_launch
+           WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ?
+           RETURNING token_hash, telegram_user_id, chat_id, expires_at, created_at`,
+        )
+        .bind(tokenHash, telegramUserId, now)
+        .first()
+      if (!row) return null
+      return {
+        tokenHash: String(row.token_hash),
+        telegramUserId: String(row.telegram_user_id),
+        chatId: String(row.chat_id),
         expiresAt: String(row.expires_at),
         createdAt: String(row.created_at),
       }
@@ -2009,10 +2124,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
   // here preserves the restart-simulation contract without weakening it.
   if (!backing.reviewContexts) backing.reviewContexts = new Map()
   if (!backing.sessions) backing.sessions = new Map()
+  if (!backing.settingsLaunches) backing.settingsLaunches = new Map()
   if (!backing.initDataFingerprints) backing.initDataFingerprints = new Map()
   if (!backing.generations) backing.generations = new Map()
   const reviewContexts = backing.reviewContexts
   const sessions = backing.sessions
+  const settingsLaunches = backing.settingsLaunches
   const initDataFingerprints = backing.initDataFingerprints
   const generations = backing.generations as Map<string, MealPlanGenerationRecord>
 
@@ -2101,14 +2218,20 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     async loadOrCreateProfile(chatId) {
       const existing = backing.profiles.get(chatId)
       if (existing) {
+        existing.configurationVersion ??= 1
         const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(existing.profile)
         const upgradedSchedule = upgradeLegacyMealSchedule(existing.schedule)
+        let hydrated = false
         if (upgradedProfile !== existing.profile) {
           existing.profile = upgradedProfile
-          existing.updatedAt = nowIso()
+          hydrated = true
         }
         if (upgradedSchedule !== existing.schedule) {
           existing.schedule = upgradedSchedule
+          hydrated = true
+        }
+        if (hydrated) {
+          existing.configurationVersion += 1
           existing.updatedAt = nowIso()
         }
         for (const plan of backing.plans.values()) {
@@ -2127,12 +2250,34 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         customPolicies: SEED_CUSTOM_POLICIES,
         schedule: SEED_SCHEDULE,
         location: null,
+        configurationVersion: 1,
         interactionGeneration: 0,
         createdAt: now,
         updatedAt: now,
       }
       backing.profiles.set(chatId, profile)
       return profile
+    },
+
+    async saveMealProfileConfiguration(input) {
+      const canonical = await this.loadOrCreateProfile(input.chatId)
+      if (canonical.configurationVersion !== input.expectedVersion)
+        return { ok: false as const, reason: "conflict" as const }
+      for (const plan of backing.plans.values()) {
+        if (plan.chatId === input.chatId && (!plan.schedule || !plan.establishedMealDefinitions))
+          return { ok: false as const, reason: "unavailable" as const }
+      }
+      const saved: StoredMealProfile = {
+        ...canonical,
+        profile: input.profile,
+        customPolicies: input.customPolicies,
+        schedule: input.schedule,
+        location: input.location,
+        configurationVersion: canonical.configurationVersion + 1,
+        updatedAt: nowIso(),
+      }
+      backing.profiles.set(input.chatId, saved)
+      return { ok: true as const, profile: saved }
     },
 
     async createActivePlan(input) {
@@ -2482,7 +2627,11 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async createMiniAppSession(input) {
-      const session: MiniAppSessionRecord = { ...input, createdAt: input.createdAt ?? nowIso() }
+      const session: MiniAppSessionRecord = {
+        ...input,
+        scope: input.scope ?? "review",
+        createdAt: input.createdAt ?? nowIso(),
+      }
       sessions.set(session.tokenHash, session)
       return session
     },
@@ -2490,6 +2639,21 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     async readMiniAppSession(tokenHash, now) {
       for (const [key, session] of sessions) if (session.expiresAt <= now) sessions.delete(key)
       return sessions.get(tokenHash) ?? null
+    },
+
+    async createMiniAppSettingsLaunch(input) {
+      settingsLaunches.set(input.tokenHash, {
+        ...input,
+        createdAt: input.createdAt ?? nowIso(),
+      })
+    },
+
+    async consumeMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      for (const [key, launch] of settingsLaunches) if (launch.expiresAt <= now) settingsLaunches.delete(key)
+      const launch = settingsLaunches.get(tokenHash)
+      if (!launch || launch.telegramUserId !== telegramUserId || launch.expiresAt <= now) return null
+      settingsLaunches.delete(tokenHash)
+      return launch
     },
 
     async consumeMiniAppInitDataFingerprint(fingerprintHash, expiresAt, now) {

@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const mockFetch = vi.hoisted(() => vi.fn())
 vi.stubGlobal("fetch", mockFetch)
 
-import { INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "../core/types"
+import { type Env, INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "../core/types"
 import { createTelegramClient } from "../integrations/telegram"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
+import { createD1TestDb, d1Count } from "./d1-test-db"
 import { createFakeIdeaIngestStub } from "./helpers/idea-ingest-stub"
 
 function b64(s: string): string {
@@ -133,6 +134,48 @@ describe("createTelegramClient", () => {
 })
 
 describe("handleTelegramWebhook", () => {
+  it("launches settings from the admitted private chat with only a hashed single-use reference", async () => {
+    mockFetch.mockReset()
+    mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, result: { message_id: 100 } }) })
+    const { db, d1 } = createD1TestDb()
+    const env = mockEnv() as ReturnType<typeof mockEnv> & Partial<Env>
+    env.TELEGRAM_ALLOWED_USER_ID = "42"
+    env.MEAL_PLANNING_DB = d1
+    env.MINI_APP_ORIGIN = "https://mini-app.example.test"
+    const update = (chat: { id: number; type: string }) =>
+      new Request("https://kipp.example/telegram", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": "my-secret", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          update_id: chat.id,
+          message: {
+            message_id: 22,
+            from: { id: 42, is_bot: false },
+            chat,
+            text: "/mealsettings",
+            entities: [{ type: "bot_command", offset: 0, length: 13 }],
+          },
+        }),
+      })
+
+    expect((await handleTelegramWebhook(update({ id: 42, type: "private" }), env as never)).status).toBe(200)
+    const sent = JSON.parse(String(mockFetch.mock.calls[0][1].body))
+    const launchUrl = new URL(sent.reply_markup.inline_keyboard[0][0].web_app.url)
+    const launchReference = launchUrl.searchParams.get("launch")
+    expect(launchUrl.origin).toBe("https://mini-app.example.test")
+    expect(launchUrl.pathname).toBe("/mini-app")
+    expect(launchReference).toBeTruthy()
+    expect(d1Count(db, "SELECT count(*) AS count FROM mini_app_settings_launch")).toBe(1)
+    expect(db.prepare("SELECT token_hash FROM mini_app_settings_launch").get()).not.toMatchObject({
+      token_hash: launchReference,
+    })
+
+    mockFetch.mockClear()
+    expect((await handleTelegramWebhook(update({ id: -10042, type: "group" }), env as never)).status).toBe(200)
+    expect(d1Count(db, "SELECT count(*) AS count FROM mini_app_settings_launch")).toBe(1)
+    expect(String(mockFetch.mock.calls[0][1].body)).toContain("private chat")
+  })
+
   beforeEach(() => mockFetch.mockReset())
   afterEach(() => vi.restoreAllMocks())
 

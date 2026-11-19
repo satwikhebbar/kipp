@@ -2,10 +2,11 @@ import { runInNewContext } from "node:vm"
 import { parseHTML } from "linkedom"
 import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
+import { createSettingsLaunchReference } from "../meal-planning/mini-app-auth"
 import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
 import { createMealPlanningStore } from "../meal-planning/store"
-import type { MealGrid, MealSchedule, WeeklyExceptions } from "../meal-planning/types"
-import { createClockedD1TestDb } from "./d1-test-db"
+import type { MealGrid, MealProfile, MealSchedule, WeeklyExceptions } from "../meal-planning/types"
+import { createClockedD1TestDb, createD1TestDb } from "./d1-test-db"
 
 function env(): Env {
   const { d1 } = createClockedD1TestDb()
@@ -121,6 +122,142 @@ async function planResponse(weekStart: string, weekEnd: string): Promise<Respons
 }
 
 describe("Mini App HTTP boundary", () => {
+  it("opens settings before a plan and atomically reads and saves versioned configuration", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const { d1 } = createD1TestDb()
+      const testEnv = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 } as Env
+      const launch = await createSettingsLaunchReference("42", "chat-42", testEnv, FAKE_NOW)
+      const sessionResponse = await miniAppRoutes.fetch(
+        new Request(`https://kipp.example/mini-app/api/session?launch=${encodeURIComponent(launch.reference)}`, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: await signedInitData(),
+        }),
+        testEnv,
+      )
+      expect(sessionResponse.status).toBe(201)
+      expect(sessionResponse.headers.get("cache-control")).toBe("no-store")
+      const session = (await sessionResponse.json()) as { token: string; scope: string }
+      expect(session.scope).toBe("settings")
+      const headers = { Authorization: `Bearer ${session.token}` }
+      const profileResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", { headers }),
+        testEnv,
+      )
+      expect(profileResponse.status).toBe(200)
+      expect(profileResponse.headers.get("cache-control")).toBe("no-store")
+      const original = (await profileResponse.json()) as {
+        configurationVersion: number
+        profile: MealProfile
+        customPolicies: unknown[]
+        schedule: MealSchedule
+        location: unknown
+        eligibleEstablishedMeals: Record<string, string[]>
+      }
+      const planResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/plan", { headers }),
+        testEnv,
+      )
+      expect(planResponse.status).toBe(403)
+      const feedbackResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/feedback", {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: "{}",
+        }),
+        testEnv,
+      )
+      expect(feedbackResponse.status).toBe(403)
+
+      const configuration = {
+        expectedVersion: original.configurationVersion,
+        profile: {
+          dietaryExclusions: ["peanut", "sesame"],
+          foodPreferences: original.profile.foodPreferences,
+          allowNewFoods: original.profile.allowNewFoods,
+          sensoryGuidelines: original.profile.sensoryGuidelines,
+          morningCookingBudgetMinutes: original.profile.morningCookingBudgetMinutes,
+          priorNightPrepAllowed: original.profile.priorNightPrepAllowed,
+          pantryBaseline: original.profile.pantryBaseline,
+        },
+        customPolicies: original.customPolicies,
+        schedule: original.schedule,
+        eligibleEstablishedMeals: original.eligibleEstablishedMeals,
+        location: { country: "India", city: "Bengaluru" },
+      }
+      const saved = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify(configuration),
+        }),
+        testEnv,
+      )
+      expect(saved.status).toBe(200)
+      const savedConfig = (await saved.json()) as typeof original
+      expect(savedConfig.configurationVersion).toBe(original.configurationVersion + 1)
+      expect(savedConfig.profile.dietaryExclusions).toEqual(["peanut", "sesame"])
+      expect(savedConfig.profile.mealDefinitions).toEqual(original.profile.mealDefinitions)
+      expect(savedConfig.profile.dishRepertoire).toEqual(original.profile.dishRepertoire)
+      expect(savedConfig.location).toEqual({ country: "India", city: "Bengaluru" })
+      const reloaded = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", { headers }),
+        testEnv,
+      )
+      expect(await reloaded.json()).toMatchObject({
+        configurationVersion: original.configurationVersion + 1,
+        profile: { dietaryExclusions: ["peanut", "sesame"] },
+      })
+
+      const stale = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify(configuration),
+        }),
+        testEnv,
+      )
+      expect(stale.status).toBe(409)
+      expect(await stale.json()).toEqual({ error: "version_conflict" })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("rejects strict, oversized, and client-owner profile writes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const { testEnv, token } = await authenticatedPlanFixture("plan-profile", "2026-09-21", "2026-09-26")
+      const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+      for (const body of ['{"chatId":"other-chat"}', "{}"])
+        expect(
+          (
+            await miniAppRoutes.fetch(
+              new Request("https://kipp.example/mini-app/api/profile", { method: "PUT", headers, body }),
+              testEnv,
+            )
+          ).status,
+        ).toBe(400)
+      expect(
+        (
+          await miniAppRoutes.fetch(
+            new Request("https://kipp.example/mini-app/api/profile", {
+              method: "PUT",
+              headers: { ...headers, "Content-Length": "70000" },
+              body: "{}",
+            }),
+            testEnv,
+          )
+        ).status,
+      ).toBe(400)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("shows a recurring half-day marker only when the saved plan has the reduced Saturday shape", async () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(FAKE_NOW)
