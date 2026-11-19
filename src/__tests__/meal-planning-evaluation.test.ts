@@ -955,6 +955,8 @@ describe("meal-planning evaluator", () => {
     "Move idli from Saturday morning tea to Sunday supper",
     "Move idli from morning tea to Sunday supper",
     "Move idli from Saturday's morning tea to Sunday supper",
+    "Move idli to Sunday supper from Saturday morning tea",
+    "Move idli from Saturday morning tea into Sunday supper",
   ])("matches a custom-slot move only at its named destination: %s", (text) => {
     const schedule = {
       days: ["Sat", "Sun"],
@@ -974,6 +976,19 @@ describe("meal-planning evaluator", () => {
       request: { kind: "revision", text: item.text },
       feedbackItems: [item],
     })
+    const sourceOnlyChange = evaluateMealPlan(
+      {
+        grid: {
+          Sat: { ...priorGrid.Sat, "morning-tea": cellFor("morning-tea", "poha") },
+          Sun: priorGrid.Sun,
+        },
+        easyBuys: [],
+        policyOutcomes: baseCandidate().policyOutcomes,
+      },
+      context,
+    )
+    expect(failureCodes(sourceOnlyChange)).toContain("unaddressed_feedback")
+
     const incorrectDestination = evaluateMealPlan(
       {
         grid: {
