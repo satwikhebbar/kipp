@@ -5,7 +5,8 @@ CREATE TABLE mini_app_settings_launch (
   telegram_user_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
   expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  consumed_at TEXT
 );
 CREATE INDEX idx_mini_app_settings_launch_expiry ON mini_app_settings_launch(expires_at);
 
@@ -17,7 +18,7 @@ CREATE TABLE mini_app_session (
   telegram_user_id TEXT NOT NULL,
   chat_id TEXT NOT NULL,
   plan_id TEXT,
-  scope TEXT NOT NULL CHECK (scope IN ('review', 'settings')),
+  scope TEXT NOT NULL DEFAULT 'review' CHECK (scope IN ('review', 'settings')),
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
   CHECK ((scope = 'review' AND plan_id IS NOT NULL) OR (scope = 'settings' AND plan_id IS NULL))

@@ -137,5 +137,23 @@ describe("Mini App Telegram authentication", () => {
     expect(accepted.session.scope).toBe("settings")
     const newLaunch = await createSettingsLaunchReference("42", "42", env, NOW)
     await expect(authenticateMiniApp(raw, env, NOW, newLaunch.reference)).rejects.toMatchObject({ reason: "replayed" })
+    await expect(
+      authenticateMiniApp(await initData({ queryId: "query-after-replay" }), env, NOW, newLaunch.reference),
+    ).resolves.toMatchObject({ session: { scope: "settings" } })
+  })
+
+  it("keeps a settings launch usable when session insertion fails", async () => {
+    const { d1, db } = createD1TestDb()
+    const env = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 }
+    const launch = await createSettingsLaunchReference("42", "42", env, NOW)
+    db.exec(`CREATE TRIGGER fail_settings_session BEFORE INSERT ON mini_app_session
+      WHEN NEW.scope = 'settings' BEGIN SELECT RAISE(ABORT, 'forced settings session failure'); END`)
+    await expect(
+      authenticateMiniApp(await initData({ queryId: "query-failed-session" }), env, NOW, launch.reference),
+    ).rejects.toThrow("forced settings session failure")
+    db.exec("DROP TRIGGER fail_settings_session")
+    await expect(
+      authenticateMiniApp(await initData({ queryId: "query-retry-session" }), env, NOW, launch.reference),
+    ).resolves.toMatchObject({ session: { scope: "settings" } })
   })
 })

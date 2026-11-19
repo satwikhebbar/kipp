@@ -317,9 +317,14 @@ function policyOutcomesFromWire(
   const result: MealPlanSelectionCandidate["policyOutcomes"] = {}
   for (const { policyId, outcome, rationale } of outcomes) {
     if (!allowed.has(policyId)) throw new ToolHandlerError("unknown policy in meal-plan tool input", "invalid-state")
-    if (result[policyId])
+    if (Object.hasOwn(result, policyId))
       throw new ToolHandlerError("duplicate policy outcome in meal-plan tool input", "invalid-state")
-    result[policyId] = { outcome, rationale }
+    Object.defineProperty(result, policyId, {
+      value: { outcome, rationale },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    })
   }
   return result
 }

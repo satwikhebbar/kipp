@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { createSettingsLaunchReference } from "../meal-planning/mini-app-auth"
 import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
+import { validateMealSchedule } from "../meal-planning/schedule"
 import { createMealPlanningStore } from "../meal-planning/store"
 import type { MealGrid, MealProfile, MealSchedule, WeeklyExceptions } from "../meal-planning/types"
 import { createClockedD1TestDb, createD1TestDb } from "./d1-test-db"
@@ -182,7 +183,10 @@ describe("Mini App HTTP boundary", () => {
           priorNightPrepAllowed: original.profile.priorNightPrepAllowed,
           pantryBaseline: original.profile.pantryBaseline,
         },
-        customPolicies: original.customPolicies,
+        customPolicies: [
+          ...original.customPolicies,
+          { id: "household-rule", label: "Household rule", scope: "persistent", value: "Use a varied lunch." },
+        ],
         schedule: original.schedule,
         eligibleEstablishedMeals: original.eligibleEstablishedMeals,
         location: { country: "India", city: "Bengaluru" },
@@ -202,14 +206,57 @@ describe("Mini App HTTP boundary", () => {
       expect(savedConfig.profile.mealDefinitions).toEqual(original.profile.mealDefinitions)
       expect(savedConfig.profile.dishRepertoire).toEqual(original.profile.dishRepertoire)
       expect(savedConfig.location).toEqual({ country: "India", city: "Bengaluru" })
+      expect(savedConfig.customPolicies).toContainEqual({
+        id: "household-rule",
+        label: "Household rule",
+        scope: "persistent",
+        value: "Use a varied lunch.",
+      })
       const reloaded = await miniAppRoutes.fetch(
         new Request("https://kipp.example/mini-app/api/profile", { headers }),
         testEnv,
       )
-      expect(await reloaded.json()).toMatchObject({
+      const reloadedConfig = (await reloaded.json()) as typeof original
+      expect(reloadedConfig).toMatchObject({
         configurationVersion: original.configurationVersion + 1,
         profile: { dietaryExclusions: ["peanut", "sesame"] },
       })
+      expect(reloadedConfig.schedule).toEqual(savedConfig.schedule)
+      expect(validateMealSchedule(reloadedConfig.schedule, reloadedConfig.profile)).toEqual([])
+
+      const invalidPolicyConfiguration = {
+        ...configuration,
+        expectedVersion: reloadedConfig.configurationVersion,
+        customPolicies: [{ id: "constructor", label: "Bad ID", scope: "persistent", value: "bad" }],
+      }
+      const invalidPolicy = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify(invalidPolicyConfiguration),
+        }),
+        testEnv,
+      )
+      expect(invalidPolicy.status).toBe(400)
+
+      const implicitLegacySchedule = {
+        ...configuration,
+        expectedVersion: reloadedConfig.configurationVersion,
+        schedule: {
+          days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+          slots: [{ id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null }],
+        },
+        eligibleEstablishedMeals: { "school-lunch": [] },
+      }
+      const legacyNormalizedWrite = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify(implicitLegacySchedule),
+        }),
+        testEnv,
+      )
+      expect(legacyNormalizedWrite.status).toBe(400)
 
       const stale = await miniAppRoutes.fetch(
         new Request("https://kipp.example/mini-app/api/profile", {

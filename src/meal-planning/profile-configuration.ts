@@ -15,6 +15,35 @@ const MAX_ELIGIBLE_MEALS_PER_SLOT = 500
 const MAX_LOCATION_COUNTRY_LENGTH = 100
 const MAX_LOCATION_CITY_LENGTH = 120
 
+const writableMealScheduleSchema = mealScheduleSchema.superRefine((schedule, context) => {
+  if (schedule.halfDays === undefined)
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["halfDays"], message: "halfDays must be explicit" })
+  schedule.slots.forEach((slot, index) => {
+    if (slot.halfDayBehavior === undefined)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["slots", index, "halfDayBehavior"],
+        message: "halfDayBehavior must be explicit",
+      })
+  })
+})
+
+const RESERVED_POLICY_IDS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+  "toString",
+  "toLocaleString",
+  "valueOf",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+])
+
 const boundedText = (max = MAX_PROFILE_TEXT_LENGTH) => z.string().trim().min(1).max(max)
 const textList = (max = MAX_PROFILE_LIST_ITEMS, textLength = MAX_PROFILE_TEXT_LENGTH) =>
   z.array(boundedText(textLength)).max(max)
@@ -41,7 +70,10 @@ export const mealProfileConfigurationRequestSchema = z
       .array(
         z
           .object({
-            id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
+            id: z
+              .string()
+              .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/)
+              .refine((id) => !RESERVED_POLICY_IDS.has(id), "policy ID is reserved"),
             label: boundedText(MAX_POLICY_LABEL_LENGTH),
             scope: z.enum(["persistent", "current_week"]),
             value: boundedText(MAX_POLICY_VALUE_LENGTH),
@@ -53,7 +85,7 @@ export const mealProfileConfigurationRequestSchema = z
         (policies) => new Set(policies.map(({ id }) => id)).size === policies.length,
         "policy IDs must be unique",
       ),
-    schedule: mealScheduleSchema,
+    schedule: writableMealScheduleSchema,
     eligibleEstablishedMeals: z
       .record(
         z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
