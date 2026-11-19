@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { authenticateMiniApp, verifyTelegramInitData } from "../meal-planning/mini-app-auth"
+import {
+  authenticateMiniApp,
+  createSettingsLaunchReference,
+  verifyTelegramInitData,
+} from "../meal-planning/mini-app-auth"
 import { createMealPlanningStore } from "../meal-planning/store"
 import { createD1TestDb } from "./d1-test-db"
 
@@ -16,12 +20,12 @@ function toHex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
-async function initData(): Promise<string> {
+async function initData(options: { queryId?: string; userId?: number } = {}): Promise<string> {
   const params = new URLSearchParams({
     auth_date: String(AUTH_DATE),
-    query_id: "query-1",
-    user: JSON.stringify({ id: 42, first_name: "Parent" }),
+    user: JSON.stringify({ id: options.userId ?? 42, first_name: "Parent" }),
   })
+  if (options.queryId !== "") params.set("query_id", options.queryId ?? "query-1")
   const secret = await sign(new TextEncoder().encode("WebAppData"), BOT_TOKEN)
   const check = [...params.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
@@ -90,5 +94,48 @@ describe("Mini App Telegram authentication", () => {
       .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
       .join("&")
     await expect(authenticateMiniApp(reordered, env, NOW)).rejects.toMatchObject({ reason: "replayed" })
+  })
+
+  it("creates a settings-only session from signed inline-button initData before any plan exists", async () => {
+    const { d1 } = createD1TestDb()
+    const env = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 }
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile("42")
+    const { reference } = await createSettingsLaunchReference("42", "42", env, NOW)
+    const result = await authenticateMiniApp(await initData(), env, NOW, reference)
+    expect(result.context).toBeNull()
+    expect(result.session).toMatchObject({ telegramUserId: "42", chatId: "42", planId: null, scope: "settings" })
+    expect(await store.activePlan("42")).toBeNull()
+    await expect(authenticateMiniApp(await initData(), env, NOW, reference)).rejects.toMatchObject({
+      reason: "unauthorized",
+    })
+  })
+
+  it("rejects missing, expired, replayed and user-mismatched settings references", async () => {
+    const { d1 } = createD1TestDb()
+    const env = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 }
+    await expect(authenticateMiniApp(await initData(), env, NOW)).rejects.toMatchObject({ reason: "unauthorized" })
+    await expect(authenticateMiniApp(await initData({ queryId: "" }), env, NOW, "missing-query")).rejects.toMatchObject(
+      {
+        reason: "invalid",
+      },
+    )
+
+    const expired = await createSettingsLaunchReference("42", "42", env, new Date(NOW.getTime() - 601_000))
+    await expect(authenticateMiniApp(await initData(), env, NOW, expired.reference)).rejects.toMatchObject({
+      reason: "unauthorized",
+    })
+
+    const mismatched = await createSettingsLaunchReference("43", "43", env, NOW)
+    await expect(authenticateMiniApp(await initData(), env, NOW, mismatched.reference)).rejects.toMatchObject({
+      reason: "unauthorized",
+    })
+
+    const replay = await createSettingsLaunchReference("42", "42", env, NOW)
+    const raw = await initData()
+    const accepted = await authenticateMiniApp(raw, env, NOW, replay.reference)
+    expect(accepted.session.scope).toBe("settings")
+    const newLaunch = await createSettingsLaunchReference("42", "42", env, NOW)
+    await expect(authenticateMiniApp(raw, env, NOW, newLaunch.reference)).rejects.toMatchObject({ reason: "replayed" })
   })
 })
