@@ -7,6 +7,7 @@ import { HTTP_STATUS } from "../runtime/http"
 import { logRuntime } from "../runtime/logging"
 import { MINI_APP_SHELL } from "./mini-app/client"
 import { authenticateMiniApp, MiniAppAuthError, readMiniAppSession } from "./mini-app-auth"
+import { legacyHalfDayBehavior } from "./schedule"
 import { createMealPlanningStore, type FeedbackBatchRecord, type MealPlanningStore } from "./store"
 
 const BYTES_PER_KIBIBYTE = 1_024
@@ -79,16 +80,16 @@ async function getContext(request: Request, env: Env): Promise<MiniAppContext> {
 }
 
 /** Plan DTO. */
-function planDto(
-  active: MealPlanRead,
-  schedule: Awaited<ReturnType<MealPlanningStore["loadOrCreateProfile"]>>["schedule"],
-  readOnly: boolean,
-) {
-  // Older saved plans may predate a recurring schedule rule. Show the half-day
-  // marker only when that plan actually has the reduced set of meals.
+function planDto(active: MealPlanRead, readOnly: boolean) {
+  const schedule = active.plan.schedule
+  const omittedSlots = schedule.slots.filter(
+    (slot) => (slot.halfDayBehavior ?? legacyHalfDayBehavior(slot.id)).action === "omit",
+  )
+  // Show the recurring half-day marker only when this version has the pinned
+  // plan's omitted-slot shape for that day.
   const applicableHalfDays = schedule.halfDays?.filter((day) => {
     const cells = active.version.candidate.grid[day]
-    return !cells?.snack2 && !cells?.["school-lunch"]
+    return omittedSlots.length > 0 && omittedSlots.every((slot) => !cells?.[slot.id])
   })
   return {
     planId: active.plan.planId,
@@ -124,7 +125,7 @@ async function readPlanDto(
   store: MealPlanningStore,
   session: Awaited<ReturnType<typeof readMiniAppSession>>,
 ) {
-  const profile = await store.loadOrCreateProfile(session.chatId)
+  await store.loadOrCreateProfile(session.chatId)
   const history = await store.listPlanHistory(session.chatId)
   const generation = await store.activePlanGeneration(session.chatId)
   const requestedPlanId = new URL(request.url).searchParams.get("planId")?.trim() || session.planId
@@ -142,20 +143,20 @@ async function readPlanDto(
   if (selected.plan.status !== "active") {
     return {
       status: "historical" as const,
-      plan: planDto(selected, profile.schedule, true),
+      plan: planDto(selected, true),
       history: historyDto,
     }
   }
   if (generation) {
     return {
       status: "generating" as const,
-      currentPlan: planDto(selected, profile.schedule, true),
+      currentPlan: planDto(selected, true),
       history: historyDto,
     }
   }
   return {
     status: "current" as const,
-    plan: planDto(active ?? selected, profile.schedule, false),
+    plan: planDto(active ?? selected, false),
     history: historyDto,
   }
 }

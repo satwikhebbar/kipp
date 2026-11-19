@@ -140,6 +140,46 @@ describe("createInMemoryMealPlanningStore", () => {
     expect(upgradeLegacyMealSchedule({ ...SEED_SCHEDULE, halfDays: [] }).halfDays).toEqual([])
   })
 
+  it.each([
+    "in-memory",
+    "D1",
+  ] as const)("keeps feedback validation on the pinned plan schedule (%s)", async (backend) => {
+    const { db, d1 } = createD1TestDb()
+    const store = backend === "D1" ? createMealPlanningStore(d1) : createInMemoryMealPlanningStore()
+    await store.loadOrCreateProfile(CHAT)
+    const customSchedule = {
+      days: ["Sun"],
+      slots: [{ id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null }],
+    }
+    await createPlan(
+      store,
+      createInput({
+        schedule: customSchedule,
+        candidate: candidate({
+          Sun: {
+            "morning-tea": { dish: "poha", vegetarian: true, items: ["poha"], cookMinutes: 10, priorNightPrep: false },
+          },
+        }),
+      }),
+    )
+    if (backend === "D1") {
+      db.prepare("UPDATE meal_profile SET schedule_json = ? WHERE chat_id = ?").run(JSON.stringify(SEED_SCHEDULE), CHAT)
+    } else {
+      ;(await store.loadOrCreateProfile(CHAT)).schedule = SEED_SCHEDULE
+    }
+    const accepted = await store.acceptFeedbackBatch({
+      batchId: "pinned-schedule-batch",
+      planId: "plan-1",
+      chatId: CHAT,
+      baseVersion: 1,
+      workflowInstanceId: "instance-1",
+      idempotencyKey: "pinned-schedule",
+      items: [{ text: "Change morning tea", target: { kind: "cell", day: "Sun", slot: "morning-tea" } }],
+    })
+    expect(accepted).toMatchObject({ ok: true, batch: { items: [{ target: { day: "Sun", slot: "morning-tea" } }] } })
+    expect((await store.activePlan(CHAT))?.plan.schedule.days).toEqual(["Sun"])
+  })
+
   it("createActivePlan writes the plan, version 1, and generation 1; previousReplaced is false for the first plan", async () => {
     const store = await newStore()
     const result = await createPlan(store, createInput())
@@ -668,6 +708,59 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(JSON.parse(row.schedule_json).halfDays).toEqual(["Sat"])
   })
 
+  it("backfills normalized schedule and established-meal snapshots for active and historical plans", async () => {
+    const { store, db } = createD1Store()
+    const profile = await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput({ planId: "legacy-active" }))
+    await createPlan(
+      store,
+      createInput({
+        planId: "legacy-history",
+        instanceId: "history-instance",
+        generationId: "history-generation",
+        weekStart: "2026-09-14T00:00:00.000Z",
+        weekEnd: "2026-09-19T23:59:59.000Z",
+      }),
+    )
+    const legacySchedule = {
+      days: ["Mon", "Sat", "Sun"],
+      slots: SEED_SCHEDULE.slots.map(({ halfDayBehavior: _behavior, ...slot }) => slot),
+    }
+    const legacyProfile = {
+      ...profile.profile,
+      mealDefinitions: (profile.profile.mealDefinitions ?? []).map((definition, index) =>
+        index === 0 ? { ...definition, suitableSlots: ["custom-tea"] } : definition,
+      ),
+    }
+    db.prepare("UPDATE meal_profile SET schedule_json = ?, profile_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(legacySchedule),
+      JSON.stringify(legacyProfile),
+      CHAT,
+    )
+    db.prepare(
+      "UPDATE meal_plan SET schedule_json = NULL, established_meal_definitions_json = NULL WHERE chat_id = ?",
+    ).run(CHAT)
+
+    const normalized = await store.loadOrCreateProfile(CHAT)
+    expect(normalized.schedule.halfDays).toEqual(["Sat"])
+    expect(
+      (await store.activePlan(CHAT))?.plan.schedule.slots.find((slot) => slot.id === "snack1")?.halfDayBehavior,
+    ).toEqual({ action: "quick", maxCookMinutes: 20 })
+    const historical = await store.planById(CHAT, "legacy-active")
+    expect(historical?.plan.schedule.days).toEqual(["Mon", "Sat", "Sun"])
+    expect(historical?.plan.establishedMealDefinitions[0]?.suitableSlots).toEqual(["custom-tea"])
+
+    db.prepare("UPDATE meal_profile SET schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify({
+        days: ["Sun"],
+        slots: [{ id: "new-slot", name: "New", packed: false, dry: false, maxCookMinutes: null }],
+      }),
+      CHAT,
+    )
+    expect((await store.activePlan(CHAT))?.plan.schedule.days).toEqual(["Mon", "Sat", "Sun"])
+    expect((await store.planById(CHAT, "legacy-active"))?.plan.schedule.days).toEqual(["Mon", "Sat", "Sun"])
+  })
+
   it("runs the migration and the happy path: seed → create v1 → promote v2 with batch → activePlan", async () => {
     const { store, db } = createD1Store()
     const profile = await store.loadOrCreateProfile(CHAT)
@@ -748,7 +841,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("migrates legacy classifier charges and prior reported rows into one cost column", async () => {
     const { db, d1 } = createD1TestDb("0005_openrouter_reported_cost.sql")
     const store = createMealPlanningStore(d1)
-    await store.loadOrCreateProfile(CHAT)
     db.prepare(`INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone,
       instance_id, status, current_version, created_at, updated_at)
       VALUES ('plan-1', ?, ?, ?, 'Asia/Kolkata', 'instance-1', 'active', 3, 'now', 'now')`).run(
@@ -769,6 +861,13 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         "utf8",
       ),
     )
+    db.exec(
+      readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), "../../migrations/0007_meal_plan_schedule_snapshot.sql"),
+        "utf8",
+      ),
+    )
+    await store.loadOrCreateProfile(CHAT)
     expect(db.prepare("SELECT cost_usd, cost_status FROM meal_plan_version ORDER BY version").all()).toEqual([
       { cost_usd: 0.002, cost_status: "legacy" },
       { cost_usd: 0.013000000000000001, cost_status: "reported" },

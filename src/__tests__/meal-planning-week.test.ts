@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { SEED_SCHEDULE } from "../meal-planning/store"
 import { previousPlanningWeekStart, resolvePlanningWeek } from "../meal-planning/week"
 
 const TZ = "Asia/Kolkata" // UTC+05:30
@@ -6,6 +7,7 @@ const CURRENT_WEEK_START = "2026-09-06T18:30:00.000Z" // Mon 2026-09-07 00:00 IS
 const CURRENT_WEEK_END = "2026-09-12T18:29:59.000Z" // Sat 2026-09-12 23:59:59 IST
 const NEXT_WEEK_START = "2026-09-13T18:30:00.000Z" // Mon 2026-09-14 00:00 IST
 const NEXT_WEEK_END = "2026-09-19T18:29:59.000Z" // Sat 2026-09-19 23:59:59 IST
+const SUNDAY_WEEK_END = "2026-09-13T18:29:59.000Z" // Sun 2026-09-13 23:59:59 IST
 
 function at(iso: string): number {
   return Date.parse(iso)
@@ -35,6 +37,26 @@ describe("resolvePlanningWeek", () => {
     expect(resolvePlanningWeek(at("2026-09-13T04:30:00.000Z"), TZ)).toEqual({
       weekStart: NEXT_WEEK_START,
       weekEnd: NEXT_WEEK_END,
+    })
+  })
+
+  it("extends the plan lifetime through Sunday only when Sunday is configured", () => {
+    const schedule = { ...SEED_SCHEDULE, days: [...SEED_SCHEDULE.days, "Sun"] }
+    expect(resolvePlanningWeek(at("2026-09-09T03:30:00.000Z"), TZ, undefined, schedule)).toEqual({
+      weekStart: CURRENT_WEEK_START,
+      weekEnd: SUNDAY_WEEK_END,
+    })
+    expect(resolvePlanningWeek(at("2026-09-13T04:30:00.000Z"), TZ, "this week", schedule)).toEqual({
+      weekStart: CURRENT_WEEK_START,
+      weekEnd: SUNDAY_WEEK_END,
+    })
+    expect(resolvePlanningWeek(at("2026-09-13T04:30:00.000Z"), TZ, undefined, SEED_SCHEDULE)).toEqual({
+      weekStart: NEXT_WEEK_START,
+      weekEnd: NEXT_WEEK_END,
+    })
+    expect(resolvePlanningWeek(at("2026-09-13T04:30:00.000Z"), TZ, undefined, schedule)).toEqual({
+      weekStart: NEXT_WEEK_START,
+      weekEnd: "2026-09-20T18:29:59.000Z",
     })
   })
 
