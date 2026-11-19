@@ -21,7 +21,7 @@ import type { MealPlanCandidate, MealPlanEvaluation } from "../meal-planning/typ
 import { createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
 
 const CHAT = "chat-1"
-const WEEKS = { weekStart: "2026-09-07T00:00:00.000Z", weekEnd: "2026-09-12T23:59:59.000Z" }
+const WEEKS = { weekStart: "2999-09-07T00:00:00.000Z", weekEnd: "2999-09-12T23:59:59.000Z" }
 
 function candidate(grid = {}): MealPlanCandidate {
   return { grid, easyBuys: [], policyOutcomes: { "snack-policy": { outcome: "satisfied", rationale: "dry snacks" } } }
@@ -56,6 +56,7 @@ function createInput(overrides: Partial<CreateActivePlanInput> = {}): CreateActi
     evaluation: evaluation(),
     weeklyInventory: { items: [], notes: [] },
     weeklyExceptions: { items: [] },
+    allowNewFoodsSnapshot: true,
     ...overrides,
   }
 }
@@ -656,6 +657,144 @@ describe.each([
 })
 
 describe("createMealPlanningStore (D1, real SQL)", () => {
+  it.each([
+    ["in-memory", () => createInMemoryMealPlanningStore()],
+    ["D1", () => createD1Store().store],
+  ])("%s freezes version approval, policy, rejection, and replacement evidence", async (_name, makeStore) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    const provisionalMealDefinitions = [
+      {
+        id: "provisional-a",
+        name: "New poha",
+        principalIngredients: ["poha"],
+        vegetarian: true as const,
+        suitableSlots: ["breakfast"],
+        packedFood: { suitable: true, dry: false },
+        typicalCookMinutes: 10,
+        priorNightPrep: "none" as const,
+        requiredIngredients: ["poha"],
+        optionalIngredients: [],
+        status: "provisional" as const,
+      },
+      {
+        id: "provisional-b",
+        name: "New idli",
+        principalIngredients: ["rice"],
+        vegetarian: true as const,
+        suitableSlots: ["breakfast"],
+        packedFood: { suitable: true, dry: false },
+        typicalCookMinutes: 10,
+        priorNightPrep: "none" as const,
+        requiredIngredients: ["rice"],
+        optionalIngredients: [],
+        status: "provisional" as const,
+      },
+    ]
+    const created = await createPlan(store, createInput({ allowNewFoodsSnapshot: false, provisionalMealDefinitions }))
+    expect(created.version.allowNewFoodsSnapshot).toBe(false)
+    expect(created.plan.approvedVersion).toBe(1)
+    expect(
+      await store.rejectPlanDishes({
+        chatId: CHAT,
+        planId: "plan-1",
+        version: 1,
+        mealIds: ["provisional-a", "provisional-b"],
+        now: "2999-09-10T00:00:00.000Z",
+      }),
+    ).toBe(true)
+    expect(
+      await store.rejectPlanDishes({
+        chatId: CHAT,
+        planId: "plan-1",
+        version: 1,
+        mealIds: ["provisional-a"],
+        now: "2999-09-10T00:00:01.000Z",
+      }),
+    ).toBe(true)
+    expect(
+      await store.decidePlanVersion({
+        chatId: CHAT,
+        planId: "plan-1",
+        version: 1,
+        action: "reject",
+        now: "2999-09-10T00:00:02.000Z",
+      }),
+    ).toBe(true)
+    expect(
+      await store.decidePlanVersion({
+        chatId: CHAT,
+        planId: "plan-1",
+        version: 1,
+        action: "accept",
+        now: "2999-09-10T00:00:03.000Z",
+      }),
+    ).toBe(false)
+    const state = await store.activePlan(CHAT)
+    expect(state?.plan).toMatchObject({
+      approvedVersion: null,
+      rejectedVersion: 1,
+      rejectedMealIds: ["provisional-a", "provisional-b"],
+    })
+    expect(
+      await store.decidePlanVersion({
+        chatId: CHAT,
+        planId: "plan-1",
+        version: 1,
+        action: "accept",
+        now: WEEKS.weekEnd,
+      }),
+    ).toBe(false)
+    expect(
+      await store.rejectPlanDishes({
+        chatId: CHAT,
+        planId: "plan-1",
+        version: 1,
+        mealIds: ["late"],
+        now: WEEKS.weekEnd,
+      }),
+    ).toBe(false)
+    await createPlan(store, createInput({ planId: "plan-2", weekStart: "2999-09-14T00:00:00.000Z" }))
+    expect((await store.latestPlanForWeek(CHAT, WEEKS.weekStart))?.plan).toMatchObject({
+      status: "replaced",
+      replacedAt: expect.any(String),
+    })
+  })
+
+  it.each([
+    ["in-memory", () => createInMemoryMealPlanningStore()],
+    ["D1", () => createD1Store().store],
+  ])("%s invalidates approval on revision and rejects a revision committed after week_end", async (_name, makeStore) => {
+    const store = makeStore()
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput())
+    const promoted = await store.promotePlanVersion(promoteInput({ allowNewFoodsSnapshot: true }))
+    expect(promoted.ok).toBe(true)
+    const current = await store.activePlan(CHAT)
+    expect(current?.plan).toMatchObject({ currentVersion: 2, approvedVersion: null, rejectedVersion: null })
+    expect(current?.version.allowNewFoodsSnapshot).toBe(true)
+    const lateStore = makeStore()
+    await lateStore.loadOrCreateProfile("late-chat")
+    await createPlan(
+      lateStore,
+      createInput({
+        chatId: "late-chat",
+        planId: "late-plan",
+        weekEnd: "2000-01-01T00:00:00.000Z",
+      }),
+    )
+    expect(
+      await lateStore.promotePlanVersion(
+        promoteInput({
+          chatId: "late-chat",
+          planId: "late-plan",
+          baseVersion: 1,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "stale" })
+    expect((await lateStore.activePlan("late-chat"))?.plan.currentVersion).toBe(1)
+  })
+
   it("persists the recurring Saturday rule when loading an existing profile", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)

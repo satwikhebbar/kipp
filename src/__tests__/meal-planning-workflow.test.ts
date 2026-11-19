@@ -5,6 +5,7 @@ import { MEAL_PLANNING_AGENT_PROMPT } from "../agent/meal-planning-session"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import type { Env } from "../core/types"
 import {
+  explicitRejectedMealIds,
   type MealPlanningLiveEvent,
   miniAppLaunchUrl,
   renderHouseholdContext,
@@ -1344,15 +1345,149 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     if (!planMessage) throw new Error("Expected persisted plan message")
     const buttons = (planMessage.replyMarkup as { inline_keyboard: Array<Array<Record<string, unknown>>> })
       .inline_keyboard
-    expect(buttons.every((row) => row.length === 1)).toBe(true)
     expect(buttons.flat()).toEqual([
       expect.objectContaining({ text: "Give feedback" }),
+      expect.objectContaining({ text: "Accept plan" }),
+      expect.objectContaining({ text: "Reject plan" }),
       { text: "Review this week's plan", web_app: { url: "https://mini-app.example.test/mini-app" } },
     ])
     const context = await createMealPlanningStore(d1).resolveMiniAppReviewContext("parent-123")
     expect(context).toEqual(
       expect.objectContaining({ chatId: CHAT, planId: expect.any(String), weekEnd: week.weekEnd }),
     )
+  })
+
+  it("accepts and rejects only the current version through authenticated meal action events", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    await store.startPlanGeneration({ chatId: CHAT, generationId: "create", expiresAt: week.weekEnd })
+    await store.createActivePlan({
+      planId: "approved-plan",
+      chatId: CHAT,
+      weekStart: week.weekStart,
+      weekEnd: week.weekEnd,
+      timezone: TZ,
+      instanceId: "wf-meal-1",
+      generationId: "create",
+      candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
+      evaluation: {} as never,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+      allowNewFoodsSnapshot: true,
+    })
+    const promoted = await store.promotePlanVersion({
+      planId: "approved-plan",
+      chatId: CHAT,
+      baseVersion: 1,
+      candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
+      evaluation: {} as never,
+      allowNewFoodsSnapshot: true,
+    })
+    expect(promoted.ok).toBe(true)
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ ok: true, result: { message_id: 1 } })),
+    )
+    const step = { do: vi.fn(async (_name: string, fn: () => unknown) => fn()) }
+    await runMealPlanningEditWorkflow(
+      makeEnv(namespace, d1),
+      {
+        instanceId: "accept-event",
+        payload: {
+          chatId: CHAT,
+          invokedAtMs,
+          edit: {
+            planInstanceId: "wf-meal-1",
+            userId: "42",
+            feedback: {
+              interactionKind: "meal-version-accept",
+              version: 2,
+            },
+          },
+        },
+      } as never,
+      step as never,
+    )
+    expect((await store.activePlan(CHAT))?.plan.approvedVersion).toBe(2)
+  })
+
+  it("persists exact dish rejection feedback before a failed revision", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const definition = {
+      id: "provisional-new-poha",
+      name: "new poha",
+      aliases: ["special poha"],
+      principalIngredients: ["rice"],
+      vegetarian: true as const,
+      suitableSlots: ["breakfast"],
+      packedFood: { suitable: true, dry: false },
+      typicalCookMinutes: 10,
+      priorNightPrep: "none" as const,
+      requiredIngredients: ["rice"],
+      optionalIngredients: [],
+      status: "provisional" as const,
+    }
+    await store.startPlanGeneration({ chatId: CHAT, generationId: "create", expiresAt: week.weekEnd })
+    await store.createActivePlan({
+      planId: "feedback-plan",
+      chatId: CHAT,
+      weekStart: week.weekStart,
+      weekEnd: week.weekEnd,
+      timezone: TZ,
+      instanceId: "wf-meal-1",
+      generationId: "create",
+      candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
+      evaluation: {} as never,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+      provisionalMealDefinitions: [definition],
+      allowNewFoodsSnapshot: true,
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: RequestInfo | URL) => {
+        if (String(url).includes("api.deepseek.com") || String(url).includes("openrouter.ai/api/v1"))
+          throw new Error("upstream down")
+        return jsonResponse({ ok: true, result: { message_id: 1 } })
+      }),
+    )
+    const step = { do: vi.fn(async (_name: string, fn: () => unknown) => fn()) }
+    await runMealPlanningEditWorkflow(
+      makeEnv(namespace, d1, { LLM_MAX_RETRIES: "0" }),
+      {
+        instanceId: "edit-event",
+        payload: {
+          chatId: CHAT,
+          invokedAtMs,
+          edit: {
+            planInstanceId: "wf-meal-1",
+            userId: "42",
+            feedback: {
+              interactionKind: "meal-feedback-reply",
+              source: "telegram-reply",
+              version: 1,
+              text: "I don't like special poha",
+            },
+          },
+        },
+      } as never,
+      step as never,
+    )
+    expect((await store.activePlan(CHAT))?.plan.rejectedMealIds).toEqual(["provisional-new-poha"])
+    expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
   })
 
   it("turns a feedback reply into a version-2 revision with an immutable submission batch", async () => {
@@ -2523,4 +2658,19 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       false,
     )
   })
+})
+
+it("captures explicitly rejected provisional dishes per contrastive feedback clause", () => {
+  const definitions = [
+    { id: "pulao", name: "peas pulao", aliases: ["matar rice"] },
+    { id: "idli", name: "idli" },
+    { id: "upma", name: "upma" },
+  ] as never
+  expect(
+    explicitRejectedMealIds([{ id: "f1", text: "Don't like peas pulao and idli, but upma is fine" }], definitions),
+  ).toEqual(["pulao", "idli"])
+  expect(explicitRejectedMealIds([{ id: "f2", text: "Please remove matar rice; I like idli" }], definitions)).toEqual([
+    "pulao",
+  ])
+  expect(explicitRejectedMealIds([{ id: "f3", text: "I don't like it" }], definitions)).toEqual([])
 })

@@ -71,6 +71,10 @@ const PLAN: MealPlanRecord = {
   weeklyExceptions: { items: [] },
   createdAt: "2026-09-07T00:00:00.000Z",
   updatedAt: "2026-09-07T00:00:00.000Z",
+  replacedAt: null,
+  approvedVersion: 1,
+  rejectedVersion: null,
+  rejectedMealIds: [],
 }
 
 const VERSION: MealPlanVersionRecord = {
@@ -85,6 +89,7 @@ const VERSION: MealPlanVersionRecord = {
   provisionalMealDefinitions: [],
   usage: null,
   createdAt: "2026-09-07T00:00:00.000Z",
+  allowNewFoodsSnapshot: true,
 }
 
 describe("renderPlanMessage", () => {

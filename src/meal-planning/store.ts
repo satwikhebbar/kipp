@@ -17,6 +17,7 @@ import type {
 const NO_VIDEOS: Record<string, RecipeVideo> = {}
 /** Maximum number of current/replaced plans exposed by one history read. */
 export const MAX_MEAL_PLAN_HISTORY = 12
+const MAX_MEAL_REJECTION_MERGE_ATTEMPTS = 4
 
 /** `{ country, city }` location snapshot stored on the household profile row. */
 export interface StoredLocation {
@@ -105,6 +106,10 @@ export interface MealPlanRecord {
   weeklyExceptions: WeeklyExceptions
   createdAt: string
   updatedAt: string
+  replacedAt: string | null
+  approvedVersion: number | null
+  rejectedVersion: number | null
+  rejectedMealIds: string[]
 }
 
 /** A hydrated, immutable `meal_plan_version` row. */
@@ -123,6 +128,8 @@ export interface MealPlanVersionRecord {
   /** Token usage that produced this version; null for rows persisted before cost tracking. */
   usage: VersionUsage | null
   createdAt: string
+  /** Historical profile policy captured when this immutable version was evaluated. */
+  allowNewFoodsSnapshot: boolean | null
 }
 
 /** The active plan plus its current version — the read shape for the live loop and the iteration-2 mini-app. */
@@ -225,6 +232,8 @@ export interface CreateActivePlanInput {
   provisionalMealDefinitions?: MealDefinition[]
   /** Token usage of the generation session(s); omitted when unavailable. */
   usage?: VersionUsage
+  /** Profile policy snapshot used to evaluate this version. */
+  allowNewFoodsSnapshot?: boolean
 }
 
 /** Result of a committed initial-plan batch. */
@@ -259,6 +268,8 @@ export interface PromotePlanVersionInput {
   feedbackBatch?: FeedbackBatchInput | null
   /** Token usage of the revision's generation session(s); omitted when unavailable. */
   usage?: VersionUsage
+  /** Profile policy snapshot used to evaluate this version. */
+  allowNewFoodsSnapshot?: boolean
 }
 
 export interface UpdateWeeklyContextInput {
@@ -287,6 +298,20 @@ export interface MealPlanningStore {
   loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
   createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
   promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
+  decidePlanVersion(input: {
+    chatId: string
+    planId: string
+    version: number
+    action: "accept" | "reject"
+    now?: string
+  }): Promise<boolean>
+  rejectPlanDishes(input: {
+    chatId: string
+    planId: string
+    version: number
+    mealIds: string[]
+    now?: string
+  }): Promise<boolean>
   /** Sums token usage across a plan's versions that recorded it; null when none did. */
   sumPlanUsage(planId: string): Promise<PlanUsageTotal | null>
   /** Updates only week-scoped inventory/calendar facts; it never creates a plan version. */
@@ -792,6 +817,10 @@ function makePlanRecord(input: CreateActivePlanInput, now: string): MealPlanReco
     weeklyExceptions: input.weeklyExceptions,
     createdAt: now,
     updatedAt: now,
+    replacedAt: null,
+    approvedVersion: 1,
+    rejectedVersion: null,
+    rejectedMealIds: [],
   }
 }
 
@@ -808,6 +837,7 @@ function makeVersionRecord(
   provisionalMealDefinitions: MealDefinition[],
   usage: VersionUsage | null,
   now: string,
+  allowNewFoodsSnapshot: boolean | null = null,
 ): MealPlanVersionRecord {
   return {
     planId,
@@ -821,16 +851,18 @@ function makeVersionRecord(
     provisionalMealDefinitions,
     usage: usage ? { ...usage } : null,
     createdAt: now,
+    allowNewFoodsSnapshot,
   }
 }
 
 const PLAN_WITH_VERSION_SELECT = `
   SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
          p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
+         p.replaced_at, p.approved_version, p.rejected_version, p.rejected_meal_ids_json,
          v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
          v.feedback_batch_id, v.video_json, v.provisional_meals_json,
          v.usage_input_tokens, v.usage_output_tokens, v.usage_model,
-         v.cost_usd, v.cost_status,
+         v.cost_usd, v.cost_status, v.allow_new_foods_snapshot,
          v.created_at AS version_created_at
   FROM meal_plan p
   JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version`
@@ -851,6 +883,10 @@ function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
       weeklyExceptions: parseJson<WeeklyExceptions>(String(row.weekly_exceptions_json), { items: [] }),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
+      replacedAt: row.replaced_at == null ? null : String(row.replaced_at),
+      approvedVersion: row.approved_version == null ? null : Number(row.approved_version),
+      rejectedVersion: row.rejected_version == null ? null : Number(row.rejected_version),
+      rejectedMealIds: parseJson<string[]>(String(row.rejected_meal_ids_json), []),
     },
     version: {
       planId: String(row.plan_id),
@@ -893,6 +929,10 @@ function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
                 : { costUsd: row.cost_status === "reported" ? Number(row.cost_usd) : null }),
             },
       createdAt: String(row.version_created_at),
+      allowNewFoodsSnapshot:
+        row.allow_new_foods_snapshot === null || row.allow_new_foods_snapshot === undefined
+          ? null
+          : Number(row.allow_new_foods_snapshot) === 1,
     },
   }
 }
@@ -973,19 +1013,19 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const results = await db.batch([
         db
           .prepare(
-            `UPDATE meal_plan SET status = 'replaced', updated_at = ?
+            `UPDATE meal_plan SET status = 'replaced', replaced_at = ?, updated_at = ?
              WHERE chat_id = ? AND status = 'active'
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND EXISTS (SELECT 1 FROM meal_plan_generation
                            WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
           )
-          .bind(now, input.chatId, input.chatId, input.chatId, input.generationId, now),
+          .bind(now, now, input.chatId, input.chatId, input.chatId, input.generationId, now),
         db
           .prepare(
             `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status,
                                     current_version, weekly_inventory_json, weekly_exceptions_json,
-                                    created_at, updated_at)
-             SELECT ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?
+                                    created_at, updated_at, approved_version)
+             SELECT ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, 1
              WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND EXISTS (SELECT 1 FROM meal_plan_generation
                            WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
@@ -1011,9 +1051,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
                                             usage_input_tokens, usage_output_tokens, usage_model,
-                                            cost_usd, cost_status,
+                                            cost_usd, cost_status, allow_new_foods_snapshot,
                                             created_at)
-             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?
+             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND EXISTS (SELECT 1 FROM meal_plan_generation
                            WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
@@ -1029,6 +1069,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.usage?.model ?? null,
             typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
             input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
+            input.allowNewFoodsSnapshot == null ? null : input.allowNewFoodsSnapshot ? 1 : 0,
             now,
             input.chatId,
             input.chatId,
@@ -1081,6 +1122,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.provisionalMealDefinitions ?? [],
           input.usage ?? null,
           now,
+          input.allowNewFoodsSnapshot ?? null,
         ),
         generation,
         previousReplaced,
@@ -1109,10 +1151,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
                                             usage_input_tokens, usage_output_tokens, usage_model,
-                                            cost_usd, cost_status,
+                                            cost_usd, cost_status, allow_new_foods_snapshot,
                                             created_at)
-             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM meal_plan
-             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
+             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM meal_plan
+             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
                                      WHERE batch_id = ? AND plan_id = meal_plan.plan_id
@@ -1133,10 +1175,12 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.usage?.model ?? null,
             typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
             input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
+            input.allowNewFoodsSnapshot == null ? null : input.allowNewFoodsSnapshot ? 1 : 0,
             now,
             input.planId,
             input.chatId,
             input.baseVersion,
+            now,
             input.chatId,
             consumeExistingBatch ? 1 : 0,
             batchId,
@@ -1145,9 +1189,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ?
              WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan
-                                           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active')`,
+                                           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?)`,
           )
-          .bind(now, input.chatId, input.planId, input.chatId, input.baseVersion),
+          .bind(now, input.chatId, input.planId, input.chatId, input.baseVersion, now),
         db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
       ]
       if (input.inventory) {
@@ -1155,7 +1199,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           db
             .prepare(
               `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
-               WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
+               WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?
                  AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
             )
             .bind(
@@ -1165,6 +1209,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
               input.planId,
               input.chatId,
               input.baseVersion,
+              now,
               input.chatId,
             ),
         )
@@ -1172,16 +1217,16 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       statements.push(
         db
           .prepare(
-            `UPDATE meal_plan SET current_version = ?, updated_at = ?
-             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
+            `UPDATE meal_plan SET current_version = ?, approved_version = NULL, rejected_version = NULL, updated_at = ?
+             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
-          .bind(newVersion, now, input.planId, input.chatId, input.baseVersion, input.chatId),
+          .bind(newVersion, now, input.planId, input.chatId, input.baseVersion, now, input.chatId),
         db
           .prepare(
             `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, status, created_at, updated_at)
              SELECT ?, plan_id, ?, ?, 'consumed', ?, ? FROM meal_plan
-             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL
+             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ? AND ? IS NOT NULL
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
           )
           .bind(
@@ -1193,6 +1238,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.planId,
             input.chatId,
             newVersion,
+            now,
             batchId,
             input.chatId,
           ),
@@ -1225,9 +1271,72 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.provisionalMealDefinitions ?? [],
           input.usage ?? null,
           now,
+          input.allowNewFoodsSnapshot ?? null,
         ),
         generation,
       }
+    },
+
+    async decidePlanVersion(input) {
+      const now = input.now ?? nowIso()
+      const result = await db
+        .prepare(
+          `UPDATE meal_plan
+         SET approved_version = ?, rejected_version = ?, updated_at = ?
+         WHERE plan_id = ? AND chat_id = ? AND status = 'active'
+           AND current_version = ? AND week_end > ?
+           AND (? = 'reject' OR rejected_version IS NULL OR rejected_version != ?)`,
+        )
+        .bind(
+          input.action === "accept" ? input.version : null,
+          input.action === "reject" ? input.version : null,
+          now,
+          input.planId,
+          input.chatId,
+          input.version,
+          now,
+          input.action,
+          input.version,
+        )
+        .run()
+      return Number(result.meta.changes) === 1
+    },
+
+    async rejectPlanDishes(input) {
+      const now = input.now ?? nowIso()
+      const mealIds = [...new Set(input.mealIds.filter((id) => typeof id === "string" && id.length > 0))]
+      if (!mealIds.length) return true
+      for (let attempt = 0; attempt < MAX_MEAL_REJECTION_MERGE_ATTEMPTS; attempt++) {
+        const row = await db
+          .prepare(
+            `SELECT p.rejected_meal_ids_json, v.provisional_meals_json FROM meal_plan p
+           JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
+           WHERE p.plan_id = ? AND p.chat_id = ? AND p.status = 'active' AND p.current_version = ? AND p.week_end > ?`,
+          )
+          .bind(input.planId, input.chatId, input.version, now)
+          .first()
+        if (!row) return false
+        const provisionalIds = new Set(
+          parseJson<MealDefinition[]>(String(row.provisional_meals_json), [])
+            .filter((definition) => definition.status === "provisional")
+            .map((definition) => definition.id),
+        )
+        if (mealIds.some((id) => !provisionalIds.has(id))) return false
+        const priorRaw = String(row.rejected_meal_ids_json ?? "[]")
+        const prior = parseJson<string[]>(priorRaw, [])
+        const next = JSON.stringify([...new Set([...prior, ...mealIds])])
+        if (next === priorRaw) return true
+        const result = await db
+          .prepare(
+            `UPDATE meal_plan SET rejected_meal_ids_json = ?, updated_at = ?
+           WHERE plan_id = ? AND chat_id = ? AND status = 'active' AND current_version = ?
+             AND week_end > ? AND rejected_meal_ids_json = ?`,
+          )
+          .bind(next, now, input.planId, input.chatId, input.version, now, priorRaw)
+          .run()
+        if (Number(result.meta.changes) === 1) return true
+      }
+      return false
     },
 
     async updateWeeklyContext(input) {
@@ -1235,7 +1344,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const result = await db
         .prepare(
           `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
-           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'`,
+           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?`,
         )
         .bind(
           JSON.stringify(input.weeklyInventory),
@@ -1244,6 +1353,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.planId,
           input.chatId,
           input.baseVersion,
+          now,
         )
         .run()
       return Number(result.meta.changes) === 1
@@ -1766,6 +1876,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const previous = activePlanForChat(input.chatId)
       if (previous) {
         previous.status = "replaced"
+        previous.replacedAt = now
         previous.updatedAt = now
       }
       const plan = makePlanRecord(input, now)
@@ -1782,6 +1893,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         input.provisionalMealDefinitions ?? [],
         input.usage ?? null,
         now,
+        input.allowNewFoodsSnapshot ?? null,
       )
       backing.versions.set(versionKey(input.planId, 1), version)
       profile.interactionGeneration += 1
@@ -1794,8 +1906,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       assertVersionCostIsValid(input.usage)
       throwIfFailing("promotePlanVersion")
       const plan = backing.plans.get(input.planId)
+      const now = nowIso()
       const stale =
-        plan?.status !== "active" || plan.chatId !== input.chatId || plan.currentVersion !== input.baseVersion
+        plan?.status !== "active" ||
+        plan.chatId !== input.chatId ||
+        plan.currentVersion !== input.baseVersion ||
+        plan.weekEnd <= now
       if (stale) return { ok: false as const, reason: "stale" as const }
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
@@ -1811,7 +1927,6 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       ) {
         return { ok: false as const, reason: "stale" as const }
       }
-      const now = nowIso()
       const newVersion = input.baseVersion + 1
       const version = makeVersionRecord(
         input.planId,
@@ -1825,6 +1940,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         input.provisionalMealDefinitions ?? [],
         input.usage ?? null,
         now,
+        input.allowNewFoodsSnapshot ?? null,
       )
       backing.versions.set(versionKey(input.planId, newVersion), version)
       if (input.inventory) {
@@ -1833,6 +1949,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         plan.updatedAt = now
       }
       plan.currentVersion = newVersion
+      plan.approvedVersion = null
+      plan.rejectedVersion = null
       plan.updatedAt = now
       if (input.feedbackBatch) {
         const batchId = input.feedbackBatch.batchId
@@ -1868,10 +1986,60 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       return { ok: true as const, version, generation: profile.interactionGeneration }
     },
 
+    async decidePlanVersion(input) {
+      const now = input.now ?? nowIso()
+      const plan = backing.plans.get(input.planId)
+      if (
+        !plan ||
+        plan.chatId !== input.chatId ||
+        plan.status !== "active" ||
+        plan.currentVersion !== input.version ||
+        plan.weekEnd <= now
+      )
+        return false
+      if (input.action === "accept") {
+        if (plan.rejectedVersion === input.version) return false
+        plan.approvedVersion = input.version
+        plan.updatedAt = now
+      } else {
+        plan.approvedVersion = null
+        plan.rejectedVersion = input.version
+        plan.updatedAt = now
+      }
+      return true
+    },
+
+    async rejectPlanDishes(input) {
+      const now = input.now ?? nowIso()
+      const plan = backing.plans.get(input.planId)
+      const version = backing.versions.get(versionKey(input.planId, input.version))
+      if (
+        !plan ||
+        !version ||
+        plan.chatId !== input.chatId ||
+        plan.status !== "active" ||
+        plan.currentVersion !== input.version ||
+        plan.weekEnd <= now
+      )
+        return false
+      const provisionalIds = new Set(
+        version.provisionalMealDefinitions
+          .filter((definition) => definition.status === "provisional")
+          .map((definition) => definition.id),
+      )
+      if (input.mealIds.some((id) => !provisionalIds.has(id))) return false
+      plan.rejectedMealIds = [...new Set([...plan.rejectedMealIds, ...input.mealIds.filter(Boolean)])]
+      plan.updatedAt = now
+      return true
+    },
+
     async updateWeeklyContext(input) {
       const plan = backing.plans.get(input.planId)
       const stale =
-        plan?.status !== "active" || plan.chatId !== input.chatId || plan.currentVersion !== input.baseVersion
+        plan?.status !== "active" ||
+        plan.chatId !== input.chatId ||
+        plan.currentVersion !== input.baseVersion ||
+        plan.weekEnd <= nowIso()
       if (stale) return { ok: false as const, reason: "stale" as const }
       plan.weeklyInventory = input.weeklyInventory
       plan.weeklyExceptions = input.weeklyExceptions
