@@ -1013,7 +1013,7 @@ describe("bounded meal-planning agent session", () => {
     }
     const rationale =
       rationaleCase === "truthful rationale"
-        ? "tg-rationale: kept paratha because paneer is excluded from household meals."
+        ? "tg-rationale: kept paratha because paneer is unavailable this week."
         : "tg-rationale"
     candidate.policyOutcomes[policy.id] = { outcome: "trade-off", rationale }
     const revisionContext = contextWithCandidateDefinitions(
@@ -1023,27 +1023,34 @@ describe("bounded meal-planning agent session", () => {
         recentPlan: structuredClone(candidate.grid),
         feedbackReferencePlan: structuredClone(candidate.grid),
         customPolicies: [policy],
+        weeklyInventory: { items: [{ name: "paneer", status: "unavailable" as const }], notes: [] },
         profile: { ...context().profile, dietaryExclusions: ["paneer"] },
       }),
       candidate,
     )
     let capturedFeedback: unknown
+    let capturedQuestionIds: string[] = []
     let decisionCalls = 0
     const decisions: DecisionsClient = {
       async decide({ questions }) {
         decisionCalls += 1
+        capturedQuestionIds = Object.keys(questions)
         const question = questions.feedback_0
         if (question?.type === "noul") capturedFeedback = question.instructions
         const instructions =
           question?.type === "noul" && typeof question.instructions !== "string" ? question.instructions : undefined
         const citedOutcomes = instructions?.citedOutcomes as { policy: string; rationale: string }[] | undefined
+        const inventory = instructions?.weeklyInventory as { items: { name: string; status: string }[] } | undefined
         const planChanges = instructions?.beforeAfter as
           | { before: { dish: string } | null; after: { dish: string } | null }[]
           | undefined
         const explained =
           citedOutcomes?.some(
-            (entry) => entry.policy.includes("Avoid paneer") && entry.rationale.includes("because paneer is excluded"),
+            (entry) =>
+              entry.policy.includes("Avoid paneer") && entry.rationale.includes("because paneer is unavailable"),
           ) === true &&
+          inventory?.items.some((item) => item.name === "paneer" && item.status === "unavailable") === true &&
+          !Object.keys(questions).some((id) => id.startsWith("persistent_policy_")) &&
           planChanges?.some(({ before, after }) => before?.dish === "paratha" && after?.dish === "paratha") === true
         return {
           id: "gen",
@@ -1097,6 +1104,7 @@ describe("bounded meal-planning agent session", () => {
       ],
     })
     expect(decisionCalls).toBe(1)
+    expect(capturedQuestionIds).not.toContain("persistent_policy_0")
     expect(result.terminal?.kind).toBe(rationaleCase === "truthful rationale" ? "propose_plan" : "needs_clarification")
     if (rationaleCase === "bare feedback reference") {
       const proposalMessage = result.messages.find(
@@ -1114,12 +1122,18 @@ describe("bounded meal-planning agent session", () => {
   it.each([
     "already listed",
     "newly added",
+    "equivalent ingredient spelling",
   ] as const)("checks shopping-list feedback against reviewed and final lists (%s)", async (listCase) => {
     const alreadyListed = listCase === "already listed"
+    const equivalentSpelling = listCase === "equivalent ingredient spelling"
+    const noNewItems = alreadyListed || equivalentSpelling
+    const finalEasyBuy = equivalentSpelling ? "tomato" : "spinach"
+    const reviewedEasyBuy = equivalentSpelling ? "tomatoes" : "spinach"
     const base = passingCandidate()
-    if (alreadyListed) base.grid.Wed["home-lunch"] = cell("paratha", ["rice", "spinach"], "home-lunch")
+    if (noNewItems)
+      base.grid.Wed["home-lunch"] = cell("paratha", ["rice", equivalentSpelling ? "tomatoes" : "spinach"], "home-lunch")
     const candidate = structuredClone(base)
-    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice", "spinach"], "home-lunch")
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice", equivalentSpelling ? "tomato" : "spinach"], "home-lunch")
     const feedback = {
       id: "tg-empty-shopping-list",
       text: "Replace Wednesday home lunch with poha without adding any shopping-list items",
@@ -1132,7 +1146,7 @@ describe("bounded meal-planning agent session", () => {
         feedbackItems: [feedback],
         recentPlan: base.grid,
         feedbackReferencePlan: base.grid,
-        feedbackReferenceEasyBuys: alreadyListed ? ["spinach"] : [],
+        feedbackReferenceEasyBuys: noNewItems ? [reviewedEasyBuy] : [],
         profile: { ...context().profile, pantryBaseline: ["wheat flour", "rice"] },
       }),
       candidate,
@@ -1169,7 +1183,7 @@ describe("bounded meal-planning agent session", () => {
       evaluateResponse(candidate),
       proposeResponse(proposeInput(candidate, [{ id: feedback.id, text: feedback.text, scope: feedback.scope }])),
     ]
-    if (!alreadyListed)
+    if (!noNewItems)
       responses.push(
         clarifyResponse({
           message: "This revision adds spinach to the shopping list. Please choose a meal that needs no new items.",
@@ -1183,13 +1197,13 @@ describe("bounded meal-planning agent session", () => {
       easyBuyClassifier: createEasyBuyClassifier(decisions),
     })
 
-    expect(capturedEasyBuys).toEqual(["spinach"])
-    expect(capturedReviewedEasyBuys).toEqual(alreadyListed ? ["spinach"] : [])
-    expect(capturedAddedEasyBuys).toEqual(alreadyListed ? [] : ["spinach"])
+    expect(capturedEasyBuys).toEqual([finalEasyBuy])
+    expect(capturedReviewedEasyBuys).toEqual(noNewItems ? [reviewedEasyBuy] : [])
+    expect(capturedAddedEasyBuys).toEqual(noNewItems ? [] : [finalEasyBuy])
     expect(capturedQuestionIds).toContain("easy_buy_0")
     expect(capturedQuestionIds).toContain("feedback_0")
-    expect(result.terminal?.kind).toBe(alreadyListed ? "propose_plan" : "needs_clarification")
-    if (!alreadyListed) {
+    expect(result.terminal?.kind).toBe(noNewItems ? "propose_plan" : "needs_clarification")
+    if (!noNewItems) {
       const proposalMessage = result.messages.find(
         (message) => message.role === "tool" && message.name === "propose_plan",
       )
@@ -1200,7 +1214,7 @@ describe("bounded meal-planning agent session", () => {
           rejectionCodes: ["unaddressed_feedback"],
         })
     } else if (result.terminal?.kind === "propose_plan") {
-      expect(result.terminal.candidate.easyBuys).toEqual(["spinach"])
+      expect(result.terminal.candidate.easyBuys).toEqual([finalEasyBuy])
     }
   })
 

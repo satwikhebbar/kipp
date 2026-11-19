@@ -243,6 +243,7 @@ describe("easy-buy classifier", () => {
         },
       ],
       citedOutcomes: [],
+      weeklyInventory: { items: [{ name: "paneer", status: "unavailable" as const }], notes: [] },
       easyBuys: [],
       reviewedEasyBuys: [],
       addedEasyBuys: [],

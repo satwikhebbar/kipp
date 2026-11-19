@@ -96,18 +96,7 @@ interface OpenRouterDecisionsResponse {
   id?: string
   model?: string
   provider?: string
-  answers?: Record<
-    string,
-    {
-      type?: string
-      noul?: unknown
-      choice?: unknown
-      score?: unknown
-      probabilities?: unknown
-      confidence?: unknown
-      legend?: unknown
-    }
-  >
+  answers?: unknown
   usage?: { input_tokens?: number; output_tokens?: number; cost?: number }
 }
 
@@ -208,16 +197,17 @@ export function createOpenRouterDecisionsClient(
  * protocol error.
  */
 function parseAnswers(
-  raw: OpenRouterDecisionsResponse["answers"],
+  raw: unknown,
   questions: Record<string, DecisionQuestion>,
   questionIds: string[],
 ): Record<string, DecisionAnswer> {
-  if (!raw) throw new ToolProviderProtocolError("OpenRouter Decisions returned no answers")
+  if (!isRecord(raw)) throw new ToolProviderProtocolError("OpenRouter Decisions returned no answers")
   const answers: Record<string, DecisionAnswer> = {}
   for (const id of questionIds) {
+    if (!Object.hasOwn(raw, id)) continue
     const answer = raw[id]
     const expected = questions[id]?.type
-    if (!answer) continue
+    if (!isRecord(answer)) throw new ToolProviderProtocolError(`OpenRouter Decisions answer "${id}" is malformed`)
     if (answer.type !== expected)
       throw new ToolProviderProtocolError(`OpenRouter Decisions answer "${id}" has an unexpected type`)
     if (answer.type === "noul") {
@@ -253,6 +243,11 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
     !Array.isArray(value) &&
     Object.values(value).every((entry) => typeof entry === "number")
   )
+}
+
+/** True for non-array objects whose keys can represent named response fields. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 /** True when every value is a string. */

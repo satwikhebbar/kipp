@@ -93,6 +93,7 @@ export interface FeedbackCheck {
   scope: { day?: string; slot?: string }
   changes: readonly FeedbackPlanChange[]
   citedOutcomes: readonly FeedbackCitedOutcome[]
+  weeklyInventory: WeeklyInventory
   easyBuys: readonly string[]
   reviewedEasyBuys: readonly string[]
   addedEasyBuys: readonly string[]
@@ -201,6 +202,7 @@ export function createEasyBuyClassifier(
             scope: check.scope,
             beforeAfter: check.changes,
             citedOutcomes: check.citedOutcomes,
+            weeklyInventory: check.weeklyInventory,
             easyBuys: check.easyBuys,
             reviewedEasyBuys: check.reviewedEasyBuys,
             addedEasyBuys: check.addedEasyBuys,

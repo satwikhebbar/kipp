@@ -108,6 +108,30 @@ describe("OpenRouter Decisions client", () => {
     )
   })
 
+  it("treats a non-record answers container as a protocol error", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ answers: [], usage: {} }),
+    })
+    const client = createOpenRouterDecisionsClient("key")
+    await expect(client.decide({ state: "policy", questions: NOUL_QUESTIONS })).rejects.toThrow(
+      "OpenRouter Decisions returned no answers",
+    )
+  })
+
+  it.each([null, false])("treats a present invalid answer (%s) as a protocol error", async (invalidAnswer) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ answers: { is_ordinary: invalidAnswer }, usage: {} }),
+    })
+    const client = createOpenRouterDecisionsClient("key")
+    await expect(client.decide({ state: "policy", questions: NOUL_QUESTIONS })).rejects.toThrow(
+      'OpenRouter Decisions answer "is_ordinary" is malformed',
+    )
+  })
+
   it("treats a wrong-type answer as a protocol error", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

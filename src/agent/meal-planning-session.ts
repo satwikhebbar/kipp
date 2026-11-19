@@ -533,8 +533,8 @@ function authoritativeFeedbackChecks(
       return [{ day, slot, before: asEvidence(before), after: asEvidence(after) }]
     })
     const reviewedEasyBuys = context.feedbackReferenceEasyBuys ?? []
-    const reviewedSet = new Set(reviewedEasyBuys)
-    const finalSet = new Set(candidate.easyBuys)
+    const reviewedSet = new Set(reviewedEasyBuys.map(normalizeIngredient))
+    const finalSet = new Set(candidate.easyBuys.map(normalizeIngredient))
     return [
       {
         feedbackId: item.id,
@@ -556,10 +556,11 @@ function authoritativeFeedbackChecks(
             },
           ]
         }),
+        weeklyInventory: context.weeklyInventory,
         easyBuys: candidate.easyBuys,
         reviewedEasyBuys,
-        addedEasyBuys: candidate.easyBuys.filter((item) => !reviewedSet.has(item)),
-        removedEasyBuys: reviewedEasyBuys.filter((item) => !finalSet.has(item)),
+        addedEasyBuys: candidate.easyBuys.filter((item) => !reviewedSet.has(normalizeIngredient(item))),
+        removedEasyBuys: reviewedEasyBuys.filter((item) => !finalSet.has(normalizeIngredient(item))),
       },
     ]
   })
