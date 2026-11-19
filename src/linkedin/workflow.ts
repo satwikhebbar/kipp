@@ -8,7 +8,7 @@ import {
   type ConversationTurnCoordinator,
   createConversationTurn,
 } from "../core/conversation-turn"
-import { computeCost, formatCostLine } from "../core/cost"
+import { addReportedCostUsd, computeCost, formatCostLine } from "../core/cost"
 import { remainingFeedbackTimeoutSeconds, resolveFeedbackDeadline } from "../core/feedback-session"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowParams } from "../core/types"
@@ -17,7 +17,8 @@ import { createGitHubClient } from "../integrations/github"
 import { createLinkedInClient, getLinkedInToken, LinkedInError } from "../integrations/linkedin"
 import { createNotionClient } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
-import { createToolProvider, resolveModel } from "../providers"
+import { createToolProvider } from "../providers"
+import { resolveOpenRouterModel } from "../providers/routing"
 import { logRuntime } from "../runtime/logging"
 import { userFacingFailureMessage } from "../runtime/user-failures"
 import { createIdeaManager } from "./ideas/manager"
@@ -237,12 +238,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
     const state = await stepDo("generate", async () => {
       const provider = createToolProvider(
-        this.env.LLM_API_KEY,
-        this.env.LLM_PROVIDER,
-        this.env.LLM_MODEL,
+        this.env.OPENROUTER_API_KEY,
+        "openrouter",
+        resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL),
         Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
       )
-      const model = resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
+      const model = resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
 
       const client = createGitHubClient(this.env)
       const manager = createIdeaManager(createNotionClient(this.env))
@@ -300,6 +301,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         chatId,
         costInputTokens: usage.inputTokens,
         costOutputTokens: usage.outputTokens,
+        costReportedUsd: usage.reportedCostUsd,
         costLine,
         model,
       })
@@ -344,6 +346,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
     let currentMessages = state.messages
     let runningInputTokens = state.costInputTokens ?? 0
     let runningOutputTokens = state.costOutputTokens ?? 0
+    let runningReportedCostUsd: number | null | undefined = state.costReportedUsd
     let latestCostLine = state.costLine
 
     const expireFeedback = async (round: number): Promise<PipelineWorkflowOutcome> => {
@@ -555,12 +558,12 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
 
       const revised = await stepDo(`revise-${revisionCount}`, async () => {
         const provider = createToolProvider(
-          this.env.LLM_API_KEY,
-          this.env.LLM_PROVIDER,
-          this.env.LLM_MODEL,
+          this.env.OPENROUTER_API_KEY,
+          "openrouter",
+          resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL),
           Number(this.env.LLM_MAX_RETRIES ?? DEFAULT_LLM_RETRIES),
         )
-        const model = state.model ?? resolveModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
+        const model = resolveOpenRouterModel(this.env.LLM_PROVIDER, this.env.LLM_MODEL)
         const feedback = text === "__revise__" ? undefined : text
         const messages = feedback ? appendLinkedInFeedback(currentMessages, feedback) : currentMessages
         const session = await runLinkedInToolSession(provider, messages)
@@ -582,6 +585,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
         const cumulativeUsage: LLMUsage = {
           inputTokens: runningInputTokens + stepUsage.inputTokens,
           outputTokens: runningOutputTokens + stepUsage.outputTokens,
+          reportedCostUsd: addReportedCostUsd(runningReportedCostUsd, stepUsage.reportedCostUsd, true),
         }
         const cost = computeCost(cumulativeUsage, model)
         const costLine = formatCostLine(cost)
@@ -591,6 +595,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
           messages: session.messages,
           costInputTokens: cumulativeUsage.inputTokens,
           costOutputTokens: cumulativeUsage.outputTokens,
+          costReportedUsd: cumulativeUsage.reportedCostUsd,
           costLine,
           model,
         })
@@ -601,6 +606,7 @@ export class PipelineWorkflow extends WorkflowEntrypoint<Env, WorkflowParams> {
       currentMessages = revised.messages
       runningInputTokens = revised.costInputTokens
       runningOutputTokens = revised.costOutputTokens
+      runningReportedCostUsd = revised.costReportedUsd
       latestCostLine = revised.costLine
 
       if (state.chatId && this.env.TELEGRAM_BOT_TOKEN) {

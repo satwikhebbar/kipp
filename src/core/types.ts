@@ -39,7 +39,7 @@ export interface Env {
   LLM_API_KEY: string
   LLM_PROVIDER: string
   LLM_MODEL?: string
-  /** Dedicated key for the meal-planning OpenRouter client. */
+  /** OpenRouter key shared by all production LLM workflows. */
   OPENROUTER_API_KEY: string
   LLM_MAX_RETRIES?: string
   /** Local-only opt-in for logging redacted LLM conversation transcripts. */
@@ -65,6 +65,7 @@ export interface WorkflowCost {
   totalOutputTokens: number
   totalCostUsd: number | null
   model: string
+  costKind?: "reported" | "estimated" | "unavailable" | "unknown-model"
 }
 
 /** Metadata-only shape returned by list/query operations; body is absent. */
@@ -88,6 +89,9 @@ export interface Idea extends IdeaSummary {
 export interface LLMUsage {
   inputTokens: number
   outputTokens: number
+  /** Provider-reported USD cost when the provider returns it. */
+  /** `null` means the provider was asked for cost but no valid amount was returned. */
+  reportedCostUsd?: number | null
 }
 
 export interface LLMResponse {

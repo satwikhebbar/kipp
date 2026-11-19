@@ -235,6 +235,8 @@ export interface MealPlanContext {
   weeklyExceptions: WeeklyExceptions
   /** Current week's base grid for revision diff and feedback scope checks. */
   recentPlan?: MealGrid | null
+  /** Plan the parent reviewed; resolves explicit moves from cells removed by a context update. */
+  feedbackReferencePlan?: MealGrid | null
   /** Plan from the immediately preceding week, when one exists; distinct from the revision base. */
   priorWeekPlan?: MealGrid | null
   request: PlanRequest

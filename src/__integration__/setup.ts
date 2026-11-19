@@ -256,7 +256,7 @@ export function createFakeNetwork(config?: FakeNetworkConfig): FakeNetwork {
       return respond({ id: "urn:li:ugcPost:fake" }, 201)
     }
 
-    if (urlStr.includes("api.deepseek.com")) {
+    if (urlStr.includes("openrouter.ai/api/v1/chat/completions")) {
       const response = llmResponses[llmCallIndex++] ?? {
         choices: [{ message: { content: "Default response" } }],
         usage: { prompt_tokens: 0, completion_tokens: 0 },
@@ -311,7 +311,8 @@ export function createBaseEnv(overrides?: Partial<Env>): Env {
     LINKEDIN_CLIENT_SECRET: "",
     LINKEDIN_ACCESS_TOKEN: "",
     LINKEDIN_AUTHOR_URN: "",
-    LLM_API_KEY: "key",
+    LLM_API_KEY: "direct-key",
+    OPENROUTER_API_KEY: "router-key",
     LLM_PROVIDER: "deepseek",
     POSTING_CADENCE_DAYS: "7",
     SUBSTACK_RSS_URL: "",

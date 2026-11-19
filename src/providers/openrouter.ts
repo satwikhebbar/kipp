@@ -1,4 +1,4 @@
-import type { LLMResponse } from "../core/types"
+import type { LLMResponse, LLMUsage } from "../core/types"
 import {
   classifyToolArgumentsParseFailure,
   type DeepseekToolWireMessage,
@@ -30,6 +30,20 @@ interface OpenRouterToolResponse {
     prompt_tokens?: number
     completion_tokens?: number
     completion_tokens_details?: { reasoning_tokens?: number }
+    cost?: number
+  }
+}
+
+/** Keeps only finite, non-negative costs reported by OpenRouter. */
+function parseUsage(usage: OpenRouterToolResponse["usage"]): LLMUsage {
+  const reportedCostUsd = usage?.cost
+  return {
+    inputTokens: usage?.prompt_tokens ?? 0,
+    outputTokens: usage?.completion_tokens ?? 0,
+    reportedCostUsd:
+      typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
+        ? reportedCostUsd
+        : null,
   }
 }
 
@@ -39,7 +53,7 @@ export function createOpenRouterGenerator(apiKey: string, modelName: string) {
     const response = await fetch(OPENROUTER_CHAT_COMPLETIONS_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: modelName, messages }),
+      body: JSON.stringify({ model: modelName, messages, usage: { include: true } }),
       signal: AbortSignal.timeout(OPENROUTER_DEFAULT_REQUEST_TIMEOUT_MS),
     })
     if (!response.ok) throw new Error(`OpenRouter API error ${response.status}`)
@@ -48,7 +62,7 @@ export function createOpenRouterGenerator(apiKey: string, modelName: string) {
     if (!message) throw new Error("OpenRouter returned empty choices")
     return {
       text: message.content ?? "",
-      usage: { inputTokens: data.usage?.prompt_tokens ?? 0, outputTokens: data.usage?.completion_tokens ?? 0 },
+      usage: parseUsage(data.usage),
     }
   }
 }
@@ -87,6 +101,7 @@ export function createOpenRouterToolClient(
         ...(toolChoice ? { tool_choice: toolChoice } : {}),
         ...(effort ? { reasoning: { effort } } : {}),
         provider: { require_parameters: true },
+        usage: { include: true },
       })
       const timeoutMs = options.requestTimeoutMs ?? OPENROUTER_DEFAULT_REQUEST_TIMEOUT_MS
       const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
@@ -185,7 +200,7 @@ export function createOpenRouterToolClient(
         toolCalls,
         reasoningContent: message.reasoning ?? undefined,
         reasoningDetails: message.reasoning_details,
-        usage: { inputTokens: data.usage?.prompt_tokens ?? 0, outputTokens: data.usage?.completion_tokens ?? 0 },
+        usage: parseUsage(data.usage),
       }
     },
   }

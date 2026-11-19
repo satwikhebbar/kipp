@@ -6,7 +6,7 @@ import {
   resolveWeekContextUpdate,
   runMealPlanningAgentSession,
 } from "../agent/meal-planning-session"
-import { computeCostByModel, formatCostLine } from "../core/cost"
+import { computeVersionCost, formatCostLine } from "../core/cost"
 import { createInteractionRouter, type InteractionRegistration } from "../core/interaction-router-client"
 import { type Env, INTERACTION_KIND, type LLMUsage, type WorkflowInteractionKind } from "../core/types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "../core/workflow-events"
@@ -15,8 +15,9 @@ import { createToolProvider, type ToolConversationMessage, type ToolProviderRequ
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
 import { logRuntime } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
-import { computeCoverageSet } from "./coverage"
+import { projectEligibleGrid } from "./coverage"
 import { createEasyBuyClassifier } from "./easy-buy-classifier"
+import { applicablePlanFeedback, isConcretePlanFeedback } from "./evaluation"
 import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -128,20 +129,32 @@ export function renderRevisionFeedback(items: FeedbackItem[]): string {
 }
 
 /** Sums two LLM usage records. */
-function addUsage(left: LLMUsage, right: LLMUsage): LLMUsage {
+function addUsage(left: LLMUsage, right: LLMUsage, hasLeftUsage: boolean): LLMUsage {
   return {
     inputTokens: left.inputTokens + right.inputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
+    ...(!hasLeftUsage
+      ? right.reportedCostUsd === undefined
+        ? {}
+        : { reportedCostUsd: right.reportedCostUsd }
+      : left.reportedCostUsd === undefined && right.reportedCostUsd === undefined
+        ? {}
+        : typeof left.reportedCostUsd === "number" && typeof right.reportedCostUsd === "number"
+          ? { reportedCostUsd: left.reportedCostUsd + right.reportedCostUsd }
+          : { reportedCostUsd: null }),
   }
 }
 
 /** Records one generated plan version's token usage under the meal-planner model, plus any reported classifier cost. */
-function makeVersionUsage(usage: LLMUsage, decisionsCostUsd = 0): VersionUsage {
+function makeVersionUsage(usage: LLMUsage, decisionsCostUsd: number | null = 0): VersionUsage {
   return {
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     model: MEAL_PLANNER_MODEL,
-    decisionsCostUsd,
+    costUsd:
+      typeof usage.reportedCostUsd === "number" && decisionsCostUsd !== null
+        ? usage.reportedCostUsd + decisionsCostUsd
+        : null,
   }
 }
 
@@ -328,7 +341,10 @@ export async function runAgentCenteredMealPlanningWorkflow(
           weeklyInventory: outcome.propose.weeklyInventory,
           weeklyExceptions: outcome.propose.weeklyExceptions,
           provisionalMealDefinitions: outcome.propose.provisionalMealDefinitions,
-          usage: makeVersionUsage(addUsage(extractionUsage ?? ZERO_USAGE, planning.usage), planning.decisionsCostUsd),
+          usage: makeVersionUsage(
+            addUsage(extractionUsage ?? ZERO_USAGE, planning.usage, extractionUsage !== null),
+            planning.decisionsCostUsd,
+          ),
         })
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
@@ -364,7 +380,8 @@ export async function runAgentCenteredMealPlanningWorkflow(
  * Extracts week-scoped facts (inventory changes and schedule exceptions) from
  * the parent's free-text request, merges them into the supplied context, and
  * returns the merged context alongside the extraction call's token usage.
- * Usage is null when there is no request text or the extraction call fails.
+ * Usage is null only when extraction is skipped. Failed attempts with no usage
+ * retain an unavailable reported cost so the complete version cost is unknown.
  */
 async function extractInitialWeekContext(
   env: Env,
@@ -374,7 +391,7 @@ async function extractInitialWeekContext(
 ): Promise<{ context: MealPlanContext; usage: LLMUsage | null }> {
   if (!event.payload.requestText?.trim()) return { context, usage: null }
   const result = await stepDo(step, "meal-planning-extract-week-context", async () => {
-    let usage: LLMUsage | null = null
+    let usage: LLMUsage = { ...ZERO_USAGE, reportedCostUsd: null }
     try {
       const provider = createToolProvider(
         env.OPENROUTER_API_KEY,
@@ -402,7 +419,11 @@ async function extractInitialWeekContext(
         toolChoice: "required",
         reasoning: "disabled",
       })
-      usage = { inputTokens: response.usage?.inputTokens ?? 0, outputTokens: response.usage?.outputTokens ?? 0 }
+      usage = {
+        inputTokens: response.usage?.inputTokens ?? 0,
+        outputTokens: response.usage?.outputTokens ?? 0,
+        reportedCostUsd: response.usage?.reportedCostUsd,
+      }
       const call = response.toolCalls?.find((candidate) => candidate.name === "extract_week_context")
       const parsed = weekContextExtractionInputSchema.safeParse(stripNullProperties(call?.input))
       if (!parsed.success) {
@@ -503,7 +524,7 @@ async function runPlanningSession(
     allowWeekContextUpdate?: boolean
     occurrence: string
   },
-): Promise<{ outcome: PlanningOutcome; usage: LLMUsage; decisionsCostUsd: number }> {
+): Promise<{ outcome: PlanningOutcome; usage: LLMUsage; decisionsCostUsd: number | null }> {
   const notifyPrefix = `meal-planning-notify-${options.occurrence}`
   const sessionDeadline = await stepDo(
     step,
@@ -511,7 +532,8 @@ async function runPlanningSession(
     async () => Date.now() + MEAL_PLANNING_TTL_MS,
   )
   let usage: LLMUsage = { inputTokens: 0, outputTokens: 0 }
-  let decisionsCostUsd = 0
+  let hasUsage = false
+  let decisionsCostUsd: number | null = 0
   for (let turn = 0; turn < MEAL_MAX_SESSION_TURNS; turn++) {
     if (
       await stepDo(
@@ -563,8 +585,12 @@ async function runPlanningSession(
       await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
       return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
-    usage = addUsage(usage, session.usage)
-    decisionsCostUsd += session.decisionUsage.costUsd
+    usage = addUsage(usage, session.usage, hasUsage)
+    hasUsage = true
+    decisionsCostUsd =
+      decisionsCostUsd === null || session.decisionUsage.costUsd === null
+        ? null
+        : decisionsCostUsd + session.decisionUsage.costUsd
     options.messages = session.messages
     if (session.decisionUsage.inputTokens || session.decisionUsage.costUsd)
       logRuntime(env, {
@@ -574,7 +600,8 @@ async function runPlanningSession(
         details: {
           inputTokens: session.decisionUsage.inputTokens,
           outputTokens: session.decisionUsage.outputTokens,
-          costUsd: session.decisionUsage.costUsd,
+          ...(session.decisionUsage.costUsd !== null ? { costUsd: session.decisionUsage.costUsd } : {}),
+          costAvailable: session.decisionUsage.costUsd !== null,
         },
       })
     logAgentSession(env, event.instanceId, session)
@@ -703,11 +730,8 @@ async function sendPlanAndRegister(
     if (!version.usage || !env.MEAL_PLANNING_DB) return ""
     const usageTotal = await createMealPlanningStore(env.MEAL_PLANNING_DB).sumPlanUsage(plan.planId)
     if (!usageTotal) return ""
-    const cost = computeCostByModel(usageTotal.byModel)
-    // The classifier's reported cost is a flat USD sum the pricing table cannot
-    // reproduce, so it is added to the priced planner total before formatting.
-    const totalCostUsd = cost.totalCostUsd === null ? null : cost.totalCostUsd + usageTotal.decisionsCostUsd
-    return formatCostLine({ ...cost, totalCostUsd }, { preserveHistoricalPricing: true })
+    const cost = computeVersionCost(usageTotal.byModel)
+    return formatCostLine(cost, { preserveHistoricalPricing: true })
   })
   const message = `${renderPlanLaunchMessage(plan)}${costLine}`
   const reviewUrl = miniAppLaunchUrl(env.MINI_APP_ORIGIN)
@@ -966,7 +990,12 @@ async function failMiniAppBatch(
 /** Builds the canonical submission payload from a live-loop event, or null when it carries nothing. */
 function submissionFromPayload(payload: MealPlanningLiveEvent | undefined): Submission | null {
   if (!payload) return null
-  if (payload.items?.length) return { items: payload.items }
+  if (payload.items?.length)
+    return {
+      items: payload.items.map((item) =>
+        item.target?.kind === "cell" ? { ...item, scope: { day: item.target.day, slot: item.target.slot } } : item,
+      ),
+    }
   if (!payload.text) return null
   const source = payload.source === "telegram-reply" ? "telegram-reply" : "telegram-text"
   return coerceSubmission(payload.text, source, payload.messageId ?? 0)
@@ -985,7 +1014,7 @@ async function runRevision(
   contextAlreadyUpdated = false,
   feedbackBatch?: FeedbackBatchRecord,
   priorUsage: LLMUsage = ZERO_USAGE,
-  priorDecisionsCostUsd = 0,
+  priorDecisionsCostUsd: number | null = 0,
 ): Promise<number | null> {
   const occurrence = `revision-${iteration}${contextAlreadyUpdated ? "-after-context" : ""}`
   const notifyPrefix = `meal-planning-notify-${occurrence}`
@@ -997,10 +1026,19 @@ async function runRevision(
   // applies a week-context fact (for example, an item going out of season).
   // Keep those authoritative items in the follow-up evaluation so the
   // requested cells cannot be silently dropped after the context update.
-  const feedbackItems = contextAlreadyUpdated && !feedbackBatch ? [] : submission.items
+  // Scoped and concrete plan-wide Telegram requests retain their authority;
+  // context-only facts are retired after applying their inventory or calendar update.
   // A stored plan can predate a recurring schedule rule. Start every revision
   // from the cells still eligible under the household's current schedule.
   const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)
+  const feedbackReference = {
+    recentPlan: revisionBaseCandidate.grid,
+    feedbackReferencePlan: active.version.candidate.grid,
+  }
+  const feedbackItems =
+    contextAlreadyUpdated && !feedbackBatch
+      ? applicablePlanFeedback(submission.items, feedbackReference)
+      : submission.items
   const priorWeek = await stepDo(step, `meal-planning-read-prior-week-${occurrence}`, () =>
     store.latestPlanForWeek(
       event.payload.chatId,
@@ -1014,15 +1052,16 @@ async function runRevision(
     weeklyInventory: active.plan.weeklyInventory,
     weeklyExceptions: active.plan.weeklyExceptions,
     recentPlan: revisionBaseCandidate.grid,
+    feedbackReferencePlan: active.version.candidate.grid,
     priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
-    request: { kind: "revision", text: submission.items.map((item) => item.text).join(" ") },
+    request: { kind: "revision", text: feedbackItems.map((item) => item.text).join(" ") },
     feedbackItems,
     provisionalMealDefinitions: active.version.provisionalMealDefinitions,
   }
   const messages: ToolConversationMessage[] = [
     {
       role: "user",
-      text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(feedbackItems)}${contextAlreadyUpdated ? `\nWeek-context updates from this message are already applied. Carry out the requested replan: ${submission.items.map((item) => item.text).join(" ")}` : ""}\n\n${renderHouseholdContext(context)}`,
+      text: `${renderPlanningTimeContext(new Date(), active.plan.timezone, active.plan.weekStart, active.plan.weekEnd)}\nRevision feedback:\n${renderRevisionFeedback(feedbackItems)}${contextAlreadyUpdated ? `\nWeek-context updates from this message are already applied. ${feedbackItems.length ? `Carry out the requested replan: ${feedbackItems.map((item) => item.text).join(" ")}` : "Reconcile the grid with the updated schedule and inventory."}` : ""}\n\n${renderHouseholdContext(context)}`,
     },
   ]
   const planning = await runPlanningSession(env, step, event, {
@@ -1034,8 +1073,13 @@ async function runRevision(
     occurrence,
   })
   const outcome = planning.outcome
-  const roundUsage = addUsage(priorUsage, planning.usage)
-  const roundDecisionsCostUsd = priorDecisionsCostUsd + planning.decisionsCostUsd
+  const hasPriorUsage =
+    priorUsage.inputTokens > 0 || priorUsage.outputTokens > 0 || priorUsage.reportedCostUsd !== undefined
+  const roundUsage = addUsage(priorUsage, planning.usage, hasPriorUsage)
+  const roundDecisionsCostUsd =
+    priorDecisionsCostUsd === null || planning.decisionsCostUsd === null
+      ? null
+      : priorDecisionsCostUsd + planning.decisionsCostUsd
   if (outcome.kind === "week_context_updated") {
     const updatedContext = outcome.update
     const persisted = await stepDo(step, `meal-planning-update-week-context-${occurrence}`, () =>
@@ -1052,10 +1096,22 @@ async function runRevision(
       return null
     }
     // Standalone Telegram context facts may intentionally stop after the
-    // context update. Mini App submissions, and scoped Telegram feedback,
+    // context update. Mini App submissions and concrete Telegram plan requests
     // still require a revision even when the model marks the context update
     // itself as replan:false.
-    const feedbackRequiresRevision = Boolean(feedbackBatch) || submission.items.some((item) => item.scope)
+    const updatedRevisionBase = withoutIneligibleCells(
+      active.version.candidate,
+      {
+        ...active.plan,
+        weeklyInventory: updatedContext.weeklyInventory,
+        weeklyExceptions: updatedContext.weeklyExceptions,
+      },
+      profile,
+    )
+    const updatedFeedbackContext = { ...context, recentPlan: updatedRevisionBase.grid }
+    const feedbackRequiresRevision =
+      Boolean(feedbackBatch) ||
+      submission.items.some((item) => item.scope || isConcretePlanFeedback(item, updatedFeedbackContext))
     if (!updatedContext.replan && !feedbackRequiresRevision) {
       if (feedbackBatch)
         await stepDo(step, `meal-planning-consume-mini-app-batch-${occurrence}`, () =>
@@ -1193,26 +1249,17 @@ function withoutIneligibleCells(
   plan: MealPlanRecord,
   profile: StoredMealProfile,
 ): MealPlanCandidate {
-  const coverage = computeCoverageSet({
-    schedule: profile.schedule,
-    profile: profile.profile,
-    customPolicies: profile.customPolicies,
-    weeklyInventory: plan.weeklyInventory,
-    weeklyExceptions: plan.weeklyExceptions,
-    recentPlan: candidate.grid,
-    request: { kind: "revision", text: "week context update" },
-  })
-  const eligible = new Set(coverage.required.map((cell) => `${cell.day}\u0000${cell.slotId}`))
   return {
     ...candidate,
-    grid: Object.fromEntries(
-      Object.entries(candidate.grid)
-        .map(([day, cells]) => [
-          day,
-          Object.fromEntries(Object.entries(cells).filter(([slot]) => eligible.has(`${day}\u0000${slot}`))),
-        ])
-        .filter(([, cells]) => Object.keys(cells).length),
-    ),
+    grid: projectEligibleGrid(candidate.grid, {
+      schedule: profile.schedule,
+      profile: profile.profile,
+      customPolicies: profile.customPolicies,
+      weeklyInventory: plan.weeklyInventory,
+      weeklyExceptions: plan.weeklyExceptions,
+      recentPlan: candidate.grid,
+      request: { kind: "revision", text: "week context update" },
+    }),
   }
 }
 

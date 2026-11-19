@@ -12,43 +12,46 @@ vi.mock("cloudflare:workers", () => {
 })
 
 const mockCreateGenerator = vi.hoisted(() => vi.fn())
-const mockResolveModel = vi.hoisted(() => vi.fn((_p: string, m?: string) => m ?? "deepseek-flash"))
+const mockProviderSelection = vi.hoisted(() => vi.fn())
 vi.mock("../providers", () => ({
-  createToolProvider: () => ({
-    generate: async (input: {
-      messages: Array<
-        | { role: string; text: string }
-        | { role: "assistant"; toolCalls: Array<{ input: { response?: string; post?: string } }> }
-        | { role: "tool" }
-      >
-    }) => {
-      const messages = input.messages.flatMap((message) => {
-        if (message.role === "tool") return []
-        if ("toolCalls" in message) return [{ role: "assistant", content: message.toolCalls[0]?.input.response ?? "" }]
-        if ("text" in message) return [{ role: message.role, content: message.text }]
-        return []
-      })
-      let response = await mockCreateGenerator({ messages })
-      while (
-        typeof response?.text === "string" &&
-        response.text.trim().startsWith("[") &&
-        response.text.includes('"passed"')
-      )
-        response = await mockCreateGenerator({ messages })
-      if (response?.toolCalls) return response
-      return {
-        toolCalls: [
-          {
-            id: crypto.randomUUID(),
-            name: "submit_linkedin_response",
-            input: { response: response.text, post: response.text },
-          },
-        ],
-        usage: response.usage,
-      }
-    },
-  }),
-  resolveModel: mockResolveModel,
+  createToolProvider: (...args: unknown[]) => {
+    mockProviderSelection(...args)
+    return {
+      generate: async (input: {
+        messages: Array<
+          | { role: string; text: string }
+          | { role: "assistant"; toolCalls: Array<{ input: { response?: string; post?: string } }> }
+          | { role: "tool" }
+        >
+      }) => {
+        const messages = input.messages.flatMap((message) => {
+          if (message.role === "tool") return []
+          if ("toolCalls" in message)
+            return [{ role: "assistant", content: message.toolCalls[0]?.input.response ?? "" }]
+          if ("text" in message) return [{ role: message.role, content: message.text }]
+          return []
+        })
+        let response = await mockCreateGenerator({ messages })
+        while (
+          typeof response?.text === "string" &&
+          response.text.trim().startsWith("[") &&
+          response.text.includes('"passed"')
+        )
+          response = await mockCreateGenerator({ messages })
+        if (response?.toolCalls) return response
+        return {
+          toolCalls: [
+            {
+              id: crypto.randomUUID(),
+              name: "submit_linkedin_response",
+              input: { response: response.text, post: response.text },
+            },
+          ],
+          usage: response.usage,
+        }
+      },
+    }
+  },
 }))
 
 const mockAssertStepOutputSize = vi.hoisted(() => vi.fn((v: unknown) => v))
@@ -235,6 +238,7 @@ describe("PipelineWorkflow", () => {
     stepDo.mockReset()
     stepDo.mockImplementation(async (_name: string, fn: () => unknown) => fn())
     waitForEvent.mockReset()
+    mockProviderSelection.mockReset()
     mockCreateGenerator.mockReset()
     mockAssertStepOutputSize.mockReset()
   }
@@ -853,7 +857,9 @@ describe("PipelineWorkflow", () => {
   })
 
   it("includes cost line in initial Telegram notification", async () => {
-    const responses = [{ text: "My draft content", usage: { inputTokens: 100000, outputTokens: 50000 } }]
+    const responses = [
+      { text: "My draft content", usage: { inputTokens: 100000, outputTokens: 50000, reportedCostUsd: 0.1234 } },
+    ]
     let callIdx = 0
 
     testRun()
@@ -869,16 +875,23 @@ describe("PipelineWorkflow", () => {
 
     const notifyMsg = telegramTexts.find((t) => t.startsWith("Draft for idea"))
     expect(notifyMsg).toBeDefined()
-    expect(notifyMsg).toContain("Est. cost:")
+    expect(notifyMsg).toContain("Cost: $")
     expect(notifyMsg).toContain("100000 in")
     expect(notifyMsg).toContain("50000 out")
-    expect(notifyMsg).toContain("deepseek-flash")
+    expect(notifyMsg).toContain("google/gemini-2.5-flash")
+    expect(notifyMsg).toContain("$0.1234")
+    expect(mockProviderSelection).toHaveBeenCalledWith(
+      "openrouter-key",
+      "openrouter",
+      "google/gemini-2.5-flash",
+      expect.any(Number),
+    )
   })
 
   it("cumulative cost across revisions appears in revised notification", async () => {
     const responses = [
-      { text: "First draft", usage: { inputTokens: 100, outputTokens: 50 } },
-      { text: "Revised draft", usage: { inputTokens: 200, outputTokens: 80 } },
+      { text: "First draft", usage: { inputTokens: 100, outputTokens: 50, reportedCostUsd: 0.001 } },
+      { text: "Revised draft", usage: { inputTokens: 200, outputTokens: 80, reportedCostUsd: 0.002 } },
     ]
     let callIdx = 0
 
@@ -898,13 +911,17 @@ describe("PipelineWorkflow", () => {
 
     const notifyMsg = telegramTexts.find((t) => t.startsWith("Revised draft for idea"))
     expect(notifyMsg).toBeDefined()
-    expect(notifyMsg).toContain("Est. cost:")
+    expect(notifyMsg).toContain("Cost: $")
+    expect(notifyMsg).toContain("$0.0030")
+    expect(mockProviderSelection).toHaveBeenCalledTimes(2)
     expect(notifyMsg).toContain("300 in")
     expect(notifyMsg).toContain("130 out")
+    expect(notifyMsg).toContain("$0.0030")
+    expect(mockProviderSelection).toHaveBeenCalledTimes(2)
   })
 
   it("marks idea expired without Telegram when no chatId is resolved", async () => {
-    const responses = [{ text: "Draft", usage: { inputTokens: 100, outputTokens: 50 } }]
+    const responses = [{ text: "Draft", usage: { inputTokens: 100, outputTokens: 50, reportedCostUsd: 0.001 } }]
     let callIdx = 0
     const noChatPage = { ...BASE_PAGE, chatId: undefined }
 
@@ -924,7 +941,7 @@ describe("PipelineWorkflow", () => {
   })
 
   it("includes cost line in publish notification when one token dimension is zero", async () => {
-    const responses = [{ text: "Draft content", usage: { inputTokens: 0, outputTokens: 50 } }]
+    const responses = [{ text: "Draft content", usage: { inputTokens: 0, outputTokens: 50, reportedCostUsd: 0.003 } }]
     let callIdx = 0
 
     testRun()
@@ -950,14 +967,14 @@ describe("PipelineWorkflow", () => {
 
     const publishMsg = telegramTexts.find((t) => t.startsWith("✅"))
     expect(publishMsg).toBeDefined()
-    expect(publishMsg).toContain("Est. cost:")
+    expect(publishMsg).toContain("Cost: $")
     expect(publishMsg).toContain("0 in")
     expect(publishMsg).toContain("50 out")
-    expect(publishMsg).toContain("deepseek-flash")
+    expect(publishMsg).toContain("google/gemini-2.5-flash")
   })
 
   it("restores cumulative cost and latest cost line when a completed revision step is replayed", async () => {
-    const responses = [{ text: "First draft", usage: { inputTokens: 100, outputTokens: 50 } }]
+    const responses = [{ text: "First draft", usage: { inputTokens: 100, outputTokens: 50, reportedCostUsd: 0.001 } }]
     let callIdx = 0
 
     testRun()

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { loadScenarios } from "../meal-planning/corpus/load"
 import {
+  applicablePlanFeedback,
   evaluateMealPlan,
   evaluateMealPlanSelection,
   evaluateMealPlanSelectionPatch,
+  isConcretePlanFeedback,
 } from "../meal-planning/evaluation"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "../meal-planning/hydration"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
@@ -830,6 +832,420 @@ describe("meal-planning evaluator", () => {
     const evaluation = evaluateMealPlan(outOfScope, context)
     expect(failureCodes(evaluation)).toEqual(["unscoped_cell_changed"])
     expect(evaluation.failures[0]).toMatchObject({ code: "unscoped_cell_changed", day: "Wed", slot: "breakfast" })
+  })
+
+  it.each<[string, boolean]>([
+    ...[" and ", ", ", " but ", " so "].flatMap((separator) => [
+      ...["Friday should be lighter", "school lunch should be lighter", "poha should be lighter"].map(
+        (preference) => [`We have no pears${separator}${preference}`, true] as [string, boolean],
+      ),
+      [`We have more pears than Monday${separator}Friday`, false] as [string, boolean],
+    ]),
+    ...[" and ", ", "].flatMap((separator) => [
+      ...[
+        "more apples than Friday",
+        "less paneer for Friday",
+        "fewer apples for Friday lunch",
+        "no more poha for Friday",
+        "2 more apples than Friday",
+      ].map((quantity) => [`We have more pears than Monday${separator}${quantity}`, false] as [string, boolean]),
+      [`We have more pears${separator}less oily meals for Friday`, true] as [string, boolean],
+      [`We have more pears${separator}more apples than Monday and Friday should be lighter`, true] as [string, boolean],
+    ]),
+    ["We have no pears, more variety for Friday lunch", true],
+    ["We have no pears and less repetition for Friday lunch", true],
+    ["Add the paneer from the pantry to Friday lunch", true],
+    ["Put paneer from stock into Friday lunch", true],
+    ["Make Friday lighter. We have no pears.", true],
+    ["Friday should be lighter", true],
+    ...[" and ", ", "].flatMap((separator) => [
+      ...["no repeat dishes this week", "avoid repeated meals", "without repeat dishes"].map(
+        (constraint) => [`We have no pears${separator}${constraint}`, true] as [string, boolean],
+      ),
+      ...[
+        "put idli on Friday breakfast",
+        "include idli for Friday breakfast",
+        "omit the planned dish on Friday breakfast",
+        "change Friday breakfast to idli",
+        "moving poha to Friday breakfast",
+      ].map((instruction) => [`Remove pears from inventory${separator}${instruction}`, true] as [string, boolean]),
+    ]),
+    ["We have no pears. Please trade the poha for idli.", true],
+    ["Trade poha for idli", true],
+    ["Swap Friday lunch to pasta", true],
+    ["Swap Monday and Tuesday breakfast", true],
+    ["No repeat dishes this week; we are out of paneer", true],
+    ["Avoid repeated meals this week", true],
+    ["Make school lunch lighter; paneer is out", true],
+    ["Remove paneer from inventory and swap Friday lunch to pasta", true],
+    ["We have more pears than we had on Monday", false],
+    ["We have more poha for Monday breakfast", false],
+    ["We have more pears than Monday, please make lunch lighter", true],
+    ["We have no pears so use idli for Friday lunch", true],
+    ["We have less paneer than Friday", false],
+    ["Remove paneer from inventory; we ran out before Friday", false],
+    ["Add paneer to inventory for Friday lunch", false],
+    ["We are out of paneer", false],
+    ["Make this better", false],
+  ])("classifies raw plan intent independently of inventory wording: %s", (text, expected) => {
+    expect(isConcretePlanFeedback({ id: "raw", text }, { recentPlan: gridFrom([["Mon", "breakfast", "poha"]]) })).toBe(
+      expected,
+    )
+  })
+
+  it.each([
+    "Make Friday lighter. We have no pears.",
+    "We have no pears and Friday should be lighter",
+    "We have no pears, Friday should be lighter",
+  ])("authorizes and matches a day-only preference without borrowing inventory context: %s", (text) => {
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "day-only", text }],
+    })
+    const candidate = baseCandidate()
+    candidate.grid.Fri.breakfast = cellFor("breakfast", "banana")
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).not.toContain("unscoped_cell_changed")
+    expect(codes).not.toContain("unaddressed_feedback")
+    expect(isConcretePlanFeedback({ id: "inventory", text: "We have more pears than Friday." }, context)).toBe(false)
+  })
+
+  it.each([" and ", ", "])("does not let compound inventory quantities authorize Friday edits (%s)", (separator) => {
+    const text = `We have more pears than Monday${separator}more apples than Friday`
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "inventory", text }],
+    })
+    const candidate = baseCandidate()
+    candidate.grid.Fri.breakfast = cellFor("breakfast", "banana")
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).toContain("unscoped_cell_changed")
+    expect(codes).toContain("unaddressed_feedback")
+  })
+
+  it("resolves moves from the reviewed plan while retiring replacements of removed dishes", () => {
+    const stored = gridFrom([
+      ["Thu", "breakfast", "poha"],
+      ["Fri", "breakfast", "banana"],
+    ])
+    const projected = gridFrom([["Fri", "breakfast", "banana"]])
+    const context = baseContext({
+      recentPlan: projected,
+      feedbackReferencePlan: stored,
+      request: { kind: "revision", text: "Move poha to another spot" },
+      feedbackItems: [{ id: "move", text: "Move poha to another spot" }],
+    })
+    expect(isConcretePlanFeedback({ id: "replace", text: "Replace poha" }, context)).toBe(false)
+    expect(isConcretePlanFeedback({ id: "move", text: "Move poha to another spot" }, context)).toBe(true)
+    const result = evaluateMealPlan(
+      { grid: gridFrom([["Fri", "breakfast", "poha"]]), easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(failureCodes(result)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(result)).not.toContain("unaddressed_feedback")
+    expect(projected.Thu).toBeUndefined()
+  })
+
+  it.each([
+    "Make school lunch lighter; paneer is out.",
+    "Make school lunch lighter; we ran out of paneer before Friday.",
+    "Remove paneer from inventory before Friday and make school lunch lighter.",
+  ])("matches meal-only feedback without borrowing inventory days: %s", (text) => {
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "meal-only", text }],
+    })
+    const breakfast = baseCandidate()
+    breakfast.grid.Mon.breakfast = cellFor("breakfast", "banana")
+    expect(failureCodes(evaluateMealPlan(breakfast, context))).toContain("unaddressed_feedback")
+    const lunch = baseCandidate()
+    lunch.grid.Mon["school-lunch"] = cellFor("school-lunch", "roasted moong")
+    expect(failureCodes(evaluateMealPlan(lunch, context))).not.toContain("unaddressed_feedback")
+  })
+
+  it("recognizes a plan-wide no-repeat constraint as addressed by a revision", () => {
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text: "No repeat dishes this week" },
+      feedbackItems: [{ id: "no-repeat", text: "No repeat dishes this week" }],
+    })
+    const candidate = baseCandidate()
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+    candidate.grid.Mon.breakfast = cellFor("breakfast", "banana")
+    candidate.policyOutcomes["snack-policy"].rationale = "Addressed no-repeat"
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+    for (const [day, slots] of Object.entries(candidate.grid))
+      for (const [slot, cell] of Object.entries(slots)) cell.dish = `${day} ${slot} unique`
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).not.toContain("unaddressed_feedback")
+    expect(codes).not.toContain("unscoped_cell_changed")
+  })
+
+  it.each([
+    ["Make school lunch lighter", "home-lunch", false],
+    ["Make school lunch lighter", "school-lunch", true],
+    ["Make home lunch lighter", "school-lunch", false],
+    ["Make home lunch lighter", "home-lunch", true],
+    ["Make lunch lighter", "school-lunch", true],
+    ["Make lunch lighter", "home-lunch", true],
+    ["Swap Friday lunch and Monday breakfast", "breakfast", false],
+    ["Swap Friday lunch and Monday breakfast", "school-lunch", true],
+  ] as const)("matches qualified and paired targets: %s / %s", (text, slot, addressed) => {
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "target", text }],
+    })
+    const candidate = baseCandidate()
+    candidate.grid.Fri[slot] = cellFor(slot, "roasted moong")
+    expect(failureCodes(evaluateMealPlan(candidate, context)).includes("unaddressed_feedback")).toBe(!addressed)
+  })
+
+  it.each([
+    "Move poha from Thursday to another spot",
+    "Move poha from Thursday to Friday breakfast",
+  ])("matches a move destination rather than the source: %s", (text) => {
+    const context = baseContext({
+      recentPlan: gridFrom([
+        ["Fri", "breakfast", "banana"],
+        ["Mon", "breakfast", "paratha"],
+      ]),
+      feedbackReferencePlan: gridFrom([["Thu", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "move", text }],
+    })
+    const candidate = baseCandidate({
+      grid: gridFrom([
+        ["Fri", "breakfast", "poha"],
+        ["Mon", "breakfast", "paratha"],
+      ]),
+    })
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("unaddressed_feedback")
+    if (text.includes("Friday")) {
+      candidate.grid.Fri.breakfast = cellFor("breakfast", "banana")
+      candidate.grid.Mon.breakfast = cellFor("breakfast", "poha")
+      expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+    }
+  })
+
+  it.each(["use", "choose", "serve"])("retains a dependent %s selection with its applicable target", (selection) => {
+    const context = { recentPlan: gridFrom([["Mon", "breakfast", "poha"]]) }
+    const text = `We have no pears. Replace poha and ${selection} idli instead.`
+    const retained = applicablePlanFeedback([{ id: "raw", text }], context)
+    expect(retained).toEqual([{ id: "raw", text: `Replace poha and ${selection} idli instead.` }])
+    expect(isConcretePlanFeedback(retained[0], context)).toBe(true)
+  })
+
+  it.each(["banana", "idli"])("retires a stale replacement even when its selection is already planned (%s)", (dish) => {
+    const context = { recentPlan: gridFrom([["Fri", "breakfast", dish]]) }
+    const text = "Thursday is closed. Replace poha and use idli instead. Put vegetable cutlet on Friday breakfast."
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([
+      { id: "raw", text: "Put vegetable cutlet on Friday breakfast." },
+    ])
+  })
+
+  it.each([
+    "We have no pears.",
+    "Thursday is closed.",
+  ])("retains an independent dish-targeted selection after a context fact: %s", (fact) => {
+    const text = `${fact} Use idli instead of poha.`
+    const context = baseContext({
+      recentPlan: gridFrom([["Mon", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "raw", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(true)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([
+      { id: "raw", text: "Use idli instead of poha." },
+    ])
+    const result = evaluateMealPlan(
+      { grid: gridFrom([["Mon", "breakfast", "idli"]]), easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(failureCodes(result)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(result)).not.toContain("unaddressed_feedback")
+  })
+
+  it.each(
+    [false, true].flatMap((targetEligible) =>
+      [false, true].map((replacementPlanned) => ({ targetEligible, replacementPlanned })),
+    ),
+  )("uses the replaced dish for eligibility: %j", ({ targetEligible, replacementPlanned }) => {
+    const text = "Thursday is closed. Use idli instead of poha."
+    const recentPlan = gridFrom([
+      ["Fri", "breakfast", replacementPlanned ? "idli" : "banana"],
+      ...(targetEligible ? [["Mon", "breakfast", "poha"] as [string, string, string]] : []),
+    ])
+    const context = baseContext({
+      recentPlan,
+      feedbackReferencePlan: gridFrom([["Thu", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "raw", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(targetEligible)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual(
+      targetEligible ? [{ id: "raw", text: "Use idli instead of poha." }] : [],
+    )
+    if (!targetEligible) {
+      const candidate = { grid: gridFrom([["Fri", "breakfast", "roasted moong"]]), easyBuys: [], policyOutcomes: {} }
+      const codes = failureCodes(evaluateMealPlan(candidate, context))
+      expect(codes).toContain("unscoped_cell_changed")
+      expect(codes).toContain("unaddressed_feedback")
+    }
+  })
+
+  it.each(
+    ["Use idli for Friday lunch instead of poha.", "Use idli instead of poha for Friday lunch."].flatMap((text) =>
+      [false, true].map((eligible) => ({ text, eligible })),
+    ),
+  )("separates replacement source from destination: %j", ({ text, eligible }) => {
+    const context = baseContext({
+      recentPlan: gridFrom([
+        ["Fri", "school-lunch", "idli"],
+        ...(eligible ? [["Mon", "breakfast", "poha"] as [string, string, string]] : []),
+      ]),
+      feedbackReferencePlan: gridFrom([["Thu", "breakfast", "poha"]]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "replacement", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "replacement", text }, context)).toBe(eligible)
+    expect(applicablePlanFeedback([{ id: "replacement", text }], context)).toEqual(
+      eligible ? [{ id: "replacement", text }] : [],
+    )
+    const candidate = { grid: gridFrom([["Fri", "school-lunch", "roasted moong"]]), easyBuys: [], policyOutcomes: {} }
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes.includes("unscoped_cell_changed")).toBe(!eligible)
+    expect(codes.includes("unaddressed_feedback")).toBe(!eligible)
+  })
+
+  it.each([
+    { scope: { day: "Fri" }, repeatedInside: false, addressed: true },
+    { scope: { day: "Fri" }, repeatedInside: true, addressed: false },
+    { scope: { slot: "school-lunch" }, repeatedInside: false, addressed: true },
+    { scope: { slot: "school-lunch" }, repeatedInside: true, addressed: false },
+    { scope: { day: "Fri", slot: "school-lunch" }, repeatedInside: false, addressed: true },
+    { scope: undefined, repeatedInside: false, addressed: false },
+  ])("checks no-repeat within the requested scope: %j", ({ scope, repeatedInside, addressed }) => {
+    const candidate = baseCandidate()
+    // Repeated favourites outside Friday remain untouched.
+    expect(candidate.grid.Mon.breakfast.dish).toBe(candidate.grid.Tue.breakfast.dish)
+    const context = baseContext({
+      recentPlan: structuredClone(candidate.grid),
+      request: { kind: "revision", text: "Avoid repeated meals" },
+      feedbackItems: [{ id: "variety", text: "Avoid repeated meals", ...(scope ? { scope } : {}) }],
+    })
+    if (scope?.slot && !scope.day) {
+      for (const [day, slots] of Object.entries(candidate.grid)) {
+        if (slots[scope.slot]) slots[scope.slot].dish = `${day} unique lunch`
+      }
+      if (repeatedInside) candidate.grid.Tue[scope.slot].dish = candidate.grid.Mon[scope.slot].dish
+    } else {
+      for (const [slot, cell] of Object.entries(candidate.grid.Fri)) {
+        if (!scope?.slot || scope.slot === slot) cell.dish = `Friday unique ${slot}`
+      }
+      if (repeatedInside) candidate.grid.Fri.snack2.dish = candidate.grid.Fri.snack1.dish
+    }
+    candidate.policyOutcomes["snack-policy"].rationale = "Addressed variety"
+    expect(candidate.grid.Mon.breakfast).toEqual(context.recentPlan?.Mon.breakfast)
+    expect(candidate.grid.Tue.breakfast).toEqual(context.recentPlan?.Tue.breakfast)
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes.includes("unaddressed_feedback")).toBe(!addressed)
+    if (scope) expect(codes).not.toContain("unscoped_cell_changed")
+  })
+
+  it.each([
+    "Use a lighter dish for Friday lunch instead of something heavy.",
+    "Make Friday lunch lighter instead of something heavy.",
+  ])("preserves the meal target of a qualitative contrast: %s", (instruction) => {
+    const text = `We have no pears. ${instruction}`
+    const context = baseContext({
+      recentPlan: baseCandidate().grid,
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "raw", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(true)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([{ id: "raw", text: instruction }])
+    const candidate = baseCandidate()
+    candidate.grid.Fri["school-lunch"] = cellFor("school-lunch", "roasted moong")
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes).not.toContain("unscoped_cell_changed")
+    expect(codes).not.toContain("unaddressed_feedback")
+  })
+
+  it("does not let a qualitative destination revive a named source removed by projection", () => {
+    const text = "Use lighter idli for Friday lunch instead of poha."
+    const context = {
+      recentPlan: gridFrom([["Fri", "school-lunch", "idli"]]),
+      feedbackReferencePlan: gridFrom([
+        ["Thu", "breakfast", "poha"],
+        ["Fri", "school-lunch", "idli"],
+      ]),
+    }
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(false)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([])
+  })
+
+  it.each(
+    ["Make poha lighter instead of something heavy.", "Poha should be lighter instead of something heavy."].flatMap(
+      (instruction) => [false, true].map((eligible) => ({ instruction, eligible })),
+    ),
+  )("keeps named-dish contrast targets eligible only while planned: %j", ({ instruction, eligible }) => {
+    const text = `We have no pears. ${instruction}`
+    const context = baseContext({
+      recentPlan: gridFrom([
+        ["Fri", "breakfast", "banana"],
+        ...(eligible ? [["Mon", "breakfast", "poha"] as [string, string, string]] : []),
+      ]),
+      feedbackReferencePlan: gridFrom([
+        ["Mon", "breakfast", "poha"],
+        ["Fri", "breakfast", "banana"],
+      ]),
+      request: { kind: "revision", text },
+      feedbackItems: [{ id: "raw", text }],
+    })
+    expect(isConcretePlanFeedback({ id: "raw", text }, context)).toBe(eligible)
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual(
+      eligible ? [{ id: "raw", text: instruction }] : [],
+    )
+    const candidate = {
+      grid: gridFrom([
+        ["Fri", "breakfast", eligible ? "banana" : "roasted moong"],
+        ...(eligible ? [["Mon", "breakfast", "idli"] as [string, string, string]] : []),
+      ]),
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const codes = failureCodes(evaluateMealPlan(candidate, context))
+    expect(codes.includes("unscoped_cell_changed")).toBe(!eligible)
+    expect(codes.includes("unaddressed_feedback")).toBe(!eligible)
+  })
+
+  it("does not attach an explicitly targeted meal request to an inventory fact", () => {
+    const context = { recentPlan: gridFrom([["Fri", "breakfast", "banana"]]) }
+    const text = "We have no pears and use idli for Friday breakfast instead."
+    expect(applicablePlanFeedback([{ id: "raw", text }], context)).toEqual([
+      { id: "raw", text: "use idli for Friday breakfast instead." },
+    ])
+  })
+
+  it("authorizes slot-only feedback across days while rejecting other slots", () => {
+    const context = baseContext({
+      request: { kind: "revision", text: "Change school lunches." },
+      feedbackItems: [{ id: "fb-slot", text: "Make school lunches lighter.", scope: { slot: "school-lunch" } }],
+    })
+    context.recentPlan = baseCandidate().grid
+    const candidate = baseCandidate()
+    candidate.grid.Mon["school-lunch"] = cellFor("school-lunch", "roasted moong")
+    candidate.grid.Tue["school-lunch"] = cellFor("school-lunch", "chickpeas")
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("unaddressed_feedback")
+    candidate.grid.Wed.breakfast = cellFor("breakfast", "banana")
+    expect(evaluateMealPlan(candidate, context).failures).toContainEqual(
+      expect.objectContaining({ code: "unscoped_cell_changed", day: "Wed", slot: "breakfast" }),
+    )
   })
 
   it("allows a concrete plan-wide Telegram move across source and destination days", () => {

@@ -107,7 +107,7 @@ const entry = `
 /** Runs the production HTTP routes, workflows, clients and durable storage with isolated external services. */
 export async function createWorkflowSanity(options: {
   model?: ScriptedModel
-  live?: { apiKey: string; model: string; provider?: "deepseek" | "openrouter" }
+  live?: { apiKey: string; model: string }
   notesWritingRetries?: number
   skipBufferGrant?: boolean
   userTurnLimit?: number
@@ -273,9 +273,7 @@ export async function createWorkflowSanity(options: {
           options.onProgress?.({ phase: "request", call: state.modelCalls })
           let response: WireBody
           if (options.live) {
-            const expectedOrigin =
-              options.live.provider === "openrouter" ? "https://openrouter.ai" : "https://api.deepseek.com"
-            if (url.origin !== expectedOrigin) throw new Error("Unexpected live model provider")
+            if (url.origin !== "https://openrouter.ai") throw new Error("Unexpected live model provider")
             // Keep any stricter production cap intact; otherwise allow generous anomaly-detection headroom.
             body.max_tokens = Math.min(
               Number(body.max_tokens ?? SANITY_LIMITS.outputTokensPerCall),

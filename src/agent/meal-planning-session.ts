@@ -120,7 +120,7 @@ function addDecisionUsage(left: DecisionUsage, right: DecisionUsage): DecisionUs
   return {
     inputTokens: left.inputTokens + right.inputTokens,
     outputTokens: left.outputTokens + right.outputTokens,
-    costUsd: left.costUsd + right.costUsd,
+    costUsd: left.costUsd === null || right.costUsd === null ? null : left.costUsd + right.costUsd,
   }
 }
 
