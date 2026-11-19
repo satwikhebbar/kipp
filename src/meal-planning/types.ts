@@ -23,6 +23,8 @@ export const FAILURE_CODES = [
   "new_meal_not_allowed",
   "invalid_new_meal",
   "packed_slot_unsuitable",
+  "packed_slot_semantically_unsuitable",
+  "packed_slot_unverified",
   "duplicate_meal_selection",
 ] as const
 

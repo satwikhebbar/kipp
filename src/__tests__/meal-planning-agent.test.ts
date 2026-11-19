@@ -240,7 +240,10 @@ describe("bounded meal-planning agent session", () => {
     const decisions: DecisionsClient = {
       async decide({ questions }) {
         const answers = Object.fromEntries(
-          Object.keys(questions).map((id) => [id, { type: "noul" as const, noul: 0.1 }]),
+          Object.keys(questions).map((id) => [
+            id,
+            { type: "noul" as const, noul: id.startsWith("easy_buy_") ? 0.1 : 0.99 },
+          ]),
         )
         return {
           id: "gen",
@@ -297,6 +300,78 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal).toMatchObject({ kind: "propose_plan" })
     expect(decideCalls).toBe(1)
     expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
+  })
+
+  it("batches packed-meal checks with easy-buy questions and blocks an unsuitable packed meal", async () => {
+    let classifiedQuestions: string[] = []
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        classifiedQuestions = Object.keys(questions)
+        const answers = Object.fromEntries(
+          classifiedQuestions.map((id) => [id, { type: "noul" as const, noul: id === "packed_meal_0" ? 0.01 : 0.99 }]),
+        )
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 5, outputTokens: 0, costUsd: 0.002 },
+        }
+      },
+    }
+    const candidate = passingCandidate()
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      clarifyResponse({
+        message: "Please choose a different packed snack for Monday.",
+        reasonCodes: ["packed_slot_semantically_unsuitable"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(classifiedQuestions).toContain("packed_meal_0")
+    expect(classifiedQuestions).toContain("packed_meal_1")
+    expect(result.terminal).toMatchObject({
+      kind: "needs_clarification",
+      reasonCodes: ["packed_slot_semantically_unsuitable"],
+    })
+    expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
+  })
+
+  it.each([
+    "missing-answer",
+    "request-failure",
+  ] as const)("blocks packed meals when the classifier is unavailable (%s)", async (failureMode) => {
+    const decisions: DecisionsClient = {
+      async decide() {
+        if (failureMode === "request-failure") throw new Error("provider unavailable")
+        return {
+          id: "gen",
+          model: "openai/gpt-6-luna-decisions",
+          provider: "OpenAI",
+          answers: {},
+          usage: { inputTokens: 1, outputTokens: 0, costUsd: 0.001 },
+        }
+      },
+    }
+    const candidate = passingCandidate()
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      clarifyResponse({
+        message: "I could not verify the packed meals. Please choose a different option.",
+        reasonCodes: ["packed_slot_unverified"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(result.terminal).toMatchObject({ kind: "needs_clarification", reasonCodes: ["packed_slot_unverified"] })
+    expect(result.decisionUsage.inputTokens).toBe(failureMode === "missing-answer" ? 1 : 0)
   })
 
   it("truncates an overlong debug justification without rejecting the terminal proposal", async () => {

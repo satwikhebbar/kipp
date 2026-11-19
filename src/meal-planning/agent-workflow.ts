@@ -595,7 +595,7 @@ async function runPlanningSession(
     if (session.decisionUsage.inputTokens || session.decisionUsage.costUsd)
       logRuntime(env, {
         workflow: event.instanceId,
-        event: "meal-planning-easy-buy-classification",
+        event: "meal-planning-semantic-classification",
         outcome: "succeeded",
         details: {
           inputTokens: session.decisionUsage.inputTokens,

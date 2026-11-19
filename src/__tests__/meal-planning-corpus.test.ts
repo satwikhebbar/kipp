@@ -28,7 +28,7 @@ const REQUIRED_IDS = [
 // Scenario JSON represents the persisted MealCell contract so it can pin the
 // evaluator independently of model selection. Selection/hydration failures
 // are covered in the hydration and agent-session suites instead.
-const HYDRATION_ONLY_FAILURE_CODES = new Set([
+const NON_EVALUATOR_FAILURE_CODES = new Set([
   "unknown_meal_definition",
   "invalid_ingredient_choice",
   "invalid_ingredient_alias",
@@ -36,6 +36,8 @@ const HYDRATION_ONLY_FAILURE_CODES = new Set([
   "new_meal_not_allowed",
   "invalid_new_meal",
   "packed_slot_unsuitable",
+  "packed_slot_semantically_unsuitable",
+  "packed_slot_unverified",
   "duplicate_meal_selection",
 ])
 
@@ -86,7 +88,7 @@ describe("meal-planning corpus health", () => {
         for (const failure of candidate.expect.failures ?? []) exercised.add(failure.code)
       }
     }
-    for (const code of FAILURE_CODES.filter((code) => !HYDRATION_ONLY_FAILURE_CODES.has(code))) {
+    for (const code of FAILURE_CODES.filter((code) => !NON_EVALUATOR_FAILURE_CODES.has(code))) {
       expect(exercised.has(code), `failure code ${code} is not exercised by any fixture`).toBe(true)
     }
   })

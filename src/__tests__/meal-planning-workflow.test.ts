@@ -1240,7 +1240,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       expect(d1Scalar(db, "SELECT cost_status FROM meal_plan_version")).toBe("unavailable")
       expect(planMessage?.text).toContain("Cost unavailable")
     } else {
-      const expectedCost = extraction === "skipped" ? 0.03 : 0.035
+      // The packed-meal semantic validation is batched into one Decisions call
+      // and its returned cost is included with extraction and planner usage.
+      const expectedCost = extraction === "skipped" ? 0.032 : 0.037
       expect(active?.version.usage?.costUsd).toBeCloseTo(expectedCost)
       expect(d1Scalar(db, "SELECT cost_status FROM meal_plan_version")).toBe("reported")
       expect(planMessage?.text).toContain(`Cost: $${expectedCost.toFixed(4)}`)

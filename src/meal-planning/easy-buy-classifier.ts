@@ -5,7 +5,7 @@ import { findProhibitedEasyBuys } from "./easy-buys"
 export const DEFAULT_ORDINARY_EASY_BUY_THRESHOLD = 0.8
 
 const MIN_THRESHOLD = 0.5
-const EASY_BUY_POLICY = `Easy buys are the short list of ordinary ingredients a household adds for the week: staples, all-season vegetables and fruits, and everyday items from a neighborhood grocery. Long-shelf and specialty items — dry fruits, nuts, seeds, jaggery, paneer, and comparable categories — are never ordinary easy buys; when the plan needs one it must already be on hand.`
+const CLASSIFICATION_POLICY = `Answer each question using its question-specific criteria and only the supplied item or meal facts. Treat packed-meal questions as judgments about the actual meal in its stated slot.`
 
 /** One easy buy the classifier judged not ordinary, with a repair-facing detail. */
 export interface NonOrdinaryEasyBuy {
@@ -15,22 +15,39 @@ export interface NonOrdinaryEasyBuy {
 
 export interface EasyBuyClassification {
   nonOrdinaryEasyBuys: NonOrdinaryEasyBuy[]
+  unsuitablePackedMeals: PackedMealClassification[]
+  unverifiedPackedMeals: PackedMealClassification[]
   usage: DecisionUsage
 }
 
+/** Meal and slot facts sent to the semantic packed-food suitability check. */
+export interface PackedMealCheck {
+  day: string
+  slot: string
+  dish: string
+  ingredients: readonly string[]
+  drySlot: boolean
+}
+
+export interface PackedMealClassification {
+  day: string
+  slot: string
+  dish: string
+  detail: string
+}
+
 export interface EasyBuyClassifier {
-  classify(easyBuys: readonly string[]): Promise<EasyBuyClassification>
+  classify(easyBuys: readonly string[], packedMeals?: readonly PackedMealCheck[]): Promise<EasyBuyClassification>
 }
 
 const ZERO_USAGE: DecisionUsage = { inputTokens: 0, outputTokens: 0, costUsd: 0 }
 
 /**
- * Creates a semantic easy-buy classifier over one batched Decisions request. It
- * is the open-vocabulary complement to the deterministic whole-word token list:
- * items already rejected deterministically are skipped, and every remaining
- * item becomes one `noul` question. A `Noul` probability of yes means "ordinary";
- * `p >= threshold` accepts, `p <= 1 - threshold` rejects, and the band between
- * is an uncertain rejection so an unverified item can never persist.
+ * Creates a batched semantic classifier for easy buys and packed meals. It is
+ * the open-vocabulary complement to deterministic easy-buy token matching:
+ * items already rejected deterministically are skipped, and remaining checks
+ * become separate `noul` questions. A `noul` probability above the threshold
+ * accepts; a low or uncertain probability never permits unverified evidence.
  */
 export function createEasyBuyClassifier(
   decisions: DecisionsClient,
@@ -38,24 +55,36 @@ export function createEasyBuyClassifier(
 ): EasyBuyClassifier {
   const threshold = clampThreshold(options.threshold)
   return {
-    async classify(easyBuys) {
+    async classify(easyBuys, packedMeals = []) {
       const deterministic = new Set(findProhibitedEasyBuys(easyBuys))
       const candidates = easyBuys.filter((buy) => !deterministic.has(buy))
-      if (candidates.length === 0) return { nonOrdinaryEasyBuys: [], usage: ZERO_USAGE }
-      const questions = Object.fromEntries(
-        candidates.map((item, index) => [
-          `easy_buy_${index}`,
-          {
-            type: "noul" as const,
-            instructions: `Is "${item}" an ordinary grocery item (a staple, all-season produce, or everyday neighborhood-grocery item) rather than a long-shelf or specialty item such as a dry fruit, nut, seed, jaggery, or paneer?`,
-            criteria: {
-              true: "An ordinary staple, all-season produce, or everyday neighborhood-grocery item.",
-              false: "A long-shelf or specialty item such as a dry fruit, nut, seed, jaggery, paneer, or comparable.",
-            },
+      if (candidates.length === 0 && packedMeals.length === 0)
+        return { nonOrdinaryEasyBuys: [], unsuitablePackedMeals: [], unverifiedPackedMeals: [], usage: ZERO_USAGE }
+      const questions: Record<
+        string,
+        { type: "noul"; instructions: string; criteria: { true: string; false: string } }
+      > = {}
+      candidates.forEach((item, index) => {
+        questions[`easy_buy_${index}`] = {
+          type: "noul",
+          instructions: `Is "${item}" an ordinary grocery item (a staple, all-season produce, or everyday neighborhood-grocery item) rather than a long-shelf or specialty item such as a dry fruit, nut, seed, jaggery, or paneer?`,
+          criteria: {
+            true: "An ordinary staple, all-season produce, or everyday neighborhood-grocery item.",
+            false: "A long-shelf or specialty item such as a dry fruit, nut, seed, jaggery, paneer, or comparable.",
           },
-        ]),
-      )
-      const result = await decisions.decide({ state: EASY_BUY_POLICY, questions })
+        }
+      })
+      packedMeals.forEach((meal, index) => {
+        questions[`packed_meal_${index}`] = {
+          type: "noul",
+          instructions: `Is the meal "${meal.dish}" with ingredients [${meal.ingredients.join(", ")}] suitable for ${meal.day} ${meal.slot} in an ordinary school lunchbox? It must travel safely without likely spilling or leaking, be independently edible by hand or ordinary spoon, and require no reheating, cooking, assembly, or special equipment.${meal.drySlot ? " This is a dry slot, so the food must also be dry and spill-resistant." : ""}`,
+          criteria: {
+            true: "The actual meal meets every stated transport, eating, preparation, and slot requirement.",
+            false: "The actual meal violates any stated transport, eating, preparation, or slot requirement.",
+          },
+        }
+      })
+      const result = await decisions.decide({ state: CLASSIFICATION_POLICY, questions })
       const nonOrdinaryEasyBuys: NonOrdinaryEasyBuy[] = []
       candidates.forEach((item, index) => {
         const answer = result.answers[`easy_buy_${index}`]
@@ -80,7 +109,29 @@ export function createEasyBuyClassifier(
           })
         }
       })
-      return { nonOrdinaryEasyBuys, usage: result.usage }
+      const unsuitablePackedMeals: PackedMealClassification[] = []
+      const unverifiedPackedMeals: PackedMealClassification[] = []
+      packedMeals.forEach((meal, index) => {
+        const base = { day: meal.day, slot: meal.slot, dish: meal.dish }
+        const answer = result.answers[`packed_meal_${index}`]
+        if (answer?.type !== "noul" || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1) {
+          unverifiedPackedMeals.push({
+            ...base,
+            detail: `packed meal "${meal.dish}" could not be verified as suitable for ${meal.slot}`,
+          })
+        } else if (answer.noul <= 1 - threshold) {
+          unsuitablePackedMeals.push({
+            ...base,
+            detail: `packed meal "${meal.dish}" is not suitable for ${meal.slot}`,
+          })
+        } else if (answer.noul < threshold) {
+          unverifiedPackedMeals.push({
+            ...base,
+            detail: `packed meal "${meal.dish}" could not be verified as suitable for ${meal.slot}`,
+          })
+        }
+      })
+      return { nonOrdinaryEasyBuys, unsuitablePackedMeals, unverifiedPackedMeals, usage: result.usage }
     },
   }
 }

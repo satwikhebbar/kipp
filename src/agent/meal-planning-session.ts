@@ -1,9 +1,11 @@
-import type { EasyBuyClassification, EasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
+import type { EasyBuyClassification, EasyBuyClassifier, PackedMealCheck } from "../meal-planning/easy-buy-classifier"
+import { findProhibitedEasyBuys } from "../meal-planning/easy-buys"
 import {
   evaluateMealPlan,
   evaluateMealPlanSelection,
   evaluateMealPlanSelectionPatch,
 } from "../meal-planning/evaluation"
+import { effectiveMealSlot } from "../meal-planning/half-day"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
 import type {
   FailureCode,
@@ -83,7 +85,7 @@ export interface MealPlanningAgentSessionOptions {
   retainReasoning?: boolean
   /** Ingredient naming locale; defaults to India. */
   ingredientLocale?: string
-  /** Semantic easy-buy classifier; when absent, only deterministic easy-buy validation runs. */
+  /** Batched Decisions classifier for semantic meal checks and easy-buy validation. */
   easyBuyClassifier?: EasyBuyClassifier
   /** Dev-only diagnostic: observes one Decisions call's returned usage and cost. */
   onDecisionUsage?: (usage: DecisionUsage) => void
@@ -139,14 +141,13 @@ export async function runMealPlanningAgentSession(
   const canUpdateWeekContext = options.context.request.kind === "revision" && options.allowWeekContextUpdate !== false
   let decisionUsage = ZERO_DECISION_USAGE
   // A candidate is classified once during evaluate_meal_plan and again during
-  // propose_plan; memoize the resolved verdict by its easy-buy list so the
-  // second pass reuses the first instead of paying for another Decisions
-  // request (and never depends on a second stochastic draw).
+  // propose_plan; key by all hydrated plan evidence so the second pass reuses
+  // the verdict only when the easy buys and packed meals are unchanged.
   const classificationCache = new Map<string, EasyBuyClassification>()
-  // Runs one batched semantic easy-buy classification against the hydrated
-  // candidate and folds any rejected/uncertain items back through the pure
-  // evaluator, so failures sort and dedupe exactly as the deterministic ones.
-  const classifyEasyBuys = async (
+  // Runs one batched semantic classification against easy buys and packed
+  // meals. Deterministic evaluation remains pure; semantic failures are added
+  // at this asynchronous session boundary.
+  const classifySemanticChecks = async (
     selection: MealPlanSelectionEvaluation,
     context: MealPlanContext,
   ): Promise<MealPlanSelectionEvaluation> => {
@@ -154,23 +155,69 @@ export async function runMealPlanningAgentSession(
     // Only spend a Decisions request once the deterministic checks pass; a
     // plan that already fails them is blocked regardless.
     if (!classifier || !selection.candidate || !selection.evaluation.pass) return selection
-    const key = [...selection.candidate.easyBuys].sort().join("\u0000")
+    const packedMeals = packedMealChecks(selection, context)
+    if (selection.candidate.easyBuys.length === 0 && packedMeals.length === 0) return selection
+    const key = JSON.stringify({ candidate: selection.candidate, packedMeals })
     let classification = classificationCache.get(key)
     if (!classification) {
-      classification = await classifier.classify(selection.candidate.easyBuys)
-      classificationCache.set(key, classification)
+      let requestSucceeded = false
+      try {
+        classification = await classifier.classify(selection.candidate.easyBuys, packedMeals)
+        classificationCache.set(key, classification)
+        requestSucceeded = true
+      } catch {
+        const deterministic = new Set(findProhibitedEasyBuys(selection.candidate.easyBuys))
+        classification = {
+          nonOrdinaryEasyBuys: selection.candidate.easyBuys
+            .filter((item) => !deterministic.has(item))
+            .map((item) => ({
+              item,
+              detail: `easy buy "${item}" could not be verified because the semantic classifier request failed`,
+            })),
+          unsuitablePackedMeals: [],
+          unverifiedPackedMeals: packedMeals.map((meal) => ({
+            day: meal.day,
+            slot: meal.slot,
+            dish: meal.dish,
+            detail: `packed meal "${meal.dish}" could not be verified because the semantic classifier request failed`,
+          })),
+          usage: ZERO_DECISION_USAGE,
+        }
+      }
       decisionUsage = addDecisionUsage(decisionUsage, classification.usage)
-      options.onDecisionUsage?.(classification.usage)
+      if (requestSucceeded) options.onDecisionUsage?.(classification.usage)
     }
-    const { nonOrdinaryEasyBuys } = classification
-    if (nonOrdinaryEasyBuys.length === 0) return selection
+    const { nonOrdinaryEasyBuys, unsuitablePackedMeals, unverifiedPackedMeals } = classification
+    if (nonOrdinaryEasyBuys.length === 0 && unsuitablePackedMeals.length === 0 && unverifiedPackedMeals.length === 0)
+      return selection
+    const packedFailures = [
+      ...unsuitablePackedMeals.map((meal) => ({
+        code: "packed_slot_semantically_unsuitable" as const,
+        day: meal.day,
+        slot: meal.slot,
+        detail: meal.detail,
+      })),
+      ...unverifiedPackedMeals.map((meal) => ({
+        code: "packed_slot_unverified" as const,
+        day: meal.day,
+        slot: meal.slot,
+        detail: meal.detail,
+      })),
+    ]
+    const evaluation = nonOrdinaryEasyBuys.length
+      ? evaluateMealPlan(selection.candidate, context, { nonOrdinaryEasyBuys })
+      : selection.evaluation
     return {
       ...selection,
-      evaluation: evaluateMealPlan(selection.candidate, context, { nonOrdinaryEasyBuys }),
+      evaluation: {
+        ...evaluation,
+        pass: evaluation.pass && packedFailures.length === 0,
+        failures: [...evaluation.failures, ...packedFailures],
+      },
     }
   }
   const evaluationTool = createEvaluateMealPlanTool(options.context, options.revisionBaseCandidate, (selection) =>
-    classifyEasyBuys(selection, options.context),
+    classifySemanticChecks(selection, options.context),
   )
   const registry: ToolRegistry = {
     [MEAL_PLANNING_TOOL.EVALUATE]: {
@@ -215,7 +262,7 @@ export async function runMealPlanningAgentSession(
                 evaluationContext,
               )
             : evaluateMealPlanSelection(candidate as MealPlanSelectionCandidate, evaluationContext)
-        selectionEvaluation = await classifyEasyBuys(selectionEvaluation, evaluationContext)
+        selectionEvaluation = await classifySemanticChecks(selectionEvaluation, evaluationContext)
         if (!selectionEvaluation.candidate)
           throw new ToolHandlerError(
             "proposed plan could not be hydrated",
@@ -335,6 +382,20 @@ export async function runMealPlanningAgentSession(
     usage: result.usage,
     decisionUsage,
   }
+}
+
+/** Packs the hydrated actual meal and applicable slot requirements as classifier evidence. */
+function packedMealChecks(selection: MealPlanSelectionEvaluation, context: MealPlanContext): PackedMealCheck[] {
+  if (!selection.candidate) return []
+  const checks: PackedMealCheck[] = []
+  for (const [day, slots] of Object.entries(selection.candidate.grid)) {
+    for (const [slotId, cell] of Object.entries(slots)) {
+      const slot = effectiveMealSlot(context, day, slotId)
+      if (!slot?.packed) continue
+      checks.push({ day, slot: slotId, dish: cell.dish, ingredients: cell.items, drySlot: slot.dry })
+    }
+  }
+  return checks
 }
 
 /**
