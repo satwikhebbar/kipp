@@ -6,6 +6,21 @@ const MAX_HALF_DAY_COOK_MINUTES = 120
 const MAX_MEAL_SLOT_NAME_LENGTH = 80
 const MAX_MEAL_COOK_MINUTES = 600
 const MAX_MEAL_SCHEDULE_SLOTS = 32
+const RESERVED_SLOT_IDS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+  "toString",
+  "toLocaleString",
+  "valueOf",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+])
 
 export const halfDayBehaviorSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("keep") }).strict(),
@@ -17,7 +32,10 @@ export const halfDayBehaviorSchema = z.discriminatedUnion("action", [
 
 export const mealSlotSchema: z.ZodType<MealSlot> = z
   .object({
-    id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
+    id: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/)
+      .refine((id) => !RESERVED_SLOT_IDS.has(id), "slot ID is reserved"),
     name: z.string().trim().min(1).max(MAX_MEAL_SLOT_NAME_LENGTH),
     packed: z.boolean(),
     dry: z.boolean(),

@@ -118,4 +118,15 @@ describe("configurable meal schedules", () => {
       }),
     ).not.toEqual([])
   })
+
+  it("rejects prototype property names as slot IDs while still detecting real duplicates", () => {
+    const prototypeSlot = { ...CUSTOM_SUNDAY_SCHEDULE.slots[0], id: "constructor" }
+    expect(validateMealSchedule({ ...CUSTOM_SUNDAY_SCHEDULE, slots: [prototypeSlot] })).not.toEqual([])
+    expect(
+      validateMealSchedule({
+        ...CUSTOM_SUNDAY_SCHEDULE,
+        slots: [CUSTOM_SUNDAY_SCHEDULE.slots[0], { ...CUSTOM_SUNDAY_SCHEDULE.slots[0] }],
+      }),
+    ).not.toEqual([])
+  })
 })
