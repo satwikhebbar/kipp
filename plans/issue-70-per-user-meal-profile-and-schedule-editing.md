@@ -83,7 +83,7 @@ Legacy hydration must participate in the same configuration concurrency contract
 - Thread the captured schedule through initial-plan evaluation and atomic persistence. Pin feedback revision context, feedback-target validation, store acceptance in both backends, and plan rendering to the plan snapshot; changed settings are adopted only by a new plan.
 - Replace seed-ID half-day branching with per-slot behavior while preserving the seed mapping.
 - Audit planner/evaluator/rendering assumptions and update fixtures/corpus for representative schedules.
-- Tests cover legacy active and historical plan freeze followed by day/slot edits; schedule save during generation; feedback after a slot is removed; new-plan adoption of changed settings; Sunday week resolution/expiry; custom-slot half-day evaluation and display; and unchanged seed behavior.
+- Tests cover legacy active and historical plan freeze followed by day/slot edits; schedule save during generation; feedback after a slot is removed; new-plan adoption of changed settings; Sunday week resolution/expiry; custom-slot half-day evaluation and display; and unchanged seed behavior. Add end-to-end workflow coverage for a Sunday-containing custom schedule with a recurring half day and custom slot IDs, checking candidate shape, rendered plan, and Sunday expiry together.
 
 ### Iteration 2 — Authenticated profile persistence API
 
