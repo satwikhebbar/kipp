@@ -696,6 +696,79 @@ describe.each([
 })
 
 describe("createMealPlanningStore (D1, real SQL)", () => {
+  it("returns its committed save even when a later save wins before the response", async () => {
+    const { d1 } = createD1TestDb()
+    const originalPrepare = d1.prepare.bind(d1)
+    let blockNextUpdate = true
+    let signalEntered: () => void = () => {}
+    let releaseUpdate: () => void = () => {}
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve
+    })
+    const delayedD1 = {
+      ...d1,
+      prepare(sql: string) {
+        const prepared = originalPrepare(sql)
+        return {
+          bind(...values: Array<string | number | null>) {
+            const statement = prepared.bind(...values)
+            if (!sql.includes("RETURNING chat_id, profile_json")) return statement
+            return {
+              ...statement,
+              first: async () => {
+                const committed = await statement.first()
+                if (blockNextUpdate) {
+                  blockNextUpdate = false
+                  signalEntered()
+                  await gate
+                }
+                return committed
+              },
+            }
+          },
+        }
+      },
+    } as unknown as D1Database
+    const store = createMealPlanningStore(delayedD1)
+    const original = await store.loadOrCreateProfile(CHAT)
+    const firstProfile = { ...original.profile, dietaryExclusions: [...original.profile.dietaryExclusions, "sesame"] }
+    const firstSave = store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: original.configurationVersion,
+      profile: firstProfile,
+      customPolicies: original.customPolicies,
+      schedule: original.schedule,
+      location: null,
+    })
+    await entered
+    const committed = await store.loadOrCreateProfile(CHAT)
+    const laterProfile = {
+      ...committed.profile,
+      dietaryExclusions: [...committed.profile.dietaryExclusions, "mustard"],
+    }
+    const laterSave = await store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: committed.configurationVersion,
+      profile: laterProfile,
+      customPolicies: committed.customPolicies,
+      schedule: committed.schedule,
+      location: null,
+    })
+    expect(laterSave.ok).toBe(true)
+    releaseUpdate()
+    const firstResult = await firstSave
+    expect(firstResult.ok).toBe(true)
+    if (firstResult.ok) {
+      expect(firstResult.profile.configurationVersion).toBe(original.configurationVersion + 1)
+      expect(firstResult.profile.profile.dietaryExclusions).toContain("sesame")
+      expect(firstResult.profile.profile.dietaryExclusions).not.toContain("mustard")
+    }
+    expect((await store.loadOrCreateProfile(CHAT)).profile.dietaryExclusions).toContain("mustard")
+  })
+
   it("does not let delayed legacy hydration overwrite a concurrent configuration save", async () => {
     const { db, d1 } = createD1TestDb()
     const originalPrepare = d1.prepare.bind(d1)
@@ -1263,6 +1336,44 @@ describe.each([
     })
     expect(stale).toEqual({ ok: false, reason: "conflict" })
     expect((await store.loadOrCreateProfile(CHAT)).profile.dietaryExclusions).toEqual(edited.dietaryExclusions)
+  })
+
+  it("allows only one concurrent save using the same profile version", async () => {
+    const store = await makeStore()
+    const original = await store.loadOrCreateProfile(CHAT)
+    const save = (exclusion: string) =>
+      store.saveMealProfileConfiguration({
+        chatId: CHAT,
+        expectedVersion: original.configurationVersion,
+        profile: { ...original.profile, dietaryExclusions: [...original.profile.dietaryExclusions, exclusion] },
+        customPolicies: original.customPolicies,
+        schedule: original.schedule,
+        location: null,
+      })
+    const results = await Promise.all([save("sesame"), save("mustard")])
+    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    expect(results.filter((result) => !result.ok)).toEqual([{ ok: false, reason: "conflict" }])
+    const latest = await store.loadOrCreateProfile(CHAT)
+    expect(latest.configurationVersion).toBe(original.configurationVersion + 1)
+    const winningExclusion = latest.profile.dietaryExclusions.find((item) => item === "sesame" || item === "mustard")
+    expect(winningExclusion).toBeDefined()
+    const success = results.find((result) => result.ok)
+    expect(success?.ok && success.profile.profile.dietaryExclusions).toContain(winningExclusion)
+  })
+
+  it("keeps old review-session inserts working after the settings migration", () => {
+    const { db } = createD1TestDb()
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO mini_app_session (session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run("old-worker-session", "old-worker-token", "parent-1", CHAT, "plan-1", "2999-01-01", "2026-09-01"),
+    ).not.toThrow()
+    expect(db.prepare("SELECT scope FROM mini_app_session WHERE session_id = ?").get("old-worker-session")).toEqual({
+      scope: "review",
+    })
   })
 
   it("consumes each settings launch reference once and binds it to one user", async () => {

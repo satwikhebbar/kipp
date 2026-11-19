@@ -9,7 +9,7 @@ import {
 } from "../meal-planning/evaluation"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "../meal-planning/hydration"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
-import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
+import { createInMemoryMealPlanningStore, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
 
 const SLOT_COOK: Record<string, number> = {
@@ -142,6 +142,42 @@ describe("meal-planning evaluator", () => {
       dishRepeatCount: 0,
       easyBuyCount: 0,
     })
+  })
+
+  it("evaluates a saved custom policy outcome as an own map entry", async () => {
+    const store = createInMemoryMealPlanningStore()
+    const original = await store.loadOrCreateProfile("chat-policy")
+    const savedPolicy = {
+      id: "household-rule",
+      label: "Household rule",
+      scope: "persistent" as const,
+      value: "Use a varied lunch.",
+    }
+    const saved = await store.saveMealProfileConfiguration({
+      chatId: "chat-policy",
+      expectedVersion: original.configurationVersion,
+      profile: original.profile,
+      customPolicies: [...original.customPolicies, savedPolicy],
+      schedule: original.schedule,
+      location: original.location,
+    })
+    expect(saved.ok).toBe(true)
+    if (!saved.ok) return
+    const context = baseContext({
+      customPolicies: saved.profile.customPolicies,
+      profile: saved.profile.profile,
+      schedule: saved.profile.schedule,
+    })
+    const policyOutcomes = Object.fromEntries(
+      saved.profile.customPolicies.map((policy) => [policy.id, { outcome: "satisfied" as const, rationale: "ok" }]),
+    )
+    const candidate = baseCandidate({ policyOutcomes })
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("missing_policy_outcome")
+
+    const inheritedPolicyContext = baseContext({
+      customPolicies: [...baseContext().customPolicies, { ...savedPolicy, id: "constructor" }],
+    })
+    expect(failureCodes(evaluateMealPlan(baseCandidate(), inheritedPolicyContext))).toContain("missing_policy_outcome")
   })
 
   it.each([

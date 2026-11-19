@@ -146,22 +146,16 @@ export async function authenticateMiniApp(
   const context = settingsLaunch ? null : await store.resolveMiniAppReviewContext(verified.userId)
   if (!settingsLaunch && !context) throw new MiniAppAuthError("unauthorized")
   const launch = settingsLaunch
-    ? await store.consumeMiniAppSettingsLaunch(
-        await sha256(launchReference as string),
-        verified.userId,
-        now.toISOString(),
-      )
+    ? await store.getMiniAppSettingsLaunch(await sha256(launchReference as string), verified.userId, now.toISOString())
     : null
   if (settingsLaunch && !launch) throw new MiniAppAuthError("unauthorized")
   if (launch) await store.loadOrCreateProfile(launch.chatId)
-  const replayed = await store.consumeMiniAppInitDataFingerprint(
-    await sha256(verified.verifiedHash),
-    new Date((verified.authDate + AUTH_MAX_AGE_SECONDS) * SECONDS_PER_MILLISECOND).toISOString(),
-    now.toISOString(),
-  )
-  if (!replayed) throw new MiniAppAuthError("replayed")
   const token = randomToken()
-  const session = await store.createMiniAppSession({
+  const fingerprintHash = await sha256(verified.verifiedHash)
+  const fingerprintExpiresAt = new Date(
+    (verified.authDate + AUTH_MAX_AGE_SECONDS) * SECONDS_PER_MILLISECOND,
+  ).toISOString()
+  const sessionInput = {
     sessionId: crypto.randomUUID(),
     tokenHash: await sha256(token),
     telegramUserId: verified.userId,
@@ -170,7 +164,28 @@ export async function authenticateMiniApp(
     scope: settingsLaunch ? "settings" : "review",
     expiresAt: new Date(now.getTime() + AUTH_MAX_AGE_SECONDS * SECONDS_PER_MILLISECOND).toISOString(),
     createdAt: now.toISOString(),
-  })
+  } as const
+  let session: MiniAppSessionRecord
+  if (launch) {
+    const exchanged = await store.exchangeMiniAppSettingsLaunch({
+      launchTokenHash: launch.tokenHash,
+      telegramUserId: verified.userId,
+      fingerprintHash,
+      fingerprintExpiresAt,
+      now: now.toISOString(),
+      session: sessionInput,
+    })
+    if (!exchanged.ok) throw new MiniAppAuthError(exchanged.reason)
+    session = exchanged.session
+  } else {
+    const replayed = await store.consumeMiniAppInitDataFingerprint(
+      fingerprintHash,
+      fingerprintExpiresAt,
+      now.toISOString(),
+    )
+    if (!replayed) throw new MiniAppAuthError("replayed")
+    session = await store.createMiniAppSession(sessionInput)
+  }
   return { token, session, context }
 }
 

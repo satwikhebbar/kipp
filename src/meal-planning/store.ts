@@ -203,6 +203,19 @@ export interface MiniAppSettingsLaunchRecord {
   createdAt: string
 }
 
+export interface SettingsMiniAppExchangeInput {
+  launchTokenHash: string
+  telegramUserId: string
+  fingerprintHash: string
+  fingerprintExpiresAt: string
+  now: string
+  session: CreateMiniAppSessionInput
+}
+
+export type MiniAppExchangeResult =
+  | { ok: true; session: MiniAppSessionRecord }
+  | { ok: false; reason: "replayed" | "unauthorized" }
+
 export interface SaveMealProfileConfigurationInput {
   chatId: string
   expectedVersion: number
@@ -343,6 +356,12 @@ export interface MealPlanningStore {
   ): Promise<MiniAppReviewContext>
   resolveMiniAppReviewContext(telegramUserId: string): Promise<MiniAppReviewContext | null>
   createMiniAppSession(input: CreateMiniAppSessionInput): Promise<MiniAppSessionRecord>
+  getMiniAppSettingsLaunch(
+    tokenHash: string,
+    telegramUserId: string,
+    now: string,
+  ): Promise<MiniAppSettingsLaunchRecord | null>
+  exchangeMiniAppSettingsLaunch(input: SettingsMiniAppExchangeInput): Promise<MiniAppExchangeResult>
   readMiniAppSession(tokenHash: string, now: string): Promise<MiniAppSessionRecord | null>
   createMiniAppSettingsLaunch(
     input: Omit<MiniAppSettingsLaunchRecord, "createdAt"> & { createdAt?: string },
@@ -1079,7 +1098,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
                SELECT 1 FROM meal_plan
                WHERE chat_id = meal_profile.chat_id
                  AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)
-             )`,
+             )
+           RETURNING chat_id, profile_json, custom_policies_json, schedule_json, location_json,
+                     interaction_generation, version, created_at, updated_at`,
         )
         .bind(
           JSON.stringify(input.profile),
@@ -1090,14 +1111,27 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.chatId,
           input.expectedVersion,
         )
-        .run()
-      if (Number(result.meta.changes) !== 1) {
+        .first()
+      if (!result) {
         const latest = await this.loadOrCreateProfile(input.chatId)
         return latest.configurationVersion === input.expectedVersion
           ? { ok: false as const, reason: "unavailable" as const }
           : { ok: false as const, reason: "conflict" as const }
       }
-      return { ok: true as const, profile: await this.loadOrCreateProfile(input.chatId) }
+      return {
+        ok: true as const,
+        profile: {
+          chatId: String(result.chat_id),
+          profile: parseJson<MealProfile>(String(result.profile_json), SEED_PROFILE),
+          customPolicies: parseJson<CustomPolicy[]>(String(result.custom_policies_json), []),
+          schedule: parseJson<MealSchedule>(String(result.schedule_json), SEED_SCHEDULE),
+          location: parseJson<StoredLocation | null>(String(result.location_json), null),
+          configurationVersion: Number(result.version),
+          interactionGeneration: Number(result.interaction_generation),
+          createdAt: String(result.created_at),
+          updatedAt: String(result.updated_at),
+        },
+      }
     },
 
     async createActivePlan(input) {
@@ -1616,6 +1650,76 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       return { ...input, scope, createdAt }
     },
 
+    async getMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      const row = await db
+        .prepare(
+          `SELECT token_hash, telegram_user_id, chat_id, expires_at, created_at
+           FROM mini_app_settings_launch
+           WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ? AND consumed_at IS NULL`,
+        )
+        .bind(tokenHash, telegramUserId, now)
+        .first()
+      return row
+        ? {
+            tokenHash: String(row.token_hash),
+            telegramUserId: String(row.telegram_user_id),
+            chatId: String(row.chat_id),
+            expiresAt: String(row.expires_at),
+            createdAt: String(row.created_at),
+          }
+        : null
+    },
+
+    async exchangeMiniAppSettingsLaunch(input) {
+      const createdAt = input.session.createdAt ?? input.now
+      const scope = input.session.scope ?? "settings"
+      const results = await db.batch([
+        db.prepare("DELETE FROM mini_app_init_data_replay WHERE expires_at <= ?").bind(input.now),
+        db
+          .prepare(
+            `UPDATE mini_app_settings_launch SET consumed_at = ?
+             WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ? AND consumed_at IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM mini_app_init_data_replay
+                 WHERE fingerprint_hash = ? AND expires_at > ?
+               )`,
+          )
+          .bind(input.now, input.launchTokenHash, input.telegramUserId, input.now, input.fingerprintHash, input.now),
+        db
+          .prepare(
+            `INSERT INTO mini_app_init_data_replay (fingerprint_hash, expires_at, created_at)
+             SELECT ?, ?, ? WHERE changes() = 1`,
+          )
+          .bind(input.fingerprintHash, input.fingerprintExpiresAt, input.now),
+        db
+          .prepare(
+            `INSERT INTO mini_app_session
+               (session_id, token_hash, telegram_user_id, chat_id, plan_id, scope, expires_at, created_at)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1`,
+          )
+          .bind(
+            input.session.sessionId,
+            input.session.tokenHash,
+            input.session.telegramUserId,
+            input.session.chatId,
+            input.session.planId,
+            scope,
+            input.session.expiresAt,
+            createdAt,
+          ),
+      ])
+      if (Number(results[1]?.meta.changes ?? 0) === 1) {
+        return { ok: true as const, session: { ...input.session, scope, createdAt } }
+      }
+      const replay = await db
+        .prepare("SELECT 1 AS found FROM mini_app_init_data_replay WHERE fingerprint_hash = ? AND expires_at > ?")
+        .bind(input.fingerprintHash, input.now)
+        .first()
+      return replay
+        ? { ok: false as const, reason: "replayed" as const }
+        : { ok: false as const, reason: "unauthorized" as const }
+    },
+
     async readMiniAppSession(tokenHash, now) {
       await db.prepare("DELETE FROM mini_app_session WHERE expires_at <= ?").bind(now).run()
       const row = await db
@@ -1943,7 +2047,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async saveMealProfileConfiguration(input) {
-      const canonical = await this.loadOrCreateProfile(input.chatId)
+      const canonical = backing.profiles.get(input.chatId)
+      if (!canonical) return { ok: false as const, reason: "unavailable" as const }
       if (canonical.configurationVersion !== input.expectedVersion)
         return { ok: false as const, reason: "conflict" as const }
       for (const plan of backing.plans.values()) {
@@ -2255,6 +2360,29 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       }
       sessions.set(session.tokenHash, session)
       return session
+    },
+
+    async getMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      const launch = settingsLaunches.get(tokenHash)
+      if (!launch || launch.telegramUserId !== telegramUserId || launch.expiresAt <= now) return null
+      return launch
+    },
+
+    async exchangeMiniAppSettingsLaunch(input) {
+      const launch = settingsLaunches.get(input.launchTokenHash)
+      if (!launch || launch.telegramUserId !== input.telegramUserId || launch.expiresAt <= input.now)
+        return { ok: false as const, reason: "unauthorized" as const }
+      for (const [key, expiry] of initDataFingerprints) if (expiry <= input.now) initDataFingerprints.delete(key)
+      if (initDataFingerprints.has(input.fingerprintHash)) return { ok: false as const, reason: "replayed" as const }
+      const session: MiniAppSessionRecord = {
+        ...input.session,
+        scope: input.session.scope ?? "settings",
+        createdAt: input.session.createdAt ?? input.now,
+      }
+      settingsLaunches.delete(input.launchTokenHash)
+      initDataFingerprints.set(input.fingerprintHash, input.fingerprintExpiresAt)
+      sessions.set(session.tokenHash, session)
+      return { ok: true as const, session }
     },
 
     async readMiniAppSession(tokenHash, now) {

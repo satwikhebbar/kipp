@@ -647,7 +647,7 @@ export function evaluateMealPlan(
   }
 
   for (const policy of persistentPolicies) {
-    if (!candidate.policyOutcomes[policy.id]) {
+    if (!Object.hasOwn(candidate.policyOutcomes, policy.id) || !candidate.policyOutcomes[policy.id]) {
       failures.push({
         code: "missing_policy_outcome",
         detail: `no recorded outcome for persistent policy "${policy.id}"`,
