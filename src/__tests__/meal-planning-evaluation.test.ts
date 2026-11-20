@@ -990,6 +990,7 @@ describe("meal-planning evaluator", () => {
   it.each([
     { name: "Tea (PM)", id: "tea-pm", day: "Mon", text: "Change Tea (PM) to poha" },
     { name: "Lunch box", id: "lunch-box", day: "Mon", text: "Change Monday Lunch box to poha" },
+    { name: "P.M. tea", id: "pm-tea", day: "Mon", text: "Change P.M. tea to poha" },
   ])("matches a punctuation-edged or multiword configured slot as a complete target: $name", ({
     name,
     id,
@@ -1009,6 +1010,41 @@ describe("meal-planning evaluator", () => {
     )
     expect(failureCodes(result)).not.toContain("unscoped_cell_changed")
     expect(failureCodes(result)).not.toContain("unaddressed_feedback")
+  })
+
+  it("does not credit a similarly named configured slot as the destination", () => {
+    const schedule = {
+      days: ["Mon"],
+      slots: [
+        { id: "lunch-box", name: "Lunch box", packed: false, dry: false, maxCookMinutes: null },
+        { id: "large-lunch-box", name: "Large lunch box", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    const context = baseContext({
+      schedule,
+      recentPlan: {
+        Mon: {
+          "lunch-box": cellFor("lunch-box", "old small lunch"),
+          "large-lunch-box": cellFor("large-lunch-box", "old large lunch"),
+        },
+      },
+    })
+    const text = "Change Monday Lunch box to poha"
+    const item = { id: "small-box", text }
+    const result = evaluateMealPlan(
+      {
+        grid: {
+          Mon: {
+            "lunch-box": cellFor("lunch-box", "old small lunch"),
+            "large-lunch-box": cellFor("large-lunch-box", "poha"),
+          },
+        },
+        easyBuys: [],
+        policyOutcomes: {},
+      },
+      { ...context, request: { kind: "revision", text }, feedbackItems: [item] },
+    )
+    expect(failureCodes(result)).toContain("unaddressed_feedback")
   })
 
   it("splits replacement sources before configured slot qualifiers and retires projected-away sources", () => {

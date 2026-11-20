@@ -244,6 +244,49 @@ describe("Mini App HTTP boundary", () => {
       expect(reloadedConfig.schedule).toEqual(savedConfig.schedule)
       expect(validateMealSchedule(reloadedConfig.schedule, reloadedConfig.profile)).toEqual([])
 
+      const requiredPrepMeal = reloadedConfig.profile.mealDefinitions?.find(
+        (definition) => definition.name.toLowerCase() === "rajma",
+      )
+      if (!requiredPrepMeal) throw new Error("missing required-prep meal fixture")
+      const unavailablePrepOnlyConfiguration = {
+        expectedVersion: reloadedConfig.configurationVersion,
+        profile: {
+          dietaryExclusions: reloadedConfig.profile.dietaryExclusions,
+          foodPreferences: reloadedConfig.profile.foodPreferences,
+          allowNewFoods: false,
+          sensoryGuidelines: reloadedConfig.profile.sensoryGuidelines,
+          morningCookingBudgetMinutes: reloadedConfig.profile.morningCookingBudgetMinutes,
+          priorNightPrepAllowed: false,
+          pantryBaseline: reloadedConfig.profile.pantryBaseline,
+        },
+        customPolicies: reloadedConfig.customPolicies,
+        schedule: {
+          days: ["Mon"],
+          halfDays: [],
+          slots: [
+            {
+              id: "prep-required",
+              name: "Prep required",
+              packed: false,
+              dry: false,
+              maxCookMinutes: null,
+              halfDayBehavior: { action: "keep" },
+            },
+          ],
+        },
+        eligibleEstablishedMeals: { "prep-required": [requiredPrepMeal.id] },
+        location: reloadedConfig.location,
+      }
+      const rejectedPrepOnlySchedule = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify(unavailablePrepOnlyConfiguration),
+        }),
+        testEnv,
+      )
+      expect(rejectedPrepOnlySchedule.status).toBe(422)
+
       const invalidPolicyConfiguration = {
         ...configuration,
         expectedVersion: reloadedConfig.configurationVersion,

@@ -116,7 +116,8 @@ export function validateMealSchedule(schedule: MealSchedule, profile?: MealProfi
         !slot.packed || Boolean(definition.packedFood?.suitable && (!slot.dry || definition.packedFood.dry))
       const cookLimit = halfDay && behavior.action === "quick" ? behavior.maxCookMinutes : slot.maxCookMinutes
       const cook = cookLimit === null || definition.typicalCookMinutes <= cookLimit
-      return eligible && packed && cook
+      const prep = profile.priorNightPrepAllowed || definition.priorNightPrep !== "required"
+      return eligible && packed && cook && prep
     }
     const occurrences = schedule.days
       .map((day) => ({ halfDay: schedule.halfDays?.includes(day) === true }))

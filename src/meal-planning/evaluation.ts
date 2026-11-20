@@ -210,11 +210,25 @@ const PLAN_CLAUSE_BOUNDARY = new RegExp(`[;.!?]+|\\b(?:and|but|so)\\s+${PLAN_INS
 
 /** Keeps a targetless "use X instead" attached to the instruction it completes. */
 function instructionClauses(text: string, context?: FeedbackContext): { text: string; targetText: string }[] {
-  const parts = text.split(new RegExp(`(${PLAN_CLAUSE_BOUNDARY.source})`))
+  const punctuationTokens = new Map<string, string>()
+  const slotPattern = scheduleSlotPattern(context?.schedule)
+  const protectedText = slotPattern
+    ? text.replace(new RegExp(slotPattern, "giu"), (slotName) =>
+        slotName.replace(/[.!?;]/g, (punctuation) => {
+          const token = `\uE000${punctuationTokens.size}\uE001`
+          punctuationTokens.set(token, punctuation)
+          return token
+        }),
+      )
+    : text
+  const restoreSlotPunctuation = (value: string) =>
+    [...punctuationTokens].reduce((restored, [token, punctuation]) => restored.replaceAll(token, punctuation), value)
+  const parts = protectedText.split(new RegExp(`(${PLAN_CLAUSE_BOUNDARY.source})`))
   const clauses: { text: string; targetText: string }[] = []
   let separator = ""
   let readingClause = true
-  for (const part of parts) {
+  for (const protectedPart of parts) {
+    const part = restoreSlotPunctuation(protectedPart)
     if (readingClause) {
       const dependentSelection =
         /^\s*(?:please\s+)?(?:use|choose|prefer|serve|put|include)\b.*\binstead\b/.test(part) &&
@@ -365,15 +379,24 @@ function concreteFeedbackMatchesChangedCell(
         ),
       ) ?? []
     const dayMatches = (day: string) => changedCell.day.toLowerCase().startsWith(day.slice(0, DAY_ABBREVIATION_LENGTH))
-    const slotMatches = (meal: string) =>
-      changedCell.slotId.toLowerCase() === meal.toLowerCase().replace(/[\s-]+/g, "-") ||
-      context.schedule?.slots.some(
+    const slotMatches = (meal: string) => {
+      const normalizedMeal = meal
+        .toLowerCase()
+        .trim()
+        .replace(/[\s-]+/g, "-")
+      const configuredSlot = context.schedule.slots.find(
         (slot) =>
-          slot.id === changedCell.slotId &&
-          (slot.name.toLowerCase() === meal.toLowerCase() ||
-            slot.id.toLowerCase() === meal.toLowerCase().replace(/\s+/g, "-")),
-      ) === true ||
-      changedCell.slotId.toLowerCase().includes(meal.replace(/\s+/g, "-").replace("snack-", "snack"))
+          slot.name
+            .toLowerCase()
+            .trim()
+            .replace(/[\s-]+/g, "-") === normalizedMeal || slot.id.toLowerCase() === normalizedMeal,
+      )
+      if (configuredSlot) return configuredSlot.id === changedCell.slotId
+      return (
+        changedCell.slotId.toLowerCase() === normalizedMeal ||
+        changedCell.slotId.toLowerCase().includes(meal.replace(/\s+/g, "-").replace("snack-", "snack"))
+      )
+    }
     const pairs = [
       ...targetText.matchAll(
         new RegExp(
