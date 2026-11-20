@@ -1422,9 +1422,10 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
 
   it.each([
     ["failed replacement", "Please remove special poha and add new idli", ["provisional-new-poha"]],
-    ["unchanged replacement", "Please remove special poha and add new idli", ["provisional-new-poha"]],
+    ["unchanged replacement", "Please remove special poha and add new idli to Monday", ["provisional-new-poha"]],
     ["move by reference", "Please remove special poha and serve it on Monday", []],
     ["move by name", "Please remove special poha and add new poha to Monday", []],
+    ["Mini App cell removal", "Please remove special poha", []],
   ] as const)("records only durable rejection evidence for %s", async (scenario, text, expectedRejections) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
@@ -1446,6 +1447,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
     const seeded = await store.activePlan(CHAT)
     if (!seeded) throw new Error("Expected a saved plan")
+    const miniApp = scenario === "Mini App cell removal"
     const definition = {
       id: "provisional-new-poha",
       name: "new poha",
@@ -1460,6 +1462,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       optionalIngredients: [],
       status: "provisional" as const,
     }
+    const candidate = structuredClone(seeded.version.candidate)
+    if (miniApp) {
+      candidate.grid.Fri.breakfast.dish = definition.name
+      candidate.grid.Mon.breakfast.dish = definition.name
+    }
     await store.startPlanGeneration({ chatId: CHAT, generationId: "create", expiresAt: week.weekEnd })
     await store.createActivePlan({
       planId: "feedback-plan",
@@ -1469,7 +1476,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       timezone: TZ,
       instanceId: "wf-meal-1",
       generationId: "create",
-      candidate: seeded.version.candidate,
+      candidate,
       evaluation: seeded.version.evaluation,
       weeklyInventory: { items: [], notes: [] },
       weeklyExceptions: { items: [] },
@@ -1480,7 +1487,31 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       allowNewFoodsSnapshot: true,
     })
     const unchanged = scenario === "unchanged replacement"
-    const feedbackItem = { id: "tg-205", text, scope: { day: "Mon", slot: "breakfast" } }
+    const batchId = "cell-removal"
+    if (miniApp) {
+      const accepted = await store.acceptFeedbackBatch({
+        batchId,
+        planId: "feedback-plan",
+        chatId: CHAT,
+        baseVersion: 1,
+        workflowInstanceId: "wf-meal-1",
+        idempotencyKey: batchId,
+        items: [{ text, target: { kind: "cell", day: "Fri", slot: "breakfast" } }],
+      })
+      expect(accepted).toMatchObject({
+        ok: true,
+        batch: {
+          items: [
+            {
+              text,
+              target: { kind: "cell", day: "Fri", slot: "breakfast" },
+              scope: { day: "Fri", slot: "breakfast" },
+            },
+          ],
+        },
+      })
+      expect(await store.markFeedbackBatchDelivered(batchId)).toBe(true)
+    }
     let telegramMessages: { text: string }[] = []
     let toolResult = () => ""
     if (!unchanged) {
@@ -1523,14 +1554,20 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           edit: {
             planInstanceId: "wf-meal-1",
             userId: "42",
-            feedback: {
-              interactionKind: "meal-feedback-reply",
-              source: "telegram-reply",
-              version: 1,
-              text,
-              messageId: 205,
-              ...(unchanged ? { items: [feedbackItem] } : {}),
-            },
+            feedback: miniApp
+              ? {
+                  interactionKind: "meal-feedback-submission",
+                  source: "mini-app",
+                  feedbackBatchId: batchId,
+                  baseVersion: 1,
+                }
+              : {
+                  interactionKind: "meal-feedback-reply",
+                  source: "telegram-reply",
+                  version: 1,
+                  text,
+                  messageId: 205,
+                },
           },
         },
       } as never,
@@ -1539,6 +1576,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(step.do).toHaveBeenCalledWith("meal-planning-read-prior-week-revision-0", expect.any(Function))
     expect((await store.activePlan(CHAT))?.plan.rejectedMealIds).toEqual(expectedRejections)
     expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    if (miniApp) expect(await store.feedbackBatch(batchId)).toMatchObject({ status: "failed" })
     if (unchanged)
       expect(
         telegramMessages.map(({ text }) => text),
@@ -2723,6 +2761,11 @@ it.each([
   ["Please remove poha and add idli", ["poha"]],
   ["Please remove poha and add established dosa to Monday", ["poha"]],
   ["Please remove poha and serve it on Monday", []],
+  ["Please remove poha. Serve it on Monday instead.", []],
+  ["Please remove poha. Then, serve it on Monday instead.", []],
+  ["Please remove poha; add poha to Monday.", []],
+  ["Please remove poha. Add idli to Monday.", ["poha"]],
+  ["Please remove poha. Remove idli. Keep poha on Monday.", ["idli"]],
   ["Please remove poha and add poha to Monday", []],
   ["Please remove peas pulao and put matar rice on Monday", []],
   ["Please remove poha and idli, and serve both on Monday", []],

@@ -264,7 +264,7 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
   )
   const contrast = /,?\s+but\s+(?=[^,;.!?]+ is fine$)/u
   const rejectsDish = new RegExp(`^(?:${rejection})$`, "u")
-  const schedule = /^(?:on|to|for) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/u
+  const schedule = /^(?:on|to|for) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?: instead)?$/u
   const names = definitions
     .flatMap((definition) =>
       [definition.name, ...(definition.aliases ?? [])].map((name) => ({ definition, name: normalize(name) })),
@@ -293,13 +293,18 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
 
   const matches = new Set<string>()
   for (const item of items) {
+    // A cell edit can leave the same dish elsewhere in the week.
+    if (item.target?.kind === "cell" || item.scope) continue
+    const rejectedGroups: Set<string>[] = []
+    const preserved = new Set<string>()
+    let unresolvedContinuation = false
     for (const sentence of normalize(item.text).split(/[;.!?]+/u)) {
       const clauses = sentence
         .trim()
+        .replace(/^(?:and|but|then|instead),? /u, "")
         .split(contrast)
         .flatMap((part) => part.split(actionBoundary))
       const rejected = new Set<string>()
-      const preserved = new Set<string>()
       let resolved = true
       for (const part of clauses) {
         const clause = part.trim()
@@ -308,18 +313,23 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
         const targetText = cue ? clause.slice(cue[0].length) : clause.replace(/ is fine$/u, "")
         const targets = cue || targetText !== clause ? parseTargets(targetText, !isRejection) : null
         if (!targets) {
+          // A retention or placement action can refer back to a previous sentence.
+          if (!isRejection && (cue || targetText !== clause)) unresolvedContinuation = true
           resolved = false
-          break
+          continue
         }
         for (const target of targets) {
           if (!isRejection) preserved.add(target.id)
           else if (target.status === "provisional") rejected.add(target.id)
         }
       }
-      // An unresolved reference or a preserved target makes the compound request unsafe as durable evidence.
-      if (resolved && [...rejected].every((id) => !preserved.has(id))) {
-        for (const id of rejected) matches.add(id)
-      }
+      if (resolved && rejected.size) rejectedGroups.push(rejected)
+    }
+    // Resolve continuations over the whole item before recording any group.
+    if (unresolvedContinuation) continue
+    for (const group of rejectedGroups) {
+      if ([...group].some((id) => preserved.has(id))) continue
+      for (const id of group) matches.add(id)
     }
   }
   return [...matches]
