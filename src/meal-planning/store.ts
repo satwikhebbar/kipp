@@ -1,5 +1,5 @@
 import type { CompletionCounts } from "./completion"
-import { completionAdditions, decodeCompletionRejectedIds } from "./completion"
+import { completionAdditions, decodeCompletionRejectedIds, decodeCompletionWeeklyExceptions } from "./completion"
 import type {
   CustomPolicy,
   FeedbackItem,
@@ -1028,7 +1028,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         const profile = JSON.parse(prior) as MealProfile
         const record = mealPlanFromRow(row)
         // Completion must fail closed if evidence that excludes a dish is unreadable.
-        record.plan.weeklyExceptions = JSON.parse(String(row.weekly_exceptions_json)) as WeeklyExceptions
+        record.plan.weeklyExceptions = decodeCompletionWeeklyExceptions(String(row.weekly_exceptions_json))
         record.plan.rejectedMealIds = decodeCompletionRejectedIds(String(row.rejected_meal_ids_json))
         const { additions, counts } = completionAdditions(record, profile)
         const attempt = crypto.randomUUID()

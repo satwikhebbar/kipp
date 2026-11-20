@@ -1,7 +1,8 @@
 import { z } from "zod"
 import { HALF_DAY_SNACK_MAX_COOK_MINUTES, halfDayDroppedSlotIds, isHalfDay } from "./half-day"
 import type { ActivePlanRecord } from "./store"
-import type { MealDefinition, MealProfile } from "./types"
+import type { MealDefinition, MealProfile, WeeklyExceptions } from "./types"
+import { EXCEPTION_KINDS } from "./types"
 
 const nonblank = z.string().refine((value) => value.trim().length > 0)
 const namesSchema = z.array(nonblank)
@@ -11,6 +12,27 @@ const gridCellSchema = z.object({ dish: nonblank })
 export function decodeCompletionRejectedIds(raw: string): string[] {
   return namesSchema.parse(JSON.parse(raw))
 }
+const weeklyExceptionsSchema = z.object({
+  items: z.array(
+    z
+      .object({
+        kind: z.enum(EXCEPTION_KINDS),
+        instruction: z.string(),
+        appliesTo: z.object({ day: nonblank.optional(), mealSlots: namesSchema.optional() }).optional(),
+      })
+      .refine(
+        ({ kind, appliesTo }) =>
+          (kind !== "school_closed" && kind !== "half_day" && kind !== "full_day") || appliesTo?.day !== undefined,
+        { message: "Calendar exception requires an applicable day" },
+      ),
+  ),
+})
+
+/** Reads frozen week exceptions and requires a day for each calendar override. */
+export function decodeCompletionWeeklyExceptions(raw: string): WeeklyExceptions {
+  return weeklyExceptionsSchema.parse(JSON.parse(raw))
+}
+
 const definitionSchema = z
   .object({
     id: nonblank,

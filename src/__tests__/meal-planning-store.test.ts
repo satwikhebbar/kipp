@@ -1705,6 +1705,34 @@ describe("completed week repertoire", () => {
     expect(established).not.toContain(lunchDish.id)
   })
 
+  it.each([
+    ["school_closed", { day: 1 }],
+    ["school_closed", undefined],
+    ["half_day", { day: " " }],
+    ["half_day", {}],
+  ])("defers completion with invalid %s evidence (%j) until repaired", async (kind, appliesTo) => {
+    let now = open
+    const { db, d1 } = createClockedD1TestDb(() => now)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const cell = { dish: dish.name, items: [], vegetarian: true, cookMinutes: 25, priorNightPrep: true }
+    await createPlan(store, input({ candidate: candidate({ Mon: { "school-lunch": cell } }) }))
+    const profileBefore = d1Scalar(db, "SELECT profile_json FROM meal_profile")
+    const update = db.prepare("UPDATE meal_plan SET weekly_exceptions_json = ? WHERE plan_id = 'plan-1'")
+    const exception = { kind, appliesTo, instruction: "Changed Monday's school schedule" }
+    update.run(JSON.stringify({ items: [exception] }))
+    now = late
+    const target = { planId: "plan-1", chatId: CHAT, weekEnd: cutoff }
+    await expect(store.completeEligibleMealPlan(target)).rejects.toThrow()
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_completion")).toBe(0)
+    expect(d1Scalar(db, "SELECT profile_json FROM meal_profile")).toBe(profileBefore)
+
+    update.run(JSON.stringify({ items: [{ ...exception, appliesTo: { day: "Mon" } }] }))
+    expect(await store.completeEligibleMealPlan(target)).toEqual({ added: 0, skipped: 0, invalid: 0 })
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_completion")).toBe(1)
+    expect(d1Scalar(db, "SELECT profile_json FROM meal_profile")).toBe(profileBefore)
+  })
+
   it("retries a profile conflict without dropping the other writer's update", async () => {
     let injectConflict = false
     const { db, d1 } = createD1TestDb(undefined, (sql) => {
