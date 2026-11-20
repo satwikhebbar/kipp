@@ -251,43 +251,74 @@ export function renderHouseholdContext(context: MealPlanContext): string {
 /** Finds provisional dishes directly targeted by explicit rejection feedback. */
 export function explicitRejectedMealIds(items: FeedbackItem[], definitions: MealDefinition[]): string[] {
   const normalize = (text: string) => text.trim().toLowerCase().replace(/’/gu, "'").replace(/\s+/gu, " ")
-  const rejection =
-    /^(?:please )?(?:i |we )?(?:reject|do not want|don't want|do not like|don't like|never serve|remove) /u
-  // Keep a continuation such as "but keep it on Monday" attached to the removal.
-  const clauseBreak =
-    /[;.!?]+|,?\s+but\s+(?=[^,;.!?]+ is fine(?:[;.!?]|$))|(?:,\s*(?:and )?|\s+and\s+)(?=(?:please )?(?:i |we )?(?:add|use|prefer|serve|move|swap|choose|include|put|make|change|switch|remove|reject|do |don't |never )\b)/u
+  const rejection = "reject|do not want|don't want|do not like|don't like|never serve|remove"
+  const otherAction =
+    "add|use|keep|prefer|serve|move|swap|choose|include|put|make|change|switch|do not remove|don't remove"
+  const actionPrefix = "(?:please )?(?:i |we )?"
+  const actionWords = `${rejection}|${otherAction}`
+  const leadingAction = new RegExp(`^${actionPrefix}(${actionWords}) `, "u")
+  // These boundaries identify candidate clauses. Their targets must still prove independence.
+  const actionBoundary = new RegExp(
+    `(?:,\\s*(?:(?:and|but) )?|\\s+(?:and|but) )(?=${actionPrefix}(?:${actionWords}) )`,
+    "u",
+  )
+  const contrast = /,?\s+but\s+(?=[^,;.!?]+ is fine$)/u
+  const rejectsDish = new RegExp(`^(?:${rejection})$`, "u")
+  const schedule = /^(?:on|to|for) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/u
   const names = definitions
-    .filter((definition) => definition.status === "provisional")
     .flatMap((definition) =>
-      [definition.name, ...(definition.aliases ?? [])].map((name) => ({ id: definition.id, name: normalize(name) })),
+      [definition.name, ...(definition.aliases ?? [])].map((name) => ({ definition, name: normalize(name) })),
     )
     .filter(({ name }) => name.length > 0)
     .sort((left, right) => right.name.length - left.name.length)
+  const parseTargets = (text: string, allowSchedule: boolean): MealDefinition[] | null => {
+    const targets: MealDefinition[] = []
+    while (text) {
+      const target = text.replace(/^(?:the|a|an) /u, "")
+      const longest = names.find(({ name }) => target.startsWith(name) && /^[\s,]|^$/u.test(target.slice(name.length)))
+      if (!longest) return null
+      const ambiguous = names.some(
+        ({ name, definition }) => name === longest.name && definition.id !== longest.definition.id,
+      )
+      if (ambiguous) return null
+      targets.push(longest.definition)
+      const suffix = target.slice(longest.name.length).trimStart()
+      if (!suffix || /^(?:,\s*)?please$/u.test(suffix) || (allowSchedule && schedule.test(suffix))) return targets
+      const separator = /^(?:,\s*(?:and )?|and )/u.exec(suffix)
+      if (!separator) return null
+      text = suffix.slice(separator[0].length)
+    }
+    return null
+  }
+
   const matches = new Set<string>()
-
   for (const item of items) {
-    for (const clause of normalize(item.text).split(clauseBreak)) {
-      const cue = rejection.exec(clause.trim())
-      if (!cue) continue
-      const clauseMatches = new Set<string>()
-      let target = clause.trim().slice(cue[0].length)
-      while (target) {
-        target = target.replace(/^(?:the|a|an) /u, "")
-        const longest = names.find(
-          ({ name }) => target.startsWith(name) && /^[\s,]|^$/u.test(target.slice(name.length)),
-        )
-        if (!longest) break
-
-        const suffix = target.slice(longest.name.length).trimStart()
-        if (names.every(({ name, id }) => name !== longest.name || id === longest.id)) clauseMatches.add(longest.id)
-        // A qualifier on the last target can apply to the entire list.
-        if (!suffix || /^(?:,\s*)?please$/u.test(suffix)) {
-          for (const id of clauseMatches) matches.add(id)
+    for (const sentence of normalize(item.text).split(/[;.!?]+/u)) {
+      const clauses = sentence
+        .trim()
+        .split(contrast)
+        .flatMap((part) => part.split(actionBoundary))
+      const rejected = new Set<string>()
+      const preserved = new Set<string>()
+      let resolved = true
+      for (const part of clauses) {
+        const clause = part.trim()
+        const cue = leadingAction.exec(clause)
+        const isRejection = Boolean(cue && rejectsDish.test(cue[1]))
+        const targetText = cue ? clause.slice(cue[0].length) : clause.replace(/ is fine$/u, "")
+        const targets = cue || targetText !== clause ? parseTargets(targetText, !isRejection) : null
+        if (!targets) {
+          resolved = false
           break
         }
-        const listSeparator = /^(?:,\s*(?:and )?|and )/u.exec(suffix)
-        if (!listSeparator) break
-        target = suffix.slice(listSeparator[0].length)
+        for (const target of targets) {
+          if (!isRejection) preserved.add(target.id)
+          else if (target.status === "provisional") rejected.add(target.id)
+        }
+      }
+      // An unresolved reference or a preserved target makes the compound request unsafe as durable evidence.
+      if (resolved && [...rejected].every((id) => !preserved.has(id))) {
+        for (const id of rejected) matches.add(id)
       }
     }
   }
@@ -1044,7 +1075,10 @@ export async function runMealPlanningEditWorkflow(
       }
       const submission = feedbackBatch ? { items: feedbackBatch.items } : submissionFromPayload(payload)
       if (!submission) return
-      const rejectedMealIds = explicitRejectedMealIds(submission.items, active.version.provisionalMealDefinitions)
+      const rejectedMealIds = explicitRejectedMealIds(submission.items, [
+        ...active.version.provisionalMealDefinitions,
+        ...(profile.profile.mealDefinitions ?? []),
+      ])
       if (rejectedMealIds.length) {
         const recorded = await stepDo(step, `meal-planning-reject-feedback-dishes-${iteration}`, () =>
           store.rejectPlanDishes({

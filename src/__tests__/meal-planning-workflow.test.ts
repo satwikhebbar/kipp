@@ -1420,7 +1420,12 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect((await store.activePlan(CHAT))?.plan.approvedVersion).toBe(2)
   })
 
-  it.each(["failed", "unchanged"])("preserves exact dish rejection after a %s revision", async (outcome) => {
+  it.each([
+    ["failed replacement", "Please remove special poha and add new idli", ["provisional-new-poha"]],
+    ["unchanged replacement", "Please remove special poha and add new idli", ["provisional-new-poha"]],
+    ["move by reference", "Please remove special poha and serve it on Monday", []],
+    ["move by name", "Please remove special poha and add new poha to Monday", []],
+  ] as const)("records only durable rejection evidence for %s", async (scenario, text, expectedRejections) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -1474,11 +1479,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       ],
       allowNewFoodsSnapshot: true,
     })
-    const text = "Please remove special poha and add new idli"
+    const unchanged = scenario === "unchanged replacement"
     const feedbackItem = { id: "tg-205", text, scope: { day: "Mon", slot: "breakfast" } }
     let telegramMessages: { text: string }[] = []
     let toolResult = () => ""
-    if (outcome === "failed") {
+    if (!unchanged) {
       vi.stubGlobal(
         "fetch",
         vi.fn(async (url: RequestInfo | URL) => {
@@ -1524,16 +1529,17 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
               version: 1,
               text,
               messageId: 205,
-              ...(outcome === "unchanged" ? { items: [feedbackItem] } : {}),
+              ...(unchanged ? { items: [feedbackItem] } : {}),
             },
           },
         },
       } as never,
       step as never,
     )
-    expect((await store.activePlan(CHAT))?.plan.rejectedMealIds).toEqual(["provisional-new-poha"])
+    expect(step.do).toHaveBeenCalledWith("meal-planning-read-prior-week-revision-0", expect.any(Function))
+    expect((await store.activePlan(CHAT))?.plan.rejectedMealIds).toEqual(expectedRejections)
     expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
-    if (outcome === "unchanged")
+    if (unchanged)
       expect(
         telegramMessages.map(({ text }) => text),
         toolResult(),
@@ -2715,6 +2721,13 @@ it.each([
   ["Please remove matar rice; I like idli", ["pulao"]],
   ["I don't like it", []],
   ["Please remove poha and add idli", ["poha"]],
+  ["Please remove poha and add established dosa to Monday", ["poha"]],
+  ["Please remove poha and serve it on Monday", []],
+  ["Please remove poha and add poha to Monday", []],
+  ["Please remove peas pulao and put matar rice on Monday", []],
+  ["Please remove poha and idli, and serve both on Monday", []],
+  ["Please remove poha and add idli and poha", []],
+  ["Please remove poha but poha is fine", []],
   ["Please remove poha, and add idli", ["poha"]],
   ["Please remove poha and idli", ["poha", "idli"]],
   ["Please remove poha, idli, and upma", ["poha", "idli", "upma"]],
