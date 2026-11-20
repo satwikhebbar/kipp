@@ -3,6 +3,7 @@ import { CalendarWorkflow } from "./calendar/workflow"
 import { createTokenVault } from "./core/token-vault-client"
 import type { Env } from "./core/types"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "./integrations/telegram"
+import { handleMealCompletionCron, MEAL_COMPLETION_CRON } from "./meal-planning/completion-cron"
 import { miniAppRoutes } from "./meal-planning/mini-app-routes"
 import { MealPlanningWorkflow } from "./meal-planning/workflow"
 import { HTTP_STATUS } from "./runtime/http"
@@ -74,6 +75,9 @@ export default {
   async scheduled(controller: ScheduledController, env: Env) {
     try {
       switch (controller.cron) {
+        case MEAL_COMPLETION_CRON:
+          await handleMealCompletionCron(env)
+          break
         case "0 9 * * *":
           await handleRssCron(env)
           break

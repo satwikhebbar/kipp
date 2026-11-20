@@ -22,7 +22,7 @@ export function isHalfDay(context: Pick<MealPlanContext, "schedule" | "weeklyExc
 }
 
 /** The slots omitted by every half-day. `mealSlots` is legacy detail, not an override of the standard schedule. */
-export function halfDayDroppedSlotIds(slots: MealSlot[]): string[] {
+export function halfDayDroppedSlotIds(slots: Pick<MealSlot, "id">[]): string[] {
   const configured = new Set(slots.map((slot) => slot.id))
   return HALF_DAY_DROPPED_SLOT_IDS.filter((slotId) => configured.has(slotId))
 }

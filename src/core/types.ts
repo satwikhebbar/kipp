@@ -158,6 +158,8 @@ export const INTERACTION_KIND = {
   MEAL_FEEDBACK: "meal-feedback",
   MEAL_FEEDBACK_REPLY: "meal-feedback-reply",
   MEAL_FEEDBACK_SUBMISSION: "meal-feedback-submission",
+  MEAL_VERSION_ACCEPT: "meal-version-accept",
+  MEAL_VERSION_REJECT: "meal-version-reject",
 } as const
 
 export type WorkflowInteractionKind = (typeof INTERACTION_KIND)[keyof typeof INTERACTION_KIND]

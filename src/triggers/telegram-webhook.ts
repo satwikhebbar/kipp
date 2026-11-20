@@ -476,7 +476,10 @@ async function dispatchRoutedInteraction(
   if (
     env.MEAL_PLANNING_DB &&
     interaction.kind.startsWith("meal-") &&
-    (interaction.kind === INTERACTION_KIND.MEAL_FEEDBACK || interaction.kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY)
+    (interaction.kind === INTERACTION_KIND.MEAL_FEEDBACK ||
+      interaction.kind === INTERACTION_KIND.MEAL_FEEDBACK_REPLY ||
+      interaction.kind === INTERACTION_KIND.MEAL_VERSION_ACCEPT ||
+      interaction.kind === INTERACTION_KIND.MEAL_VERSION_REJECT)
   ) {
     const store = createMealPlanningStore(env.MEAL_PLANNING_DB)
     const active = await store.activePlan(String(chatId))
