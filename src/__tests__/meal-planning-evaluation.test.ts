@@ -988,6 +988,53 @@ describe("meal-planning evaluator", () => {
   })
 
   it.each([
+    { name: "Tea (PM)", id: "tea-pm", day: "Mon", text: "Change Tea (PM) to poha" },
+    { name: "Lunch box", id: "lunch-box", day: "Mon", text: "Change Monday Lunch box to poha" },
+  ])("matches a punctuation-edged or multiword configured slot as a complete target: $name", ({
+    name,
+    id,
+    day,
+    text,
+  }) => {
+    const context = baseContext({
+      schedule: { days: [day], slots: [{ id, name, packed: false, dry: false, maxCookMinutes: null }] },
+      recentPlan: { [day]: { [id]: cellFor(id, "existing food") } },
+    })
+    const item = { id: "configured-slot", text }
+    expect(isConcretePlanFeedback(item, context)).toBe(true)
+    expect(applicablePlanFeedback([item], context)).toEqual([item])
+    const result = evaluateMealPlan(
+      { grid: { [day]: { [id]: cellFor(id, "poha") } }, easyBuys: [], policyOutcomes: {} },
+      { ...context, request: { kind: "revision", text }, feedbackItems: [item] },
+    )
+    expect(failureCodes(result)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(result)).not.toContain("unaddressed_feedback")
+  })
+
+  it("splits replacement sources before configured slot qualifiers and retires projected-away sources", () => {
+    const schedule = {
+      days: ["Fri"],
+      slots: [{ id: "tea-pm", name: "Tea (PM)", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const text = "Use idli instead of poha for Friday Tea (PM)."
+    const base = gridFrom([
+      ["Mon", "breakfast", "poha"],
+      ["Fri", "tea-pm", "banana"],
+    ])
+    const context = baseContext({
+      schedule,
+      recentPlan: base,
+      feedbackReferencePlan: gridFrom([["Mon", "breakfast", "poha"]]),
+    })
+    const item = { id: "configured-source", text }
+    expect(isConcretePlanFeedback(item, context)).toBe(true)
+    expect(applicablePlanFeedback([item], context)).toEqual([item])
+    const projectedAway = { ...context, recentPlan: gridFrom([["Fri", "tea-pm", "banana"]]) }
+    expect(isConcretePlanFeedback(item, projectedAway)).toBe(false)
+    expect(applicablePlanFeedback([item], projectedAway)).toEqual([])
+  })
+
+  it.each([
     "Move idli from Saturday morning tea to Sunday supper",
     "Move idli from morning tea to Sunday supper",
     "Move idli from Saturday's morning tea to Sunday supper",

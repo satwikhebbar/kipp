@@ -276,9 +276,9 @@ export interface CreateActivePlanInput {
   weekEnd: string
   timezone: string
   /** The exact schedule captured before planning and used to evaluate `candidate`. */
-  schedule?: MealSchedule
+  schedule: MealSchedule
   /** The established catalog captured before planning and used for slot eligibility. */
-  establishedMealDefinitions?: MealDefinition[]
+  establishedMealDefinitions: MealDefinition[]
   /** The live Workflow instance id — the webhook's fallthrough pointer (§6). */
   instanceId: string
   /** Generation lease token; plan creation is rejected when it is absent, expired, or superseded. */
@@ -325,6 +325,8 @@ export interface PromotePlanVersionInput {
   planId: string
   chatId: string
   baseVersion: number
+  /** Configuration snapshot used to validate this revision. Promotion is rejected if it changed. */
+  profileConfigurationVersion: number
   candidate: MealPlanCandidate
   evaluation: MealPlanEvaluation
   video?: Record<string, RecipeVideo>
@@ -937,8 +939,8 @@ function makePlanRecord(input: CreateActivePlanInput, now: string): MealPlanReco
     weekStart: input.weekStart,
     weekEnd: input.weekEnd,
     timezone: input.timezone,
-    schedule: input.schedule ?? SEED_SCHEDULE,
-    establishedMealDefinitions: input.establishedMealDefinitions ?? [],
+    schedule: structuredClone(input.schedule),
+    establishedMealDefinitions: structuredClone(input.establishedMealDefinitions),
     instanceId: input.instanceId,
     status: "active",
     currentVersion: 1,
@@ -1361,8 +1363,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.weekStart,
             input.weekEnd,
             input.timezone,
-            JSON.stringify(input.schedule ?? SEED_SCHEDULE),
-            JSON.stringify(input.establishedMealDefinitions ?? []),
+            JSON.stringify(input.schedule),
+            JSON.stringify(input.establishedMealDefinitions),
             input.instanceId,
             JSON.stringify(input.weeklyInventory),
             JSON.stringify(input.weeklyExceptions),
@@ -1468,8 +1470,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const insertedVersion =
         "SELECT plan_id, version, created_at FROM meal_plan_version WHERE plan_id = ? AND version = ? AND write_attempt_id = ?"
       const proof = [input.planId, newVersion, attemptId] as const
-      const profilePresent = await db.prepare("SELECT 1 FROM meal_profile WHERE chat_id = ?").bind(input.chatId).first()
+      const profilePresent = await db.prepare("SELECT version FROM meal_profile WHERE chat_id = ?").bind(input.chatId).first()
       if (!profilePresent) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      if (Number(profilePresent.version) !== input.profileConfigurationVersion)
+        return { ok: false as const, reason: "stale" as const }
 
       // All effects use the successor from this attempt and its cutoff timestamp.
       // Checking the deadline again could split a successful insert from its dependent writes.
@@ -1486,7 +1490,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}
                AND weekly_inventory_json = COALESCE(?, weekly_inventory_json)
                AND weekly_exceptions_json = COALESCE(?, weekly_exceptions_json)
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ? AND version = ${input.profileConfigurationVersion})
                AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
                                      WHERE batch_id = ? AND plan_id = meal_plan.plan_id
                                        AND chat_id = meal_plan.chat_id AND base_version = meal_plan.current_version
@@ -1740,7 +1744,6 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async activePlan(chatId) {
-      await this.loadOrCreateProfile(chatId)
       const row = await db
         .prepare(
           `${PLAN_WITH_VERSION_SELECT}
@@ -1749,11 +1752,18 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         .bind(chatId)
         .first()
       if (!row) return null
+      if (row.schedule_json == null || row.established_meal_definitions_json == null) {
+        await this.loadOrCreateProfile(chatId)
+        const hydrated = await db
+          .prepare(`${PLAN_WITH_VERSION_SELECT} WHERE p.chat_id = ? AND p.status = 'active'`)
+          .bind(chatId)
+          .first()
+        return hydrated ? mealPlanFromRow(hydrated) : null
+      }
       return mealPlanFromRow(row)
     },
 
     async latestPlanForWeek(chatId, weekStart) {
-      await this.loadOrCreateProfile(chatId)
       const row = await db
         .prepare(
           `${PLAN_WITH_VERSION_SELECT}
@@ -1763,11 +1773,19 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(chatId, weekStart)
         .first()
-      return row ? mealPlanFromRow(row) : null
+      if (!row || (row.schedule_json != null && row.established_meal_definitions_json != null))
+        return row ? mealPlanFromRow(row) : null
+      await this.loadOrCreateProfile(chatId)
+      const hydrated = await db
+        .prepare(
+          `${PLAN_WITH_VERSION_SELECT} WHERE p.chat_id = ? AND p.week_start = ? ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1`,
+        )
+        .bind(chatId, weekStart)
+        .first()
+      return hydrated ? mealPlanFromRow(hydrated) : null
     },
 
     async listPlanHistory(chatId) {
-      await this.loadOrCreateProfile(chatId)
       const result = await db
         .prepare(
           `${PLAN_WITH_VERSION_SELECT}
@@ -1784,11 +1802,23 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(chatId, MAX_MEAL_PLAN_HISTORY)
         .all()
-      return (result.results ?? []).map((row) => mealPlanFromRow(row))
+      let rows = result.results ?? []
+      if (rows.some((row) => row.schedule_json == null || row.established_meal_definitions_json == null)) {
+        await this.loadOrCreateProfile(chatId)
+        const hydrated = await db
+          .prepare(`${PLAN_WITH_VERSION_SELECT}
+           WHERE p.chat_id = ? AND NOT EXISTS (
+             SELECT 1 FROM meal_plan newer WHERE newer.chat_id = p.chat_id AND newer.week_start = p.week_start
+               AND (newer.created_at > p.created_at OR (newer.created_at = p.created_at AND newer.rowid > p.rowid)))
+           ORDER BY CASE WHEN p.status = 'active' THEN 0 ELSE 1 END, p.updated_at DESC, p.created_at DESC, p.plan_id DESC LIMIT ?`)
+          .bind(chatId, MAX_MEAL_PLAN_HISTORY)
+          .all()
+        rows = hydrated.results ?? []
+      }
+      return rows.map((row) => mealPlanFromRow(row))
     },
 
     async planById(chatId, planId) {
-      await this.loadOrCreateProfile(chatId)
       const row = await db
         .prepare(
           `${PLAN_WITH_VERSION_SELECT}
@@ -1796,7 +1826,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(chatId, planId)
         .first()
-      return row ? mealPlanFromRow(row) : null
+      if (!row || (row.schedule_json != null && row.established_meal_definitions_json != null))
+        return row ? mealPlanFromRow(row) : null
+      await this.loadOrCreateProfile(chatId)
+      const hydrated = await db
+        .prepare(`${PLAN_WITH_VERSION_SELECT} WHERE p.chat_id = ? AND p.plan_id = ?`)
+        .bind(chatId, planId)
+        .first()
+      return hydrated ? mealPlanFromRow(hydrated) : null
     },
     async activePlanPointer(chatId) {
       const row = await db
@@ -2010,7 +2047,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const row = await db
         .prepare(
           `DELETE FROM mini_app_settings_launch
-           WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ?
+           WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ? AND consumed_at IS NULL
            RETURNING token_hash, telegram_user_id, chat_id, expires_at, created_at`,
         )
         .bind(tokenHash, telegramUserId, now)
@@ -2367,6 +2404,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async saveMealProfileConfiguration(input) {
+      await this.loadOrCreateProfile(input.chatId)
       const canonical = backing.profiles.get(input.chatId)
       if (!canonical) return { ok: false as const, reason: "unavailable" as const }
       if (canonical.configurationVersion !== input.expectedVersion)
@@ -2448,6 +2486,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       if (stale) return { ok: false as const, reason: "stale" as const }
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      if (profile.configurationVersion !== input.profileConfigurationVersion)
+        return { ok: false as const, reason: "stale" as const }
       const existingBatch = input.feedbackBatch?.consumeExisting
         ? backing.batches.get(input.feedbackBatch.batchId)
         : undefined
@@ -2621,7 +2661,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async activePlan(chatId) {
-      await this.loadOrCreateProfile(chatId)
+      if (
+        [...backing.plans.values()].some(
+          (plan) => plan.chatId === chatId && (!plan.schedule || !plan.establishedMealDefinitions),
+        )
+      )
+        await this.loadOrCreateProfile(chatId)
       const plan = activePlanForChat(chatId)
       if (!plan) return null
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
@@ -2630,7 +2675,15 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async latestPlanForWeek(chatId, weekStart) {
-      await this.loadOrCreateProfile(chatId)
+      if (
+        [...backing.plans.values()].some(
+          (plan) =>
+            plan.chatId === chatId &&
+            plan.weekStart === weekStart &&
+            (!plan.schedule || !plan.establishedMealDefinitions),
+        )
+      )
+        await this.loadOrCreateProfile(chatId)
       let plan: MealPlanRecord | undefined
       for (const candidate of backing.plans.values()) {
         if (candidate.chatId !== chatId || candidate.weekStart !== weekStart) continue
@@ -2642,7 +2695,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async listPlanHistory(chatId) {
-      await this.loadOrCreateProfile(chatId)
+      if (
+        [...backing.plans.values()].some(
+          (plan) => plan.chatId === chatId && (!plan.schedule || !plan.establishedMealDefinitions),
+        )
+      )
+        await this.loadOrCreateProfile(chatId)
       const latestByWeek = new Map<string, MealPlanRecord>()
       for (const plan of backing.plans.values()) {
         if (plan.chatId !== chatId) continue
@@ -2667,9 +2725,9 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async planById(chatId, planId) {
-      await this.loadOrCreateProfile(chatId)
       const plan = backing.plans.get(planId)
       if (!plan || plan.chatId !== chatId) return null
+      if (!plan.schedule || !plan.establishedMealDefinitions) await this.loadOrCreateProfile(chatId)
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       return version ? structuredClone({ plan, version }) : null
     },

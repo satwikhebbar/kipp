@@ -87,6 +87,8 @@ describe("configurable meal schedules", () => {
         {
           ...(SEED_PROFILE.mealDefinitions?.[0] as NonNullable<typeof SEED_PROFILE.mealDefinitions>[number]),
           suitableSlots: ["morning-tea", "lunch", "supper"],
+          packedFood: { suitable: true, dry: true },
+          typicalCookMinutes: 0,
         },
       ],
     }
@@ -107,6 +109,22 @@ describe("configurable meal schedules", () => {
         "morning-tea",
       ),
     ).toBe(true)
+  })
+
+  it("allows half-day-only eligibility on required half-day slots but not ordinary days", () => {
+    const definition = {
+      ...(SEED_PROFILE.mealDefinitions?.find((meal) => meal.halfDaySnack) as NonNullable<
+        typeof SEED_PROFILE.mealDefinitions
+      >[number]),
+      suitableSlots: ["supper"],
+      packedFood: { suitable: true, dry: true },
+      typicalCookMinutes: 10,
+    }
+    const profile = { ...SEED_PROFILE, allowNewFoods: false, mealDefinitions: [definition] }
+    expect(validateMealSchedule(CUSTOM_SUNDAY_SCHEDULE, profile)).toEqual([])
+    expect(validateMealSchedule({ ...CUSTOM_SUNDAY_SCHEDULE, days: ["Mon", "Sun"] }, profile)).toEqual(
+      expect.arrayContaining([expect.stringContaining("Morning tea (morning-tea) has no eligible established meals")]),
+    )
   })
 
   it("rejects malformed weekday, duplicate slot, and all-omitted half-day configurations", () => {

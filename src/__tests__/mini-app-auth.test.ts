@@ -4,8 +4,8 @@ import {
   createSettingsLaunchReference,
   verifyTelegramInitData,
 } from "../meal-planning/mini-app-auth"
-import { createMealPlanningStore } from "../meal-planning/store"
-import { createClockedD1TestDb } from "./d1-test-db"
+import { createMealPlanningStore, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
+import { createClockedD1TestDb, createD1TestDb } from "./d1-test-db"
 
 const BOT_TOKEN = "123:bot-token"
 const NOW = new Date("2026-09-01T12:00:00.000Z")
@@ -60,6 +60,8 @@ describe("Mini App Telegram authentication", () => {
       weekStart: "2026-08-31T00:00:00.000Z",
       weekEnd: "2026-09-05T23:59:59.000Z",
       timezone: "Asia/Kolkata",
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "instance-1",
       generationId: "generation-1",
       candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },

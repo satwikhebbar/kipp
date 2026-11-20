@@ -1415,6 +1415,7 @@ async function runRevision(
       chatId: event.payload.chatId,
       baseVersion: active.plan.currentVersion,
       expectedWeekContext: active.plan,
+      profileConfigurationVersion: profile.configurationVersion,
       candidate: enriched.candidate,
       video: enriched.video,
       evaluation: propose.evaluation,

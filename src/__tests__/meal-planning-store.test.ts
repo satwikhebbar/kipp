@@ -52,6 +52,8 @@ function createInput(overrides: Partial<CreateActivePlanInput> = {}): CreateActi
     chatId: CHAT,
     ...WEEKS,
     timezone: "Asia/Kolkata",
+    schedule: SEED_SCHEDULE,
+    establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
     instanceId: "instance-1",
     generationId: "generation-1",
     candidate: candidate(),
@@ -68,6 +70,7 @@ function promoteInput(overrides: Partial<PromotePlanVersionInput> = {}): Promote
     planId: "plan-1",
     chatId: CHAT,
     baseVersion: 1,
+    profileConfigurationVersion: 1,
     candidate: candidate({
       Mon: { breakfast: { dish: "poha", vegetarian: true, items: ["poha"], cookMinutes: 10, priorNightPrep: false } },
     }),

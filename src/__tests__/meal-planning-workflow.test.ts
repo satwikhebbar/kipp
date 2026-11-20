@@ -594,7 +594,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
     const active = await store.activePlan(CHAT)
     expect(active?.plan.schedule).toEqual(schedule)
-    expect(active?.plan.weekEnd).toBe(week.weekEnd)
+    expect(active?.plan.weekEnd).toBe("2026-09-13T18:29:59.000Z")
     expect(active?.version.candidate.grid).toEqual(
       expect.objectContaining({
         Sun: expect.objectContaining({ "morning-tea": expect.any(Object), supper: expect.any(Object) }),
@@ -758,6 +758,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           weekStart: active.plan.weekStart,
           weekEnd: active.plan.weekEnd,
           timezone: TZ,
+          schedule: SEED_SCHEDULE,
+          establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
           candidate: active.version.candidate,
           evaluation: active.version.evaluation,
           weeklyInventory: active.plan.weeklyInventory,
@@ -1440,6 +1442,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "prior-workflow",
       generationId: "prior-workflow",
       candidate: {
@@ -1517,6 +1521,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: priorWeek.weekStart,
       weekEnd: priorWeek.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "prior-week-workflow",
       generationId: "prior-week-workflow",
       candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
@@ -1589,6 +1595,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "same-week-workflow",
       generationId: "same-week-workflow",
       candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
@@ -3198,6 +3206,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "prior-workflow",
       generationId: "prior-generation",
       candidate: { grid: {}, easyBuys: [], policyOutcomes: {} } as never,
@@ -3287,6 +3297,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
             planId: active.plan.planId,
             chatId: CHAT,
             baseVersion: 1,
+            profileConfigurationVersion: (await store.loadOrCreateProfile(CHAT)).configurationVersion,
             candidate: active.version.candidate,
             evaluation: active.version.evaluation,
             video: active.version.video,
