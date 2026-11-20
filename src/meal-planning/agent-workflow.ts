@@ -293,11 +293,11 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
   }
 
   const matches = new Set<string>()
+  const preserved = new Set<string>()
   feedback: for (const item of items) {
     // A cell edit can leave the same dish elsewhere in the week.
     if (item.target?.kind === "cell" || item.scope) continue
-    const rejectedGroups: Set<string>[] = []
-    const preserved = new Set<string>()
+    const rejected = new Set<string>()
     for (const sentence of normalize(item.text).split(/[;.!?]+/u)) {
       const statement = sentence.trim()
       if (!statement || /^(?:thanks|thank you)$/u.test(statement)) continue
@@ -305,12 +305,12 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
         .replace(/^(?:and|but|then|instead),? /u, "")
         .split(contrast)
         .flatMap((part) => part.split(actionBoundary))
-      const rejected = new Set<string>()
       for (const part of clauses) {
         const clause = part.trim()
         const cue = leadingAction.exec(clause)
         const isRejection = Boolean(cue && rejectsDish.test(cue[1]))
-        const targetText = cue ? clause.slice(cue[0].length) : clause.replace(/ is fine$/u, "")
+        const actionTarget = cue ? clause.slice(cue[0].length) : clause.replace(/ is fine$/u, "")
+        const targetText = cue && !isRejection ? actionTarget.replace(/ instead$/u, "") : actionTarget
         const planWideRejection = isRejection ? parseTargets(targetText, false) : null
         const targets = planWideRejection ?? (cue || targetText !== clause ? parseTargets(targetText, true) : null)
         // Any unmatched instruction can qualify or reverse an earlier removal.
@@ -321,15 +321,10 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
           else if (target.status === "provisional") rejected.add(target.id)
         }
       }
-      if (rejected.size) rejectedGroups.push(rejected)
     }
-    // Resolve continuations over the whole item before recording any group.
-    for (const group of rejectedGroups) {
-      if ([...group].some((id) => preserved.has(id))) continue
-      for (const id of group) matches.add(id)
-    }
+    for (const id of rejected) matches.add(id)
   }
-  return [...matches]
+  return [...matches].filter((id) => !preserved.has(id))
 }
 
 /**
@@ -433,11 +428,21 @@ export async function runAgentCenteredMealPlanningWorkflow(
           allowNewFoodsSnapshot: profile.profile.allowNewFoods,
         })
       } catch (error) {
-        if (error instanceof PlanWeekClosedError) return null
+        if (error instanceof PlanWeekClosedError) return "week-closed" as const
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
         throw error
       }
     })
+    if (created === "week-closed") {
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        "That planning week has closed. Run /mealplan to request a new plan.",
+        "meal-planning-notify-week-closed",
+      )
+      return
+    }
     if (!created) return
     const persisted = created
     await stepDo(step, "meal-planning-finish-generation-lease", () =>
@@ -1082,26 +1087,26 @@ export async function runMealPlanningEditWorkflow(
       }
       const submission = feedbackBatch ? { items: feedbackBatch.items } : submissionFromPayload(payload)
       if (!submission) return
-      const rejectedMealIds = explicitRejectedMealIds(submission.items, [
-        ...active.version.provisionalMealDefinitions,
-        ...(profile.profile.mealDefinitions ?? []),
-      ])
-      if (rejectedMealIds.length) {
-        const recorded = await stepDo(step, `meal-planning-reject-feedback-dishes-${iteration}`, () =>
-          store.rejectPlanDishes({
-            chatId,
-            planId: active.plan.planId,
-            version: active.plan.currentVersion,
-            mealIds: rejectedMealIds,
-          }),
-        )
-        if (!recorded) {
-          if (feedbackBatch) await failMiniAppBatch(env, step, store, chatId, feedbackBatch.batchId, iteration)
-          else await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-reject-feedback-stale-${iteration}`)
-          return
-        }
-      }
       try {
+        const rejectedMealIds = explicitRejectedMealIds(submission.items, [
+          ...active.version.provisionalMealDefinitions,
+          ...(profile.profile.mealDefinitions ?? []),
+        ])
+        if (rejectedMealIds.length) {
+          const recorded = await stepDo(step, `meal-planning-reject-feedback-dishes-${iteration}`, () =>
+            store.rejectPlanDishes({
+              chatId,
+              planId: active.plan.planId,
+              version: active.plan.currentVersion,
+              mealIds: rejectedMealIds,
+            }),
+          )
+          if (!recorded) {
+            if (feedbackBatch) await failMiniAppBatch(env, step, store, chatId, feedbackBatch.batchId, iteration)
+            else await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-reject-feedback-stale-${iteration}`)
+            return
+          }
+        }
         await runRevision(env, step, event, store, profile, active, submission, iteration, false, feedbackBatch)
       } catch (error) {
         if (isWorkflowInterruption(error)) throw error
@@ -1267,7 +1272,14 @@ async function runRevision(
       }),
     )
     if (!persisted.ok) {
-      await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-context`)
+      if (feedbackBatch) {
+        await stepDo(step, `meal-planning-stale-mini-app-batch-${occurrence}`, () =>
+          store.markFeedbackBatchStale(feedbackBatch.batchId, new Date().toISOString()),
+        )
+        await notifyMiniAppBatchTerminal(env, step, store, event.payload.chatId, feedbackBatch.batchId, iteration)
+      } else {
+        await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-context`)
+      }
       return null
     }
     // Standalone Telegram context facts may intentionally stop after the
@@ -1376,7 +1388,7 @@ async function runRevision(
       outcome: "failed",
       failureCategory: result.reason,
     })
-    await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-plan`)
+    if (!feedbackBatch) await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-plan`)
     return null
   }
   const updated = await stepDo(step, `meal-planning-read-updated-${occurrence}`, () =>

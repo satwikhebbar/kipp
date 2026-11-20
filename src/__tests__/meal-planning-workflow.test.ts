@@ -15,7 +15,7 @@ import {
   runAgentCenteredMealPlanningWorkflow,
   runMealPlanningEditWorkflow,
 } from "../meal-planning/agent-workflow"
-import { MEAL_NO_CHANGES } from "../meal-planning/messages"
+import { MEAL_NO_CHANGES, MEAL_STALE_PLAN } from "../meal-planning/messages"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
@@ -625,6 +625,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     "busy",
     "provider-failure",
     "promotion-failure",
+    "stale-context",
+    "stale-promotion",
   ])("terminalizes a Mini App batch on %s and prevents duplicate revision on retry", async (failure) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
@@ -660,19 +662,32 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     if (failure === "busy") await router.claimEdit(`meal:${original.instanceId}`, "other-edit", "meal")
     const revised = revisionPatch("Mon", "snack1", SEED_MEAL_IDS["vegetable cutlet"])
     const network = stubNetwork(
-      failure === "promotion-failure"
+      failure === "stale-context"
         ? [
-            deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
             deepseekResponse([
               {
-                name: "propose_plan",
-                input: proposeInput(revised, [
-                  { id: "mini-1", text: "Use idli instead.", scope: { day: "Mon", slot: "snack1" } },
-                ]),
+                name: "update_week_context",
+                input: {
+                  inventoryChanges: [{ name: "pear", status: "unavailable" }],
+                  exceptionAdds: [],
+                  replan: false,
+                },
               },
             ]),
           ]
-        : [],
+        : failure === "promotion-failure" || failure === "stale-promotion"
+          ? [
+              deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+              deepseekResponse([
+                {
+                  name: "propose_plan",
+                  input: proposeInput(revised, [
+                    { id: "mini-1", text: "Use idli instead.", scope: { day: "Mon", slot: "snack1" } },
+                  ]),
+                },
+              ]),
+            ]
+          : [],
     )
     const event = {
       ...original,
@@ -697,10 +712,19 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     step.do.mockImplementation(async (name, fn) => {
       if (failure === "promotion-failure" && name.startsWith("meal-planning-promote-"))
         throw new Error("D1 unavailable")
+      if (
+        (failure === "stale-context" && name.startsWith("meal-planning-update-week-context-")) ||
+        (failure === "stale-promotion" && name.startsWith("meal-planning-promote-"))
+      ) {
+        vi.setSystemTime(new Date(active.plan.weekEnd))
+      }
       return execute(name, fn)
     })
     await runMealPlanningEditWorkflow(env, event, step as never)
-    expect((await store.feedbackBatch("failed-batch"))?.status).toBe("failed")
+    const status = failure.startsWith("stale-") ? "stale" : "failed"
+    expect((await store.feedbackBatch("failed-batch"))?.status).toBe(status)
+    if (status === "stale")
+      expect(network.telegramMessages.filter(({ text }) => text === MEAL_STALE_PLAN)).toHaveLength(1)
     expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
     const requests = network.deepseekBodies.length
     if (failure === "busy") await router.releaseEdit(`meal:${original.instanceId}`, "other-edit")
@@ -712,7 +736,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       createMemoizingStep([], invokedAtMs) as never,
     )
     expect(network.deepseekBodies).toHaveLength(requests)
-    expect((await store.feedbackBatch("failed-batch"))?.status).toBe("failed")
+    expect((await store.feedbackBatch("failed-batch"))?.status).toBe(status)
+    if (status === "stale")
+      expect(network.telegramMessages.filter(({ text }) => text === MEAL_STALE_PLAN)).toHaveLength(1)
     expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
     expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
   })
@@ -875,6 +901,33 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(deepseekBodies).toHaveLength(2)
     expect(telegramMessages.filter((message) => message.text.includes("School week of"))).toHaveLength(1)
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+  })
+
+  it("notifies the parent when initial persistence reaches a closed week", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createClockedD1TestDb()
+    const { namespace, registrations } = fakeRouter()
+    const base = seedCandidate()
+    const { telegramMessages } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+    const { weekEnd } = resolvePlanningWeek(invokedAtMs, TZ)
+    const step = {
+      do: vi.fn(async (name: string, fn: () => unknown) => {
+        if (name === "meal-planning-create-plan") vi.setSystemTime(new Date(weekEnd))
+        return fn()
+      }),
+    }
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+    expect(telegramMessages.filter(({ text }) => text.includes("planning week has closed"))).toEqual([
+      expect.objectContaining({ text: "That planning week has closed. Run /mealplan to request a new plan." }),
+    ])
+    expect(registrations).toHaveLength(0)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan")).toBe(0)
+    expect(await createMealPlanningStore(d1).activePlanGeneration(CHAT)).toBeNull()
   })
 
   it("persists plan v1, registers feedback, and completes without waiting", async () => {
@@ -1428,6 +1481,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ["move across sentences", "Please remove special poha. Let’s serve it on Monday instead.", []],
     ["named move across sentences", "Please remove special poha. We can have new poha on Monday instead.", []],
     ["Mini App cell removal", "Please remove special poha", []],
+    ["Mini App rejection write error", "Please remove special poha", []],
+    ["Mini App lost rejection response", "Please remove special poha", ["provisional-new-poha"]],
   ] as const)("records only durable rejection evidence for %s", async (scenario, text, expectedRejections) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
@@ -1449,7 +1504,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
     const seeded = await store.activePlan(CHAT)
     if (!seeded) throw new Error("Expected a saved plan")
-    const miniApp = scenario === "Mini App cell removal"
+    const cellRemoval = scenario === "Mini App cell removal"
+    const miniApp = scenario.startsWith("Mini App")
     const definition = {
       id: "provisional-new-poha",
       name: "new poha",
@@ -1465,7 +1521,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       status: "provisional" as const,
     }
     const candidate = structuredClone(seeded.version.candidate)
-    if (miniApp) {
+    if (cellRemoval) {
       candidate.grid.Fri.breakfast.dish = definition.name
       candidate.grid.Mon.breakfast.dish = definition.name
     }
@@ -1491,6 +1547,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const unchanged = scenario === "unchanged replacement"
     const batchId = "cell-removal"
     if (miniApp) {
+      const target = cellRemoval
+        ? ({ kind: "cell", day: "Fri", slot: "breakfast" } as const)
+        : ({ kind: "plan" } as const)
       const accepted = await store.acceptFeedbackBatch({
         batchId,
         planId: "feedback-plan",
@@ -1498,7 +1557,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         baseVersion: 1,
         workflowInstanceId: "wf-meal-1",
         idempotencyKey: batchId,
-        items: [{ text, target: { kind: "cell", day: "Fri", slot: "breakfast" } }],
+        items: [{ text, target }],
       })
       expect(accepted).toMatchObject({
         ok: true,
@@ -1506,8 +1565,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           items: [
             {
               text,
-              target: { kind: "cell", day: "Fri", slot: "breakfast" },
-              scope: { day: "Fri", slot: "breakfast" },
+              target,
+              ...(cellRemoval ? { scope: { day: "Fri", slot: "breakfast" } } : {}),
             },
           ],
         },
@@ -1545,7 +1604,17 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           .map(({ content }) => content)
           .join("\n") ?? ""
     }
-    const step = { do: vi.fn(async (_name: string, fn: () => unknown) => fn()) }
+    const writeError = scenario === "Mini App rejection write error"
+    const lostResponse = scenario === "Mini App lost rejection response"
+    const step = {
+      do: vi.fn(async (name: string, fn: () => unknown) => {
+        if (name === "meal-planning-reject-feedback-dishes-0" && (writeError || lostResponse)) {
+          if (lostResponse) await fn()
+          throw new Error("D1 unavailable")
+        }
+        return fn()
+      }),
+    }
     await runMealPlanningEditWorkflow(
       makeEnv(namespace, d1, { LLM_MAX_RETRIES: "0" }),
       {
@@ -1575,7 +1644,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       } as never,
       step as never,
     )
-    expect(step.do).toHaveBeenCalledWith("meal-planning-read-prior-week-revision-0", expect.any(Function))
+    if (writeError || lostResponse)
+      expect(step.do).not.toHaveBeenCalledWith("meal-planning-read-prior-week-revision-0", expect.any(Function))
+    else expect(step.do).toHaveBeenCalledWith("meal-planning-read-prior-week-revision-0", expect.any(Function))
     expect((await store.activePlan(CHAT))?.plan.rejectedMealIds).toEqual(expectedRejections)
     expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
     if (miniApp) expect(await store.feedbackBatch(batchId)).toMatchObject({ status: "failed" })
@@ -2761,6 +2832,11 @@ it.each([
   ["Please remove matar rice; I like idli", ["pulao"]],
   ["I don't like it", []],
   ["Please remove poha and add idli", ["poha"]],
+  ["Please remove poha and add idli instead", ["poha"]],
+  ["Please remove poha instead", []],
+  ["Please remove poha and idli, but keep poha on Monday", ["idli"]],
+  [["Please remove poha and idli", "Keep poha on Monday"], ["idli"]],
+  [["Keep poha on Monday", "Please remove poha", "Please remove idli"], ["idli"]],
   ["Please remove poha and add established dosa to Monday", ["poha"]],
   ["Please remove poha and serve it on Monday", []],
   ["Please remove poha. Serve it on Monday instead.", []],
@@ -2803,9 +2879,9 @@ it.each([
     { id: "upma", name: "upma" },
   ].map((definition) => ({ ...definition, status: "provisional" }))
   expect(
-    explicitRejectedMealIds([{ id: "feedback", text }], [
-      ...definitions,
-      { id: "dosa", name: "established dosa", status: "established" },
-    ] as never),
+    explicitRejectedMealIds(
+      (Array.isArray(text) ? text : [text]).map((text, index) => ({ id: String(index), text })),
+      [...definitions, { id: "dosa", name: "established dosa", status: "established" }] as never,
+    ),
   ).toEqual(ids)
 })
