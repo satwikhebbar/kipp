@@ -5,6 +5,12 @@ import type { MealDefinition, MealProfile } from "./types"
 
 const nonblank = z.string().refine((value) => value.trim().length > 0)
 const namesSchema = z.array(nonblank)
+const gridCellSchema = z.object({ dish: nonblank })
+
+/** Reads the stored rejection evidence or aborts completion if it is unreadable. */
+export function decodeCompletionRejectedIds(raw: string): string[] {
+  return namesSchema.parse(JSON.parse(raw))
+}
 const definitionSchema = z
   .object({
     id: nonblank,
@@ -43,6 +49,11 @@ function normalizeName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ")
 }
 
+/** Identifies JSON objects while excluding arrays and nulls from the grid. */
+function isGridObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 /** Converts referenced, eligible provisional definitions while preserving their planning attributes. */
 export function completionAdditions(record: ActivePlanRecord, profile: MealProfile) {
   const { plan, version } = record
@@ -52,16 +63,25 @@ export function completionAdditions(record: ActivePlanRecord, profile: MealProfi
   )
   const schedule = { days: [], slots: [] }
   const referenced = new Set<string>()
-  for (const [day, cells] of Object.entries(version.candidate.grid)) {
+  const counts: CompletionCounts = { added: 0, skipped: 0, invalid: 0 }
+  const grid: unknown = version.candidate?.grid
+  if (!isGridObject(grid)) counts.invalid++
+  for (const [day, cells] of Object.entries(isGridObject(grid) ? grid : {})) {
     if (closed.has(day)) continue
+    if (!isGridObject(cells)) {
+      counts.invalid++
+      continue
+    }
     const dropped = isHalfDay({ schedule, weeklyExceptions }, day)
       ? halfDayDroppedSlotIds(Object.keys(cells).map((id) => ({ id })))
       : []
     for (const [slot, cell] of Object.entries(cells)) {
-      if (!dropped.includes(slot)) referenced.add(normalizeName(cell.dish))
+      if (dropped.includes(slot)) continue
+      const parsed = gridCellSchema.safeParse(cell)
+      if (parsed.success) referenced.add(normalizeName(parsed.data.dish))
+      else counts.invalid++
     }
   }
-  const counts: CompletionCounts = { added: 0, skipped: 0, invalid: 0 }
   const catalog = profile.mealDefinitions ?? []
   const known = catalog.filter((entry) => entry.status === "established")
   const knownNames = new Set(known.flatMap(names))

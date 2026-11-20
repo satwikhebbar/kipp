@@ -1794,6 +1794,63 @@ describe("completed week repertoire", () => {
     expect(await store.claimDueMealCompletion(new Set())).toBeNull()
   })
 
+  it.each([
+    ["invalid JSON", "["],
+    ["a JSON string", JSON.stringify(dish.id)],
+    ["an array with a non-string ID", JSON.stringify([dish.id, null])],
+  ])("leaves the catalog and ledger unchanged when rejection evidence is %s", async (_case, raw) => {
+    let now = open
+    const { db, d1 } = createClockedD1TestDb(() => now)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, input())
+    const profileBefore = d1Scalar(db, "SELECT profile_json FROM meal_profile")
+    const update = db.prepare("UPDATE meal_plan SET rejected_meal_ids_json = ? WHERE plan_id = 'plan-1'")
+    update.run(raw)
+    now = late
+    const target = { planId: "plan-1", chatId: CHAT, weekEnd: cutoff }
+    await expect(store.completeEligibleMealPlan(target)).rejects.toThrow()
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_completion")).toBe(0)
+    expect(d1Scalar(db, "SELECT profile_json FROM meal_profile")).toBe(profileBefore)
+
+    update.run(JSON.stringify([dish.id]))
+    expect(await store.completeEligibleMealPlan(target)).toEqual({ added: 0, skipped: 1, invalid: 0 })
+    expect(d1Scalar(db, "SELECT profile_json FROM meal_profile")).toBe(profileBefore)
+  })
+
+  it.each([true, false])("counts malformed grid entries and completes (valid cell: %s)", async (hasValidCell) => {
+    let now = open
+    const { db, d1 } = createClockedD1TestDb(() => now)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const original = input()
+    await createPlan(store, original)
+    const profileBefore = d1Scalar(db, "SELECT profile_json FROM meal_profile")
+    const grid = {
+      Mon: null,
+      Tue: { ...(hasValidCell ? original.candidate.grid.Mon : { "home-lunch": null }), breakfast: { dish: 42 } },
+      Wed: [],
+      Thu: { breakfast: { dish: " " } },
+    }
+    db.prepare("UPDATE meal_plan_version SET candidate_json = ? WHERE plan_id = 'plan-1'").run(
+      JSON.stringify({ ...original.candidate, grid }),
+    )
+    now = late
+    const target = { planId: "plan-1", chatId: CHAT, weekEnd: cutoff }
+    const counts = { added: hasValidCell ? 1 : 0, skipped: 0, invalid: hasValidCell ? 4 : 5 }
+    expect(await store.completeEligibleMealPlan(target)).toEqual(counts)
+    expect(d1Scalar(db, "SELECT invalid_count FROM meal_plan_completion")).toBe(counts.invalid)
+    expect(await store.completeEligibleMealPlan(target)).toBeNull()
+    if (hasValidCell) {
+      expect((await store.loadOrCreateProfile(CHAT)).profile.mealDefinitions).toContainEqual({
+        ...dish,
+        status: "established",
+      })
+    } else {
+      expect(d1Scalar(db, "SELECT profile_json FROM meal_profile")).toBe(profileBefore)
+    }
+  })
+
   it("rolls back the ledger when the catalog update fails", async () => {
     let now = open
     const { db, d1 } = createClockedD1TestDb(() => now)
