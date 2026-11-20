@@ -7,6 +7,7 @@ import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
 import { MEAL_HELP, MEAL_PLAN_ENDED, MEAL_PLAN_GENERATING, MEAL_STALE_PLAN } from "../meal-planning/messages"
+import { createSettingsLaunchReference } from "../meal-planning/mini-app-auth"
 import { createMealPlanningStore } from "../meal-planning/store"
 import { firstNoteUrl } from "../notes/links"
 import type { NotesWorkflowParams } from "../notes/types"
@@ -16,7 +17,7 @@ import { userFacingFailureMessage } from "../runtime/user-failures"
 const LABEL_TRUNCATE_LENGTH = 80
 const ASCII_SPACE_CODE_POINT = 32
 const UNKNOWN_COMMAND_MESSAGE =
-  "Unknown command. Use /add <text>, /generate [idea id], /note <thoughts>, /calendar <request>, /mealplan <request>, or tap inline buttons."
+  "Unknown command. Use /add <text>, /generate [idea id], /note <thoughts>, /calendar <request>, /mealplan <request>, /mealsettings, or tap inline buttons."
 
 class NotesTransportError extends Error {}
 
@@ -63,7 +64,19 @@ interface TelegramCommand {
   argument: string
 }
 
-const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "note", "calendar", "mealplan"])
+const KNOWN_TELEGRAM_COMMANDS = new Set(["add", "generate", "note", "calendar", "mealplan", "mealsettings"])
+
+/** Builds the Mini App shell URL only from a configured public HTTPS origin. */
+function mealSettingsBaseUrl(origin: string | undefined): string | null {
+  if (!origin?.trim()) return null
+  try {
+    const configured = new URL(origin)
+    if (configured.protocol !== "https:" || configured.username || configured.password) return null
+    return new URL("/mini-app", configured.origin).toString()
+  } catch {
+    return null
+  }
+}
 
 /** Reads a Telegram slash command from its bot_command entity, with a text fallback for test and legacy updates. */
 function telegramCommand(message: TelegramMessage): TelegramCommand | null {
@@ -308,6 +321,41 @@ async function handleMessage(msg: TelegramMessage, env: Env, setupOrigin: string
         },
       })
       await tg.sendMessage(msg.chat.id, "Planning that now.")
+      return new Response("OK")
+    }
+
+    if (command?.name === "mealsettings") {
+      const allowedUser = env.TELEGRAM_ALLOWED_USER_ID?.trim()
+      if (
+        msg.chat.type !== "private" ||
+        msg.chat.id !== msg.from.id ||
+        !allowedUser ||
+        String(msg.from.id) !== allowedUser
+      ) {
+        await tg.sendMessage(msg.chat.id, "Open household settings from your private chat with Kipp.", {
+          plainText: true,
+        })
+        return new Response("OK")
+      }
+      if (!env.MEAL_PLANNING_DB) {
+        await tg.sendMessage(msg.chat.id, "Household settings are not available right now.", { plainText: true })
+        return new Response("OK")
+      }
+      const appUrl = mealSettingsBaseUrl(env.MINI_APP_ORIGIN)
+      if (!appUrl) {
+        await tg.sendMessage(msg.chat.id, "Household settings are not available right now.", { plainText: true })
+        return new Response("OK")
+      }
+      const store = createMealPlanningStore(env.MEAL_PLANNING_DB)
+      await store.loadOrCreateProfile(String(msg.chat.id))
+      const launch = await createSettingsLaunchReference(String(msg.from.id), String(msg.chat.id), env)
+      const launchUrl = new URL(appUrl)
+      launchUrl.searchParams.set("launch", launch.reference)
+      await tg.sendMessage(msg.chat.id, "Open household settings:", {
+        replyMarkup: {
+          inline_keyboard: [[{ text: "Household settings", web_app: { url: launchUrl.toString() } }]],
+        },
+      })
       return new Response("OK")
     }
 

@@ -13,6 +13,8 @@ const SECONDS_PER_MILLISECOND = 1_000
 const MAX_BEARER_LENGTH = 256
 const MAX_INIT_DATA_LENGTH = 16_384
 const SESSION_TOKEN_BYTES = 32
+const SETTINGS_LAUNCH_TTL_SECONDS = 600
+const MAX_LAUNCH_REFERENCE_LENGTH = 256
 
 export class MiniAppAuthError extends Error {
   constructor(
@@ -63,7 +65,7 @@ export async function verifyTelegramInitData(
   raw: string,
   botToken: string,
   nowSeconds = Math.floor(Date.now() / SECONDS_PER_MILLISECOND),
-): Promise<{ userId: string; authDate: number; verifiedHash: string }> {
+): Promise<{ userId: string; authDate: number; verifiedHash: string; queryId: string | null }> {
   if (!raw || raw.length > MAX_INIT_DATA_LENGTH) throw new MiniAppAuthError("invalid")
   const params = new URLSearchParams(raw)
   const hashValue = params.get("hash")
@@ -93,7 +95,7 @@ export async function verifyTelegramInitData(
   const expected = await hmac(secret, checkString)
   const supplied = fromHex(hashValue)
   if (!supplied || !equalBytes(expected, supplied)) throw new MiniAppAuthError("invalid")
-  return { userId: String(user.id), authDate, verifiedHash: hashValue.toLowerCase() }
+  return { userId: String(user.id), authDate, verifiedHash: hashValue.toLowerCase(), queryId: params.get("query_id") }
 }
 
 /** Sha256. */
@@ -106,35 +108,84 @@ function randomToken(): string {
   return base64urlEncode(crypto.getRandomValues(new Uint8Array(SESSION_TOKEN_BYTES)))
 }
 
+/** Creates a short-lived private-chat settings launch and stores only its hash. */
+export async function createSettingsLaunchReference(
+  telegramUserId: string,
+  chatId: string,
+  env: Pick<Env, "MEAL_PLANNING_DB">,
+  now = new Date(),
+): Promise<{ reference: string; expiresAt: string }> {
+  if (!env.MEAL_PLANNING_DB) throw new MiniAppAuthError("unavailable")
+  const reference = randomToken()
+  const expiresAt = new Date(now.getTime() + SETTINGS_LAUNCH_TTL_SECONDS * SECONDS_PER_MILLISECOND).toISOString()
+  await createMealPlanningStore(env.MEAL_PLANNING_DB).createMiniAppSettingsLaunch({
+    tokenHash: await sha256(reference),
+    telegramUserId,
+    chatId,
+    expiresAt,
+    createdAt: now.toISOString(),
+  })
+  return { reference, expiresAt }
+}
+
 /** Authenticate mini app. */
 export async function authenticateMiniApp(
   rawInitData: string,
   env: Pick<Env, "TELEGRAM_BOT_TOKEN" | "TELEGRAM_ALLOWED_USER_ID" | "MEAL_PLANNING_DB">,
   now = new Date(),
-): Promise<{ token: string; session: MiniAppSessionRecord; context: MiniAppReviewContext }> {
+  launchReference?: string | null,
+): Promise<{ token: string; session: MiniAppSessionRecord; context: MiniAppReviewContext | null }> {
   if (!env.MEAL_PLANNING_DB) throw new MiniAppAuthError("unavailable")
   const nowSeconds = Math.floor(now.getTime() / SECONDS_PER_MILLISECOND)
   const verified = await verifyTelegramInitData(rawInitData, env.TELEGRAM_BOT_TOKEN, nowSeconds)
   if (verified.userId !== env.TELEGRAM_ALLOWED_USER_ID.trim()) throw new MiniAppAuthError("unauthorized")
   const store = createMealPlanningStore(env.MEAL_PLANNING_DB)
-  const replayed = await store.consumeMiniAppInitDataFingerprint(
-    await sha256(verified.verifiedHash),
-    new Date((verified.authDate + AUTH_MAX_AGE_SECONDS) * SECONDS_PER_MILLISECOND).toISOString(),
-    now.toISOString(),
-  )
-  if (!replayed) throw new MiniAppAuthError("replayed")
-  const context = await store.resolveMiniAppReviewContext(verified.userId)
-  if (!context) throw new MiniAppAuthError("unauthorized")
+  const settingsLaunch = launchReference !== undefined && launchReference !== null
+  if (settingsLaunch && (!launchReference || launchReference.length > MAX_LAUNCH_REFERENCE_LENGTH || !verified.queryId))
+    throw new MiniAppAuthError("invalid")
+  const context = settingsLaunch ? null : await store.resolveMiniAppReviewContext(verified.userId)
+  if (!settingsLaunch && !context) throw new MiniAppAuthError("unauthorized")
+  const launch = settingsLaunch
+    ? await store.getMiniAppSettingsLaunch(await sha256(launchReference as string), verified.userId, now.toISOString())
+    : null
+  if (settingsLaunch && !launch) throw new MiniAppAuthError("unauthorized")
+  if (launch) await store.loadOrCreateProfile(launch.chatId)
   const token = randomToken()
-  const session = await store.createMiniAppSession({
+  const fingerprintHash = await sha256(verified.verifiedHash)
+  const fingerprintExpiresAt = new Date(
+    (verified.authDate + AUTH_MAX_AGE_SECONDS + 1) * SECONDS_PER_MILLISECOND,
+  ).toISOString()
+  const sessionInput = {
     sessionId: crypto.randomUUID(),
     tokenHash: await sha256(token),
     telegramUserId: verified.userId,
-    chatId: context.chatId,
-    planId: context.planId,
+    chatId: launch?.chatId ?? (context as MiniAppReviewContext).chatId,
+    planId: context?.planId ?? null,
+    scope: settingsLaunch ? "settings" : "review",
     expiresAt: new Date(now.getTime() + AUTH_MAX_AGE_SECONDS * SECONDS_PER_MILLISECOND).toISOString(),
     createdAt: now.toISOString(),
-  })
+  } as const
+  let session: MiniAppSessionRecord
+  if (launch) {
+    const exchanged = await store.exchangeMiniAppSettingsLaunch({
+      launchTokenHash: launch.tokenHash,
+      telegramUserId: verified.userId,
+      fingerprintHash,
+      fingerprintExpiresAt,
+      now: now.toISOString(),
+      session: sessionInput,
+    })
+    if (!exchanged.ok) throw new MiniAppAuthError(exchanged.reason)
+    session = exchanged.session
+  } else {
+    const replayed = await store.consumeMiniAppInitDataFingerprint(
+      fingerprintHash,
+      fingerprintExpiresAt,
+      now.toISOString(),
+    )
+    if (!replayed) throw new MiniAppAuthError("replayed")
+    session = await store.createMiniAppSession(sessionInput)
+  }
   return { token, session, context }
 }
 

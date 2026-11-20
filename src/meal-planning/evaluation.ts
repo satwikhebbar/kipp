@@ -16,6 +16,7 @@ import type {
   MealPlanSelectionCandidate,
   MealPlanSelectionEvaluation,
   MealPlanSelectionPatch,
+  MealSchedule,
 } from "./types"
 
 const MAX_PRIOR_NIGHT_PREP_PER_DAY = 2
@@ -143,20 +144,43 @@ function inFeedbackScope(scope: { day?: string; slot?: string }, day: string, sl
   return Boolean(scope.day || scope.slot) && (!scope.day || scope.day === day) && (!scope.slot || scope.slot === slotId)
 }
 
+type FeedbackContext = Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan"> &
+  Partial<Pick<MealPlanContext, "schedule">>
+
+const DAY_WORDS = "(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)"
+const MEAL_WORDS = "(?:(?:school|home)\\s+lunch|breakfast|snack\\s*[12]?|lunch|dinner)"
+const DAY_ABBREVIATION_LENGTH = 3
+
+/** Builds a word-boundary pattern for configured slot names and IDs. */
+function scheduleSlotPattern(schedule?: MealSchedule): string | undefined {
+  const values = schedule?.slots.flatMap(({ id, name }) => [id.replace(/-/g, " "), name]) ?? []
+  if (values.length === 0) return undefined
+  const escaped = values
+    .map((value) =>
+      value
+        .trim()
+        .split(/[\s-]+/)
+        .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("[\\s-]+"),
+    )
+    .sort((a, b) => b.length - a.length)
+  return `(?:${escaped.join("|")})`
+}
+
+/** Checks whether feedback names any slot from the pinned schedule. */
+function mentionsScheduleSlot(text: string, schedule?: MealSchedule): boolean {
+  const pattern = scheduleSlotPattern(schedule)
+  return pattern !== undefined && new RegExp(`(?<![\\p{L}\\p{N}_])${pattern}(?![\\p{L}\\p{N}_])`, "iu").test(text)
+}
+
 /** A plan target authorizes a revision only when the parent's text names a concrete change. */
-export function isConcretePlanFeedback(
-  item: FeedbackItem,
-  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
-): boolean {
+export function isConcretePlanFeedback(item: FeedbackItem, context: FeedbackContext): boolean {
   if (item.scope || item.target?.kind === "cell") return false
   return planFeedbackClauses(item.text, context).some((text) => isPlanChangeClause(text, context))
 }
 
 /** Retains only instructions applicable to the newly eligible revision base. */
-export function applicablePlanFeedback(
-  items: FeedbackItem[],
-  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
-): FeedbackItem[] {
+export function applicablePlanFeedback(items: FeedbackItem[], context: FeedbackContext): FeedbackItem[] {
   return items.flatMap((item) => {
     if (item.scope) return [item]
     const clauses = planFeedbackClauses(item.text, context).filter((text) => isPlanChangeClause(text, context))
@@ -180,24 +204,40 @@ const PLAN_ACTION_WORDS =
 const PLAN_CONSTRAINT_WORDS = "(?:no|avoid|without)\\s+repeat(?:ed)?\\s+(?:dishes|meals)"
 const PLAN_ACTION = new RegExp(`\\b(?:${PLAN_ACTION_WORDS})\\b`)
 const PLAN_CONSTRAINT = new RegExp(`\\b${PLAN_CONSTRAINT_WORDS}\\b`)
-const PLAN_TARGET =
-  /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|breakfast|snack|lunch|dinner|meal|dish)\b/
+const PLAN_TARGET = new RegExp(`\\b(?:${DAY_WORDS}|${MEAL_WORDS}|meal|dish)\\b`)
 const PLAN_INSTRUCTION_START = `(?=(?:please\\s+)?(?:${PLAN_ACTION_WORDS}|${PLAN_CONSTRAINT_WORDS})\\b)`
 const PLAN_CLAUSE_BOUNDARY = new RegExp(`[;.!?]+|\\b(?:and|but|so)\\s+${PLAN_INSTRUCTION_START}`)
 
 /** Keeps a targetless "use X instead" attached to the instruction it completes. */
-function instructionClauses(text: string): { text: string; targetText: string }[] {
-  const parts = text.split(new RegExp(`(${PLAN_CLAUSE_BOUNDARY.source})`))
+function instructionClauses(text: string, context?: FeedbackContext): { text: string; targetText: string }[] {
+  const punctuationTokens = new Map<string, string>()
+  const slotPattern = scheduleSlotPattern(context?.schedule)
+  const protectedText = slotPattern
+    ? text.replace(new RegExp(slotPattern, "giu"), (slotName) =>
+        slotName.replace(/[.!?;]/g, (punctuation) => {
+          const token = `\uE000${punctuationTokens.size}\uE001`
+          punctuationTokens.set(token, punctuation)
+          return token
+        }),
+      )
+    : text
+  const restoreSlotPunctuation = (value: string) =>
+    [...punctuationTokens].reduce((restored, [token, punctuation]) => restored.replaceAll(token, punctuation), value)
+  const parts = protectedText.split(new RegExp(`(${PLAN_CLAUSE_BOUNDARY.source})`))
   const clauses: { text: string; targetText: string }[] = []
   let separator = ""
   let readingClause = true
-  for (const part of parts) {
+  for (const protectedPart of parts) {
+    const part = restoreSlotPunctuation(protectedPart)
     if (readingClause) {
       const dependentSelection =
         /^\s*(?:please\s+)?(?:use|choose|prefer|serve|put|include)\b.*\binstead\b/.test(part) &&
         // "Instead of poha" supplies its own target, independently of a prior fact.
         !/\binstead\s+of\s+\S/.test(part) &&
-        !new RegExp(`\\b(?:${DAY_WORDS}|${MEAL_WORDS})\\b`).test(part)
+        !new RegExp(
+          `\\b${DAY_WORDS}\\b|\\b${MEAL_WORDS}\\b|(?<![\\p{L}\\p{N}_])${scheduleSlotPattern(context?.schedule) ?? "(?!)"}(?![\\p{L}\\p{N}_])`,
+          "iu",
+        ).test(part)
       if (dependentSelection && clauses.length > 0) clauses[clauses.length - 1].text += separator + part
       else clauses.push({ text: part, targetText: part })
     } else separator = part
@@ -207,11 +247,8 @@ function instructionClauses(text: string): { text: string; targetText: string }[
 }
 
 /** Keeps inventory facts separate from the plan instructions they accompany. */
-function planFeedbackClauses(
-  text: string,
-  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
-): string[] {
-  return instructionClauses(text.toLowerCase()).flatMap(({ text: clause }) => {
+function planFeedbackClauses(text: string, context: FeedbackContext): string[] {
+  return instructionClauses(text.toLowerCase(), context).flatMap(({ text: clause }) => {
     if (!/^\s*(?:we (?:have|had)|there (?:are|is))\b|\b(?:inventory|pantry|stock)\b/.test(clause)) return [clause]
     // Ask the classifier itself whether the suffix is an instruction. This
     // includes day-, meal-, and dish-led preferences without another verb list.
@@ -246,13 +283,10 @@ function mentionsDish(text: string, grid: MealGrid | null | undefined): boolean 
 }
 
 /** Classifies a clause so inventory actions cannot borrow plan targets from unrelated facts. */
-function isPlanChangeClause(
-  text: string,
-  context: Pick<MealPlanContext, "recentPlan" | "feedbackReferencePlan">,
-): boolean {
+function isPlanChangeClause(text: string, context: FeedbackContext): boolean {
   // Eligibility belongs to the target, not to a replacement that might also
   // appear elsewhere in the grid. Rendering still keeps the full instruction.
-  text = instructionClauses(text)[0]?.targetText ?? text
+  text = instructionClauses(text, context)[0]?.targetText ?? text
   // A pantry mention after an action can be a source, rather than its target.
   const inventoryDestination = /\b(?:remove|update)\b/.test(text)
     ? text
@@ -264,21 +298,26 @@ function isPlanChangeClause(
   const action = PLAN_ACTION.test(text)
   const destination = /\b(?:with|to|for|instead|from|on|into|another|other)\b/.test(text)
   const replacementSource = text.match(/\binstead\s+of\s+(.+)/)
+  const slotPattern = scheduleSlotPattern(context.schedule)
+  const targetWords = `(?:${DAY_WORDS}|${MEAL_WORDS}${slotPattern ? `|${slotPattern}` : ""})`
   // Destination qualifiers locate the new meal, not the dish being replaced.
   const sourceTarget = replacementSource?.[1].split(
-    new RegExp(`\\s+(?:for|on|at)\\s+(?=(?:${DAY_WORDS}|${MEAL_WORDS})\\b)`),
+    new RegExp(`\\s+(?:for|on|at)\\s+(?=(?:${targetWords})(?![\\p{L}\\p{N}_]))`, "iu"),
   )[0]
   const sourceNamesReviewedDish =
     replacementSource &&
     [context.recentPlan, context.feedbackReferencePlan].some((grid) => mentionsDish(sourceTarget ?? "", grid))
   const primaryInstruction = text.slice(0, replacementSource?.index)
-  const primaryHasTarget = PLAN_TARGET.test(primaryInstruction) || mentionsDish(primaryInstruction, context.recentPlan)
-  // A named source owns replacement eligibility even after projection removes
-  // it. A generic contrast ("something heavy") must not erase an explicit meal
-  // or eligible named-dish target in the instruction before "instead of".
+  const primaryHasTarget =
+    PLAN_TARGET.test(primaryInstruction) ||
+    mentionsScheduleSlot(primaryInstruction, context.schedule) ||
+    mentionsDish(primaryInstruction, context.recentPlan)
+  // Keep a named source distinct from the destination, but validate it against
+  // the projected revision base below. A generic contrast must not erase an
+  // explicit meal or eligible named-dish target before "instead of".
   const applicabilityTarget =
     replacementSource && (sourceNamesReviewedDish || !primaryHasTarget) ? (sourceTarget ?? "") : text
-  const mealOrDay = PLAN_TARGET.test(applicabilityTarget)
+  const mealOrDay = PLAN_TARGET.test(applicabilityTarget) || mentionsScheduleSlot(applicabilityTarget, context.schedule)
   // A move can rescue a dish from a closed day. A replacement of a removed dish
   // is already satisfied by projection and must not survive as stale feedback.
   const referencePlan = /\b(?:move|moving|shift)\b/.test(text)
@@ -289,11 +328,14 @@ function isPlanChangeClause(
   const specificPreference =
     /\b(?:less|more|lighter|faster|simpler|healthier|spicier)\b/.test(text) ||
     /\b(?:too|less|more)\s+(?:oily|spicy|heavy|slow|wet|dry)\b/.test(text)
-  const namedDays =
+  const namedDays = applicabilityTarget.match(new RegExp(`\\b${DAY_WORDS}\\b`, "g")) ?? []
+  const namedMeals =
     applicabilityTarget.match(
-      /\b(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/g,
+      new RegExp(
+        `(?<![\\p{L}\\p{N}_])(?:${slotPattern ? `${slotPattern}|` : ""}${MEAL_WORDS})(?![\\p{L}\\p{N}_])`,
+        "giu",
+      ),
     ) ?? []
-  const namedMeals = applicabilityTarget.match(/\b(?:breakfast|snack|lunch|dinner)\b/g) ?? []
   const explicitSwap =
     /\b(?:swap|switch|trade)\b/.test(text) && (new Set(namedDays).size >= 2 || new Set(namedMeals).size >= 2)
   return (
@@ -307,10 +349,6 @@ function isPlanChangeClause(
 function isPlanConstraint(text: string): boolean {
   return PLAN_CONSTRAINT.test(text)
 }
-
-const DAY_WORDS = "(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)"
-const MEAL_WORDS = "(?:(?:school|home)\\s+lunch|breakfast|snack\\s*[12]?|lunch|dinner)"
-const DAY_ABBREVIATION_LENGTH = 3
 
 /** Matches requested destinations while preserving day/meal pairs and qualifiers. */
 function concreteFeedbackMatchesChangedCell(
@@ -326,16 +364,47 @@ function concreteFeedbackMatchesChangedCell(
     const priorDish = context.recentPlan?.[changedCell.day]?.[changedCell.slotId]?.dish
     const priorDishMatches = priorDish !== undefined && text.includes(priorDish.toLowerCase())
     const moving = /\b(?:move|moving|shift)\b/.test(text)
-    // A source locates the old dish; it is not a requested destination.
-    const targetText = moving
-      ? text.replace(new RegExp(`\\bfrom\\s+${DAY_WORDS}(?:\\s+${MEAL_WORDS})?`, "g"), "")
-      : text
+    // A move's destination follows "to" or "into" and ends before an optional
+    // trailing source. Restrict matching to that phrase so source slots cannot
+    // be mistaken for the destination regardless of which comes first.
+    const destination = text.match(/\b(?:to|into)\s+(.+?)(?=\s+from\b|$)/)
+    const targetText = moving ? (destination?.[1] ?? text) : text
     const namedDays = targetText.match(new RegExp(`\\b${DAY_WORDS}\\b`, "g")) ?? []
-    const namedMeals = targetText.match(new RegExp(`\\b${MEAL_WORDS}\\b`, "g")) ?? []
+    const slotPattern = scheduleSlotPattern(context.schedule)
+    const namedMeals =
+      targetText.match(
+        new RegExp(
+          `(?<![\\p{L}\\p{N}_])(?:${slotPattern ? `${slotPattern}|` : ""}${MEAL_WORDS})(?![\\p{L}\\p{N}_])`,
+          "giu",
+        ),
+      ) ?? []
     const dayMatches = (day: string) => changedCell.day.toLowerCase().startsWith(day.slice(0, DAY_ABBREVIATION_LENGTH))
-    const slotMatches = (meal: string) =>
-      changedCell.slotId.toLowerCase().includes(meal.replace(/\s+/g, "-").replace("snack-", "snack"))
-    const pairs = [...targetText.matchAll(new RegExp(`\\b(${DAY_WORDS})\\s+(${MEAL_WORDS})\\b`, "g"))]
+    const slotMatches = (meal: string) => {
+      const normalizedMeal = meal
+        .toLowerCase()
+        .trim()
+        .replace(/[\s-]+/g, "-")
+      const configuredSlot = context.schedule.slots.find(
+        (slot) =>
+          slot.name
+            .toLowerCase()
+            .trim()
+            .replace(/[\s-]+/g, "-") === normalizedMeal || slot.id.toLowerCase() === normalizedMeal,
+      )
+      if (configuredSlot) return configuredSlot.id === changedCell.slotId
+      return (
+        changedCell.slotId.toLowerCase() === normalizedMeal ||
+        changedCell.slotId.toLowerCase().includes(meal.replace(/\s+/g, "-").replace("snack-", "snack"))
+      )
+    }
+    const pairs = [
+      ...targetText.matchAll(
+        new RegExp(
+          `\\b(${DAY_WORDS})\\s+((?:${slotPattern ? `${slotPattern}|` : ""}${MEAL_WORDS}))(?![\\p{L}\\p{N}_])`,
+          "giu",
+        ),
+      ),
+    ]
     if (pairs.length > 1 && new Set(namedMeals).size > 1)
       return pairs.some((pair) => dayMatches(pair[1]) && slotMatches(pair[2]))
     if (namedDays.length > 0 && namedMeals.length > 0) return namedDays.some(dayMatches) && namedMeals.some(slotMatches)
@@ -407,6 +476,7 @@ export function evaluateMealPlan(
   const persistentPolicies = context.customPolicies.filter((policy) => policy.scope === "persistent")
 
   const presentCells = new Set(refs.map((ref) => `${ref.day}\u0000${ref.slotId}`))
+  const allowedCells = new Set(coverage.required.map(({ day, slotId }) => `${day}\u0000${slotId}`))
   for (const cell of coverage.required) {
     if (!presentCells.has(`${cell.day}\u0000${cell.slotId}`)) {
       failures.push({
@@ -425,6 +495,10 @@ export function evaluateMealPlan(
     }
     if (coverage.droppedSlots.some((drop) => drop.day === day && drop.slotId === slotId)) {
       failures.push({ code: "extra_slot_for_half_day", day, slot: slotId, detail: `cell on half day ${day}` })
+    }
+    const droppedByHalfDay = coverage.droppedSlots.some((drop) => drop.day === day && drop.slotId === slotId)
+    if (!allowedCells.has(`${day}\u0000${slotId}`) && !closedDays.has(day) && !droppedByHalfDay) {
+      failures.push({ code: "unconfigured_cell", day, slot: slotId, detail: "cell is outside the configured schedule" })
     }
     for (const token of cell.items) {
       if (clearExclusionTokens.has(normalizeIngredient(token))) {
@@ -613,7 +687,7 @@ export function evaluateMealPlan(
   }
 
   for (const policy of persistentPolicies) {
-    if (!candidate.policyOutcomes[policy.id]) {
+    if (!Object.hasOwn(candidate.policyOutcomes, policy.id) || !candidate.policyOutcomes[policy.id]) {
       failures.push({
         code: "missing_policy_outcome",
         detail: `no recorded outcome for persistent policy "${policy.id}"`,
@@ -625,8 +699,13 @@ export function evaluateMealPlan(
   if (request.kind === "revision" && context.recentPlan) {
     const concretePlanFeedback = feedbackItems.some((item) => isConcretePlanFeedback(item, context))
     for (const { day, slotId } of revisionChangedCells) {
+      const invalidatedByNewExclusion = context.revisionRepairableCells?.some(
+        (cell) => cell.day === day && cell.slotId === slotId,
+      )
       const scoped =
-        concretePlanFeedback || feedbackItems.some((item) => item.scope && inFeedbackScope(item.scope, day, slotId))
+        invalidatedByNewExclusion ||
+        concretePlanFeedback ||
+        feedbackItems.some((item) => item.scope && inFeedbackScope(item.scope, day, slotId))
       if (!scoped) {
         failures.push({
           code: "unscoped_cell_changed",

@@ -50,6 +50,8 @@ function createInput(overrides: Partial<CreateActivePlanInput> = {}): CreateActi
     chatId: CHAT,
     ...WEEKS,
     timezone: "Asia/Kolkata",
+    schedule: SEED_SCHEDULE,
+    establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
     instanceId: "instance-1",
     generationId: "generation-1",
     candidate: candidate(),
@@ -65,6 +67,7 @@ function promoteInput(overrides: Partial<PromotePlanVersionInput> = {}): Promote
     planId: "plan-1",
     chatId: CHAT,
     baseVersion: 1,
+    profileConfigurationVersion: 1,
     candidate: candidate({
       Mon: { breakfast: { dish: "poha", vegetarian: true, items: ["poha"], cookMinutes: 10, priorNightPrep: false } },
     }),
@@ -138,6 +141,46 @@ describe("createInMemoryMealPlanningStore", () => {
     profile.schedule = { days: [...SEED_SCHEDULE.days], slots: [...SEED_SCHEDULE.slots] }
     expect((await store.loadOrCreateProfile(CHAT)).schedule.halfDays).toEqual(["Sat"])
     expect(upgradeLegacyMealSchedule({ ...SEED_SCHEDULE, halfDays: [] }).halfDays).toEqual([])
+  })
+
+  it.each([
+    "in-memory",
+    "D1",
+  ] as const)("keeps feedback validation on the pinned plan schedule (%s)", async (backend) => {
+    const { db, d1 } = createD1TestDb()
+    const store = backend === "D1" ? createMealPlanningStore(d1) : createInMemoryMealPlanningStore()
+    await store.loadOrCreateProfile(CHAT)
+    const customSchedule = {
+      days: ["Sun"],
+      slots: [{ id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null }],
+    }
+    await createPlan(
+      store,
+      createInput({
+        schedule: customSchedule,
+        candidate: candidate({
+          Sun: {
+            "morning-tea": { dish: "poha", vegetarian: true, items: ["poha"], cookMinutes: 10, priorNightPrep: false },
+          },
+        }),
+      }),
+    )
+    if (backend === "D1") {
+      db.prepare("UPDATE meal_profile SET schedule_json = ? WHERE chat_id = ?").run(JSON.stringify(SEED_SCHEDULE), CHAT)
+    } else {
+      ;(await store.loadOrCreateProfile(CHAT)).schedule = SEED_SCHEDULE
+    }
+    const accepted = await store.acceptFeedbackBatch({
+      batchId: "pinned-schedule-batch",
+      planId: "plan-1",
+      chatId: CHAT,
+      baseVersion: 1,
+      workflowInstanceId: "instance-1",
+      idempotencyKey: "pinned-schedule",
+      items: [{ text: "Change morning tea", target: { kind: "cell", day: "Sun", slot: "morning-tea" } }],
+    })
+    expect(accepted).toMatchObject({ ok: true, batch: { items: [{ target: { day: "Sun", slot: "morning-tea" } }] } })
+    expect((await store.activePlan(CHAT))?.plan.schedule.days).toEqual(["Sun"])
   })
 
   it("createActivePlan writes the plan, version 1, and generation 1; previousReplaced is false for the first plan", async () => {
@@ -656,6 +699,197 @@ describe.each([
 })
 
 describe("createMealPlanningStore (D1, real SQL)", () => {
+  it("cleans expired settings launches when creating a new live launch", async () => {
+    const { d1, db } = createD1TestDb()
+    const store = createMealPlanningStore(d1)
+    const expired = new Date(Date.now() - 1_000).toISOString()
+    await store.createMiniAppSettingsLaunch({
+      tokenHash: "expired-settings-launch",
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      expiresAt: expired,
+      createdAt: expired,
+    })
+    await store.createMiniAppSettingsLaunch({
+      tokenHash: "current-settings-launch",
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    expect(
+      d1Count(
+        db,
+        "SELECT count(*) AS count FROM mini_app_settings_launch WHERE token_hash = ?",
+        "expired-settings-launch",
+      ),
+    ).toBe(0)
+    expect(
+      d1Count(
+        db,
+        "SELECT count(*) AS count FROM mini_app_settings_launch WHERE token_hash = ?",
+        "current-settings-launch",
+      ),
+    ).toBe(1)
+  })
+
+  it("returns its committed save even when a later save wins before the response", async () => {
+    const { d1 } = createD1TestDb()
+    const originalPrepare = d1.prepare.bind(d1)
+    let blockNextUpdate = true
+    let signalEntered: () => void = () => {}
+    let releaseUpdate: () => void = () => {}
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve
+    })
+    const delayedD1 = {
+      ...d1,
+      prepare(sql: string) {
+        const prepared = originalPrepare(sql)
+        return {
+          bind(...values: Array<string | number | null>) {
+            const statement = prepared.bind(...values)
+            if (!sql.includes("RETURNING chat_id, profile_json")) return statement
+            return {
+              ...statement,
+              first: async () => {
+                const committed = await statement.first()
+                if (blockNextUpdate) {
+                  blockNextUpdate = false
+                  signalEntered()
+                  await gate
+                }
+                return committed
+              },
+            }
+          },
+        }
+      },
+    } as unknown as D1Database
+    const store = createMealPlanningStore(delayedD1)
+    const original = await store.loadOrCreateProfile(CHAT)
+    const firstProfile = { ...original.profile, dietaryExclusions: [...original.profile.dietaryExclusions, "sesame"] }
+    const firstSave = store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: original.configurationVersion,
+      profile: firstProfile,
+      customPolicies: original.customPolicies,
+      schedule: original.schedule,
+      location: null,
+    })
+    await entered
+    const committed = await store.loadOrCreateProfile(CHAT)
+    const laterProfile = {
+      ...committed.profile,
+      dietaryExclusions: [...committed.profile.dietaryExclusions, "mustard"],
+    }
+    const laterSave = await store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: committed.configurationVersion,
+      profile: laterProfile,
+      customPolicies: committed.customPolicies,
+      schedule: committed.schedule,
+      location: null,
+    })
+    expect(laterSave.ok).toBe(true)
+    releaseUpdate()
+    const firstResult = await firstSave
+    expect(firstResult.ok).toBe(true)
+    if (firstResult.ok) {
+      expect(firstResult.profile.configurationVersion).toBe(original.configurationVersion + 1)
+      expect(firstResult.profile.profile.dietaryExclusions).toContain("sesame")
+      expect(firstResult.profile.profile.dietaryExclusions).not.toContain("mustard")
+    }
+    expect((await store.loadOrCreateProfile(CHAT)).profile.dietaryExclusions).toContain("mustard")
+  })
+
+  it("does not let delayed legacy hydration overwrite a concurrent configuration save", async () => {
+    const { db, d1 } = createD1TestDb()
+    const originalPrepare = d1.prepare.bind(d1)
+    let blockNextHydration = true
+    let signalEntered: () => void = () => {}
+    let releaseHydration: () => void = () => {}
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      releaseHydration = resolve
+    })
+    const delayedD1 = {
+      ...d1,
+      prepare(sql: string) {
+        const prepared = originalPrepare(sql)
+        return {
+          bind(...values: Array<string | number | null>) {
+            const statement = prepared.bind(...values)
+            if (!sql.includes("version = version + 1") || !sql.includes("SET profile_json = ?, schedule_json = ?"))
+              return statement
+            return {
+              ...statement,
+              run: async () => {
+                if (blockNextHydration) {
+                  blockNextHydration = false
+                  signalEntered()
+                  await gate
+                }
+                return statement.run()
+              },
+            }
+          },
+        }
+      },
+    } as unknown as D1Database
+    const seeded = await createMealPlanningStore(d1).loadOrCreateProfile(CHAT)
+    const legacyProfile = {
+      ...seeded.profile,
+      mealDefinitions: seeded.profile.mealDefinitions?.map(
+        ({ halfDaySnack: _snack, packedFood: _packed, ...definition }) => definition,
+      ),
+    }
+    const legacySchedule = {
+      days: [...seeded.schedule.days],
+      halfDays: [...(seeded.schedule.halfDays ?? [])],
+      slots: seeded.schedule.slots.map(({ halfDayBehavior: _behavior, ...slot }) => slot),
+    }
+    db.prepare("UPDATE meal_profile SET profile_json = ?, schedule_json = ?, version = 1 WHERE chat_id = ?").run(
+      JSON.stringify(legacyProfile),
+      JSON.stringify(legacySchedule),
+      CHAT,
+    )
+    const store = createMealPlanningStore(delayedD1)
+
+    const delayedHydration = store.loadOrCreateProfile(CHAT)
+    await entered
+    const concurrentBase = await store.loadOrCreateProfile(CHAT)
+    const winningProfile = {
+      ...concurrentBase.profile,
+      dietaryExclusions: [...concurrentBase.profile.dietaryExclusions, "sesame"],
+    }
+    const saved = await store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: concurrentBase.configurationVersion,
+      profile: winningProfile,
+      customPolicies: concurrentBase.customPolicies,
+      schedule: concurrentBase.schedule,
+      location: { country: "India", city: "Bengaluru" },
+    })
+    expect(saved.ok).toBe(true)
+    releaseHydration()
+    const hydratedCaller = await delayedHydration
+    expect(hydratedCaller.profile.dietaryExclusions).toContain("sesame")
+    expect(hydratedCaller.location).toEqual({ country: "India", city: "Bengaluru" })
+    expect(hydratedCaller.configurationVersion).toBe(concurrentBase.configurationVersion + 1)
+    const persisted = JSON.parse(
+      String(
+        (db.prepare("SELECT profile_json FROM meal_profile WHERE chat_id = ?").get(CHAT) as { profile_json: string })
+          .profile_json,
+      ),
+    ) as { dietaryExclusions: string[] }
+    expect(persisted.dietaryExclusions).toContain("sesame")
+  })
+
   it("persists the recurring Saturday rule when loading an existing profile", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
@@ -666,6 +900,59 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       schedule_json: string
     }
     expect(JSON.parse(row.schedule_json).halfDays).toEqual(["Sat"])
+  })
+
+  it("backfills normalized schedule and established-meal snapshots for active and historical plans", async () => {
+    const { store, db } = createD1Store()
+    const profile = await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput({ planId: "legacy-active" }))
+    await createPlan(
+      store,
+      createInput({
+        planId: "legacy-history",
+        instanceId: "history-instance",
+        generationId: "history-generation",
+        weekStart: "2026-09-14T00:00:00.000Z",
+        weekEnd: "2026-09-19T23:59:59.000Z",
+      }),
+    )
+    const legacySchedule = {
+      days: ["Mon", "Sat", "Sun"],
+      slots: SEED_SCHEDULE.slots.map(({ halfDayBehavior: _behavior, ...slot }) => slot),
+    }
+    const legacyProfile = {
+      ...profile.profile,
+      mealDefinitions: (profile.profile.mealDefinitions ?? []).map((definition, index) =>
+        index === 0 ? { ...definition, suitableSlots: ["custom-tea"] } : definition,
+      ),
+    }
+    db.prepare("UPDATE meal_profile SET schedule_json = ?, profile_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(legacySchedule),
+      JSON.stringify(legacyProfile),
+      CHAT,
+    )
+    db.prepare(
+      "UPDATE meal_plan SET schedule_json = NULL, established_meal_definitions_json = NULL WHERE chat_id = ?",
+    ).run(CHAT)
+
+    const normalized = await store.loadOrCreateProfile(CHAT)
+    expect(normalized.schedule.halfDays).toEqual(["Sat"])
+    expect(
+      (await store.activePlan(CHAT))?.plan.schedule.slots.find((slot) => slot.id === "snack1")?.halfDayBehavior,
+    ).toEqual({ action: "quick", maxCookMinutes: 20 })
+    const historical = await store.planById(CHAT, "legacy-active")
+    expect(historical?.plan.schedule.days).toEqual(["Mon", "Sat", "Sun"])
+    expect(historical?.plan.establishedMealDefinitions[0]?.suitableSlots).toEqual(["custom-tea"])
+
+    db.prepare("UPDATE meal_profile SET schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify({
+        days: ["Sun"],
+        slots: [{ id: "new-slot", name: "New", packed: false, dry: false, maxCookMinutes: null }],
+      }),
+      CHAT,
+    )
+    expect((await store.activePlan(CHAT))?.plan.schedule.days).toEqual(["Mon", "Sat", "Sun"])
+    expect((await store.planById(CHAT, "legacy-active"))?.plan.schedule.days).toEqual(["Mon", "Sat", "Sun"])
   })
 
   it("runs the migration and the happy path: seed → create v1 → promote v2 with batch → activePlan", async () => {
@@ -748,7 +1035,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
   it("migrates legacy classifier charges and prior reported rows into one cost column", async () => {
     const { db, d1 } = createD1TestDb("0005_openrouter_reported_cost.sql")
     const store = createMealPlanningStore(d1)
-    await store.loadOrCreateProfile(CHAT)
     db.prepare(`INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone,
       instance_id, status, current_version, created_at, updated_at)
       VALUES ('plan-1', ?, ?, ?, 'Asia/Kolkata', 'instance-1', 'active', 3, 'now', 'now')`).run(
@@ -769,6 +1055,13 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         "utf8",
       ),
     )
+    db.exec(
+      readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), "../../migrations/0007_meal_plan_schedule_snapshot.sql"),
+        "utf8",
+      ),
+    )
+    await store.loadOrCreateProfile(CHAT)
     expect(db.prepare("SELECT cost_usd, cost_status FROM meal_plan_version ORDER BY version").all()).toEqual([
       { cost_usd: 0.002, cost_status: "legacy" },
       { cost_usd: 0.013000000000000001, cost_status: "reported" },
@@ -1047,6 +1340,98 @@ describe.each([
     },
   ],
 ] as const)("Mini App durable contracts (%s)", (_name, makeStore) => {
+  it("saves full profile configuration with an optimistic version CAS", async () => {
+    const store = await makeStore()
+    const original = await store.loadOrCreateProfile(CHAT)
+    const edited = {
+      ...original.profile,
+      dietaryExclusions: [...original.profile.dietaryExclusions, "sesame"],
+    }
+    const saved = await store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: original.configurationVersion,
+      profile: edited,
+      customPolicies: original.customPolicies,
+      schedule: original.schedule,
+      location: { country: "India", city: "Bengaluru" },
+    })
+    expect(saved.ok).toBe(true)
+    if (!saved.ok) return
+    expect(saved.profile.configurationVersion).toBe(original.configurationVersion + 1)
+    expect(saved.profile.profile.mealDefinitions).toEqual(original.profile.mealDefinitions)
+    expect(saved.profile.profile.dishRepertoire).toEqual(original.profile.dishRepertoire)
+    expect(saved.profile.location).toEqual({ country: "India", city: "Bengaluru" })
+
+    const stale = await store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: original.configurationVersion,
+      profile: original.profile,
+      customPolicies: original.customPolicies,
+      schedule: original.schedule,
+      location: null,
+    })
+    expect(stale).toEqual({ ok: false, reason: "conflict" })
+    expect((await store.loadOrCreateProfile(CHAT)).profile.dietaryExclusions).toEqual(edited.dietaryExclusions)
+  })
+
+  it("allows only one concurrent save using the same profile version", async () => {
+    const store = await makeStore()
+    const original = await store.loadOrCreateProfile(CHAT)
+    const save = (exclusion: string) =>
+      store.saveMealProfileConfiguration({
+        chatId: CHAT,
+        expectedVersion: original.configurationVersion,
+        profile: { ...original.profile, dietaryExclusions: [...original.profile.dietaryExclusions, exclusion] },
+        customPolicies: original.customPolicies,
+        schedule: original.schedule,
+        location: null,
+      })
+    const results = await Promise.all([save("sesame"), save("mustard")])
+    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    expect(results.filter((result) => !result.ok)).toEqual([{ ok: false, reason: "conflict" }])
+    const latest = await store.loadOrCreateProfile(CHAT)
+    expect(latest.configurationVersion).toBe(original.configurationVersion + 1)
+    const winningExclusion = latest.profile.dietaryExclusions.find((item) => item === "sesame" || item === "mustard")
+    expect(winningExclusion).toBeDefined()
+    const success = results.find((result) => result.ok)
+    expect(success?.ok && success.profile.profile.dietaryExclusions).toContain(winningExclusion)
+  })
+
+  it("keeps old review-session inserts working after the settings migration", () => {
+    const { db } = createD1TestDb()
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO mini_app_session (session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run("old-worker-session", "old-worker-token", "parent-1", CHAT, "plan-1", "2999-01-01", "2026-09-01"),
+    ).not.toThrow()
+    expect(db.prepare("SELECT scope FROM mini_app_session WHERE session_id = ?").get("old-worker-session")).toEqual({
+      scope: "review",
+    })
+  })
+
+  it("consumes each settings launch reference once and binds it to one user", async () => {
+    const store = await makeStore()
+    await store.createMiniAppSettingsLaunch({
+      tokenHash: "settings-reference-digest",
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      expiresAt: "2026-09-07T00:10:00.000Z",
+      createdAt: "2026-09-07T00:00:00.000Z",
+    })
+    expect(
+      await store.consumeMiniAppSettingsLaunch("settings-reference-digest", "other-user", "2026-09-07T00:05:00.000Z"),
+    ).toBeNull()
+    expect(
+      await store.consumeMiniAppSettingsLaunch("settings-reference-digest", "parent-1", "2026-09-07T00:05:00.000Z"),
+    ).toMatchObject({ chatId: CHAT, telegramUserId: "parent-1" })
+    expect(
+      await store.consumeMiniAppSettingsLaunch("settings-reference-digest", "parent-1", "2026-09-07T00:05:00.000Z"),
+    ).toBeNull()
+  })
+
   it("fences plan creation to the current unexpired generation lease", async () => {
     const store = await makeStore()
     await createPlan(store, createInput())

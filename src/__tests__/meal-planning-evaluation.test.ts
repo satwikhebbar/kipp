@@ -9,7 +9,7 @@ import {
 } from "../meal-planning/evaluation"
 import { hydrateMealPlan, hydrateMealPlanPatch } from "../meal-planning/hydration"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
-import { SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
+import { createInMemoryMealPlanningStore, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealGrid, MealPlanCandidate, MealPlanContext } from "../meal-planning/types"
 
 const SLOT_COOK: Record<string, number> = {
@@ -144,6 +144,42 @@ describe("meal-planning evaluator", () => {
     })
   })
 
+  it("evaluates a saved custom policy outcome as an own map entry", async () => {
+    const store = createInMemoryMealPlanningStore()
+    const original = await store.loadOrCreateProfile("chat-policy")
+    const savedPolicy = {
+      id: "household-rule",
+      label: "Household rule",
+      scope: "persistent" as const,
+      value: "Use a varied lunch.",
+    }
+    const saved = await store.saveMealProfileConfiguration({
+      chatId: "chat-policy",
+      expectedVersion: original.configurationVersion,
+      profile: original.profile,
+      customPolicies: [...original.customPolicies, savedPolicy],
+      schedule: original.schedule,
+      location: original.location,
+    })
+    expect(saved.ok).toBe(true)
+    if (!saved.ok) return
+    const context = baseContext({
+      customPolicies: saved.profile.customPolicies,
+      profile: saved.profile.profile,
+      schedule: saved.profile.schedule,
+    })
+    const policyOutcomes = Object.fromEntries(
+      saved.profile.customPolicies.map((policy) => [policy.id, { outcome: "satisfied" as const, rationale: "ok" }]),
+    )
+    const candidate = baseCandidate({ policyOutcomes })
+    expect(failureCodes(evaluateMealPlan(candidate, context))).not.toContain("missing_policy_outcome")
+
+    const inheritedPolicyContext = baseContext({
+      customPolicies: [...baseContext().customPolicies, { ...savedPolicy, id: "constructor" }],
+    })
+    expect(failureCodes(evaluateMealPlan(baseCandidate(), inheritedPolicyContext))).toContain("missing_policy_outcome")
+  })
+
   it.each([
     "dates",
     "date",
@@ -217,6 +253,35 @@ describe("meal-planning evaluator", () => {
     const candidate = baseCandidate()
     candidate.grid.Sat = { breakfast: cellFor("breakfast", "paratha") }
     expect(failureCodes(evaluateMealPlan(candidate, baseContext()))).toEqual(["extra_slot_for_closed_day"])
+  })
+
+  it("rejects cells for unconfigured days or slots in both selection hydration and final evaluation", () => {
+    const context = baseContext({
+      schedule: {
+        days: ["Sun"],
+        slots: [{ id: "morning-tea", name: "Morning tea", packed: false, dry: false, maxCookMinutes: null }],
+      },
+      profile: { ...baseContext().profile, mealDefinitions: SEED_PROFILE.mealDefinitions },
+    })
+    const definitionId = context.profile.mealDefinitions?.[0]?.id
+    if (!definitionId) throw new Error("missing seed meal definition")
+    const selection = evaluateMealPlanSelection(
+      { grid: { Mon: { "morning-tea": { mealDefinitionId: definitionId } } }, easyBuys: [], policyOutcomes: {} },
+      context,
+    )
+    expect(failureCodes(selection.evaluation)).toContain("unconfigured_cell")
+    expect(selection.failures).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "unconfigured_cell", day: "Mon" })]),
+    )
+
+    const candidate = baseCandidate({
+      grid: {
+        Mon: { "morning-tea": cellFor("breakfast", "banana") },
+      },
+    })
+    expect(failureCodes(evaluateMealPlan(candidate, context))).toEqual(
+      expect.arrayContaining(["missing_slot", "unconfigured_cell"]),
+    )
   })
 
   it("flags combined morning cooking over the budget", () => {
@@ -893,6 +958,183 @@ describe("meal-planning evaluator", () => {
     )
   })
 
+  it.each(["Swap Saturday and Sunday", "Swap Sat and Sun"])("recognizes both weekend days in swaps: %s", (text) => {
+    expect(isConcretePlanFeedback({ id: "weekend-swap", text }, { recentPlan: null })).toBe(true)
+  })
+
+  it("recognizes a configured custom slot as a feedback target without a current dish name", () => {
+    const context = baseContext({
+      schedule: {
+        days: ["Sun"],
+        slots: [{ id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null }],
+      },
+      recentPlan: { Sun: { "morning-tea": cellFor("morning-tea", "existing food") } },
+    })
+    const item = { id: "custom-slot", text: "Change morning tea to poha" }
+    expect(isConcretePlanFeedback(item, context)).toBe(true)
+    expect(applicablePlanFeedback([item], context)).toEqual([item])
+    const candidate = {
+      grid: { Sun: { "morning-tea": cellFor("morning-tea", "poha") } },
+      easyBuys: [],
+      policyOutcomes: {},
+    }
+    const evaluation = evaluateMealPlan(candidate, {
+      ...context,
+      request: { kind: "revision", text: item.text },
+      feedbackItems: [item],
+    })
+    expect(failureCodes(evaluation)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(evaluation)).not.toContain("unaddressed_feedback")
+  })
+
+  it.each([
+    { name: "Tea (PM)", id: "tea-pm", day: "Mon", text: "Change Tea (PM) to poha" },
+    { name: "Lunch box", id: "lunch-box", day: "Mon", text: "Change Monday Lunch box to poha" },
+    { name: "P.M. tea", id: "pm-tea", day: "Mon", text: "Change P.M. tea to poha" },
+  ])("matches a punctuation-edged or multiword configured slot as a complete target: $name", ({
+    name,
+    id,
+    day,
+    text,
+  }) => {
+    const context = baseContext({
+      schedule: { days: [day], slots: [{ id, name, packed: false, dry: false, maxCookMinutes: null }] },
+      recentPlan: { [day]: { [id]: cellFor(id, "existing food") } },
+    })
+    const item = { id: "configured-slot", text }
+    expect(isConcretePlanFeedback(item, context)).toBe(true)
+    expect(applicablePlanFeedback([item], context)).toEqual([item])
+    const result = evaluateMealPlan(
+      { grid: { [day]: { [id]: cellFor(id, "poha") } }, easyBuys: [], policyOutcomes: {} },
+      { ...context, request: { kind: "revision", text }, feedbackItems: [item] },
+    )
+    expect(failureCodes(result)).not.toContain("unscoped_cell_changed")
+    expect(failureCodes(result)).not.toContain("unaddressed_feedback")
+  })
+
+  it("does not credit a similarly named configured slot as the destination", () => {
+    const schedule = {
+      days: ["Mon"],
+      slots: [
+        { id: "lunch-box", name: "Lunch box", packed: false, dry: false, maxCookMinutes: null },
+        { id: "large-lunch-box", name: "Large lunch box", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    const context = baseContext({
+      schedule,
+      recentPlan: {
+        Mon: {
+          "lunch-box": cellFor("lunch-box", "old small lunch"),
+          "large-lunch-box": cellFor("large-lunch-box", "old large lunch"),
+        },
+      },
+    })
+    const text = "Change Monday Lunch box to poha"
+    const item = { id: "small-box", text }
+    const result = evaluateMealPlan(
+      {
+        grid: {
+          Mon: {
+            "lunch-box": cellFor("lunch-box", "old small lunch"),
+            "large-lunch-box": cellFor("large-lunch-box", "poha"),
+          },
+        },
+        easyBuys: [],
+        policyOutcomes: {},
+      },
+      { ...context, request: { kind: "revision", text }, feedbackItems: [item] },
+    )
+    expect(failureCodes(result)).toContain("unaddressed_feedback")
+  })
+
+  it("splits replacement sources before configured slot qualifiers and retires projected-away sources", () => {
+    const schedule = {
+      days: ["Fri"],
+      slots: [{ id: "tea-pm", name: "Tea (PM)", packed: false, dry: false, maxCookMinutes: null }],
+    }
+    const text = "Use idli instead of poha for Friday Tea (PM)."
+    const base = gridFrom([
+      ["Mon", "breakfast", "poha"],
+      ["Fri", "tea-pm", "banana"],
+    ])
+    const context = baseContext({
+      schedule,
+      recentPlan: base,
+      feedbackReferencePlan: gridFrom([["Mon", "breakfast", "poha"]]),
+    })
+    const item = { id: "configured-source", text }
+    expect(isConcretePlanFeedback(item, context)).toBe(true)
+    expect(applicablePlanFeedback([item], context)).toEqual([item])
+    const projectedAway = { ...context, recentPlan: gridFrom([["Fri", "tea-pm", "banana"]]) }
+    expect(isConcretePlanFeedback(item, projectedAway)).toBe(false)
+    expect(applicablePlanFeedback([item], projectedAway)).toEqual([])
+  })
+
+  it.each([
+    "Move idli from Saturday morning tea to Sunday supper",
+    "Move idli from morning tea to Sunday supper",
+    "Move idli from Saturday's morning tea to Sunday supper",
+    "Move idli to Sunday supper from Saturday morning tea",
+    "Move idli from Saturday morning tea into Sunday supper",
+  ])("matches a custom-slot move only at its named destination: %s", (text) => {
+    const schedule = {
+      days: ["Sat", "Sun"],
+      slots: [
+        { id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null },
+        { id: "supper", name: "Supper", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    const priorGrid = {
+      Sat: { "morning-tea": cellFor("morning-tea", "idli"), supper: cellFor("supper", "rice and beans") },
+      Sun: { "morning-tea": cellFor("morning-tea", "banana"), supper: cellFor("supper", "paratha") },
+    }
+    const item = { id: "move-custom", text }
+    const context = baseContext({
+      schedule,
+      recentPlan: priorGrid,
+      request: { kind: "revision", text: item.text },
+      feedbackItems: [item],
+    })
+    const sourceOnlyChange = evaluateMealPlan(
+      {
+        grid: {
+          Sat: { ...priorGrid.Sat, "morning-tea": cellFor("morning-tea", "poha") },
+          Sun: priorGrid.Sun,
+        },
+        easyBuys: [],
+        policyOutcomes: baseCandidate().policyOutcomes,
+      },
+      context,
+    )
+    expect(failureCodes(sourceOnlyChange)).toContain("unaddressed_feedback")
+
+    const incorrectDestination = evaluateMealPlan(
+      {
+        grid: {
+          Sat: { ...priorGrid.Sat, "morning-tea": cellFor("morning-tea", "poha") },
+          Sun: { ...priorGrid.Sun, "morning-tea": cellFor("morning-tea", "idli") },
+        },
+        easyBuys: [],
+        policyOutcomes: baseCandidate().policyOutcomes,
+      },
+      context,
+    )
+    expect(failureCodes(incorrectDestination)).toContain("unaddressed_feedback")
+
+    const correctDestination = evaluateMealPlan(
+      {
+        grid: {
+          Sat: { ...priorGrid.Sat, "morning-tea": cellFor("morning-tea", "poha") },
+          Sun: { ...priorGrid.Sun, supper: cellFor("supper", "idli") },
+        },
+        easyBuys: [],
+        policyOutcomes: baseCandidate().policyOutcomes,
+      },
+      context,
+    )
+    expect(failureCodes(correctDestination)).not.toContain("unaddressed_feedback")
+  })
+
   it.each([
     "Make Friday lighter. We have no pears.",
     "We have no pears and Friday should be lighter",
@@ -1353,6 +1595,36 @@ describe("meal-planning evaluator", () => {
 
     expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unscoped_cell_changed")
     expect(failureCodes(evaluateMealPlan(candidate, context))).toContain("unaddressed_feedback")
+  })
+
+  it("allows a scoped revision to replace a cell invalidated by a new hard exclusion", () => {
+    const original = baseCandidate()
+    original.grid.Tue.breakfast.items = ["peanut"]
+    const recentPlan = structuredClone(original.grid)
+    delete recentPlan.Tue.breakfast
+    const context = baseContext({
+      profile: { ...baseContext().profile, dietaryExclusions: ["peanut"] },
+      recentPlan,
+      request: { kind: "revision", text: "Use banana for Monday breakfast." },
+      feedbackItems: [
+        { id: "monday-breakfast", text: "Use banana for Monday breakfast.", scope: { day: "Mon", slot: "breakfast" } },
+      ],
+      revisionRepairableCells: [{ day: "Tue", slotId: "breakfast" }],
+    })
+    const candidate = structuredClone(original)
+    candidate.grid.Tue.breakfast = cellFor("breakfast", "paratha")
+    candidate.grid.Mon.breakfast = cellFor("breakfast", "banana")
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(failureCodes(evaluation)).not.toContain("hard_exclusion")
+    expect(failureCodes(evaluation)).not.toContain("unscoped_cell_changed")
+    expect(evaluation.failures).not.toContainEqual(expect.objectContaining({ code: "unaddressed_feedback" }))
+    for (const day of Object.keys(original.grid)) {
+      for (const slot of Object.keys(original.grid[day] ?? {})) {
+        if (day === "Mon" && slot === "breakfast") continue
+        if (day === "Tue" && slot === "breakfast") continue
+        expect(candidate.grid[day]?.[slot]).toEqual(original.grid[day]?.[slot])
+      }
+    }
   })
 
   it("flags feedback that no changed cell or outcome rationale addresses", () => {

@@ -1,3 +1,4 @@
+import { normalizeLegacyMealSchedule } from "./schedule"
 import type {
   CustomPolicy,
   FeedbackItem,
@@ -15,6 +16,7 @@ import type {
 
 /** The empty per-cell video record written when enrichment is absent. */
 const NO_VIDEOS: Record<string, RecipeVideo> = {}
+const MAX_PROFILE_HYDRATION_CAS_ATTEMPTS = 8
 /** Maximum number of current/replaced plans exposed by one history read. */
 export const MAX_MEAL_PLAN_HISTORY = 12
 
@@ -31,6 +33,8 @@ export interface StoredMealProfile {
   customPolicies: CustomPolicy[]
   schedule: MealSchedule
   location: StoredLocation | null
+  /** Optimistic configuration version stored in `meal_profile.version`. */
+  configurationVersion: number
   /** Chat-scoped plan-message generation (§6): bumped exactly once per persisted plan message. */
   interactionGeneration: number
   createdAt: string
@@ -98,6 +102,10 @@ export interface MealPlanRecord {
   weekStart: string
   weekEnd: string
   timezone: string
+  /** Immutable schedule snapshot used for every version of this plan. */
+  schedule: MealSchedule
+  /** Established meal definitions captured with the schedule so its eligible cells remain usable in revisions. */
+  establishedMealDefinitions: MealDefinition[]
   instanceId: string
   status: MealPlanStatus
   currentVersion: number
@@ -175,14 +183,51 @@ export interface MiniAppSessionRecord {
   tokenHash: string
   telegramUserId: string
   chatId: string
-  planId: string
+  planId: string | null
+  scope: "review" | "settings"
   expiresAt: string
   createdAt: string
 }
 
-export interface CreateMiniAppSessionInput extends Omit<MiniAppSessionRecord, "createdAt"> {
+export interface CreateMiniAppSessionInput extends Omit<MiniAppSessionRecord, "createdAt" | "scope"> {
+  scope?: MiniAppSessionRecord["scope"]
   createdAt?: string
 }
+
+/** A private-chat launch reference consumed once when a settings session is exchanged. */
+export interface MiniAppSettingsLaunchRecord {
+  tokenHash: string
+  telegramUserId: string
+  chatId: string
+  expiresAt: string
+  createdAt: string
+}
+
+export interface SettingsMiniAppExchangeInput {
+  launchTokenHash: string
+  telegramUserId: string
+  fingerprintHash: string
+  fingerprintExpiresAt: string
+  now: string
+  session: CreateMiniAppSessionInput
+}
+
+export type MiniAppExchangeResult =
+  | { ok: true; session: MiniAppSessionRecord }
+  | { ok: false; reason: "replayed" | "unauthorized" }
+
+export interface SaveMealProfileConfigurationInput {
+  chatId: string
+  expectedVersion: number
+  profile: MealProfile
+  customPolicies: CustomPolicy[]
+  schedule: MealSchedule
+  location: StoredLocation | null
+}
+
+export type SaveMealProfileConfigurationResult =
+  | { ok: true; profile: StoredMealProfile }
+  | { ok: false; reason: "conflict" | "unavailable" }
 
 export interface AcceptFeedbackBatchInput {
   batchId: string
@@ -213,6 +258,10 @@ export interface CreateActivePlanInput {
   weekStart: string
   weekEnd: string
   timezone: string
+  /** The exact schedule captured before planning and used to evaluate `candidate`. */
+  schedule: MealSchedule
+  /** The established catalog captured before planning and used for slot eligibility. */
+  establishedMealDefinitions: MealDefinition[]
   /** The live Workflow instance id — the webhook's fallthrough pointer (§6). */
   instanceId: string
   /** Generation lease token; plan creation is rejected when it is absent, expired, or superseded. */
@@ -249,6 +298,8 @@ export interface PromotePlanVersionInput {
   planId: string
   chatId: string
   baseVersion: number
+  /** Configuration snapshot used to validate this revision. Promotion is rejected if it changed. */
+  profileConfigurationVersion: number
   candidate: MealPlanCandidate
   evaluation: MealPlanEvaluation
   video?: Record<string, RecipeVideo>
@@ -285,6 +336,7 @@ export interface ActivePlanPointer {
 /** The typed meal-planning store surface. The D1 and in-memory implementations share the same invariants. */
 export interface MealPlanningStore {
   loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
+  saveMealProfileConfiguration(input: SaveMealProfileConfigurationInput): Promise<SaveMealProfileConfigurationResult>
   createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
   promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
   /** Sums token usage across a plan's versions that recorded it; null when none did. */
@@ -306,7 +358,21 @@ export interface MealPlanningStore {
   ): Promise<MiniAppReviewContext>
   resolveMiniAppReviewContext(telegramUserId: string): Promise<MiniAppReviewContext | null>
   createMiniAppSession(input: CreateMiniAppSessionInput): Promise<MiniAppSessionRecord>
+  getMiniAppSettingsLaunch(
+    tokenHash: string,
+    telegramUserId: string,
+    now: string,
+  ): Promise<MiniAppSettingsLaunchRecord | null>
+  exchangeMiniAppSettingsLaunch(input: SettingsMiniAppExchangeInput): Promise<MiniAppExchangeResult>
   readMiniAppSession(tokenHash: string, now: string): Promise<MiniAppSessionRecord | null>
+  createMiniAppSettingsLaunch(
+    input: Omit<MiniAppSettingsLaunchRecord, "createdAt"> & { createdAt?: string },
+  ): Promise<void>
+  consumeMiniAppSettingsLaunch(
+    tokenHash: string,
+    telegramUserId: string,
+    now: string,
+  ): Promise<MiniAppSettingsLaunchRecord | null>
   /** Atomically consumes a replay fingerprint until its supplied expiry. */
   consumeMiniAppInitDataFingerprint(fingerprintHash: string, expiresAt: string, now: string): Promise<boolean>
   acceptFeedbackBatch(input: AcceptFeedbackBatchInput): Promise<AcceptFeedbackBatchResult>
@@ -332,6 +398,7 @@ export interface InMemoryMealPlanningBacking {
   batches: Map<string, FeedbackBatchRecord>
   reviewContexts?: Map<string, MiniAppReviewContext>
   sessions?: Map<string, MiniAppSessionRecord>
+  settingsLaunches?: Map<string, MiniAppSettingsLaunchRecord>
   initDataFingerprints?: Map<string, string>
   generations?: Map<string, MealPlanGenerationRecord>
 }
@@ -346,19 +413,45 @@ export const SEED_SCHEDULE: MealSchedule = {
   days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
   halfDays: ["Sat"],
   slots: [
-    { id: "breakfast", name: "Breakfast", packed: false, dry: false, maxCookMinutes: null },
-    { id: "snack1", name: "Snack 1", packed: true, dry: true, maxCookMinutes: 0 },
-    { id: "snack2", name: "Snack 2", packed: true, dry: true, maxCookMinutes: 0 },
-    { id: "school-lunch", name: "School lunch", packed: true, dry: false, maxCookMinutes: null },
-    { id: "home-lunch", name: "Home lunch", packed: false, dry: false, maxCookMinutes: null },
+    {
+      id: "breakfast",
+      name: "Breakfast",
+      packed: false,
+      dry: false,
+      maxCookMinutes: null,
+      halfDayBehavior: { action: "keep" },
+    },
+    {
+      id: "snack1",
+      name: "Snack 1",
+      packed: true,
+      dry: true,
+      maxCookMinutes: 0,
+      halfDayBehavior: { action: "quick", maxCookMinutes: 20 },
+    },
+    { id: "snack2", name: "Snack 2", packed: true, dry: true, maxCookMinutes: 0, halfDayBehavior: { action: "omit" } },
+    {
+      id: "school-lunch",
+      name: "School lunch",
+      packed: true,
+      dry: false,
+      maxCookMinutes: null,
+      halfDayBehavior: { action: "omit" },
+    },
+    {
+      id: "home-lunch",
+      name: "Home lunch",
+      packed: false,
+      dry: false,
+      maxCookMinutes: null,
+      halfDayBehavior: { action: "keep" },
+    },
   ],
 }
 
 /** Add the starter household's recurring Saturday rule to profiles created before it was stored. */
 export function upgradeLegacyMealSchedule(schedule: MealSchedule): MealSchedule {
-  return schedule.halfDays === undefined && schedule.days.includes("Sat")
-    ? { ...schedule, halfDays: ["Sat"] }
-    : schedule
+  return normalizeLegacyMealSchedule(schedule)
 }
 
 const SEED_MEAL_INGREDIENTS: Record<string, string[]> = {
@@ -785,6 +878,8 @@ function makePlanRecord(input: CreateActivePlanInput, now: string): MealPlanReco
     weekStart: input.weekStart,
     weekEnd: input.weekEnd,
     timezone: input.timezone,
+    schedule: structuredClone(input.schedule),
+    establishedMealDefinitions: structuredClone(input.establishedMealDefinitions),
     instanceId: input.instanceId,
     status: "active",
     currentVersion: 1,
@@ -825,7 +920,8 @@ function makeVersionRecord(
 }
 
 const PLAN_WITH_VERSION_SELECT = `
-  SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
+  SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.schedule_json,
+         p.established_meal_definitions_json, p.instance_id, p.status,
          p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
          v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
          v.feedback_batch_id, v.video_json, v.provisional_meals_json,
@@ -844,6 +940,12 @@ function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
       weekStart: String(row.week_start),
       weekEnd: String(row.week_end),
       timezone: String(row.timezone),
+      schedule:
+        parseJson<MealSchedule | null>(String(row.schedule_json), null) ??
+        (() => {
+          throw new Error(`plan schedule snapshot missing for ${String(row.plan_id)}`)
+        })(),
+      establishedMealDefinitions: parseJson<MealDefinition[]>(String(row.established_meal_definitions_json), []),
       instanceId: String(row.instance_id),
       status: String(row.status) as MealPlanStatus,
       currentVersion: Number(row.current_version),
@@ -925,39 +1027,112 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           now,
         )
         .run()
-      const row = await db
-        .prepare(
-          `SELECT chat_id, profile_json, custom_policies_json, schedule_json, location_json,
-                  interaction_generation, created_at, updated_at
-           FROM meal_profile WHERE chat_id = ?`,
-        )
-        .bind(chatId)
-        .first()
-      const profile = parseJson<MealProfile>(String(row?.profile_json), SEED_PROFILE)
-      const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(profile)
-      const schedule = parseJson<MealSchedule>(String(row?.schedule_json), SEED_SCHEDULE)
-      const upgradedSchedule = upgradeLegacyMealSchedule(schedule)
-      if (upgradedProfile !== profile) {
+      for (let attempt = 0; attempt < MAX_PROFILE_HYDRATION_CAS_ATTEMPTS; attempt++) {
+        const row = await db
+          .prepare(
+            `SELECT chat_id, profile_json, custom_policies_json, schedule_json, location_json,
+                    interaction_generation, version, created_at, updated_at
+             FROM meal_profile WHERE chat_id = ?`,
+          )
+          .bind(chatId)
+          .first()
+        if (!row) throw new Error("meal profile unavailable")
+        const profile = parseJson<MealProfile>(String(row.profile_json), SEED_PROFILE)
+        const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(profile)
+        const schedule = parseJson<MealSchedule>(String(row.schedule_json), SEED_SCHEDULE)
+        const upgradedSchedule = upgradeLegacyMealSchedule(schedule)
+        const version = Number(row.version)
+        if (upgradedProfile !== profile || upgradedSchedule !== schedule) {
+          const hydrated = await db
+            .prepare(
+              `UPDATE meal_profile SET profile_json = ?, schedule_json = ?, version = version + 1, updated_at = ?
+               WHERE chat_id = ? AND version = ?`,
+            )
+            .bind(JSON.stringify(upgradedProfile), JSON.stringify(upgradedSchedule), now, chatId, version)
+            .run()
+          if (Number(hydrated.meta.changes) !== 1) continue
+        }
         await db
-          .prepare("UPDATE meal_profile SET profile_json = ?, updated_at = ? WHERE chat_id = ?")
-          .bind(JSON.stringify(upgradedProfile), now, chatId)
+          .prepare(
+            `UPDATE meal_plan
+             SET schedule_json = COALESCE(schedule_json, ?),
+                 established_meal_definitions_json = COALESCE(established_meal_definitions_json, ?)
+             WHERE chat_id = ?
+               AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)`,
+          )
+          .bind(JSON.stringify(upgradedSchedule), JSON.stringify(upgradedProfile.mealDefinitions ?? []), chatId)
           .run()
+        const unfrozen = await db
+          .prepare(
+            `SELECT count(*) AS count FROM meal_plan
+             WHERE chat_id = ? AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)`,
+          )
+          .bind(chatId)
+          .first<{ count: number }>()
+        if (Number(unfrozen?.count ?? 0) !== 0) throw new Error("meal plan snapshot unavailable")
+        return {
+          chatId: String(row.chat_id),
+          profile: upgradedProfile,
+          customPolicies: parseJson<CustomPolicy[]>(String(row.custom_policies_json), []),
+          schedule: upgradedSchedule,
+          location: parseJson<StoredLocation | null>(String(row.location_json), null),
+          configurationVersion: version + (upgradedProfile !== profile || upgradedSchedule !== schedule ? 1 : 0),
+          interactionGeneration: Number(row.interaction_generation),
+          createdAt: String(row.created_at),
+          updatedAt: upgradedProfile !== profile || upgradedSchedule !== schedule ? now : String(row.updated_at),
+        }
       }
-      if (upgradedSchedule !== schedule) {
-        await db
-          .prepare("UPDATE meal_profile SET schedule_json = ?, updated_at = ? WHERE chat_id = ?")
-          .bind(JSON.stringify(upgradedSchedule), now, chatId)
-          .run()
+      throw new Error("meal profile hydration conflict")
+    },
+
+    async saveMealProfileConfiguration(input) {
+      const canonical = await this.loadOrCreateProfile(input.chatId)
+      if (canonical.configurationVersion !== input.expectedVersion)
+        return { ok: false as const, reason: "conflict" as const }
+      const now = nowIso()
+      const result = await db
+        .prepare(
+          `UPDATE meal_profile
+           SET profile_json = ?, custom_policies_json = ?, schedule_json = ?, location_json = ?,
+               version = version + 1, updated_at = ?
+           WHERE chat_id = ? AND version = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM meal_plan
+               WHERE chat_id = meal_profile.chat_id
+                 AND (schedule_json IS NULL OR established_meal_definitions_json IS NULL)
+             )
+           RETURNING chat_id, profile_json, custom_policies_json, schedule_json, location_json,
+                     interaction_generation, version, created_at, updated_at`,
+        )
+        .bind(
+          JSON.stringify(input.profile),
+          JSON.stringify(input.customPolicies),
+          JSON.stringify(input.schedule),
+          input.location === null ? null : JSON.stringify(input.location),
+          now,
+          input.chatId,
+          input.expectedVersion,
+        )
+        .first()
+      if (!result) {
+        const latest = await this.loadOrCreateProfile(input.chatId)
+        return latest.configurationVersion === input.expectedVersion
+          ? { ok: false as const, reason: "unavailable" as const }
+          : { ok: false as const, reason: "conflict" as const }
       }
       return {
-        chatId: String(row?.chat_id),
-        profile: upgradedProfile,
-        customPolicies: parseJson<CustomPolicy[]>(String(row?.custom_policies_json), []),
-        schedule: upgradedSchedule,
-        location: parseJson<StoredLocation | null>(String(row?.location_json), null),
-        interactionGeneration: Number(row?.interaction_generation),
-        createdAt: String(row?.created_at),
-        updatedAt: String(row?.updated_at),
+        ok: true as const,
+        profile: {
+          chatId: String(result.chat_id),
+          profile: parseJson<MealProfile>(String(result.profile_json), SEED_PROFILE),
+          customPolicies: parseJson<CustomPolicy[]>(String(result.custom_policies_json), []),
+          schedule: parseJson<MealSchedule>(String(result.schedule_json), SEED_SCHEDULE),
+          location: parseJson<StoredLocation | null>(String(result.location_json), null),
+          configurationVersion: Number(result.version),
+          interactionGeneration: Number(result.interaction_generation),
+          createdAt: String(result.created_at),
+          updatedAt: String(result.updated_at),
+        },
       }
     },
 
@@ -982,10 +1157,11 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .bind(now, input.chatId, input.chatId, input.chatId, input.generationId, now),
         db
           .prepare(
-            `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status,
+            `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, schedule_json,
+                                    established_meal_definitions_json, instance_id, status,
                                     current_version, weekly_inventory_json, weekly_exceptions_json,
                                     created_at, updated_at)
-             SELECT ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND EXISTS (SELECT 1 FROM meal_plan_generation
                            WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
@@ -996,6 +1172,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.weekStart,
             input.weekEnd,
             input.timezone,
+            JSON.stringify(input.schedule),
+            JSON.stringify(input.establishedMealDefinitions),
             input.instanceId,
             JSON.stringify(input.weeklyInventory),
             JSON.stringify(input.weeklyExceptions),
@@ -1099,10 +1277,15 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       // cannot race the batch; every mutating statement below is additionally
       // guarded on the profile existing, so even a hypothetical mid-batch
       // absence no-ops the whole transaction).
-      const profilePresent = await db.prepare("SELECT 1 FROM meal_profile WHERE chat_id = ?").bind(input.chatId).first()
+      const profilePresent = await db
+        .prepare("SELECT version FROM meal_profile WHERE chat_id = ?")
+        .bind(input.chatId)
+        .first()
       if (!profilePresent) {
         throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       }
+      if (Number(profilePresent.version) !== input.profileConfigurationVersion)
+        return { ok: false as const, reason: "stale" as const }
       const statements = [
         db
           .prepare(
@@ -1113,7 +1296,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
                                             created_at)
              SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ? AND version = ${input.profileConfigurationVersion})
                AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
                                      WHERE batch_id = ? AND plan_id = meal_plan.plan_id
                                        AND chat_id = meal_plan.chat_id AND base_version = meal_plan.current_version
@@ -1145,9 +1328,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ?
              WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan
-                                           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active')`,
+                                           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active')
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ? AND version = ${input.profileConfigurationVersion})`,
           )
-          .bind(now, input.chatId, input.planId, input.chatId, input.baseVersion),
+          .bind(now, input.chatId, input.planId, input.chatId, input.baseVersion, input.chatId),
         db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
       ]
       if (input.inventory) {
@@ -1156,7 +1340,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             .prepare(
               `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
                WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
-                 AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+                 AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ? AND version = ${input.profileConfigurationVersion})`,
             )
             .bind(
               JSON.stringify(input.inventory.weeklyInventory),
@@ -1174,7 +1358,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `UPDATE meal_plan SET current_version = ?, updated_at = ?
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active'
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ? AND version = ${input.profileConfigurationVersion})`,
           )
           .bind(newVersion, now, input.planId, input.chatId, input.baseVersion, input.chatId),
         db
@@ -1182,7 +1366,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, status, created_at, updated_at)
              SELECT ?, plan_id, ?, ?, 'consumed', ?, ? FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND ? IS NOT NULL
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ? AND version = ${input.profileConfigurationVersion})`,
           )
           .bind(
             batchId,
@@ -1322,6 +1506,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         .bind(chatId)
         .first()
       if (!row) return null
+      if (row.schedule_json == null || row.established_meal_definitions_json == null) {
+        await this.loadOrCreateProfile(chatId)
+        const hydrated = await db
+          .prepare(`${PLAN_WITH_VERSION_SELECT} WHERE p.chat_id = ? AND p.status = 'active'`)
+          .bind(chatId)
+          .first()
+        return hydrated ? mealPlanFromRow(hydrated) : null
+      }
       return mealPlanFromRow(row)
     },
 
@@ -1335,7 +1527,16 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(chatId, weekStart)
         .first()
-      return row ? mealPlanFromRow(row) : null
+      if (!row || (row.schedule_json != null && row.established_meal_definitions_json != null))
+        return row ? mealPlanFromRow(row) : null
+      await this.loadOrCreateProfile(chatId)
+      const hydrated = await db
+        .prepare(
+          `${PLAN_WITH_VERSION_SELECT} WHERE p.chat_id = ? AND p.week_start = ? ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1`,
+        )
+        .bind(chatId, weekStart)
+        .first()
+      return hydrated ? mealPlanFromRow(hydrated) : null
     },
 
     async listPlanHistory(chatId) {
@@ -1355,7 +1556,20 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(chatId, MAX_MEAL_PLAN_HISTORY)
         .all()
-      return (result.results ?? []).map((row) => mealPlanFromRow(row))
+      let rows = result.results ?? []
+      if (rows.some((row) => row.schedule_json == null || row.established_meal_definitions_json == null)) {
+        await this.loadOrCreateProfile(chatId)
+        const hydrated = await db
+          .prepare(`${PLAN_WITH_VERSION_SELECT}
+           WHERE p.chat_id = ? AND NOT EXISTS (
+             SELECT 1 FROM meal_plan newer WHERE newer.chat_id = p.chat_id AND newer.week_start = p.week_start
+               AND (newer.created_at > p.created_at OR (newer.created_at = p.created_at AND newer.rowid > p.rowid)))
+           ORDER BY CASE WHEN p.status = 'active' THEN 0 ELSE 1 END, p.updated_at DESC, p.created_at DESC, p.plan_id DESC LIMIT ?`)
+          .bind(chatId, MAX_MEAL_PLAN_HISTORY)
+          .all()
+        rows = hydrated.results ?? []
+      }
+      return rows.map((row) => mealPlanFromRow(row))
     },
 
     async planById(chatId, planId) {
@@ -1366,7 +1580,14 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         )
         .bind(chatId, planId)
         .first()
-      return row ? mealPlanFromRow(row) : null
+      if (!row || (row.schedule_json != null && row.established_meal_definitions_json != null))
+        return row ? mealPlanFromRow(row) : null
+      await this.loadOrCreateProfile(chatId)
+      const hydrated = await db
+        .prepare(`${PLAN_WITH_VERSION_SELECT} WHERE p.chat_id = ? AND p.plan_id = ?`)
+        .bind(chatId, planId)
+        .first()
+      return hydrated ? mealPlanFromRow(hydrated) : null
     },
     async activePlanPointer(chatId) {
       const row = await db
@@ -1450,10 +1671,11 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
 
     async createMiniAppSession(input) {
       const createdAt = input.createdAt ?? nowIso()
+      const scope = input.scope ?? "review"
       await db
         .prepare(
-          `INSERT INTO mini_app_session (session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO mini_app_session (session_id, token_hash, telegram_user_id, chat_id, plan_id, scope, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           input.sessionId,
@@ -1461,18 +1683,89 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.telegramUserId,
           input.chatId,
           input.planId,
+          scope,
           input.expiresAt,
           createdAt,
         )
         .run()
-      return { ...input, createdAt }
+      return { ...input, scope, createdAt }
+    },
+
+    async getMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      const row = await db
+        .prepare(
+          `SELECT token_hash, telegram_user_id, chat_id, expires_at, created_at
+           FROM mini_app_settings_launch
+           WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ? AND consumed_at IS NULL`,
+        )
+        .bind(tokenHash, telegramUserId, now)
+        .first()
+      return row
+        ? {
+            tokenHash: String(row.token_hash),
+            telegramUserId: String(row.telegram_user_id),
+            chatId: String(row.chat_id),
+            expiresAt: String(row.expires_at),
+            createdAt: String(row.created_at),
+          }
+        : null
+    },
+
+    async exchangeMiniAppSettingsLaunch(input) {
+      const createdAt = input.session.createdAt ?? input.now
+      const scope = input.session.scope ?? "settings"
+      const results = await db.batch([
+        db.prepare("DELETE FROM mini_app_init_data_replay WHERE expires_at <= ?").bind(input.now),
+        db
+          .prepare(
+            `UPDATE mini_app_settings_launch SET consumed_at = ?
+             WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ? AND consumed_at IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM mini_app_init_data_replay
+                 WHERE fingerprint_hash = ? AND expires_at > ?
+               )`,
+          )
+          .bind(input.now, input.launchTokenHash, input.telegramUserId, input.now, input.fingerprintHash, input.now),
+        db
+          .prepare(
+            `INSERT INTO mini_app_init_data_replay (fingerprint_hash, expires_at, created_at)
+             SELECT ?, ?, ? WHERE changes() = 1`,
+          )
+          .bind(input.fingerprintHash, input.fingerprintExpiresAt, input.now),
+        db
+          .prepare(
+            `INSERT INTO mini_app_session
+               (session_id, token_hash, telegram_user_id, chat_id, plan_id, scope, expires_at, created_at)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1`,
+          )
+          .bind(
+            input.session.sessionId,
+            input.session.tokenHash,
+            input.session.telegramUserId,
+            input.session.chatId,
+            input.session.planId,
+            scope,
+            input.session.expiresAt,
+            createdAt,
+          ),
+      ])
+      if (Number(results[1]?.meta.changes ?? 0) === 1) {
+        return { ok: true as const, session: { ...input.session, scope, createdAt } }
+      }
+      const replay = await db
+        .prepare("SELECT 1 AS found FROM mini_app_init_data_replay WHERE fingerprint_hash = ? AND expires_at > ?")
+        .bind(input.fingerprintHash, input.now)
+        .first()
+      return replay
+        ? { ok: false as const, reason: "replayed" as const }
+        : { ok: false as const, reason: "unauthorized" as const }
     },
 
     async readMiniAppSession(tokenHash, now) {
       await db.prepare("DELETE FROM mini_app_session WHERE expires_at <= ?").bind(now).run()
       const row = await db
         .prepare(
-          `SELECT session_id, token_hash, telegram_user_id, chat_id, plan_id, expires_at, created_at
+          `SELECT session_id, token_hash, telegram_user_id, chat_id, plan_id, scope, expires_at, created_at
            FROM mini_app_session WHERE token_hash = ? AND expires_at > ?`,
         )
         .bind(tokenHash, now)
@@ -1483,7 +1776,41 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         tokenHash: String(row.token_hash),
         telegramUserId: String(row.telegram_user_id),
         chatId: String(row.chat_id),
-        planId: String(row.plan_id),
+        planId: row.plan_id === null ? null : String(row.plan_id),
+        scope: String(row.scope) as MiniAppSessionRecord["scope"],
+        expiresAt: String(row.expires_at),
+        createdAt: String(row.created_at),
+      }
+    },
+
+    async createMiniAppSettingsLaunch(input) {
+      const now = nowIso()
+      await db.batch([
+        db.prepare("DELETE FROM mini_app_settings_launch WHERE expires_at <= ?").bind(now),
+        db
+          .prepare(
+            `INSERT INTO mini_app_settings_launch (token_hash, telegram_user_id, chat_id, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .bind(input.tokenHash, input.telegramUserId, input.chatId, input.expiresAt, input.createdAt ?? now),
+      ])
+    },
+
+    async consumeMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      await db.prepare("DELETE FROM mini_app_settings_launch WHERE expires_at <= ?").bind(now).run()
+      const row = await db
+        .prepare(
+          `DELETE FROM mini_app_settings_launch
+           WHERE token_hash = ? AND telegram_user_id = ? AND expires_at > ? AND consumed_at IS NULL
+           RETURNING token_hash, telegram_user_id, chat_id, expires_at, created_at`,
+        )
+        .bind(tokenHash, telegramUserId, now)
+        .first()
+      if (!row) return null
+      return {
+        tokenHash: String(row.token_hash),
+        telegramUserId: String(row.telegram_user_id),
+        chatId: String(row.chat_id),
         expiresAt: String(row.expires_at),
         createdAt: String(row.created_at),
       }
@@ -1502,13 +1829,13 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async acceptFeedbackBatch(input) {
+      await this.loadOrCreateProfile(input.chatId)
       const now = nowIso()
       const planRow = await db
         .prepare(
-          `SELECT v.candidate_json, profile.schedule_json
+          `SELECT v.candidate_json, p.schedule_json
            FROM meal_plan p
            JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
-           JOIN meal_profile profile ON profile.chat_id = p.chat_id
            WHERE p.plan_id = ? AND p.chat_id = ? AND p.instance_id = ? AND p.current_version = ? AND p.status = 'active'
              AND NOT EXISTS (SELECT 1 FROM meal_plan_generation g
                              WHERE g.chat_id = p.chat_id AND g.status = 'generating' AND g.expires_at > ?)`,
@@ -1695,10 +2022,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
   // here preserves the restart-simulation contract without weakening it.
   if (!backing.reviewContexts) backing.reviewContexts = new Map()
   if (!backing.sessions) backing.sessions = new Map()
+  if (!backing.settingsLaunches) backing.settingsLaunches = new Map()
   if (!backing.initDataFingerprints) backing.initDataFingerprints = new Map()
   if (!backing.generations) backing.generations = new Map()
   const reviewContexts = backing.reviewContexts
   const sessions = backing.sessions
+  const settingsLaunches = backing.settingsLaunches
   const initDataFingerprints = backing.initDataFingerprints
   const generations = backing.generations as Map<string, MealPlanGenerationRecord>
 
@@ -1720,15 +2049,28 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     async loadOrCreateProfile(chatId) {
       const existing = backing.profiles.get(chatId)
       if (existing) {
+        existing.configurationVersion ??= 1
         const upgradedProfile = upgradeLegacyHalfDaySnackDefinitions(existing.profile)
         const upgradedSchedule = upgradeLegacyMealSchedule(existing.schedule)
+        let hydrated = false
         if (upgradedProfile !== existing.profile) {
           existing.profile = upgradedProfile
-          existing.updatedAt = nowIso()
+          hydrated = true
         }
         if (upgradedSchedule !== existing.schedule) {
           existing.schedule = upgradedSchedule
+          hydrated = true
+        }
+        if (hydrated) {
+          existing.configurationVersion += 1
           existing.updatedAt = nowIso()
+        }
+        for (const plan of backing.plans.values()) {
+          if (plan.chatId === chatId) {
+            if (!plan.schedule) plan.schedule = upgradedSchedule
+            if (!plan.establishedMealDefinitions)
+              plan.establishedMealDefinitions = upgradedProfile.mealDefinitions ?? []
+          }
         }
         return existing
       }
@@ -1739,12 +2081,36 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         customPolicies: SEED_CUSTOM_POLICIES,
         schedule: SEED_SCHEDULE,
         location: null,
+        configurationVersion: 1,
         interactionGeneration: 0,
         createdAt: now,
         updatedAt: now,
       }
       backing.profiles.set(chatId, profile)
       return profile
+    },
+
+    async saveMealProfileConfiguration(input) {
+      await this.loadOrCreateProfile(input.chatId)
+      const canonical = backing.profiles.get(input.chatId)
+      if (!canonical) return { ok: false as const, reason: "unavailable" as const }
+      if (canonical.configurationVersion !== input.expectedVersion)
+        return { ok: false as const, reason: "conflict" as const }
+      for (const plan of backing.plans.values()) {
+        if (plan.chatId === input.chatId && (!plan.schedule || !plan.establishedMealDefinitions))
+          return { ok: false as const, reason: "unavailable" as const }
+      }
+      const saved: StoredMealProfile = {
+        ...canonical,
+        profile: input.profile,
+        customPolicies: input.customPolicies,
+        schedule: input.schedule,
+        location: input.location,
+        configurationVersion: canonical.configurationVersion + 1,
+        updatedAt: nowIso(),
+      }
+      backing.profiles.set(input.chatId, saved)
+      return { ok: true as const, profile: saved }
     },
 
     async createActivePlan(input) {
@@ -1799,6 +2165,8 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       if (stale) return { ok: false as const, reason: "stale" as const }
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      if (profile.configurationVersion !== input.profileConfigurationVersion)
+        return { ok: false as const, reason: "stale" as const }
       const existingBatch = input.feedbackBatch?.consumeExisting
         ? backing.batches.get(input.feedbackBatch.batchId)
         : undefined
@@ -1918,6 +2286,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async activePlan(chatId) {
+      if (
+        [...backing.plans.values()].some(
+          (plan) => plan.chatId === chatId && (!plan.schedule || !plan.establishedMealDefinitions),
+        )
+      )
+        await this.loadOrCreateProfile(chatId)
       const plan = activePlanForChat(chatId)
       if (!plan) return null
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
@@ -1926,6 +2300,15 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async latestPlanForWeek(chatId, weekStart) {
+      if (
+        [...backing.plans.values()].some(
+          (plan) =>
+            plan.chatId === chatId &&
+            plan.weekStart === weekStart &&
+            (!plan.schedule || !plan.establishedMealDefinitions),
+        )
+      )
+        await this.loadOrCreateProfile(chatId)
       let plan: MealPlanRecord | undefined
       for (const candidate of backing.plans.values()) {
         if (candidate.chatId !== chatId || candidate.weekStart !== weekStart) continue
@@ -1937,6 +2320,12 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async listPlanHistory(chatId) {
+      if (
+        [...backing.plans.values()].some(
+          (plan) => plan.chatId === chatId && (!plan.schedule || !plan.establishedMealDefinitions),
+        )
+      )
+        await this.loadOrCreateProfile(chatId)
       const latestByWeek = new Map<string, MealPlanRecord>()
       for (const plan of backing.plans.values()) {
         if (plan.chatId !== chatId) continue
@@ -1963,6 +2352,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     async planById(chatId, planId) {
       const plan = backing.plans.get(planId)
       if (!plan || plan.chatId !== chatId) return null
+      if (!plan.schedule || !plan.establishedMealDefinitions) await this.loadOrCreateProfile(chatId)
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       return version ? { plan, version } : null
     },
@@ -2028,14 +2418,58 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async createMiniAppSession(input) {
-      const session: MiniAppSessionRecord = { ...input, createdAt: input.createdAt ?? nowIso() }
+      const session: MiniAppSessionRecord = {
+        ...input,
+        scope: input.scope ?? "review",
+        createdAt: input.createdAt ?? nowIso(),
+      }
       sessions.set(session.tokenHash, session)
       return session
+    },
+
+    async getMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      const launch = settingsLaunches.get(tokenHash)
+      if (!launch || launch.telegramUserId !== telegramUserId || launch.expiresAt <= now) return null
+      return launch
+    },
+
+    async exchangeMiniAppSettingsLaunch(input) {
+      const launch = settingsLaunches.get(input.launchTokenHash)
+      if (!launch || launch.telegramUserId !== input.telegramUserId || launch.expiresAt <= input.now)
+        return { ok: false as const, reason: "unauthorized" as const }
+      for (const [key, expiry] of initDataFingerprints) if (expiry <= input.now) initDataFingerprints.delete(key)
+      if (initDataFingerprints.has(input.fingerprintHash)) return { ok: false as const, reason: "replayed" as const }
+      const session: MiniAppSessionRecord = {
+        ...input.session,
+        scope: input.session.scope ?? "settings",
+        createdAt: input.session.createdAt ?? input.now,
+      }
+      settingsLaunches.delete(input.launchTokenHash)
+      initDataFingerprints.set(input.fingerprintHash, input.fingerprintExpiresAt)
+      sessions.set(session.tokenHash, session)
+      return { ok: true as const, session }
     },
 
     async readMiniAppSession(tokenHash, now) {
       for (const [key, session] of sessions) if (session.expiresAt <= now) sessions.delete(key)
       return sessions.get(tokenHash) ?? null
+    },
+
+    async createMiniAppSettingsLaunch(input) {
+      const now = nowIso()
+      for (const [key, launch] of settingsLaunches) if (launch.expiresAt <= now) settingsLaunches.delete(key)
+      settingsLaunches.set(input.tokenHash, {
+        ...input,
+        createdAt: input.createdAt ?? now,
+      })
+    },
+
+    async consumeMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
+      for (const [key, launch] of settingsLaunches) if (launch.expiresAt <= now) settingsLaunches.delete(key)
+      const launch = settingsLaunches.get(tokenHash)
+      if (!launch || launch.telegramUserId !== telegramUserId || launch.expiresAt <= now) return null
+      settingsLaunches.delete(tokenHash)
+      return launch
     },
 
     async consumeMiniAppInitDataFingerprint(fingerprintHash, expiresAt, now) {
@@ -2046,6 +2480,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async acceptFeedbackBatch(input) {
+      await this.loadOrCreateProfile(input.chatId)
       if (await this.activePlanGeneration(input.chatId)) return { ok: false as const, reason: "generating" as const }
       const plan = backing.plans.get(input.planId)
       if (
@@ -2059,7 +2494,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       const profile = backing.profiles.get(plan.chatId)
       if (!version || !profile) return { ok: false as const, reason: "stale" as const }
-      const items = normalizeMiniAppFeedbackItems(input.items, version.candidate, profile.schedule)
+      const items = normalizeMiniAppFeedbackItems(input.items, version.candidate, plan.schedule)
       if (!items) return { ok: false as const, reason: "invalid_items" as const }
       const existing = [...backing.batches.values()].find(
         (batch) => batch.planId === input.planId && batch.idempotencyKey === input.idempotencyKey,

@@ -41,8 +41,8 @@ export function computeCoverageSet(context: MealPlanContext): CoverageSet {
   const droppedSlots: Array<{ day: string; slotId: string }> = []
   for (const day of schedule.days) {
     if (!isHalfDay(context, day) || closed.has(day)) continue
-    // A half-day always means one snack and no packed school lunch. Legacy
-    // mealSlots detail from persisted plans never relaxes this standard shape.
+    // Each saved slot declares whether it stays, is omitted, or is quick on a
+    // half-day. Legacy schedules normalize their seed IDs in the store layer.
     for (const slotId of halfDayDroppedSlotIds(schedule.slots)) {
       droppedSlots.push({ day, slotId })
     }
