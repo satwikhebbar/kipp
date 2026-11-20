@@ -253,7 +253,7 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
   const normalize = (text: string) => text.trim().toLowerCase().replace(/’/gu, "'").replace(/\s+/gu, " ")
   const rejection = "reject|do not want|don't want|do not like|don't like|never serve|remove"
   const otherAction =
-    "add|use|keep|prefer|serve|move|swap|choose|include|put|make|change|switch|do not remove|don't remove"
+    "add|use|keep|like|prefer|serve|move|swap|choose|include|put|make|change|switch|do not remove|don't remove"
   const actionPrefix = "(?:please )?(?:i |we )?"
   const actionWords = `${rejection}|${otherAction}`
   const leadingAction = new RegExp(`^${actionPrefix}(${actionWords}) `, "u")
@@ -264,7 +264,8 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
   )
   const contrast = /,?\s+but\s+(?=[^,;.!?]+ is fine$)/u
   const rejectsDish = new RegExp(`^(?:${rejection})$`, "u")
-  const schedule = /^(?:on|to|for) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?: instead)?$/u
+  const schedule =
+    /^(?:on|to|for|from|except on) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?: instead)?$/u
   const names = definitions
     .flatMap((definition) =>
       [definition.name, ...(definition.aliases ?? [])].map((name) => ({ definition, name: normalize(name) })),
@@ -292,41 +293,37 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
   }
 
   const matches = new Set<string>()
-  for (const item of items) {
+  feedback: for (const item of items) {
     // A cell edit can leave the same dish elsewhere in the week.
     if (item.target?.kind === "cell" || item.scope) continue
     const rejectedGroups: Set<string>[] = []
     const preserved = new Set<string>()
-    let unresolvedContinuation = false
     for (const sentence of normalize(item.text).split(/[;.!?]+/u)) {
-      const clauses = sentence
-        .trim()
+      const statement = sentence.trim()
+      if (!statement || /^(?:thanks|thank you)$/u.test(statement)) continue
+      const clauses = statement
         .replace(/^(?:and|but|then|instead),? /u, "")
         .split(contrast)
         .flatMap((part) => part.split(actionBoundary))
       const rejected = new Set<string>()
-      let resolved = true
       for (const part of clauses) {
         const clause = part.trim()
         const cue = leadingAction.exec(clause)
         const isRejection = Boolean(cue && rejectsDish.test(cue[1]))
         const targetText = cue ? clause.slice(cue[0].length) : clause.replace(/ is fine$/u, "")
-        const targets = cue || targetText !== clause ? parseTargets(targetText, !isRejection) : null
-        if (!targets) {
-          // A retention or placement action can refer back to a previous sentence.
-          if (!isRejection && (cue || targetText !== clause)) unresolvedContinuation = true
-          resolved = false
-          continue
-        }
+        const planWideRejection = isRejection ? parseTargets(targetText, false) : null
+        const targets = planWideRejection ?? (cue || targetText !== clause ? parseTargets(targetText, true) : null)
+        // Any unmatched instruction can qualify or reverse an earlier removal.
+        // Leave the entire item to revision unless every substantive clause is understood.
+        if (!targets) continue feedback
         for (const target of targets) {
-          if (!isRejection) preserved.add(target.id)
+          if (!planWideRejection) preserved.add(target.id)
           else if (target.status === "provisional") rejected.add(target.id)
         }
       }
-      if (resolved && rejected.size) rejectedGroups.push(rejected)
+      if (rejected.size) rejectedGroups.push(rejected)
     }
     // Resolve continuations over the whole item before recording any group.
-    if (unresolvedContinuation) continue
     for (const group of rejectedGroups) {
       if ([...group].some((id) => preserved.has(id))) continue
       for (const id of group) matches.add(id)

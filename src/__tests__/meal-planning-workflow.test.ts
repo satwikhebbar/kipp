@@ -1425,6 +1425,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ["unchanged replacement", "Please remove special poha and add new idli to Monday", ["provisional-new-poha"]],
     ["move by reference", "Please remove special poha and serve it on Monday", []],
     ["move by name", "Please remove special poha and add new poha to Monday", []],
+    ["move across sentences", "Please remove special poha. Let’s serve it on Monday instead.", []],
+    ["named move across sentences", "Please remove special poha. We can have new poha on Monday instead.", []],
     ["Mini App cell removal", "Please remove special poha", []],
   ] as const)("records only durable rejection evidence for %s", async (scenario, text, expectedRejections) => {
     vi.useFakeTimers()
@@ -2762,6 +2764,11 @@ it.each([
   ["Please remove poha and add established dosa to Monday", ["poha"]],
   ["Please remove poha and serve it on Monday", []],
   ["Please remove poha. Serve it on Monday instead.", []],
+  ["Please remove poha. Let’s serve it on Monday instead.", []],
+  ["Please remove poha. We can have poha on Monday instead.", []],
+  ["Please remove poha. I don't want to remove poha.", []],
+  ["Please remove poha. Remove poha from Friday.", []],
+  ["Please remove poha. Thanks!", ["poha"]],
   ["Please remove poha. Then, serve it on Monday instead.", []],
   ["Please remove poha; add poha to Monday.", []],
   ["Please remove poha. Add idli to Monday.", ["poha"]],
