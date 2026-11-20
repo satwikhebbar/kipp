@@ -5,7 +5,7 @@ import type { Env } from "../core/types"
 import { createSettingsLaunchReference } from "../meal-planning/mini-app-auth"
 import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
 import { validateMealSchedule } from "../meal-planning/schedule"
-import { createMealPlanningStore } from "../meal-planning/store"
+import { createMealPlanningStore, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealGrid, MealProfile, MealSchedule, WeeklyExceptions } from "../meal-planning/types"
 import { createClockedD1TestDb, createD1TestDb } from "./d1-test-db"
 
@@ -481,6 +481,7 @@ describe("Mini App HTTP boundary", () => {
     expect(shell.headers.get("content-type")).toBe("text/html; charset=utf-8")
     const html = await shell.text()
     expect(html).toContain("Change plan")
+    expect(html).toContain("Household settings")
     expect(html).toContain("https://telegram.org/js/telegram-web-app.js")
     expect(html).toContain("Feedback ready")
     expect(html).toContain("Your next meal plan is still being generated.")
@@ -504,6 +505,165 @@ describe("Mini App HTTP boundary", () => {
     const plan = await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app/api/plan"), env())
     expect(plan.status).toBe(403)
     expect(plan.headers.get("cache-control")).toBe("no-store")
+  })
+
+  it("edits and reloads household settings from a settings-only Mini App launch", async () => {
+    const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
+    const location = new URL("https://kipp.example/mini-app?launch=private-launch")
+    Object.defineProperty(window, "location", { value: location, configurable: true })
+    Object.defineProperty(window, "Telegram", {
+      value: { WebApp: { initData: "signed-inline-init-data", ready: vi.fn(), expand: vi.fn() } },
+      configurable: true,
+    })
+    const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
+    const profile = JSON.parse(JSON.stringify(SEED_PROFILE)) as MealProfile
+    const schedule = JSON.parse(JSON.stringify(SEED_SCHEDULE)) as MealSchedule
+    let serverSettings = {
+      configurationVersion: 1,
+      profile,
+      customPolicies: [],
+      schedule,
+      location: null,
+      eligibleEstablishedMeals: Object.fromEntries(
+        schedule.slots.map((slot) => [
+          slot.id,
+          (profile.mealDefinitions ?? [])
+            .filter((definition) => definition.status === "established" && definition.suitableSlots.includes(slot.id))
+            .map((definition) => definition.id),
+        ]),
+      ),
+    }
+    const calls: Array<{ path: string; method: string }> = []
+    const submissions: Array<Record<string, unknown>> = []
+    client.fetch = async (input, init) => {
+      const path = String(input)
+      const method = init?.method ?? "GET"
+      calls.push({ path, method })
+      if (path.startsWith("/mini-app/api/session"))
+        return new Response(JSON.stringify({ token: "settings-session", scope: "settings" }), { status: 201 })
+      if (path === "/mini-app/api/profile" && method === "PUT") {
+        const submitted = JSON.parse(String(init?.body)) as Record<string, unknown>
+        submissions.push(submitted)
+        const data = submitted as typeof serverSettings & { expectedVersion: number }
+        if (submissions.length === 1) {
+          serverSettings = {
+            ...serverSettings,
+            configurationVersion: 2,
+            profile: { ...serverSettings.profile, sensoryGuidelines: ["Use gentle seasoning"] },
+          }
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
+        }
+        serverSettings = {
+          configurationVersion: data.expectedVersion + 1,
+          profile: { ...serverSettings.profile, ...data.profile },
+          customPolicies: data.customPolicies,
+          schedule: data.schedule,
+          location: data.location,
+          eligibleEstablishedMeals: data.eligibleEstablishedMeals,
+        }
+        return new Response(JSON.stringify(serverSettings))
+      }
+      if (path === "/mini-app/api/profile") return new Response(JSON.stringify(serverSettings))
+      return new Response(JSON.stringify({ error: "unexpected_request" }), { status: 404 })
+    }
+    const scripts = [...MINI_APP_SHELL.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
+    const context = {
+      window,
+      document: window.document,
+      MutationObserver: client.MutationObserver,
+      Event: window.Event,
+      Response,
+      URL,
+      fetch: (...args: Parameters<typeof fetch>) => client.fetch(...args),
+      localStorage: { getItem: () => null },
+    }
+    scripts.forEach((script) => {
+      runInNewContext(script, context)
+    })
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+    await settle()
+
+    const app = window.document.getElementById("app")
+    expect(app?.textContent).toContain("Household settings")
+    expect(app?.querySelector(".settings-form")).not.toBeNull()
+    expect(calls[0]?.path).toBe("/mini-app/api/session?launch=private-launch")
+    expect(calls.some((call) => call.path.includes("/mini-app/api/plan"))).toBe(false)
+
+    const addSlot = app?.querySelector('button[data-action="add-slot"]')
+    addSlot?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const rows = [...(app?.querySelectorAll(".settings-slot") ?? [])]
+    const addedRow = rows.find(
+      (row) =>
+        (row.querySelector('[data-slot="id"]') as unknown as { value: string; checked: boolean })?.value ===
+        "meal-slot-6",
+    )
+    expect(addedRow).toBeDefined()
+    const addedId = addedRow?.querySelector('[data-slot="id"]') as unknown as { value: string; checked: boolean }
+    const addedName = addedRow?.querySelector('[data-slot="name"]') as unknown as { value: string; checked: boolean }
+    addedId.value = "morning-tea"
+    addedName.value = "Morning tea"
+    const eligible = addedRow?.querySelector("[data-meal-id]") as unknown as { value: string; checked: boolean }
+    expect(eligible).toBeDefined()
+    eligible.checked = true
+    addedRow
+      ?.querySelector('button[data-slot-action="-1"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+
+    const dayChecks = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    dayChecks.forEach((input) => {
+      input.checked = input.value === "Tue" || input.value === "Sun"
+    })
+    const halfDayChecks = [...(app?.querySelectorAll('input[name="halfDays"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    halfDayChecks.forEach((input) => {
+      input.checked = input.value === "Sun"
+    })
+    const exclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    exclusions.value = "egg\nsesame"
+    const form = app?.querySelector(".settings-form")
+    form?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+
+    expect(submissions[0]).toMatchObject({
+      expectedVersion: 1,
+      profile: { dietaryExclusions: ["egg", "sesame"] },
+      schedule: {
+        days: ["Tue", "Sun"],
+        halfDays: ["Sun"],
+      },
+    })
+    expect(app?.textContent).toContain("changed in another session")
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+
+    const reapplied = submissions[1]
+    if (!reapplied) throw new Error("missing reapply request")
+    expect(reapplied).toMatchObject({
+      expectedVersion: 2,
+      profile: { dietaryExclusions: ["egg", "sesame"] },
+    })
+    const submittedSchedule = reapplied.schedule as MealSchedule
+    expect(submittedSchedule.slots.map((slot) => slot.id)).toEqual([
+      "breakfast",
+      "snack1",
+      "snack2",
+      "school-lunch",
+      "morning-tea",
+      "home-lunch",
+    ])
+    expect((reapplied.eligibleEstablishedMeals as Record<string, string[]>)["morning-tea"]).toEqual([eligible.value])
+    expect(app?.textContent).toContain("Settings saved.")
+    app?.querySelector('button[data-action="reload"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(calls.filter((call) => call.path === "/mini-app/api/profile" && call.method === "GET")).toHaveLength(3)
+    expect((app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string })?.value).toContain(
+      "sesame",
+    )
   })
 
   it("leaves a single week as a simple header without a redundant status", async () => {
