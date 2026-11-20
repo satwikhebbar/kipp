@@ -1,3 +1,5 @@
+import type { CompletionCounts } from "./completion"
+import { completionAdditions } from "./completion"
 import type {
   CustomPolicy,
   FeedbackItem,
@@ -18,6 +20,7 @@ const NO_VIDEOS: Record<string, RecipeVideo> = {}
 /** Maximum number of current/replaced plans exposed by one history read. */
 export const MAX_MEAL_PLAN_HISTORY = 12
 const MAX_MEAL_REJECTION_MERGE_ATTEMPTS = 4
+const MAX_MEAL_COMPLETION_ATTEMPTS = 3
 
 /** `{ country, city }` location snapshot stored on the household profile row. */
 export interface StoredLocation {
@@ -300,9 +303,17 @@ export interface ActivePlanPointer {
   weekEnd: string
 }
 
+export interface MealCompletionTarget {
+  planId: string
+  chatId: string
+  weekEnd: string
+}
+
 /** The typed meal-planning store surface. The D1 and in-memory implementations share the same invariants. */
 export interface MealPlanningStore {
   loadOrCreateProfile(chatId: string): Promise<StoredMealProfile>
+  claimDueMealCompletion(seen: ReadonlySet<string>): Promise<MealCompletionTarget | null>
+  completeEligibleMealPlan(target: MealCompletionTarget): Promise<CompletionCounts | null>
   createActivePlan(input: CreateActivePlanInput): Promise<CreateActivePlanResult>
   promotePlanVersion(input: PromotePlanVersionInput): Promise<PromotePlanVersionResult>
   decidePlanVersion(input: {
@@ -359,6 +370,8 @@ export interface InMemoryMealPlanningBacking {
   sessions?: Map<string, MiniAppSessionRecord>
   initDataFingerprints?: Map<string, string>
   generations?: Map<string, MealPlanGenerationRecord>
+  completedPlans?: Set<string>
+  completionCursor?: MealCompletionTarget
 }
 
 /** Options for the in-memory store; `failNextOn` is a single-shot test hook that simulates a mid-batch statement failure. */
@@ -857,7 +870,7 @@ function makeVersionRecord(
   }
 }
 
-const PLAN_WITH_VERSION_SELECT = `
+const PLAN_WITH_VERSION_COLUMNS = `
   SELECT p.plan_id, p.chat_id, p.week_start, p.week_end, p.timezone, p.instance_id, p.status,
          p.current_version, p.weekly_inventory_json, p.weekly_exceptions_json, p.created_at, p.updated_at,
          p.replaced_at, p.approved_version, p.rejected_version, p.rejected_meal_ids_json,
@@ -865,9 +878,27 @@ const PLAN_WITH_VERSION_SELECT = `
          v.feedback_batch_id, v.video_json, v.provisional_meals_json,
          v.usage_input_tokens, v.usage_output_tokens, v.usage_model,
          v.cost_usd, v.cost_status, v.allow_new_foods_snapshot,
-         v.created_at AS version_created_at
+         v.created_at AS version_created_at`
+const PLAN_WITH_VERSION_FROM = `
   FROM meal_plan p
   JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version`
+
+// Keep due selection and the SQL write authorization on the same eligibility predicate.
+const ELIGIBLE_FOR_COMPLETION = `
+  p.week_end <= ${D1_NOW_ISO}
+  AND p.created_at < p.week_end AND v.created_at < p.week_end
+  AND (p.status = 'active' OR p.replaced_at > p.week_end)
+  AND p.approved_version = p.current_version
+  AND (p.rejected_version IS NULL OR p.rejected_version != p.current_version)
+  AND v.allow_new_foods_snapshot = 1
+  AND NOT EXISTS (SELECT 1 FROM meal_plan_completion c WHERE c.plan_id = p.plan_id)
+  AND NOT EXISTS (
+    SELECT 1 FROM meal_plan newer WHERE newer.chat_id = p.chat_id AND newer.week_start = p.week_start
+      AND (newer.created_at, newer.rowid) > (p.created_at, p.rowid)
+  )
+`
+
+const PLAN_WITH_VERSION_SELECT = `${PLAN_WITH_VERSION_COLUMNS} ${PLAN_WITH_VERSION_FROM}`
 
 /** Hydrates a plan header and its immutable current version from a joined row. */
 function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
@@ -947,6 +978,98 @@ function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
  */
 export function createMealPlanningStore(db: D1Database): MealPlanningStore {
   return {
+    async claimDueMealCompletion(seen) {
+      const cursor = await db
+        .prepare("SELECT week_end, plan_id, revision FROM meal_plan_completion_cursor WHERE singleton = ?")
+        .bind(1)
+        .first<{ week_end: string; plan_id: string; revision: string }>()
+      const excluded = [...seen]
+      const exclude = excluded.length ? `AND p.plan_id NOT IN (${excluded.map(() => "?").join(",")})` : ""
+      const select = `SELECT p.plan_id AS planId, p.chat_id AS chatId, p.week_end AS weekEnd
+        FROM meal_plan p JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
+        WHERE ${ELIGIBLE_FOR_COMPLETION} ${exclude}`
+      const order = "ORDER BY p.week_end, p.plan_id LIMIT 1"
+      const after = cursor
+        ? await db
+            .prepare(`${select} AND (p.week_end, p.plan_id) > (?, ?) ${order}`)
+            .bind(...excluded, cursor.week_end, cursor.plan_id)
+            .first<MealCompletionTarget>()
+        : null
+      const target =
+        after ??
+        (await db
+          .prepare(`${select} ${order}`)
+          .bind(...excluded)
+          .first<MealCompletionTarget>())
+      if (!target) return null
+      const revision = crypto.randomUUID()
+      const claim = cursor
+        ? db
+            .prepare(`UPDATE meal_plan_completion_cursor SET week_end = ?, plan_id = ?, revision = ?
+                      WHERE singleton = 1 AND revision = ?`)
+            .bind(target.weekEnd, target.planId, revision, cursor.revision)
+        : db
+            .prepare(`INSERT OR IGNORE INTO meal_plan_completion_cursor
+                      (singleton, week_end, plan_id, revision) VALUES (1, ?, ?, ?)`)
+            .bind(target.weekEnd, target.planId, revision)
+      return (await claim.run()).meta.changes === 1 ? target : null
+    },
+
+    async completeEligibleMealPlan(target) {
+      for (let retry = 0; retry < MAX_MEAL_COMPLETION_ATTEMPTS; retry++) {
+        const row = await db
+          .prepare(`${PLAN_WITH_VERSION_COLUMNS}, profile.profile_json ${PLAN_WITH_VERSION_FROM}
+          JOIN meal_profile profile ON profile.chat_id = p.chat_id
+          WHERE p.plan_id = ? AND p.chat_id = ? AND p.week_end = ? AND ${ELIGIBLE_FOR_COMPLETION}`)
+          .bind(target.planId, target.chatId, target.weekEnd)
+          .first()
+        if (!row) return null
+        const prior = String(row.profile_json)
+        const profile = JSON.parse(prior) as MealProfile
+        const record = mealPlanFromRow(row)
+        // Reject corrupt exception JSON instead of treating it as an empty exception list.
+        record.plan.weeklyExceptions = JSON.parse(String(row.weekly_exceptions_json)) as WeeklyExceptions
+        const { additions, counts } = completionAdditions(record, profile)
+        const attempt = crypto.randomUUID()
+        const ledger = db
+          .prepare(`
+          INSERT INTO meal_plan_completion (plan_id, version, attempt_id, added_count, skipped_count, invalid_count, processed_at)
+          SELECT p.plan_id, p.current_version, ?, ?, ?, ?, ${D1_NOW_ISO}
+          FROM meal_plan p JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
+          JOIN meal_profile profile ON profile.chat_id = p.chat_id
+          WHERE p.plan_id = ? AND p.chat_id = ? AND p.week_end = ? AND p.current_version = ?
+            AND p.weekly_exceptions_json = ? AND p.rejected_meal_ids_json = ?
+            AND profile.profile_json = ? AND ${ELIGIBLE_FOR_COMPLETION}`)
+          .bind(
+            attempt,
+            counts.added,
+            counts.skipped,
+            counts.invalid,
+            target.planId,
+            target.chatId,
+            target.weekEnd,
+            record.plan.currentVersion,
+            row.weekly_exceptions_json,
+            row.rejected_meal_ids_json,
+            prior,
+          )
+        const statements = [ledger]
+        if (additions.length) {
+          const merged = { ...profile, mealDefinitions: [...(profile.mealDefinitions ?? []), ...additions] }
+          statements.push(
+            db
+              .prepare(`
+            UPDATE meal_profile SET profile_json = ?, updated_at = ${D1_NOW_ISO}, version = version + 1
+            WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan_completion WHERE plan_id = ? AND attempt_id = ?)`)
+              .bind(JSON.stringify(merged), target.chatId, target.planId, attempt),
+          )
+        }
+        const [result] = await db.batch(statements)
+        if (result.meta.changes === 1) return counts
+      }
+      return null
+    },
+
     async loadOrCreateProfile(chatId) {
       const now = nowIso()
       // Atomic insert-if-absent: `INSERT OR IGNORE` is one statement, so two
@@ -980,10 +1103,13 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const schedule = parseJson<MealSchedule>(String(row?.schedule_json), SEED_SCHEDULE)
       const upgradedSchedule = upgradeLegacyMealSchedule(schedule)
       if (upgradedProfile !== profile) {
-        await db
-          .prepare("UPDATE meal_profile SET profile_json = ?, updated_at = ? WHERE chat_id = ?")
-          .bind(JSON.stringify(upgradedProfile), now, chatId)
+        const normalized = await db
+          .prepare(
+            "UPDATE meal_profile SET profile_json = ?, updated_at = ?, version = version + 1 WHERE chat_id = ? AND profile_json = ?",
+          )
+          .bind(JSON.stringify(upgradedProfile), now, chatId, row?.profile_json)
           .run()
+        if (normalized.meta.changes !== 1) return this.loadOrCreateProfile(chatId)
       }
       if (upgradedSchedule !== schedule) {
         await db
@@ -1790,7 +1916,70 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     return undefined
   }
 
+  backing.completedPlans ??= new Set()
+  const completed = backing.completedPlans
+
+  /** Checks latest-plan ordering and the same historical evidence as the D1 authorizing write. */
+  function eligiblePlan(plan: MealPlanRecord): ActivePlanRecord | null {
+    const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
+    if (
+      !version ||
+      completed.has(plan.planId) ||
+      plan.weekEnd > nowIso() ||
+      plan.createdAt >= plan.weekEnd ||
+      version.createdAt >= plan.weekEnd ||
+      (plan.status !== "active" && !(plan.replacedAt && plan.replacedAt > plan.weekEnd)) ||
+      plan.approvedVersion !== plan.currentVersion ||
+      plan.rejectedVersion === plan.currentVersion ||
+      version.allowNewFoodsSnapshot !== true
+    )
+      return null
+
+    let latest: MealPlanRecord | undefined
+    for (const entry of backing.plans.values()) {
+      if (entry.chatId !== plan.chatId || entry.weekStart !== plan.weekStart) continue
+      if (!latest || entry.createdAt >= latest.createdAt) latest = entry
+    }
+    return latest === plan ? { plan, version } : null
+  }
+
   return {
+    async claimDueMealCompletion(seen) {
+      const due = [...backing.plans.values()]
+        .filter((plan) => !seen.has(plan.planId) && eligiblePlan(plan))
+        .sort((a, b) => (a.weekEnd === b.weekEnd ? (a.planId < b.planId ? -1 : 1) : a.weekEnd < b.weekEnd ? -1 : 1))
+      const cursor = backing.completionCursor
+      const plan =
+        (cursor &&
+          due.find(
+            (row) => row.weekEnd > cursor.weekEnd || (row.weekEnd === cursor.weekEnd && row.planId > cursor.planId),
+          )) ??
+        due[0]
+      if (!plan) return null
+      const { planId, chatId, weekEnd } = plan
+      const target = { planId, chatId, weekEnd }
+      backing.completionCursor = target
+      return target
+    },
+
+    async completeEligibleMealPlan(target) {
+      const plan = backing.plans.get(target.planId)
+      if (!plan || plan.chatId !== target.chatId || plan.weekEnd !== target.weekEnd) return null
+      const record = eligiblePlan(plan)
+      const profile = backing.profiles.get(target.chatId)
+      if (!record || !profile) return null
+      const { additions, counts } = completionAdditions(record, profile.profile)
+      if (additions.length) {
+        profile.profile = {
+          ...profile.profile,
+          mealDefinitions: [...(profile.profile.mealDefinitions ?? []), ...additions],
+        }
+        profile.updatedAt = nowIso()
+      }
+      completed.add(target.planId)
+      return counts
+    },
+
     async loadOrCreateProfile(chatId) {
       const existing = backing.profiles.get(chatId)
       if (existing) {

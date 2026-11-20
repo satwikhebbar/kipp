@@ -859,15 +859,10 @@ async function sendPlanAndRegister(
   const sent = await step.do(`meal-planning-send-plan-${occurrence}`, async () => {
     const callbackToken = crypto.randomUUID()
     const interactionId = crypto.randomUUID()
-    const acceptToken = crypto.randomUUID()
-    const acceptId = crypto.randomUUID()
-    const rejectToken = crypto.randomUUID()
-    const rejectId = crypto.randomUUID()
-    const buttons: Array<Record<string, unknown>> = [
-      { text: "Give feedback", callback_data: callbackToken },
-      { text: "Accept plan", callback_data: acceptToken },
-      { text: "Reject plan", callback_data: rejectToken },
-    ]
+    const acceptToken = version.version > 1 ? crypto.randomUUID() : undefined
+    const acceptId = acceptToken ? crypto.randomUUID() : undefined
+    const buttons: Array<Record<string, unknown>> = [{ text: "Give feedback", callback_data: callbackToken }]
+    if (acceptToken) buttons.push({ text: "Accept plan", callback_data: acceptToken })
     if (miniAppUrl) buttons.push({ text: "Review this week's plan", web_app: { url: miniAppUrl } })
     const sentMessage = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
       replyMarkup: { inline_keyboard: [buttons] },
@@ -877,8 +872,6 @@ async function sendPlanAndRegister(
       callbackToken,
       acceptId,
       acceptToken,
-      rejectId,
-      rejectToken,
       messageId: sentMessage.messageId,
     }
   })
@@ -896,30 +889,20 @@ async function sendPlanAndRegister(
       interactionGroup: MEAL_PLANNING_GROUP,
       generation,
     } satisfies InteractionRegistration)
-    await router.register({
-      interactionId: sent.acceptId,
-      version: version.version,
-      workflowId: plan.instanceId,
-      edit: {},
-      kind: INTERACTION_KIND.MEAL_VERSION_ACCEPT,
-      callbackToken: sent.acceptToken,
-      botMessageId: sent.messageId,
-      expiresAt: Date.parse(plan.weekEnd),
-      interactionGroup: MEAL_PLANNING_GROUP,
-      generation,
-    } satisfies InteractionRegistration)
-    await router.register({
-      interactionId: sent.rejectId,
-      version: version.version,
-      workflowId: plan.instanceId,
-      edit: {},
-      kind: INTERACTION_KIND.MEAL_VERSION_REJECT,
-      callbackToken: sent.rejectToken,
-      botMessageId: sent.messageId,
-      expiresAt: Date.parse(plan.weekEnd),
-      interactionGroup: MEAL_PLANNING_GROUP,
-      generation,
-    } satisfies InteractionRegistration)
+    if (sent.acceptId && sent.acceptToken) {
+      await router.register({
+        interactionId: sent.acceptId,
+        version: version.version,
+        workflowId: plan.instanceId,
+        edit: {},
+        kind: INTERACTION_KIND.MEAL_VERSION_ACCEPT,
+        callbackToken: sent.acceptToken,
+        botMessageId: sent.messageId,
+        expiresAt: Date.parse(plan.weekEnd),
+        interactionGroup: MEAL_PLANNING_GROUP,
+        generation,
+      } satisfies InteractionRegistration)
+    }
   })
 }
 

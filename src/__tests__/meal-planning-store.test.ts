@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it, vi } from "vitest"
 import { computeVersionCost } from "../core/cost"
+import { handleMealCompletionCron } from "../meal-planning/completion-cron"
 import {
   type CreateActivePlanInput,
   createInMemoryMealPlanningStore,
@@ -18,7 +19,7 @@ import {
   upgradeLegacyHalfDaySnackDefinitions,
   upgradeLegacyMealSchedule,
 } from "../meal-planning/store"
-import type { MealPlanCandidate, MealPlanEvaluation } from "../meal-planning/types"
+import type { MealDefinition, MealPlanCandidate, MealPlanEvaluation } from "../meal-planning/types"
 import { createClockedD1TestDb, createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
 
 const CHAT = "chat-1"
@@ -1609,5 +1610,237 @@ describe.each([
         items: [{ text: "missing cell", target: { kind: "cell", day: "Mon", slot: "school-lunch" } }],
       }),
     ).resolves.toEqual({ ok: false, reason: "invalid_items" })
+  })
+})
+
+describe("completed week repertoire", () => {
+  const open = "2030-09-07T23:59:00.000Z"
+  const cutoff = "2030-09-07T23:59:59.999Z"
+  const late = "2030-09-08T00:15:00.000Z"
+  const dish: MealDefinition = {
+    id: "new-roasted-squash",
+    name: "Roasted squash",
+    vegetarian: true,
+    principalIngredients: ["squash"],
+    requiredIngredients: ["squash", "yogurt"],
+    optionalIngredients: ["parsley"],
+    packedFood: { suitable: false, dry: false },
+    suitableSlots: ["home-lunch"],
+    typicalCookMinutes: 25,
+    priorNightPrep: "required",
+    status: "provisional",
+  }
+  const input = (overrides: Partial<CreateActivePlanInput> = {}) =>
+    createInput({
+      weekStart: "2030-09-02T00:00:00.000Z",
+      weekEnd: cutoff,
+      provisionalMealDefinitions: [dish],
+      candidate: candidate({
+        Mon: { "home-lunch": { dish: dish.name, items: [], vegetarian: true, cookMinutes: 25, priorNightPrep: true } },
+      }),
+      ...overrides,
+    })
+
+  it.each(["D1", "memory"])("%s promotes the saved definition once at cutoff", async (kind) => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(open)
+      const store =
+        kind === "D1" ? createMealPlanningStore(createClockedD1TestDb().d1) : createInMemoryMealPlanningStore()
+      await store.loadOrCreateProfile(CHAT)
+      await createPlan(store, input())
+      expect(await store.claimDueMealCompletion(new Set())).toBeNull()
+      vi.setSystemTime(cutoff)
+      const target = await store.claimDueMealCompletion(new Set())
+      expect(target).toEqual({ planId: "plan-1", chatId: CHAT, weekEnd: cutoff })
+      if (!target) throw new Error("Expected a due plan")
+      expect(await store.completeEligibleMealPlan(target)).toEqual({ added: 1, skipped: 0, invalid: 0 })
+      expect(await store.completeEligibleMealPlan(target)).toBeNull()
+      const loaded = await store.loadOrCreateProfile(CHAT)
+      expect(loaded.profile.mealDefinitions).toContainEqual({ ...dish, status: "established" })
+      expect((await store.activePlan(CHAT))?.version.provisionalMealDefinitions).toEqual([dish])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("uses the frozen exceptions on an unchanged plan and keeps a dish with another surviving cell", async () => {
+    let now = open
+    const store = createMealPlanningStore(createClockedD1TestDb(() => now).d1)
+    await store.loadOrCreateProfile(CHAT)
+    const closedDish = { ...dish, id: "closed", name: "Canceled squash" }
+    const lunchDish = { ...dish, id: "half", name: "Omitted lunch" }
+    const retained = { ...dish, id: "retained", name: "Full-day lunch" }
+    const cell = { dish: dish.name, items: [], vegetarian: true, cookMinutes: 25, priorNightPrep: true }
+    await createPlan(
+      store,
+      input({
+        provisionalMealDefinitions: [dish, closedDish, lunchDish, retained],
+        candidate: candidate({
+          Mon: { breakfast: { ...cell, dish: closedDish.name }, "home-lunch": cell },
+          Tue: { "home-lunch": cell, "school-lunch": { ...cell, dish: lunchDish.name } },
+          Wed: { "school-lunch": { ...cell, dish: retained.name } },
+        }),
+      }),
+    )
+    await store.updateWeeklyContext({
+      planId: "plan-1",
+      chatId: CHAT,
+      baseVersion: 1,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: {
+        items: [
+          { kind: "school_closed", instruction: "Closed Monday", appliesTo: { day: "Mon" } },
+          { kind: "half_day", instruction: "Half Tuesday", appliesTo: { day: "Tue" } },
+          { kind: "half_day", instruction: "Half Wednesday", appliesTo: { day: "Wed" } },
+          { kind: "full_day", instruction: "Full Wednesday", appliesTo: { day: "Wed" } },
+        ],
+      },
+    })
+    now = late
+    await handleMealCompletionCron({}, store)
+    const established = (await store.loadOrCreateProfile(CHAT)).profile.mealDefinitions?.map((entry) => entry.id)
+    expect(established).toEqual(expect.arrayContaining([dish.id, retained.id]))
+    expect(established).not.toContain(closedDish.id)
+    expect(established).not.toContain(lunchDish.id)
+  })
+
+  it("retries a profile conflict without dropping the other writer's update", async () => {
+    let injectConflict = false
+    const { db, d1 } = createD1TestDb(undefined, (sql) => {
+      if (injectConflict && sql.includes("INSERT INTO meal_plan_completion (")) {
+        injectConflict = false
+        db.prepare(
+          "UPDATE meal_profile SET profile_json = json_set(profile_json, '$.allowNewFoods', json('false')) WHERE chat_id = ?",
+        ).run(CHAT)
+      }
+    })
+    let now = open
+    db.function("strftime", (_format, _value) => now)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, input())
+    now = late
+    injectConflict = true
+    await expect(
+      store.completeEligibleMealPlan({ planId: "plan-1", chatId: CHAT, weekEnd: cutoff }),
+    ).resolves.toMatchObject({ added: 1 })
+    const { profile } = await store.loadOrCreateProfile(CHAT)
+    expect(profile.allowNewFoods).toBe(false)
+    expect(profile.mealDefinitions).toContainEqual({ ...dish, status: "established" })
+  })
+
+  it.each([false, true])("requires explicit acceptance for a revision (accepted: %s)", async (accepted) => {
+    let now = open
+    const store = createMealPlanningStore(createClockedD1TestDb(() => now).d1)
+    await store.loadOrCreateProfile(CHAT)
+    const original = input()
+    await createPlan(store, original)
+    const promotion = await store.promotePlanVersion(
+      promoteInput({
+        candidate: original.candidate,
+        allowNewFoodsSnapshot: true,
+        provisionalMealDefinitions: [dish],
+      }),
+    )
+    expect(promotion.ok).toBe(true)
+    if (accepted) {
+      expect(
+        await store.decidePlanVersion({ planId: original.planId, chatId: CHAT, version: 2, action: "accept" }),
+      ).toBe(true)
+    }
+    now = late
+    await handleMealCompletionCron({}, store)
+    const definition = (await store.loadOrCreateProfile(CHAT)).profile.mealDefinitions?.find(
+      (entry) => entry.id === dish.id,
+    )
+    expect(definition?.status === "established").toBe(accepted)
+  })
+
+  it.each([false, true])("preserves a prior week only when replaced after cutoff (%s)", async (afterCutoff) => {
+    let now = open
+    const store = createMealPlanningStore(createClockedD1TestDb(() => now).d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, input())
+    now = afterCutoff ? late : open
+    await createPlan(
+      store,
+      input({
+        planId: "next-plan",
+        weekStart: "2030-09-09T00:00:00.000Z",
+        weekEnd: "2030-09-14T23:59:59.999Z",
+      }),
+    )
+    now = late
+    await handleMealCompletionCron({}, store)
+    const definition = (await store.loadOrCreateProfile(CHAT)).profile.mealDefinitions?.find(
+      (entry) => entry.id === dish.id,
+    )
+    expect(definition?.status === "established").toBe(afterCutoff)
+  })
+
+  it("records zero additions for a rejected dish without rewriting the profile", async () => {
+    let now = open
+    const { db, d1 } = createClockedD1TestDb(() => now)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, input())
+    expect(await store.rejectPlanDishes({ planId: "plan-1", chatId: CHAT, version: 1, mealIds: [dish.id] })).toBe(true)
+    const before = d1Scalar(db, "SELECT profile_json FROM meal_profile")
+    now = late
+    await handleMealCompletionCron({}, store)
+    expect(d1Scalar(db, "SELECT added_count FROM meal_plan_completion")).toBe(0)
+    expect(d1Scalar(db, "SELECT profile_json FROM meal_profile")).toBe(before)
+    expect(await store.claimDueMealCompletion(new Set())).toBeNull()
+  })
+
+  it("rolls back the ledger when the catalog update fails", async () => {
+    let now = open
+    const { db, d1 } = createClockedD1TestDb(() => now)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, input())
+    now = late
+    const target = { planId: "plan-1", chatId: CHAT, weekEnd: cutoff }
+    db.exec(
+      "CREATE TRIGGER fail_completion BEFORE UPDATE OF profile_json ON meal_profile BEGIN SELECT RAISE(ABORT, 'test failure'); END",
+    )
+    await expect(store.completeEligibleMealPlan(target)).rejects.toThrow("test failure")
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_completion")).toBe(0)
+    expect((await store.loadOrCreateProfile(CHAT)).profile.mealDefinitions).not.toContainEqual({
+      ...dish,
+      status: "established",
+    })
+    db.exec("DROP TRIGGER fail_completion")
+    expect(await store.completeEligibleMealPlan(target)).toMatchObject({ added: 1 })
+  })
+
+  it("moves past repeated failures across sweeps and retries after wrapping", async () => {
+    let now = open
+    const store = createMealPlanningStore(createClockedD1TestDb(() => now).d1)
+    const failedCount = 6
+    for (let n = 0; n <= failedCount; n++) {
+      const id = String(n)
+      await store.loadOrCreateProfile(id)
+      await createPlan(store, input({ planId: id, chatId: id }))
+    }
+    now = late
+    const attempts: string[] = []
+    const complete = store.completeEligibleMealPlan
+    store.completeEligibleMealPlan = async (target) => {
+      attempts.push(target.planId)
+      if (target.planId !== String(failedCount)) throw new Error("persistent test failure")
+      return complete(target)
+    }
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await handleMealCompletionCron({}, store)
+      expect(attempts).not.toContain(String(failedCount))
+      await handleMealCompletionCron({}, store)
+      expect(attempts).toContain(String(failedCount))
+      expect(attempts.filter((id) => id === "0")).toHaveLength(2)
+    } finally {
+      logged.mockRestore()
+    }
   })
 })

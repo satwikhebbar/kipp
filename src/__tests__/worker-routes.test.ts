@@ -2,7 +2,11 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { TokenVaultDO } from "../core/token-vault"
 import { createTokenVault } from "../core/token-vault-client"
 import type { Env } from "../core/types"
+import { MEAL_COMPLETION_CRON } from "../meal-planning/completion-cron"
+import { createMealPlanningStore } from "../meal-planning/store"
+import type { MealDefinition, MealPlanEvaluation } from "../meal-planning/types"
 import { handleAuthCallback, handleAuthStart } from "../triggers/linkedin-auth"
+import { createClockedD1TestDb } from "./d1-test-db"
 
 vi.mock("../linkedin/workflow", () => ({ PipelineWorkflow: class {} }))
 vi.mock("../calendar/workflow", () => ({ CalendarWorkflow: class {} }))
@@ -516,6 +520,70 @@ describe("scheduled() cron failure notification", () => {
       return { ok: false, status }
     })
   }
+
+  it("promotes a new dish through the scheduled handler into the ordinary planning profile", async () => {
+    const { d1 } = createClockedD1TestDb()
+    const store = createMealPlanningStore(d1)
+    const env = cronEnv({ MEAL_PLANNING_DB: d1 })
+    const chatId = "42"
+    const weekEnd = new Date(Date.now() + 1000).toISOString()
+    const dish: MealDefinition = {
+      id: "new-soup",
+      name: "Spinach soup",
+      vegetarian: true,
+      principalIngredients: ["spinach"],
+      requiredIngredients: ["spinach", "potato"],
+      optionalIngredients: [],
+      suitableSlots: ["home-lunch"],
+      packedFood: { suitable: false, dry: false },
+      typicalCookMinutes: 20,
+      priorNightPrep: "none",
+      status: "provisional",
+    }
+    await store.loadOrCreateProfile(chatId)
+    await store.startPlanGeneration({ chatId, generationId: "gen", expiresAt: weekEnd })
+    await store.createActivePlan({
+      planId: "plan",
+      chatId,
+      weekStart: new Date().toISOString(),
+      weekEnd,
+      timezone: "UTC",
+      instanceId: "instance",
+      generationId: "gen",
+      allowNewFoodsSnapshot: true,
+      provisionalMealDefinitions: [dish],
+      candidate: {
+        grid: {
+          Mon: {
+            "home-lunch": {
+              dish: dish.name,
+              items: dish.requiredIngredients,
+              vegetarian: true,
+              cookMinutes: 20,
+              priorNightPrep: false,
+            },
+          },
+        },
+        easyBuys: [],
+        policyOutcomes: {},
+      },
+      evaluation: {} as MealPlanEvaluation,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+    })
+    vi.setSystemTime(new Date(weekEnd))
+    const event = {
+      cron: MEAL_COMPLETION_CRON,
+      scheduledTime: Date.now(),
+      noRetry: false,
+    } as unknown as ScheduledController
+    await worker.scheduled(event, env)
+    await worker.scheduled(event, env)
+    const { profile } = await createMealPlanningStore(d1).loadOrCreateProfile(chatId)
+    expect(profile.mealDefinitions?.filter((entry) => entry.id === dish.id)).toEqual([
+      { ...dish, status: "established" },
+    ])
+  })
 
   it("notifies the operator exactly once with safe text when a cron job fails", async () => {
     const env = cronEnv()

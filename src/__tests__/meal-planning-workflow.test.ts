@@ -1403,8 +1403,6 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       .inline_keyboard
     expect(buttons.flat()).toEqual([
       expect.objectContaining({ text: "Give feedback" }),
-      expect.objectContaining({ text: "Accept plan" }),
-      expect.objectContaining({ text: "Reject plan" }),
       { text: "Review this week's plan", web_app: { url: "https://mini-app.example.test/mini-app" } },
     ])
     const context = await createMealPlanningStore(d1).resolveMiniAppReviewContext("parent-123")
@@ -1709,6 +1707,15 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(planMessages).toHaveLength(2)
     expect(planMessages[0]?.text).toContain("2 in / 2 out")
     expect(planMessages[1]?.text).toContain("4 in / 4 out")
+    const keyboard = planMessages[1]?.replyMarkup as { inline_keyboard: Array<Array<{ text: string }>> }
+    expect(keyboard.inline_keyboard.flat().map((button) => button.text)).toEqual(["Give feedback", "Accept plan"])
+    expect(registrations).toContainEqual(
+      expect.objectContaining({
+        kind: "meal-version-accept",
+        version: 2,
+        expiresAt: Date.parse(week.weekEnd),
+      }),
+    )
     const v1 = db.prepare("SELECT candidate_json FROM meal_plan_version WHERE version = 1").get() as {
       candidate_json: string
     }
