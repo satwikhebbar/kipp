@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { authenticateMiniApp, verifyTelegramInitData } from "../meal-planning/mini-app-auth"
 import { createMealPlanningStore } from "../meal-planning/store"
-import { createD1TestDb } from "./d1-test-db"
+import { createClockedD1TestDb } from "./d1-test-db"
 
 const BOT_TOKEN = "123:bot-token"
 const NOW = new Date("2026-09-01T12:00:00.000Z")
@@ -42,7 +42,7 @@ describe("Mini App Telegram authentication", () => {
   })
 
   it("creates a scoped session once and rejects replayed init data", async () => {
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb(() => NOW.toISOString())
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile("chat-42")
     await store.startPlanGeneration({

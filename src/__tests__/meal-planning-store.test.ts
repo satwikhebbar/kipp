@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { DatabaseSync } from "node:sqlite"
 import { fileURLToPath } from "node:url"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { computeVersionCost } from "../core/cost"
 import {
   type CreateActivePlanInput,
@@ -11,6 +11,7 @@ import {
   type InMemoryMealPlanningBacking,
   MAX_MEAL_PLAN_HISTORY,
   type MealPlanningStore,
+  PlanWeekClosedError,
   type PromotePlanVersionInput,
   SEED_PROFILE,
   SEED_SCHEDULE,
@@ -18,7 +19,7 @@ import {
   upgradeLegacyMealSchedule,
 } from "../meal-planning/store"
 import type { MealPlanCandidate, MealPlanEvaluation } from "../meal-planning/types"
-import { createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
+import { createClockedD1TestDb, createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
 
 const CHAT = "chat-1"
 const WEEKS = { weekStart: "2999-09-07T00:00:00.000Z", weekEnd: "2999-09-12T23:59:59.000Z" }
@@ -192,8 +193,8 @@ describe("createInMemoryMealPlanningStore", () => {
       store,
       createInput({
         planId: "plan-2",
-        weekStart: "2026-09-14T00:00:00.000Z",
-        weekEnd: "2026-09-19T23:59:59.000Z",
+        weekStart: "2999-09-14T00:00:00.000Z",
+        weekEnd: "2999-09-19T23:59:59.000Z",
         weeklyInventory: { items: [], notes: [] },
       }),
     )
@@ -521,7 +522,7 @@ it.each([
 ])("%s selects the latest plan for an exact week and skips a week off", async (_name, makeStore) => {
   const store = makeStore()
   await store.loadOrCreateProfile(CHAT)
-  const earlier = "2026-09-14T00:00:00.000Z"
+  const earlier = "2999-09-14T00:00:00.000Z"
   const current = "2026-09-21T00:00:00.000Z"
   expect(await store.latestPlanForWeek(CHAT, earlier)).toBeNull()
   await createPlan(store, createInput({ planId: "plan-1" }))
@@ -543,7 +544,7 @@ it.each([
   await createPlan(store, createInput({ planId: "prior-week-plan" }))
   const promoted = await store.promotePlanVersion(promoteInput({ planId: "prior-week-plan", baseVersion: 1 }))
   expect(promoted.ok).toBe(true)
-  await createPlan(store, createInput({ planId: "current-week-plan", weekStart: "2026-09-14T00:00:00.000Z" }))
+  await createPlan(store, createInput({ planId: "current-week-plan", weekStart: "2999-09-14T00:00:00.000Z" }))
   expect(await store.latestPlanForWeek(CHAT, WEEKS.weekStart)).toMatchObject({
     plan: { planId: "prior-week-plan", status: "replaced", currentVersion: 2 },
     version: { version: 2, candidate: { grid: { Mon: { breakfast: { dish: "poha" } } } } },
@@ -700,7 +701,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         planId: "plan-1",
         version: 1,
         mealIds: ["provisional-a", "provisional-b"],
-        now: "2999-09-10T00:00:00.000Z",
       }),
     ).toBe(true)
     expect(
@@ -709,7 +709,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         planId: "plan-1",
         version: 1,
         mealIds: ["provisional-a"],
-        now: "2999-09-10T00:00:01.000Z",
       }),
     ).toBe(true)
     expect(
@@ -718,7 +717,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         planId: "plan-1",
         version: 1,
         action: "reject",
-        now: "2999-09-10T00:00:02.000Z",
       }),
     ).toBe(true)
     expect(
@@ -727,7 +725,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         planId: "plan-1",
         version: 1,
         action: "accept",
-        now: "2999-09-10T00:00:03.000Z",
       }),
     ).toBe(false)
     const state = await store.activePlan(CHAT)
@@ -742,7 +739,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         planId: "plan-1",
         version: 1,
         action: "accept",
-        now: WEEKS.weekEnd,
       }),
     ).toBe(false)
     expect(
@@ -751,7 +747,6 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         planId: "plan-1",
         version: 1,
         mealIds: ["late"],
-        now: WEEKS.weekEnd,
       }),
     ).toBe(false)
     await createPlan(store, createInput({ planId: "plan-2", weekStart: "2999-09-14T00:00:00.000Z" }))
@@ -773,26 +768,21 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     const current = await store.activePlan(CHAT)
     expect(current?.plan).toMatchObject({ currentVersion: 2, approvedVersion: null, rejectedVersion: null })
     expect(current?.version.allowNewFoodsSnapshot).toBe(true)
-    const lateStore = makeStore()
-    await lateStore.loadOrCreateProfile("late-chat")
-    await createPlan(
-      lateStore,
-      createInput({
-        chatId: "late-chat",
-        planId: "late-plan",
-        weekEnd: "2000-01-01T00:00:00.000Z",
-      }),
-    )
-    expect(
-      await lateStore.promotePlanVersion(
-        promoteInput({
-          chatId: "late-chat",
-          planId: "late-plan",
-          baseVersion: 1,
-        }),
-      ),
-    ).toEqual({ ok: false, reason: "stale" })
-    expect((await lateStore.activePlan("late-chat"))?.plan.currentVersion).toBe(1)
+    vi.useFakeTimers({ toFake: ["Date"] })
+    try {
+      vi.setSystemTime(new Date("2998-09-10T00:00:00.000Z"))
+      const lateStore = _name === "D1" ? createMealPlanningStore(createClockedD1TestDb().d1) : makeStore()
+      await lateStore.loadOrCreateProfile(CHAT)
+      await createPlan(lateStore, createInput())
+      vi.setSystemTime(new Date(WEEKS.weekEnd))
+      expect(await lateStore.promotePlanVersion(promoteInput())).toEqual({ ok: false, reason: "stale" })
+      expect(await lateStore.decidePlanVersion({ chatId: CHAT, planId: "plan-1", version: 1, action: "reject" })).toBe(
+        false,
+      )
+      expect((await lateStore.activePlan(CHAT))?.plan).toMatchObject({ currentVersion: 1, approvedVersion: 1 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("persists the recurring Saturday rule when loading an existing profile", async () => {
@@ -1084,6 +1074,169 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan WHERE status = 'active'")).toBe(1)
   })
 
+  it.each([false, true])("rejects late initial persistence with a valid lease (prior plan: %s)", async (hasPrior) => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    if (hasPrior) await createPlan(store, createInput())
+    const before = await store.activePlan(CHAT)
+    await store.startPlanGeneration({
+      chatId: CHAT,
+      generationId: "late-lease",
+      expiresAt: "2999-01-01T00:00:00.000Z",
+    })
+    await expect(
+      store.createActivePlan(
+        createInput({
+          planId: "late-plan",
+          generationId: "late-lease",
+          weekEnd: "2000-01-01T00:00:00.000Z",
+        }),
+      ),
+    ).rejects.toThrow(PlanWeekClosedError)
+    expect(await store.activePlan(CHAT)).toEqual(before)
+    expect(await store.activePlanGeneration(CHAT)).toMatchObject({ generationId: "late-lease" })
+    expect((await store.loadOrCreateProfile(CHAT)).interactionGeneration).toBe(hasPrior ? 1 : 0)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan")).toBe(hasPrior ? 1 : 0)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(hasPrior ? 1 : 0)
+  })
+
+  it.each([false, true])("uses D1 replacement time (old deadline crossed: %s)", async (crossed) => {
+    let beforeCreate: (() => void) | undefined
+    const { db, d1 } = createD1TestDb(undefined, (sql) => {
+      if (sql.startsWith("INSERT INTO meal_plan (")) beforeCreate?.()
+    })
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput())
+    const cutoff = crossed ? "2000-01-01T00:00:00.000Z" : WEEKS.weekEnd
+    beforeCreate = () => {
+      db.prepare("UPDATE meal_plan SET week_end = ? WHERE plan_id = 'plan-1'").run(cutoff)
+    }
+    const next = await createPlan(store, createInput({ planId: "plan-2", weekStart: "2999-09-14T00:00:00.000Z" }))
+    const prior = await store.planById(CHAT, "plan-1")
+    expect(prior?.plan.replacedAt).toBe(next.version.createdAt)
+    expect(prior?.plan.replacedAt).toBe(next.plan.createdAt)
+    expect(String(prior?.plan.replacedAt) > cutoff).toBe(crossed)
+    expect(next.previousReplaced).toBe(true)
+  })
+
+  it.each([
+    "revision",
+    "accept",
+    "reject",
+    "dish",
+    "dish retry",
+  ] as const)("checks the D1 cutoff at execution for %s", async (operation) => {
+    let beforeWrite: ((sql: string) => void) | undefined
+    const { db, d1 } = createD1TestDb(undefined, (sql) => beforeWrite?.(sql))
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    const seedDefinition = SEED_PROFILE.mealDefinitions?.[0]
+    if (!seedDefinition) throw new Error("Expected a seed meal definition")
+    await createPlan(
+      store,
+      createInput({
+        provisionalMealDefinitions: [{ ...seedDefinition, id: "provisional", status: "provisional" }],
+      }),
+    )
+    const decision = { chatId: CHAT, planId: "plan-1", version: 1 }
+    if (operation === "accept") {
+      // Make acceptance observable even though version 1 starts approved.
+      db.exec("UPDATE meal_plan SET approved_version = NULL WHERE plan_id = 'plan-1'")
+    }
+    const before = await store.activePlan(CHAT)
+    let writeSeen = false
+    beforeWrite = (sql) => {
+      if (operation === "revision" && !sql.startsWith("INSERT INTO meal_plan_version")) return
+      if (operation !== "revision" && !/^UPDATE meal_plan\s+SET/u.test(sql)) return
+      beforeWrite = undefined
+      writeSeen = true
+      if (operation === "dish retry") {
+        db.exec("UPDATE meal_plan SET rejected_meal_ids_json = '[\"other\"]' WHERE plan_id = 'plan-1'")
+        beforeWrite = (sql) => {
+          if (!sql.includes("SELECT p.rejected_meal_ids_json")) return
+          beforeWrite = undefined
+          db.exec("UPDATE meal_plan SET week_end = '2000-01-01T00:00:00.000Z' WHERE plan_id = 'plan-1'")
+        }
+        return
+      }
+      db.exec("UPDATE meal_plan SET week_end = '2000-01-01T00:00:00.000Z' WHERE plan_id = 'plan-1'")
+    }
+
+    if (operation === "revision") {
+      expect(await store.promotePlanVersion(promoteInput())).toEqual({ ok: false, reason: "stale" })
+    } else if (operation === "accept" || operation === "reject") {
+      expect(await store.decidePlanVersion({ ...decision, action: operation })).toBe(false)
+    } else {
+      expect(await store.rejectPlanDishes({ ...decision, mealIds: ["provisional"] })).toBe(false)
+    }
+    expect(writeSeen).toBe(true)
+    expect(await store.activePlan(CHAT)).toEqual({
+      ...before,
+      plan: {
+        ...before?.plan,
+        weekEnd: "2000-01-01T00:00:00.000Z",
+        rejectedMealIds: operation === "dish retry" ? ["other"] : [],
+      },
+    })
+    expect((await store.loadOrCreateProfile(CHAT)).interactionGeneration).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+  })
+
+  it.each([
+    "failed",
+    "processing",
+  ] as const)("applies revision effects only on a successful insert (%s batch)", async (status) => {
+    const { store, db } = createD1Store()
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, createInput())
+    const { ok } = await store.acceptFeedbackBatch({
+      batchId: "mini-app-batch",
+      planId: "plan-1",
+      chatId: CHAT,
+      baseVersion: 1,
+      workflowInstanceId: "instance-1",
+      idempotencyKey: "request",
+      items: [{ text: "Please revise", target: { kind: "plan" } }],
+    })
+    expect(ok).toBe(true)
+    expect(await store.markFeedbackBatchDelivered("mini-app-batch")).toBe(true)
+    const now = new Date().toISOString()
+    expect(await store.claimFeedbackBatchForWorkflow("mini-app-batch", "instance-1", now)).toMatchObject({
+      status: "processing",
+    })
+    if (status === "failed") expect(await store.markFeedbackBatchFailed("mini-app-batch", "workflow", now)).toBe(true)
+
+    const before = await store.activePlan(CHAT)
+    const batchBefore = db.prepare("SELECT * FROM feedback_batch").get()
+    const result = await store.promotePlanVersion(
+      promoteInput({
+        inventory: { weeklyInventory: { items: [], notes: ["revised"] }, weeklyExceptions: { items: [] } },
+        feedbackBatch: { batchId: "mini-app-batch", items: [], consumeExisting: true },
+      }),
+    )
+
+    if (status === "failed") {
+      expect(result).toEqual({ ok: false, reason: "stale" })
+      expect(await store.activePlan(CHAT)).toEqual(before)
+      expect(before?.plan.approvedVersion).toBe(1)
+      expect((await store.loadOrCreateProfile(CHAT)).interactionGeneration).toBe(1)
+      expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
+      expect(db.prepare("SELECT * FROM feedback_batch").get()).toEqual(batchBefore)
+    } else {
+      expect(result).toMatchObject({
+        ok: true,
+        version: { version: 2, feedbackBatchId: "mini-app-batch" },
+        generation: 2,
+      })
+      expect(await store.activePlan(CHAT)).toMatchObject({
+        plan: { currentVersion: 2, approvedVersion: null, weeklyInventory: { notes: ["revised"] } },
+        version: { version: 2 },
+      })
+      expect(db.prepare("SELECT status FROM feedback_batch").get()).toEqual({ status: "consumed" })
+    }
+  })
+
   it("a stale promote returns stale with no state changes", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
@@ -1101,7 +1254,8 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
       version: { version: 2 },
     })
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(2)
-    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(1)
+    expect(d1Count(db, "SELECT count(*) AS count FROM feedback_batch")).toBe(0)
+    expect((await store.loadOrCreateProfile(CHAT)).interactionGeneration).toBe(2)
   })
 
   it("a cross-chat promotion (plan A id + chat B) is stale and changes neither plan nor either generation", async () => {
@@ -1274,8 +1428,8 @@ describe.each([
         planId: "plan-2",
         instanceId: "instance-2",
         generationId: "generation-2",
-        weekStart: "2026-09-14T00:00:00.000Z",
-        weekEnd: "2026-09-19T23:59:59.000Z",
+        weekStart: "2999-09-14T00:00:00.000Z",
+        weekEnd: "2999-09-19T23:59:59.000Z",
       }),
     )
 
@@ -1285,7 +1439,7 @@ describe.each([
       telegramUserId: "parent-1",
       chatId: CHAT,
       planId: "plan-2",
-      weekEnd: "2026-09-19T23:59:59.000Z",
+      weekEnd: "2999-09-19T23:59:59.000Z",
     })
     expect(await store.resolveMiniAppReviewContext("parent-1")).toMatchObject({ planId: "plan-2" })
   })
@@ -1337,14 +1491,14 @@ describe.each([
     const store = await makeStore()
     for (let index = 1; index <= MAX_MEAL_PLAN_HISTORY + 2; index++) {
       const planId = `plan-${String(index).padStart(2, "0")}`
-      const weekStart = new Date(Date.UTC(2026, 0, index)).toISOString()
+      const weekStart = new Date(Date.UTC(2999, 0, index)).toISOString()
       await createPlan(
         store,
         createInput({
           planId,
           instanceId: `instance-${planId}`,
           weekStart,
-          weekEnd: new Date(Date.UTC(2026, 0, index + 5, 23, 59, 59)).toISOString(),
+          weekEnd: new Date(Date.UTC(2999, 0, index + 5, 23, 59, 59)).toISOString(),
         }),
       )
     }

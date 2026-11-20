@@ -245,6 +245,13 @@ export interface CreateActivePlanResult {
   previousReplaced: boolean
 }
 
+/** The target week closed before the initial plan could be persisted. */
+export class PlanWeekClosedError extends Error {
+  constructor() {
+    super("target meal plan week has closed")
+  }
+}
+
 /** One immutable submission batch written atomically with the revision it drives. */
 export interface FeedbackBatchInput {
   batchId: string
@@ -303,15 +310,8 @@ export interface MealPlanningStore {
     planId: string
     version: number
     action: "accept" | "reject"
-    now?: string
   }): Promise<boolean>
-  rejectPlanDishes(input: {
-    chatId: string
-    planId: string
-    version: number
-    mealIds: string[]
-    now?: string
-  }): Promise<boolean>
+  rejectPlanDishes(input: { chatId: string; planId: string; version: number; mealIds: string[] }): Promise<boolean>
   /** Sums token usage across a plan's versions that recorded it; null when none did. */
   sumPlanUsage(planId: string): Promise<PlanUsageTotal | null>
   /** Updates only week-scoped inventory/calendar facts; it never creates a plan version. */
@@ -715,6 +715,8 @@ const SEED_CUSTOM_POLICIES: CustomPolicy[] = [
   },
 ]
 
+const D1_NOW_ISO = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+
 /** ISO-8601 UTC at fixed millisecond precision — the only timestamp format D1 rows may carry. */
 function nowIso(): string {
   return new Date().toISOString()
@@ -1003,32 +1005,27 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
 
     async createActivePlan(input) {
       assertVersionCostIsValid(input.usage)
-      const now = nowIso()
-      // Every mutating statement is guarded on the profile row existing, so a
-      // missing profile (a programming error — the workflow always calls
-      // loadOrCreateProfile first) makes the whole batch write nothing: the
-      // supersede no-ops (a prior active plan stays active), the plan/version
-      // inserts no-op, and the zero-row generation bump turns the batch into
-      // an atomic failure instead of a committed plan with `generation: NaN`.
-      const results = await db.batch([
-        db
-          .prepare(
-            `UPDATE meal_plan SET status = 'replaced', replaced_at = ?, updated_at = ?
-             WHERE chat_id = ? AND status = 'active'
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
-               AND EXISTS (SELECT 1 FROM meal_plan_generation
-                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
-          )
-          .bind(now, now, input.chatId, input.chatId, input.chatId, input.generationId, now),
+      const attemptId = crypto.randomUUID()
+      const createdPlan =
+        "SELECT plan_id, chat_id, created_at FROM meal_plan WHERE plan_id = ? AND write_attempt_id = ?"
+      const proof = [input.planId, attemptId] as const
+      const results = await db.batch<{
+        created_at: string | null
+        interaction_generation: number | null
+        week_closed: number
+        lease_valid: number
+      }>([
         db
           .prepare(
             `INSERT INTO meal_plan (plan_id, chat_id, week_start, week_end, timezone, instance_id, status,
                                     current_version, weekly_inventory_json, weekly_exceptions_json,
-                                    created_at, updated_at, approved_version)
-             SELECT ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, ?, 1
-             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+                                    created_at, updated_at, write_attempt_id)
+             SELECT ?, ?, ?, ?, ?, ?, 'replaced', 0, ?, ?, ${D1_NOW_ISO}, ${D1_NOW_ISO}, ?
+             WHERE ? > ${D1_NOW_ISO}
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND EXISTS (SELECT 1 FROM meal_plan_generation
-                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
+                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating'
+                             AND expires_at > ${D1_NOW_ISO})`,
           )
           .bind(
             input.planId,
@@ -1039,27 +1036,22 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.instanceId,
             JSON.stringify(input.weeklyInventory),
             JSON.stringify(input.weeklyExceptions),
-            now,
-            now,
+            attemptId,
+            input.weekEnd,
             input.chatId,
             input.chatId,
             input.generationId,
-            now,
           ),
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
                                             usage_input_tokens, usage_output_tokens, usage_model,
-                                            cost_usd, cost_status, allow_new_foods_snapshot,
-                                            created_at)
-             SELECT ?, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?
-             WHERE EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
-               AND EXISTS (SELECT 1 FROM meal_plan_generation
-                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
+                                            cost_usd, cost_status, allow_new_foods_snapshot, created_at)
+             SELECT plan_id, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, created_at
+             FROM (${createdPlan})`,
           )
           .bind(
-            input.planId,
             JSON.stringify(input.candidate),
             JSON.stringify(input.evaluation),
             JSON.stringify(input.video ?? NO_VIDEOS),
@@ -1070,46 +1062,53 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
             input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
             input.allowNewFoodsSnapshot == null ? null : input.allowNewFoodsSnapshot ? 1 : 0,
-            now,
-            input.chatId,
-            input.chatId,
-            input.generationId,
-            now,
+            ...proof,
           ),
+        // The staged row is private to this batch. Replace the prior active row before activating it.
         db
           .prepare(
-            `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ?
-             WHERE chat_id = ?
-               AND EXISTS (SELECT 1 FROM meal_plan_generation
-                           WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?)`,
+            `UPDATE meal_plan SET status = 'replaced', replaced_at = created.created_at, updated_at = created.created_at
+             FROM (${createdPlan}) AS created WHERE meal_plan.chat_id = created.chat_id AND meal_plan.status = 'active'`,
           )
-          .bind(now, input.chatId, input.chatId, input.generationId, now),
+          .bind(...proof),
         db
           .prepare(
-            `DELETE FROM meal_plan_generation
-             WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+            `UPDATE meal_plan SET status = 'active', current_version = 1, approved_version = 1
+             WHERE plan_id = ? AND write_attempt_id = ?`,
           )
-          .bind(input.chatId, input.generationId, now, input.chatId),
-        db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
+          .bind(...proof),
+        db
+          .prepare(
+            `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = created.created_at
+             FROM (${createdPlan}) AS created WHERE meal_profile.chat_id = created.chat_id`,
+          )
+          .bind(...proof),
+        db
+          .prepare(
+            `DELETE FROM meal_plan_generation WHERE chat_id = ? AND generation_id = ?
+               AND EXISTS (${createdPlan})`,
+          )
+          .bind(input.chatId, input.generationId, ...proof),
+        db
+          .prepare(
+            `SELECT (SELECT created_at FROM (${createdPlan})) AS created_at,
+                    (SELECT interaction_generation FROM meal_profile WHERE chat_id = ?) AS interaction_generation,
+                    ? <= ${D1_NOW_ISO} AS week_closed,
+                    EXISTS (SELECT 1 FROM meal_plan_generation
+                            WHERE chat_id = ? AND generation_id = ? AND status = 'generating'
+                              AND expires_at > ${D1_NOW_ISO}) AS lease_valid`,
+          )
+          .bind(...proof, input.chatId, input.weekEnd, input.chatId, input.generationId),
       ])
-      const generationChanged = Number((results[3] as { meta: { changes?: number } }).meta.changes) === 1
-      if (!generationChanged) {
-        const lease = await db
-          .prepare(
-            "SELECT 1 FROM meal_plan_generation WHERE chat_id = ? AND generation_id = ? AND status = 'generating' AND expires_at > ?",
-          )
-          .bind(input.chatId, input.generationId, now)
-          .first()
-        if (!lease) throw new Error(`generation lease missing or expired for chat ${input.chatId}`)
+      const result = results[6].results[0]
+      if (!result.created_at) {
+        if (result.week_closed) throw new PlanWeekClosedError()
+        if (!result.lease_valid) throw new Error(`generation lease missing or expired for chat ${input.chatId}`)
         throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       }
-      const previousReplaced = Number((results[0] as { meta: { changes?: number } }).meta.changes) >= 1
-      const generation = Number(
-        (results[5] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
-      )
+      const createdAt = String(result.created_at)
       return {
-        plan: makePlanRecord(input, now),
+        plan: makePlanRecord(input, createdAt),
         version: makeVersionRecord(
           input.planId,
           1,
@@ -1121,40 +1120,38 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.video ?? NO_VIDEOS,
           input.provisionalMealDefinitions ?? [],
           input.usage ?? null,
-          now,
+          createdAt,
           input.allowNewFoodsSnapshot ?? null,
         ),
-        generation,
-        previousReplaced,
+        generation: Number(result.interaction_generation),
+        previousReplaced: Number(results[2].meta.changes) >= 1,
       }
     },
 
     async promotePlanVersion(input) {
       assertVersionCostIsValid(input.usage)
-      const now = nowIso()
       const newVersion = input.baseVersion + 1
       const batchId = input.feedbackBatch?.batchId ?? null
       const consumeExistingBatch = input.feedbackBatch?.consumeExisting === true
-      // The missing-profile precondition is checked before the batch commits:
-      // a missing profile throws with nothing written rather than surfacing as
-      // a misleading "stale" (the profile row is never deleted, so the check
-      // cannot race the batch; every mutating statement below is additionally
-      // guarded on the profile existing, so even a hypothetical mid-batch
-      // absence no-ops the whole transaction).
+      const attemptId = crypto.randomUUID()
+      const insertedVersion =
+        "SELECT plan_id, version, created_at FROM meal_plan_version WHERE plan_id = ? AND version = ? AND write_attempt_id = ?"
+      const proof = [input.planId, newVersion, attemptId] as const
       const profilePresent = await db.prepare("SELECT 1 FROM meal_profile WHERE chat_id = ?").bind(input.chatId).first()
-      if (!profilePresent) {
-        throw new Error(`meal_profile row missing for chat ${input.chatId}`)
-      }
+      if (!profilePresent) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+
+      // All effects use the successor from this attempt and its cutoff timestamp.
+      // Checking the deadline again could split a successful insert from its dependent writes.
       const statements = [
         db
           .prepare(
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
                                             usage_input_tokens, usage_output_tokens, usage_model,
-                                            cost_usd, cost_status, allow_new_foods_snapshot,
-                                            created_at)
-             SELECT ?, ?, ?, ?, 'revision', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM meal_plan
-             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?
+                                            cost_usd, cost_status, allow_new_foods_snapshot, created_at, write_attempt_id)
+             SELECT plan_id, ?, ?, ?, 'revision', current_version, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${D1_NOW_ISO}, ?
+             FROM meal_plan
+             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
                                      WHERE batch_id = ? AND plan_id = meal_plan.plan_id
@@ -1162,11 +1159,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
                                        AND status = 'processing'))`,
           )
           .bind(
-            input.planId,
             newVersion,
             JSON.stringify(input.candidate),
             JSON.stringify(input.evaluation),
-            input.baseVersion,
             batchId,
             JSON.stringify(input.video ?? NO_VIDEOS),
             JSON.stringify(input.provisionalMealDefinitions ?? []),
@@ -1176,87 +1171,62 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
             input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
             input.allowNewFoodsSnapshot == null ? null : input.allowNewFoodsSnapshot ? 1 : 0,
-            now,
+            attemptId,
             input.planId,
             input.chatId,
             input.baseVersion,
-            now,
             input.chatId,
             consumeExistingBatch ? 1 : 0,
             batchId,
           ),
         db
           .prepare(
-            `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = ?
-             WHERE chat_id = ? AND EXISTS (SELECT 1 FROM meal_plan
-                                           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?)`,
-          )
-          .bind(now, input.chatId, input.planId, input.chatId, input.baseVersion, now),
-        db.prepare("SELECT interaction_generation FROM meal_profile WHERE chat_id = ?").bind(input.chatId),
-      ]
-      if (input.inventory) {
-        statements.push(
-          db
-            .prepare(
-              `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
-               WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?
-                 AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
-            )
-            .bind(
-              JSON.stringify(input.inventory.weeklyInventory),
-              JSON.stringify(input.inventory.weeklyExceptions),
-              now,
-              input.planId,
-              input.chatId,
-              input.baseVersion,
-              now,
-              input.chatId,
-            ),
-        )
-      }
-      statements.push(
-        db
-          .prepare(
-            `UPDATE meal_plan SET current_version = ?, approved_version = NULL, rejected_version = NULL, updated_at = ?
-             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
-          )
-          .bind(newVersion, now, input.planId, input.chatId, input.baseVersion, now, input.chatId),
-        db
-          .prepare(
-            `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, status, created_at, updated_at)
-             SELECT ?, plan_id, ?, ?, 'consumed', ?, ? FROM meal_plan
-             WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ? AND ? IS NOT NULL
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)`,
+            `UPDATE meal_plan SET current_version = successor.version, approved_version = NULL, rejected_version = NULL,
+                                  weekly_inventory_json = COALESCE(?, weekly_inventory_json),
+                                  weekly_exceptions_json = COALESCE(?, weekly_exceptions_json),
+                                  updated_at = successor.created_at
+             FROM (${insertedVersion}) AS successor WHERE meal_plan.plan_id = successor.plan_id`,
           )
           .bind(
-            batchId,
-            input.baseVersion,
-            JSON.stringify(input.feedbackBatch?.items ?? []),
-            now,
-            now,
-            input.planId,
-            input.chatId,
-            newVersion,
-            now,
-            batchId,
-            input.chatId,
+            input.inventory ? JSON.stringify(input.inventory.weeklyInventory) : null,
+            input.inventory ? JSON.stringify(input.inventory.weeklyExceptions) : null,
+            ...proof,
           ),
         db
           .prepare(
-            `UPDATE feedback_batch SET status = 'consumed', updated_at = ?
-             WHERE batch_id = ? AND status = 'processing' AND ? = 1
-               AND EXISTS (SELECT 1 FROM meal_plan_version
-                           WHERE plan_id = ? AND version = ? AND feedback_batch_id = ?)`,
+            `UPDATE meal_profile SET interaction_generation = interaction_generation + 1, updated_at = successor.created_at
+             FROM (${insertedVersion}) AS successor WHERE chat_id = ?`,
           )
-          .bind(now, batchId, consumeExistingBatch ? 1 : 0, input.planId, newVersion, batchId),
-      )
-      const results = await db.batch(statements)
-      const promoted = Number((results[0] as { meta: { changes?: number } }).meta.changes) === 1
-      if (!promoted) return { ok: false as const, reason: "stale" as const }
-      const generation = Number(
-        (results[2] as { results?: Array<{ interaction_generation?: number }> }).results?.[0]?.interaction_generation,
-      )
+          .bind(...proof, input.chatId),
+        db
+          .prepare(
+            `SELECT interaction_generation, (SELECT created_at FROM (${insertedVersion})) AS created_at
+             FROM meal_profile WHERE chat_id = ?`,
+          )
+          .bind(...proof, input.chatId),
+      ]
+      if (input.feedbackBatch && consumeExistingBatch) {
+        statements.push(
+          db
+            .prepare(
+              `UPDATE feedback_batch SET status = 'consumed', updated_at = successor.created_at
+               FROM (${insertedVersion}) AS successor WHERE batch_id = ?`,
+            )
+            .bind(...proof, batchId),
+        )
+      } else if (input.feedbackBatch) {
+        statements.push(
+          db
+            .prepare(
+              `INSERT OR IGNORE INTO feedback_batch (batch_id, plan_id, base_version, items_json, status, created_at, updated_at)
+               SELECT ?, plan_id, ?, ?, 'consumed', created_at, created_at FROM (${insertedVersion})`,
+            )
+            .bind(batchId, input.baseVersion, JSON.stringify(input.feedbackBatch.items), ...proof),
+        )
+      }
+      const results = await db.batch<{ created_at: string; interaction_generation: number }>(statements)
+      if (Number(results[0].meta.changes) !== 1) return { ok: false as const, reason: "stale" as const }
+      const result = results[3].results[0]
       return {
         ok: true as const,
         version: makeVersionRecord(
@@ -1270,31 +1240,28 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.video ?? NO_VIDEOS,
           input.provisionalMealDefinitions ?? [],
           input.usage ?? null,
-          now,
+          String(result.created_at),
           input.allowNewFoodsSnapshot ?? null,
         ),
-        generation,
+        generation: Number(result.interaction_generation),
       }
     },
 
     async decidePlanVersion(input) {
-      const now = input.now ?? nowIso()
       const result = await db
         .prepare(
           `UPDATE meal_plan
-         SET approved_version = ?, rejected_version = ?, updated_at = ?
+         SET approved_version = ?, rejected_version = ?, updated_at = ${D1_NOW_ISO}
          WHERE plan_id = ? AND chat_id = ? AND status = 'active'
-           AND current_version = ? AND week_end > ?
+           AND current_version = ? AND week_end > ${D1_NOW_ISO}
            AND (? = 'reject' OR rejected_version IS NULL OR rejected_version != ?)`,
         )
         .bind(
           input.action === "accept" ? input.version : null,
           input.action === "reject" ? input.version : null,
-          now,
           input.planId,
           input.chatId,
           input.version,
-          now,
           input.action,
           input.version,
         )
@@ -1303,7 +1270,6 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async rejectPlanDishes(input) {
-      const now = input.now ?? nowIso()
       const mealIds = [...new Set(input.mealIds.filter((id) => typeof id === "string" && id.length > 0))]
       if (!mealIds.length) return true
       for (let attempt = 0; attempt < MAX_MEAL_REJECTION_MERGE_ATTEMPTS; attempt++) {
@@ -1311,9 +1277,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .prepare(
             `SELECT p.rejected_meal_ids_json, v.provisional_meals_json FROM meal_plan p
            JOIN meal_plan_version v ON v.plan_id = p.plan_id AND v.version = p.current_version
-           WHERE p.plan_id = ? AND p.chat_id = ? AND p.status = 'active' AND p.current_version = ? AND p.week_end > ?`,
+           WHERE p.plan_id = ? AND p.chat_id = ? AND p.status = 'active'
+             AND p.current_version = ? AND p.week_end > ${D1_NOW_ISO}`,
           )
-          .bind(input.planId, input.chatId, input.version, now)
+          .bind(input.planId, input.chatId, input.version)
           .first()
         if (!row) return false
         const provisionalIds = new Set(
@@ -1328,11 +1295,11 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         if (next === priorRaw) return true
         const result = await db
           .prepare(
-            `UPDATE meal_plan SET rejected_meal_ids_json = ?, updated_at = ?
+            `UPDATE meal_plan SET rejected_meal_ids_json = ?, updated_at = ${D1_NOW_ISO}
            WHERE plan_id = ? AND chat_id = ? AND status = 'active' AND current_version = ?
-             AND week_end > ? AND rejected_meal_ids_json = ?`,
+             AND week_end > ${D1_NOW_ISO} AND rejected_meal_ids_json = ?`,
           )
-          .bind(next, now, input.planId, input.chatId, input.version, now, priorRaw)
+          .bind(next, input.planId, input.chatId, input.version, priorRaw)
           .run()
         if (Number(result.meta.changes) === 1) return true
       }
@@ -1340,20 +1307,17 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async updateWeeklyContext(input) {
-      const now = nowIso()
       const result = await db
         .prepare(
-          `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ?
-           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ?`,
+          `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ${D1_NOW_ISO}
+           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}`,
         )
         .bind(
           JSON.stringify(input.weeklyInventory),
           JSON.stringify(input.weeklyExceptions),
-          now,
           input.planId,
           input.chatId,
           input.baseVersion,
-          now,
         )
         .run()
       return Number(result.meta.changes) === 1
@@ -1860,9 +1824,10 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     async createActivePlan(input) {
       assertVersionCostIsValid(input.usage)
       throwIfFailing("createActivePlan")
+      const now = nowIso()
+      if (input.weekEnd <= now) throw new PlanWeekClosedError()
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
-      const now = nowIso()
       const generation = generations.get(input.chatId)
       if (
         !generation ||
@@ -1987,7 +1952,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async decidePlanVersion(input) {
-      const now = input.now ?? nowIso()
+      const now = nowIso()
       const plan = backing.plans.get(input.planId)
       if (
         !plan ||
@@ -2010,7 +1975,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async rejectPlanDishes(input) {
-      const now = input.now ?? nowIso()
+      const now = nowIso()
       const plan = backing.plans.get(input.planId)
       const version = backing.versions.get(versionKey(input.planId, input.version))
       if (

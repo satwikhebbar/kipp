@@ -36,6 +36,7 @@ import {
   type MealPlanningStore,
   type MealPlanRecord,
   type MealPlanVersionRecord,
+  PlanWeekClosedError,
   type PromotePlanVersionInput,
   type PromotePlanVersionResult,
   type StoredMealProfile,
@@ -247,23 +248,41 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   return lines.join("\n")
 }
 
-/** Finds exact provisional meal names rejected explicitly in feedback; ambiguous text is ignored. */
+/** Finds provisional dishes directly targeted by explicit rejection feedback. */
 export function explicitRejectedMealIds(items: FeedbackItem[], definitions: MealDefinition[]): string[] {
-  const rejection = /\b(?:reject|do not want|don't want|do not like|don't like|never serve|remove)\b/iu
-  const contrast = /\b(?:but|however|although|though)\b|[;.!?]/iu
+  const normalize = (text: string) => text.trim().toLowerCase().replace(/’/gu, "'").replace(/\s+/gu, " ")
+  const rejection =
+    /^(?:please )?(?:i |we )?(?:reject|do not want|don't want|do not like|don't like|never serve|remove) /u
+  const clauseBreak =
+    /[;.!?]+|(?:,?\s+but\s+|(?:,\s*|\s+and\s+)(?=(?:please )?(?:i |we )?(?:add|use|keep|prefer|serve|move|swap|choose|include|put|make|change|switch|remove|reject|do |don't |never )\b))/u
+  const names = definitions
+    .filter((definition) => definition.status === "provisional")
+    .flatMap((definition) =>
+      [definition.name, ...(definition.aliases ?? [])].map((name) => ({ id: definition.id, name: normalize(name) })),
+    )
+    .filter(({ name }) => name.length > 0)
+    .sort((left, right) => right.name.length - left.name.length)
   const matches = new Set<string>()
+
   for (const item of items) {
-    // Split contrastive clauses so a nearby positive mention is not treated as rejected.
-    const clauses = item.text.split(contrast).filter(Boolean)
-    for (const clause of clauses) {
-      if (!rejection.test(clause)) continue
-      const found = definitions.filter((definition) =>
-        [definition.name, ...(definition.aliases ?? [])].some((name) => {
-          const normalized = name.trim().toLocaleLowerCase()
-          return normalized.length > 0 && clause.toLocaleLowerCase().includes(normalized)
-        }),
-      )
-      for (const definition of found) matches.add(definition.id)
+    for (const clause of normalize(item.text).split(clauseBreak)) {
+      const cue = rejection.exec(clause.trim())
+      if (!cue) continue
+      let target = clause.trim().slice(cue[0].length)
+      while (target) {
+        target = target.replace(/^(?:the|a|an) /u, "")
+        const longest = names.find(
+          ({ name }) => target.startsWith(name) && /^[\s,]|^$/u.test(target.slice(name.length)),
+        )
+        if (!longest) break
+
+        const suffix = target.slice(longest.name.length).trimStart()
+        const listSeparator = /^(?:,\s*(?:and )?|and )/u.exec(suffix)
+        if (suffix && suffix !== "please" && !listSeparator) break
+        if (names.every(({ name, id }) => name !== longest.name || id === longest.id)) matches.add(longest.id)
+        if (!listSeparator) break
+        target = suffix.slice(listSeparator[0].length)
+      }
     }
   }
   return [...matches]
@@ -370,6 +389,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
           allowNewFoodsSnapshot: profile.profile.allowNewFoods,
         })
       } catch (error) {
+        if (error instanceof PlanWeekClosedError) return null
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
         throw error
       }
@@ -932,7 +952,6 @@ export async function runMealPlanningEditWorkflow(
           planId: active.plan.planId,
           version: payload.version ?? active.plan.currentVersion,
           action: kind === INTERACTION_KIND.MEAL_VERSION_ACCEPT ? "accept" : "reject",
-          now: new Date().toISOString(),
         }),
       )
       if (accepted) {
@@ -1027,7 +1046,6 @@ export async function runMealPlanningEditWorkflow(
             planId: active.plan.planId,
             version: active.plan.currentVersion,
             mealIds: rejectedMealIds,
-            now: new Date().toISOString(),
           }),
         )
         if (!recorded) {

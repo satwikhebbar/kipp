@@ -15,11 +15,12 @@ import {
   runAgentCenteredMealPlanningWorkflow,
   runMealPlanningEditWorkflow,
 } from "../meal-planning/agent-workflow"
+import { MEAL_NO_CHANGES } from "../meal-planning/messages"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
-import { createD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
+import { createClockedD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
 import { sqliteInteractionRouter } from "./fixtures/interaction-router"
 import { workflowTimeoutError } from "./fixtures/workflow-timeout"
 
@@ -433,7 +434,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const env = makeEnv(namespace, d1)
     const original = mealEvent(invokedAtMs)
@@ -519,7 +520,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     let loseCommitResponse = false
     const uncertainD1 = {
       ...d1,
@@ -628,7 +629,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const env = makeEnv(namespace, d1, { LLM_MAX_RETRIES: "0" })
     const original = mealEvent(invokedAtMs)
@@ -724,7 +725,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace, registrations } = fakeRouter()
     const env = makeEnv(namespace, d1)
     const original = mealEvent(invokedAtMs)
@@ -835,7 +836,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const base = seedCandidate()
     const { telegramMessages, deepseekBodies } = stubNetwork([
@@ -880,7 +881,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const step = createFakeStep([], Date.parse(week.weekEnd))
@@ -939,7 +940,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const store = createMealPlanningStore(d1)
     const profile = await store.loadOrCreateProfile(CHAT)
     const firstDefinition = profile.profile.mealDefinitions?.[0]
@@ -981,7 +982,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const store = createMealPlanningStore(d1)
@@ -1056,7 +1057,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const priorWeek = resolvePlanningWeek(invokedAtMs - daysAgo * 24 * 60 * 60 * 1000, TZ)
@@ -1078,6 +1079,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
         ),
       ]),
     )
+    vi.setSystemTime(Date.parse(priorWeek.weekStart))
     await store.createActivePlan({
       planId: "prior-week-plan",
       chatId: CHAT,
@@ -1101,6 +1103,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       },
       provisionalMealDefinitions: [],
     })
+    vi.setSystemTime(invokedAtMs)
     const step = createFakeStep([], Date.parse(week.weekEnd))
     const base = seedCandidate()
     const { deepseekBodies } = stubNetwork([
@@ -1128,7 +1131,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed 09-09
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const store = createMealPlanningStore(d1)
@@ -1194,7 +1197,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const step = createFakeStep([], Date.parse(week.weekEnd))
@@ -1254,7 +1257,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const step = createFakeStep([], Date.parse(week.weekEnd))
@@ -1321,7 +1324,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const step = createFakeStep([], Date.parse(week.weekEnd))
@@ -1361,7 +1364,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile(CHAT)
@@ -1417,15 +1420,27 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect((await store.activePlan(CHAT))?.plan.approvedVersion).toBe(2)
   })
 
-  it("persists exact dish rejection feedback before a failed revision", async () => {
+  it.each(["failed", "unchanged"])("preserves exact dish rejection after a %s revision", async (outcome) => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const store = createMealPlanningStore(d1)
     await store.loadOrCreateProfile(CHAT)
     const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const base = seedCandidate()
+    stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(
+      makeEnv(namespace, d1),
+      mealEvent(invokedAtMs),
+      createMemoizingStep([], invokedAtMs) as never,
+    )
+    const seeded = await store.activePlan(CHAT)
+    if (!seeded) throw new Error("Expected a saved plan")
     const definition = {
       id: "provisional-new-poha",
       name: "new poha",
@@ -1449,21 +1464,49 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       timezone: TZ,
       instanceId: "wf-meal-1",
       generationId: "create",
-      candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
-      evaluation: {} as never,
+      candidate: seeded.version.candidate,
+      evaluation: seeded.version.evaluation,
       weeklyInventory: { items: [], notes: [] },
       weeklyExceptions: { items: [] },
-      provisionalMealDefinitions: [definition],
+      provisionalMealDefinitions: [
+        definition,
+        { ...definition, id: "provisional-new-idli", name: "new idli", aliases: [] },
+      ],
       allowNewFoodsSnapshot: true,
     })
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: RequestInfo | URL) => {
-        if (String(url).includes("api.deepseek.com") || String(url).includes("openrouter.ai/api/v1"))
-          throw new Error("upstream down")
-        return jsonResponse({ ok: true, result: { message_id: 1 } })
-      }),
-    )
+    const text = "Please remove special poha and add new idli"
+    const feedbackItem = { id: "tg-205", text, scope: { day: "Mon", slot: "breakfast" } }
+    let telegramMessages: { text: string }[] = []
+    let toolResult = () => ""
+    if (outcome === "failed") {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: RequestInfo | URL) => {
+          if (String(url).includes("api.deepseek.com") || String(url).includes("openrouter.ai/api/v1"))
+            throw new Error("upstream down")
+          return jsonResponse({ ok: true, result: { message_id: 1 } })
+        }),
+      )
+    } else {
+      const patch = {
+        grid: {},
+        policyOutcomes: {
+          ...base.policyOutcomes,
+          [POLICY_IDS[0]]: { outcome: "satisfied", rationale: "tg-205: the dish is already absent." },
+        },
+      }
+      const network = stubNetwork([
+        deepseekResponse([{ name: "evaluate_meal_plan", input: patch }]),
+        deepseekResponse([{ name: "propose_plan", input: proposeInput(patch) }]),
+      ])
+      telegramMessages = network.telegramMessages
+      toolResult = () =>
+        network.deepseekBodies
+          .at(-1)
+          ?.messages.filter(({ role }) => role === "tool")
+          .map(({ content }) => content)
+          .join("\n") ?? ""
+    }
     const step = { do: vi.fn(async (_name: string, fn: () => unknown) => fn()) }
     await runMealPlanningEditWorkflow(
       makeEnv(namespace, d1, { LLM_MAX_RETRIES: "0" }),
@@ -1479,7 +1522,9 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
               interactionKind: "meal-feedback-reply",
               source: "telegram-reply",
               version: 1,
-              text: "I don't like special poha",
+              text,
+              messageId: 205,
+              ...(outcome === "unchanged" ? { items: [feedbackItem] } : {}),
             },
           },
         },
@@ -1488,13 +1533,18 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
     expect((await store.activePlan(CHAT))?.plan.rejectedMealIds).toEqual(["provisional-new-poha"])
     expect((await store.activePlan(CHAT))?.plan.currentVersion).toBe(1)
+    if (outcome === "unchanged")
+      expect(
+        telegramMessages.map(({ text }) => text),
+        toolResult(),
+      ).toContain(MEAL_NO_CHANGES)
   })
 
   it("turns a feedback reply into a version-2 revision with an immutable submission batch", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -1560,7 +1610,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const store = createMealPlanningStore(d1)
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
@@ -1648,7 +1698,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -1736,7 +1786,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -1804,7 +1854,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -1890,7 +1940,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -1939,7 +1989,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -2046,7 +2096,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -2119,7 +2169,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -2187,7 +2237,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed; tomorrow is Thu
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -2234,7 +2284,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z") // Wed; tomorrow is Thu
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -2287,7 +2337,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace, registrations } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const base = seedCandidate()
@@ -2354,7 +2404,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const env = makeEnv(namespace, d1)
     const event = mealEvent(invokedAtMs)
@@ -2407,7 +2457,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const step = createFakeStep([], Date.parse(week.weekEnd))
@@ -2424,7 +2474,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const step = createFakeStep([], Date.parse(week.weekEnd))
@@ -2448,7 +2498,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const step = createFakeStep([], Date.parse(week.weekEnd))
@@ -2475,7 +2525,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const store = createMealPlanningStore(d1)
@@ -2534,7 +2584,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     // Two stale button taps: each must send its own stale-plan notice even
@@ -2563,7 +2613,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const store = createMealPlanningStore(d1)
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
@@ -2623,7 +2673,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
     stubUuidSequence()
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb()
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     // The first randomUUID is the clarification interactionId, so the force-reply
@@ -2660,17 +2710,33 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
   })
 })
 
-it("captures explicitly rejected provisional dishes per contrastive feedback clause", () => {
+it.each([
+  ["Don't like peas pulao and idli, but upma is fine", ["pulao", "idli"]],
+  ["Please remove matar rice; I like idli", ["pulao"]],
+  ["I don't like it", []],
+  ["Please remove poha and add idli", ["poha"]],
+  ["Please remove poha and idli", ["poha", "idli"]],
+  ["Please remove onions from poha", []],
+  ["Please remove poha onions", []],
+  ["Please remove poha’s onions", []],
+  ["I do not want to remove poha", []],
+  ["Please don't remove poha", []],
+  ["Don't like special poha", ["special"]],
+  ["Please remove breakfast bowl", []],
+  ["Please remove idli and don't remove poha", ["idli"]],
+  ["Please remove established dosa", []],
+])("matches only the dish targeted by %s", (text, ids) => {
   const definitions = [
     { id: "pulao", name: "peas pulao", aliases: ["matar rice"] },
+    { id: "poha", name: "poha", aliases: ["breakfast bowl"] },
+    { id: "special", name: "special poha", aliases: ["breakfast bowl"] },
     { id: "idli", name: "idli" },
     { id: "upma", name: "upma" },
-  ] as never
+  ].map((definition) => ({ ...definition, status: "provisional" }))
   expect(
-    explicitRejectedMealIds([{ id: "f1", text: "Don't like peas pulao and idli, but upma is fine" }], definitions),
-  ).toEqual(["pulao", "idli"])
-  expect(explicitRejectedMealIds([{ id: "f2", text: "Please remove matar rice; I like idli" }], definitions)).toEqual([
-    "pulao",
-  ])
-  expect(explicitRejectedMealIds([{ id: "f3", text: "I don't like it" }], definitions)).toEqual([])
+    explicitRejectedMealIds([{ id: "feedback", text }], [
+      ...definitions,
+      { id: "dosa", name: "established dosa", status: "established" },
+    ] as never),
+  ).toEqual(ids)
 })
