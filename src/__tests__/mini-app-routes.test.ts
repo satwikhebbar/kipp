@@ -543,6 +543,8 @@ describe("Mini App HTTP boundary", () => {
     let delayNextSave = false
     let conflictNextSave = false
     let slotConflictNextSave = false
+    let eligibilityConflictNextSave: { slotId: string; eligibleIds: string[] } | null = null
+    let halfDayConflictNextSave = false
     const delayedSave = { release: undefined as (() => void) | undefined }
     client.fetch = async (input, init) => {
       const path = String(input)
@@ -595,8 +597,35 @@ describe("Mini App HTTP boundary", () => {
           }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
+        if (eligibilityConflictNextSave) {
+          const conflict = eligibilityConflictNextSave
+          eligibilityConflictNextSave = null
+          serverSettings = {
+            ...serverSettings,
+            configurationVersion: serverSettings.configurationVersion + 1,
+            eligibleEstablishedMeals: {
+              ...serverSettings.eligibleEstablishedMeals,
+              [conflict.slotId]: conflict.eligibleIds,
+            },
+          }
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
+        }
+        if (halfDayConflictNextSave) {
+          halfDayConflictNextSave = false
+          serverSettings = {
+            ...serverSettings,
+            configurationVersion: serverSettings.configurationVersion + 1,
+            schedule: {
+              ...serverSettings.schedule,
+              halfDays: [...new Set([...(serverSettings.schedule.halfDays ?? []), "Tue"])],
+            },
+          }
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
+        }
         const submittedSlotIds = data.schedule.slots.map((slot) => slot.id).sort()
         if (JSON.stringify(Object.keys(data.eligibleEstablishedMeals).sort()) !== JSON.stringify(submittedSlotIds))
+          return new Response(JSON.stringify({ error: "invalid_configuration" }), { status: 400 })
+        if ((data.schedule.halfDays ?? []).some((day) => !data.schedule.days.includes(day)))
           return new Response(JSON.stringify({ error: "invalid_configuration" }), { status: 400 })
         serverSettings = {
           configurationVersion: data.expectedVersion + 1,
@@ -636,10 +665,10 @@ describe("Mini App HTTP boundary", () => {
     expect(app?.textContent).toContain("Current week only (saved)")
 
     const initialRows = [...(app?.querySelectorAll(".settings-slot") ?? [])]
-    const firstSlotRow = initialRows[0]
-    if (!firstSlotRow) throw new Error("missing initial slot")
-    const removedId = (firstSlotRow.querySelector('[data-slot="id"]') as unknown as { value: string }).value
-    firstSlotRow
+    const slotRowToRemove = initialRows.at(-1)
+    if (!slotRowToRemove) throw new Error("missing initial slot")
+    const removedId = (slotRowToRemove.querySelector('[data-slot="id"]') as unknown as { value: string }).value
+    slotRowToRemove
       .querySelector('button[data-slot-action="0"]')
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
     app?.querySelector('button[data-action="add-slot"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
@@ -722,11 +751,11 @@ describe("Mini App HTTP boundary", () => {
     })
     const submittedSchedule = reapplied.schedule as MealSchedule
     expect(submittedSchedule.slots.map((slot) => slot.id)).toEqual([
+      "breakfast",
       "snack1",
       "snack2",
-      "school-lunch",
       addedId.value,
-      "home-lunch",
+      "school-lunch",
     ])
     expect((reapplied.eligibleEstablishedMeals as Record<string, string[]>)[addedId.value]).toEqual([eligible.value])
     expect(app?.textContent).toContain("Settings saved.")
@@ -786,6 +815,75 @@ describe("Mini App HTTP boundary", () => {
     expect(Object.keys(serverSettings.eligibleEstablishedMeals).sort()).toEqual(resolvedSlotIds)
     expect(resolvedSlotIds).toContain("remote-lunch")
     expect(resolvedSlotIds).toContain("snack1")
+
+    const establishedMealId = serverSettings.profile.mealDefinitions?.find(
+      (definition) => definition.status === "established",
+    )?.id
+    if (!establishedMealId) throw new Error("missing established meal for the slot conflict test")
+    const originalSnackMeals = [...serverSettings.eligibleEstablishedMeals.breakfast]
+    const latestSnackMeals = originalSnackMeals.length ? [] : [establishedMealId]
+    eligibilityConflictNextSave = { slotId: "breakfast", eligibleIds: latestSnackMeals }
+    const snackToRemove = [...(app?.querySelectorAll(".settings-slot") ?? [])].find(
+      (row) => (row.querySelector('[data-slot="id"]') as unknown as { value: string }).value === "breakfast",
+    )
+    snackToRemove
+      ?.querySelector('button[data-slot-action="0"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("schedule.slots.breakfast and eligibleEstablishedMeals.breakfast")
+    app
+      ?.querySelector('button[data-action="use-latest-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(serverSettings.schedule.slots.some((slot) => slot.id === "breakfast")).toBe(true)
+    expect(serverSettings.eligibleEstablishedMeals.breakfast).toEqual(latestSnackMeals)
+
+    const keepLocalSnackMeals = latestSnackMeals.length ? [] : [establishedMealId]
+    eligibilityConflictNextSave = { slotId: "breakfast", eligibleIds: keepLocalSnackMeals }
+    const snackToRemoveAgain = [...(app?.querySelectorAll(".settings-slot") ?? [])].find(
+      (row) => (row.querySelector('[data-slot="id"]') as unknown as { value: string }).value === "breakfast",
+    )
+    snackToRemoveAgain
+      ?.querySelector('button[data-slot-action="0"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    app
+      ?.querySelector('button[data-action="keep-local-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(serverSettings.schedule.slots.some((slot) => slot.id === "breakfast")).toBe(false)
+    expect("breakfast" in serverSettings.eligibleEstablishedMeals).toBe(false)
+
+    halfDayConflictNextSave = true
+    const configuredDays = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    configuredDays.forEach((input) => {
+      input.checked = input.value === "Sun"
+    })
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    const submissionsBeforeDayReapply = submissions.length
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(submissions).toHaveLength(submissionsBeforeDayReapply)
+    expect(app?.textContent).toContain("schedule.days and schedule.halfDays")
+    app
+      ?.querySelector('button[data-action="use-latest-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect((serverSettings.schedule.halfDays ?? []).every((day) => serverSettings.schedule.days.includes(day))).toBe(
+      true,
+    )
+    expect(serverSettings.schedule.days).toContain("Tue")
+    expect(serverSettings.schedule.halfDays ?? []).toContain("Tue")
 
     const reviewNavigation = window.document.createElement("button")
     reviewNavigation.textContent = "Back to meal plan"
