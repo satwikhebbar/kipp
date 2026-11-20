@@ -533,6 +533,9 @@ describe("Mini App HTTP boundary", () => {
     }
     const calls: Array<{ path: string; method: string }> = []
     const submissions: Array<Record<string, unknown>> = []
+    let delayNextSave = false
+    let conflictNextSave = false
+    const delayedSave = { release: undefined as (() => void) | undefined }
     client.fetch = async (input, init) => {
       const path = String(input)
       const method = init?.method ?? "GET"
@@ -542,12 +545,27 @@ describe("Mini App HTTP boundary", () => {
       if (path === "/mini-app/api/profile" && method === "PUT") {
         const submitted = JSON.parse(String(init?.body)) as Record<string, unknown>
         submissions.push(submitted)
+        if (delayNextSave) {
+          delayNextSave = false
+          await new Promise<void>((resolve) => {
+            delayedSave.release = resolve
+          })
+        }
         const data = submitted as typeof serverSettings & { expectedVersion: number }
         if (submissions.length === 1) {
           serverSettings = {
             ...serverSettings,
             configurationVersion: 2,
             profile: { ...serverSettings.profile, sensoryGuidelines: ["Use gentle seasoning"] },
+          }
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
+        }
+        if (conflictNextSave) {
+          conflictNextSave = false
+          serverSettings = {
+            ...serverSettings,
+            configurationVersion: serverSettings.configurationVersion + 1,
+            profile: { ...serverSettings.profile, sensoryGuidelines: ["Other session preference"] },
           }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
@@ -587,18 +605,21 @@ describe("Mini App HTTP boundary", () => {
     expect(calls[0]?.path).toBe("/mini-app/api/session?launch=private-launch")
     expect(calls.some((call) => call.path.includes("/mini-app/api/plan"))).toBe(false)
 
-    const addSlot = app?.querySelector('button[data-action="add-slot"]')
-    addSlot?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const initialRows = [...(app?.querySelectorAll(".settings-slot") ?? [])]
+    const firstSlotRow = initialRows[0]
+    if (!firstSlotRow) throw new Error("missing initial slot")
+    const removedId = (firstSlotRow.querySelector('[data-slot="id"]') as unknown as { value: string }).value
+    firstSlotRow
+      .querySelector('button[data-slot-action="0"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    app?.querySelector('button[data-action="add-slot"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     const rows = [...(app?.querySelectorAll(".settings-slot") ?? [])]
-    const addedRow = rows.find(
-      (row) =>
-        (row.querySelector('[data-slot="id"]') as unknown as { value: string; checked: boolean })?.value ===
-        "meal-slot-6",
-    )
+    const addedRow = rows.at(-1)
     expect(addedRow).toBeDefined()
-    const addedId = addedRow?.querySelector('[data-slot="id"]') as unknown as { value: string; checked: boolean }
+    const addedId = addedRow?.querySelector('[data-slot="id"]') as unknown as { value: string; readOnly: boolean }
     const addedName = addedRow?.querySelector('[data-slot="name"]') as unknown as { value: string; checked: boolean }
-    addedId.value = "morning-tea"
+    expect(addedId.readOnly).toBe(true)
+    expect(addedId.value).not.toBe(removedId)
     addedName.value = "Morning tea"
     const eligible = addedRow?.querySelector("[data-meal-id]") as unknown as { value: string; checked: boolean }
     expect(eligible).toBeDefined()
@@ -606,6 +627,12 @@ describe("Mini App HTTP boundary", () => {
     addedRow
       ?.querySelector('button[data-slot-action="-1"]')
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+
+    app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const policy = app?.querySelector(".settings-policy")
+    ;(policy?.querySelector('[data-policy="id"]') as unknown as { value: string }).value = "avoid-red-dye"
+    ;(policy?.querySelector('[data-policy="label"]') as unknown as { value: string }).value = "Avoid red dye"
+    ;(policy?.querySelector('[data-policy="value"]') as unknown as { value: string }).value = "Do not use red dye"
 
     const dayChecks = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
       value: string
@@ -630,6 +657,9 @@ describe("Mini App HTTP boundary", () => {
     expect(submissions[0]).toMatchObject({
       expectedVersion: 1,
       profile: { dietaryExclusions: ["egg", "sesame"] },
+      customPolicies: [
+        { id: "avoid-red-dye", label: "Avoid red dye", scope: "persistent", value: "Do not use red dye" },
+      ],
       schedule: {
         days: ["Tue", "Sun"],
         halfDays: ["Sun"],
@@ -643,18 +673,20 @@ describe("Mini App HTTP boundary", () => {
     if (!reapplied) throw new Error("missing reapply request")
     expect(reapplied).toMatchObject({
       expectedVersion: 2,
-      profile: { dietaryExclusions: ["egg", "sesame"] },
+      profile: { dietaryExclusions: ["egg", "sesame"], sensoryGuidelines: ["Use gentle seasoning"] },
+      customPolicies: [
+        { id: "avoid-red-dye", label: "Avoid red dye", scope: "persistent", value: "Do not use red dye" },
+      ],
     })
     const submittedSchedule = reapplied.schedule as MealSchedule
     expect(submittedSchedule.slots.map((slot) => slot.id)).toEqual([
-      "breakfast",
       "snack1",
       "snack2",
       "school-lunch",
-      "morning-tea",
+      addedId.value,
       "home-lunch",
     ])
-    expect((reapplied.eligibleEstablishedMeals as Record<string, string[]>)["morning-tea"]).toEqual([eligible.value])
+    expect((reapplied.eligibleEstablishedMeals as Record<string, string[]>)[addedId.value]).toEqual([eligible.value])
     expect(app?.textContent).toContain("Settings saved.")
     app?.querySelector('button[data-action="reload"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
@@ -662,6 +694,44 @@ describe("Mini App HTTP boundary", () => {
     expect((app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string })?.value).toContain(
       "sesame",
     )
+    expect(serverSettings.profile.sensoryGuidelines).toEqual(["Use gentle seasoning"])
+    expect(app?.textContent).not.toContain("Current week only")
+
+    conflictNextSave = true
+    const sensory = app?.querySelector('[data-setting="sensoryGuidelines"]') as unknown as { value: string }
+    sensory.value = "Local preference"
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("profile.sensoryGuidelines")
+    app
+      ?.querySelector('button[data-action="use-latest-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(serverSettings.profile.sensoryGuidelines).toEqual(["Other session preference"])
+
+    const reviewNavigation = window.document.createElement("button")
+    reviewNavigation.textContent = "Back to meal plan"
+    app?.querySelector(".settings-card .head-main")?.append(reviewNavigation)
+    delayNextSave = true
+    const delayedExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+      disabled: boolean
+    }
+    delayedExclusions.value = "egg\nsesame\npeanut"
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(delayedExclusions.disabled).toBe(true)
+    const reloadWhileSaving = app?.querySelector('button[data-action="reload"]') as unknown as { disabled: boolean }
+    expect(reloadWhileSaving.disabled).toBe(true)
+    expect(reviewNavigation.disabled).toBe(true)
+    expect(delayedSave.release).toBeDefined()
+    delayedSave.release?.()
+    await settle()
+    expect(serverSettings.profile.dietaryExclusions).toEqual(["egg", "sesame", "peanut"])
+    const savedExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    expect(savedExclusions.value).toContain("peanut")
   })
 
   it("leaves a single week as a simple header without a redundant status", async () => {

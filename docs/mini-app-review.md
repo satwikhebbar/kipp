@@ -53,8 +53,9 @@ parent account on both Android and iOS Telegram clients:
   return to the plan. Confirm its displayed grid remains on the plan's pinned
   schedule and feedback still submits against that plan.
 - Simulate a stale configuration version. Confirm the editor offers **Reload
-  latest and reapply my edits**, and that a successful reapply returns the
-  canonical saved configuration.
+  latest and reapply my edits**, and that a successful reapply preserves
+  unrelated remote edits. If both sessions changed the same field, confirm the
+  editor asks which value to keep.
 - Run `/mealplan`; verify the persisted plan message has both feedback actions.
 - Open the Mini App and confirm the dark board, safe-area spacing, theme,
   six-day selection, compact holiday `🏖 Holiday` disabled state, and selectable
