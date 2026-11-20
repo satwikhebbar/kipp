@@ -87,7 +87,7 @@ export function legacyHalfDayBehavior(slotId: string): NonNullable<MealSlot["hal
 /** Applies legacy Saturday and seed-slot behavior without changing already-normalized schedules. */
 export function normalizeLegacyMealSchedule(schedule: MealSchedule): MealSchedule {
   const days = schedule.days
-  const halfDays = schedule.halfDays === undefined && days.includes("Sat") ? ["Sat"] : schedule.halfDays
+  const halfDays = schedule.halfDays === undefined ? (days.includes("Sat") ? ["Sat"] : []) : schedule.halfDays
   let slotsChanged = false
   const slots = schedule.slots.map((slot) => {
     if (slot.halfDayBehavior) return slot
@@ -95,7 +95,7 @@ export function normalizeLegacyMealSchedule(schedule: MealSchedule): MealSchedul
     return { ...slot, halfDayBehavior: legacyHalfDayBehavior(slot.id) }
   })
   if (halfDays === schedule.halfDays && !slotsChanged) return schedule
-  return { ...schedule, ...(halfDays === undefined ? {} : { halfDays }), slots }
+  return { ...schedule, halfDays, slots }
 }
 
 /** Returns actionable deterministic configuration failures, including established-meal availability. */

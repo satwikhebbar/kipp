@@ -273,6 +273,82 @@ describe("Mini App HTTP boundary", () => {
     }
   })
 
+  it("canonicalizes a legacy Sunday-only schedule before profile-only edits", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    vi.setSystemTime(FAKE_NOW)
+    try {
+      const { db, d1 } = createD1TestDb()
+      const testEnv = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 } as Env
+      const store = createMealPlanningStore(d1)
+      const seeded = await store.loadOrCreateProfile("chat-42")
+      const legacySchedule = {
+        days: ["Sun"],
+        slots: seeded.schedule.slots.map(({ halfDayBehavior: _behavior, ...slot }) => slot),
+      }
+      db.prepare("UPDATE meal_profile SET schedule_json = ?, version = 1 WHERE chat_id = ?").run(
+        JSON.stringify(legacySchedule),
+        "chat-42",
+      )
+      const launch = await createSettingsLaunchReference("42", "chat-42", testEnv, FAKE_NOW)
+      const sessionResponse = await miniAppRoutes.fetch(
+        new Request(`https://kipp.example/mini-app/api/session?launch=${encodeURIComponent(launch.reference)}`, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: await signedInitData(),
+        }),
+        testEnv,
+      )
+      const { token } = (await sessionResponse.json()) as { token: string }
+      const headers = { Authorization: `Bearer ${token}` }
+      const read = async () =>
+        (await (
+          await miniAppRoutes.fetch(new Request("https://kipp.example/mini-app/api/profile", { headers }), testEnv)
+        ).json()) as {
+          configurationVersion: number
+          profile: MealProfile
+          customPolicies: unknown[]
+          schedule: MealSchedule
+          location: { country: string; city: string } | null
+          eligibleEstablishedMeals: Record<string, string[]>
+        }
+      const profile = await read()
+      expect(profile.schedule.halfDays).toEqual([])
+      expect(validateMealSchedule(profile.schedule, profile.profile)).toEqual([])
+      const savedResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            expectedVersion: profile.configurationVersion,
+            profile: {
+              dietaryExclusions: [...profile.profile.dietaryExclusions, "sesame"],
+              foodPreferences: profile.profile.foodPreferences,
+              allowNewFoods: profile.profile.allowNewFoods,
+              sensoryGuidelines: profile.profile.sensoryGuidelines,
+              morningCookingBudgetMinutes: profile.profile.morningCookingBudgetMinutes,
+              priorNightPrepAllowed: profile.profile.priorNightPrepAllowed,
+              pantryBaseline: profile.profile.pantryBaseline,
+            },
+            customPolicies: profile.customPolicies,
+            schedule: profile.schedule,
+            eligibleEstablishedMeals: profile.eligibleEstablishedMeals,
+            location: profile.location,
+          }),
+        }),
+        testEnv,
+      )
+      expect(savedResponse.status).toBe(200)
+      const saved = (await savedResponse.json()) as typeof profile
+      const reloaded = await read()
+      expect(reloaded.configurationVersion).toBe(saved.configurationVersion)
+      expect(reloaded.profile.dietaryExclusions).toContain("sesame")
+      expect(reloaded.schedule).toEqual(profile.schedule)
+      expect(reloaded.schedule.halfDays).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("rejects strict, oversized, and client-owner profile writes", async () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(FAKE_NOW)
