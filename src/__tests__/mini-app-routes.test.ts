@@ -519,7 +519,14 @@ describe("Mini App HTTP boundary", () => {
     let serverSettings = {
       configurationVersion: 1,
       profile,
-      customPolicies: [],
+      customPolicies: [
+        {
+          id: "legacy-week-policy",
+          label: "Week-only instruction",
+          scope: "current_week",
+          value: "Keep the plan simple",
+        },
+      ],
       schedule,
       location: null,
       eligibleEstablishedMeals: Object.fromEntries(
@@ -535,6 +542,7 @@ describe("Mini App HTTP boundary", () => {
     const submissions: Array<Record<string, unknown>> = []
     let delayNextSave = false
     let conflictNextSave = false
+    let slotConflictNextSave = false
     const delayedSave = { release: undefined as (() => void) | undefined }
     client.fetch = async (input, init) => {
       const path = String(input)
@@ -569,6 +577,27 @@ describe("Mini App HTTP boundary", () => {
           }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
+        if (slotConflictNextSave) {
+          slotConflictNextSave = false
+          const lunch: MealSchedule["slots"][number] = {
+            id: "remote-lunch",
+            name: "Lunch",
+            packed: false,
+            dry: false,
+            maxCookMinutes: null,
+            halfDayBehavior: { action: "keep" as const },
+          }
+          serverSettings = {
+            ...serverSettings,
+            configurationVersion: serverSettings.configurationVersion + 1,
+            schedule: { ...serverSettings.schedule, slots: [...serverSettings.schedule.slots, lunch] },
+            eligibleEstablishedMeals: { ...serverSettings.eligibleEstablishedMeals, "remote-lunch": [] },
+          }
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
+        }
+        const submittedSlotIds = data.schedule.slots.map((slot) => slot.id).sort()
+        if (JSON.stringify(Object.keys(data.eligibleEstablishedMeals).sort()) !== JSON.stringify(submittedSlotIds))
+          return new Response(JSON.stringify({ error: "invalid_configuration" }), { status: 400 })
         serverSettings = {
           configurationVersion: data.expectedVersion + 1,
           profile: { ...serverSettings.profile, ...data.profile },
@@ -604,6 +633,7 @@ describe("Mini App HTTP boundary", () => {
     expect(app?.querySelector(".settings-form")).not.toBeNull()
     expect(calls[0]?.path).toBe("/mini-app/api/session?launch=private-launch")
     expect(calls.some((call) => call.path.includes("/mini-app/api/plan"))).toBe(false)
+    expect(app?.textContent).toContain("Current week only (saved)")
 
     const initialRows = [...(app?.querySelectorAll(".settings-slot") ?? [])]
     const firstSlotRow = initialRows[0]
@@ -629,7 +659,7 @@ describe("Mini App HTTP boundary", () => {
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
 
     app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
-    const policy = app?.querySelector(".settings-policy")
+    const policy = [...(app?.querySelectorAll(".settings-policy") ?? [])].at(-1)
     ;(policy?.querySelector('[data-policy="id"]') as unknown as { value: string }).value = "avoid-red-dye"
     ;(policy?.querySelector('[data-policy="label"]') as unknown as { value: string }).value = "Avoid red dye"
     ;(policy?.querySelector('[data-policy="value"]') as unknown as { value: string }).value = "Do not use red dye"
@@ -658,6 +688,12 @@ describe("Mini App HTTP boundary", () => {
       expectedVersion: 1,
       profile: { dietaryExclusions: ["egg", "sesame"] },
       customPolicies: [
+        {
+          id: "legacy-week-policy",
+          label: "Week-only instruction",
+          scope: "current_week",
+          value: "Keep the plan simple",
+        },
         { id: "avoid-red-dye", label: "Avoid red dye", scope: "persistent", value: "Do not use red dye" },
       ],
       schedule: {
@@ -675,6 +711,12 @@ describe("Mini App HTTP boundary", () => {
       expectedVersion: 2,
       profile: { dietaryExclusions: ["egg", "sesame"], sensoryGuidelines: ["Use gentle seasoning"] },
       customPolicies: [
+        {
+          id: "legacy-week-policy",
+          label: "Week-only instruction",
+          scope: "current_week",
+          value: "Keep the plan simple",
+        },
         { id: "avoid-red-dye", label: "Avoid red dye", scope: "persistent", value: "Do not use red dye" },
       ],
     })
@@ -695,7 +737,15 @@ describe("Mini App HTTP boundary", () => {
       "sesame",
     )
     expect(serverSettings.profile.sensoryGuidelines).toEqual(["Use gentle seasoning"])
-    expect(app?.textContent).not.toContain("Current week only")
+    expect(app?.textContent).toContain("Current week only (saved)")
+
+    const profileOnlyExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+    }
+    profileOnlyExclusions.value = "egg\nsesame\nalmond"
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(serverSettings.customPolicies[0]?.scope).toBe("current_week")
 
     conflictNextSave = true
     const sensory = app?.querySelector('[data-setting="sensoryGuidelines"]') as unknown as { value: string }
@@ -705,11 +755,37 @@ describe("Mini App HTTP boundary", () => {
     app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
     expect(app?.textContent).toContain("profile.sensoryGuidelines")
+    const saveWithUnresolvedOverlap = app?.querySelector(".settings-save") as unknown as { disabled: boolean }
+    expect(saveWithUnresolvedOverlap.disabled).toBe(true)
+    const submissionCountWithOverlap = submissions.length
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(submissions).toHaveLength(submissionCountWithOverlap)
     app
       ?.querySelector('button[data-action="use-latest-conflicts"]')
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
     expect(serverSettings.profile.sensoryGuidelines).toEqual(["Other session preference"])
+
+    slotConflictNextSave = true
+    const snackRow = [...(app?.querySelectorAll(".settings-slot") ?? [])].find(
+      (row) => (row.querySelector('[data-slot="id"]') as unknown as { value: string }).value === "snack1",
+    )
+    snackRow?.querySelector('button[data-slot-action="0"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("schedule.slots")
+    app
+      ?.querySelector('button[data-action="use-latest-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("Settings saved.")
+    const resolvedSlotIds = serverSettings.schedule.slots.map((slot) => slot.id).sort()
+    expect(Object.keys(serverSettings.eligibleEstablishedMeals).sort()).toEqual(resolvedSlotIds)
+    expect(resolvedSlotIds).toContain("remote-lunch")
+    expect(resolvedSlotIds).toContain("snack1")
 
     const reviewNavigation = window.document.createElement("button")
     reviewNavigation.textContent = "Back to meal plan"
