@@ -546,7 +546,7 @@ describe("Mini App HTTP boundary", () => {
     let conflictNextSave = false
     let slotConflictNextSave = false
     let eligibilityConflictNextSave: { slotId: string; eligibleIds: string[] } | null = null
-    let halfDayConflictNextSave = false
+    let halfDayConflictNextSave: "half" | "full" | null = null
     const delayedSave = { release: undefined as (() => void) | undefined }
     client.fetch = async (input, init) => {
       const path = String(input)
@@ -613,14 +613,15 @@ describe("Mini App HTTP boundary", () => {
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
         if (halfDayConflictNextSave) {
-          halfDayConflictNextSave = false
+          const conflict = halfDayConflictNextSave
+          halfDayConflictNextSave = null
+          const halfDays = new Set(serverSettings.schedule.halfDays ?? [])
+          if (conflict === "half") halfDays.add("Tue")
+          else halfDays.delete("Tue")
           serverSettings = {
             ...serverSettings,
             configurationVersion: serverSettings.configurationVersion + 1,
-            schedule: {
-              ...serverSettings.schedule,
-              halfDays: [...new Set([...(serverSettings.schedule.halfDays ?? []), "Tue"])],
-            },
+            schedule: { ...serverSettings.schedule, halfDays: [...halfDays] },
           }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
@@ -862,13 +863,32 @@ describe("Mini App HTTP boundary", () => {
     expect(serverSettings.schedule.slots.some((slot) => slot.id === "breakfast")).toBe(false)
     expect("breakfast" in serverSettings.eligibleEstablishedMeals).toBe(false)
 
-    halfDayConflictNextSave = true
     const configuredDays = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
       value: string
       checked: boolean
     }[]
     configuredDays.forEach((input) => {
-      input.checked = input.value === "Sun"
+      input.checked = input.value === "Mon" || input.value === "Tue"
+    })
+    const configuredHalfDays = [...(app?.querySelectorAll('input[name="halfDays"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    configuredHalfDays.forEach((input) => {
+      input.checked = false
+    })
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(serverSettings.schedule.days).toEqual(["Mon", "Tue"])
+    expect(serverSettings.schedule.halfDays ?? []).toEqual([])
+
+    halfDayConflictNextSave = "half"
+    const localConflictDays = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    localConflictDays.forEach((input) => {
+      input.checked = input.value === "Mon" || input.value === "Wed"
     })
     app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
     await settle()
@@ -876,16 +896,33 @@ describe("Mini App HTTP boundary", () => {
     app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
     expect(submissions).toHaveLength(submissionsBeforeDayReapply)
-    expect(app?.textContent).toContain("schedule.days and schedule.halfDays")
+    expect(app?.textContent).toContain("schedule.day.Tue")
     app
       ?.querySelector('button[data-action="use-latest-conflicts"]')
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
-    expect((serverSettings.schedule.halfDays ?? []).every((day) => serverSettings.schedule.days.includes(day))).toBe(
-      true,
-    )
-    expect(serverSettings.schedule.days).toContain("Tue")
-    expect(serverSettings.schedule.halfDays ?? []).toContain("Tue")
+    expect(serverSettings.schedule.days).toEqual(["Mon", "Tue", "Wed"])
+    expect(serverSettings.schedule.halfDays).toEqual(["Tue"])
+
+    halfDayConflictNextSave = "full"
+    const daysAfterLatestChoice = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    daysAfterLatestChoice.forEach((input) => {
+      input.checked = input.value === "Mon" || input.value === "Wed"
+    })
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("schedule.day.Tue")
+    app
+      ?.querySelector('button[data-action="keep-local-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(serverSettings.schedule.days).toEqual(["Mon", "Wed"])
+    expect(serverSettings.schedule.halfDays ?? []).toEqual([])
 
     const reviewNavigation = window.document.createElement("button")
     reviewNavigation.textContent = "Back to meal plan"
