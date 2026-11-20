@@ -153,7 +153,7 @@ export async function authenticateMiniApp(
   const token = randomToken()
   const fingerprintHash = await sha256(verified.verifiedHash)
   const fingerprintExpiresAt = new Date(
-    (verified.authDate + AUTH_MAX_AGE_SECONDS) * SECONDS_PER_MILLISECOND,
+    (verified.authDate + AUTH_MAX_AGE_SECONDS + 1) * SECONDS_PER_MILLISECOND,
   ).toISOString()
   const sessionInput = {
     sessionId: crypto.randomUUID(),

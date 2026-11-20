@@ -142,6 +142,23 @@ describe("Mini App Telegram authentication", () => {
     ).resolves.toMatchObject({ session: { scope: "settings" } })
   })
 
+  it("keeps replay protection through the final accepted init-data second", async () => {
+    const { d1 } = createD1TestDb()
+    const env = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 }
+    const raw = await initData()
+    const firstLaunch = await createSettingsLaunchReference("42", "42", env, NOW)
+    await authenticateMiniApp(raw, env, NOW, firstLaunch.reference)
+
+    // This unused reference remains valid until one second after the auth-data boundary.
+    const unusedLaunch = await createSettingsLaunchReference("42", "42", env, new Date(NOW.getTime() + 1_000))
+    await expect(
+      authenticateMiniApp(raw, env, new Date(NOW.getTime() + 599_999), unusedLaunch.reference),
+    ).rejects.toMatchObject({ reason: "replayed" })
+    await expect(
+      authenticateMiniApp(raw, env, new Date(NOW.getTime() + 600_000), unusedLaunch.reference),
+    ).rejects.toMatchObject({ reason: "replayed" })
+  })
+
   it("keeps a settings launch usable when session insertion fails", async () => {
     const { d1, db } = createD1TestDb()
     const env = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 }

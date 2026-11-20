@@ -696,6 +696,39 @@ describe.each([
 })
 
 describe("createMealPlanningStore (D1, real SQL)", () => {
+  it("cleans expired settings launches when creating a new live launch", async () => {
+    const { d1, db } = createD1TestDb()
+    const store = createMealPlanningStore(d1)
+    const expired = new Date(Date.now() - 1_000).toISOString()
+    await store.createMiniAppSettingsLaunch({
+      tokenHash: "expired-settings-launch",
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      expiresAt: expired,
+      createdAt: expired,
+    })
+    await store.createMiniAppSettingsLaunch({
+      tokenHash: "current-settings-launch",
+      telegramUserId: "parent-1",
+      chatId: CHAT,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+    expect(
+      d1Count(
+        db,
+        "SELECT count(*) AS count FROM mini_app_settings_launch WHERE token_hash = ?",
+        "expired-settings-launch",
+      ),
+    ).toBe(0)
+    expect(
+      d1Count(
+        db,
+        "SELECT count(*) AS count FROM mini_app_settings_launch WHERE token_hash = ?",
+        "current-settings-launch",
+      ),
+    ).toBe(1)
+  })
+
   it("returns its committed save even when a later save wins before the response", async () => {
     const { d1 } = createD1TestDb()
     const originalPrepare = d1.prepare.bind(d1)

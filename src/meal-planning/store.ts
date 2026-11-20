@@ -1743,13 +1743,16 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async createMiniAppSettingsLaunch(input) {
-      await db
-        .prepare(
-          `INSERT INTO mini_app_settings_launch (token_hash, telegram_user_id, chat_id, expires_at, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .bind(input.tokenHash, input.telegramUserId, input.chatId, input.expiresAt, input.createdAt ?? nowIso())
-        .run()
+      const now = nowIso()
+      await db.batch([
+        db.prepare("DELETE FROM mini_app_settings_launch WHERE expires_at <= ?").bind(now),
+        db
+          .prepare(
+            `INSERT INTO mini_app_settings_launch (token_hash, telegram_user_id, chat_id, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .bind(input.tokenHash, input.telegramUserId, input.chatId, input.expiresAt, input.createdAt ?? now),
+      ])
     },
 
     async consumeMiniAppSettingsLaunch(tokenHash, telegramUserId, now) {
@@ -2391,9 +2394,11 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
     },
 
     async createMiniAppSettingsLaunch(input) {
+      const now = nowIso()
+      for (const [key, launch] of settingsLaunches) if (launch.expiresAt <= now) settingsLaunches.delete(key)
       settingsLaunches.set(input.tokenHash, {
         ...input,
-        createdAt: input.createdAt ?? nowIso(),
+        createdAt: input.createdAt ?? now,
       })
     },
 
