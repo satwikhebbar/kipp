@@ -8,7 +8,6 @@ import {
   type FoodPreferences,
   INVENTORY_STATUSES,
   type InventoryItem,
-  type MealCell,
   type MealGrid,
   type MealPlanCandidate,
   type MealPlanContext,
@@ -133,7 +132,7 @@ export const feedbackItemSchema: z.ZodType<FeedbackItem> = z
   })
   .strict()
 
-export const mealCellSchema: z.ZodType<MealCell> = z
+export const mealCellSchema = z
   .object({
     dish: z.string().min(1),
     vegetarian: z.boolean(),

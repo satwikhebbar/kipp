@@ -1,3 +1,4 @@
+import { ZodError } from "zod"
 import type { Env } from "../core/types"
 import { logRuntime } from "../runtime/logging"
 import type { MealPlanningStore } from "./store"
@@ -12,7 +13,11 @@ export async function handleMealCompletionCron(
   store = env.MEAL_PLANNING_DB ? createMealPlanningStore(env.MEAL_PLANNING_DB) : undefined,
 ): Promise<void> {
   if (!store) return
-  await sweep(store, env)
+  try {
+    await sweep(store, env)
+  } catch {
+    console.error(JSON.stringify({ event: "meal-plan-completion", outcome: "failed", failureCategory: "claim-error" }))
+  }
 }
 
 /** Advances durable progress before attempting each eligible plan. */
@@ -29,9 +34,19 @@ async function sweep(store: MealPlanningStore, env: Pick<Env, "LOG_LEVEL">): Pro
         outcome: counts ? "succeeded" : "ignored",
         ...(counts ? { metrics: counts } : {}),
       })
-    } catch {
+    } catch (error) {
       console.error(
-        JSON.stringify({ event: "meal-plan-completion", outcome: "failed", failureCategory: "store-error" }),
+        JSON.stringify({
+          event: "meal-plan-completion",
+          outcome: "failed",
+          planId: target.planId,
+          failureCategory:
+            error instanceof ZodError
+              ? "invalid-evidence"
+              : error instanceof SyntaxError
+                ? "invalid-json"
+                : "store-error",
+        }),
       )
     }
   }

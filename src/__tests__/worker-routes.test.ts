@@ -585,6 +585,28 @@ describe("scheduled() cron failure notification", () => {
     ])
   })
 
+  it("logs completion cursor failures without sending a Telegram notification", async () => {
+    const prepare = vi.fn(() => {
+      throw new Error("internal database details")
+    })
+    const fetch = vi.fn()
+    vi.stubGlobal("fetch", fetch)
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await worker.scheduled(
+        { cron: MEAL_COMPLETION_CRON, scheduledTime: Date.now() } as ScheduledController,
+        cronEnv({ MEAL_PLANNING_DB: { prepare } }),
+      )
+      expect(prepare).toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        JSON.stringify({ event: "meal-plan-completion", outcome: "failed", failureCategory: "claim-error" }),
+      )
+    } finally {
+      error.mockRestore()
+    }
+  })
+
   it("notifies the operator exactly once with safe text when a cron job fails", async () => {
     const env = cronEnv()
     const telegramBodies: Array<{ chat_id?: string | number; text?: string }> = []

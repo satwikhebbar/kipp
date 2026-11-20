@@ -1664,6 +1664,93 @@ describe("completed week repertoire", () => {
     }
   })
 
+  it.each(["D1", "memory"])("%s preserves a closure saved while a revision is planning", async (kind) => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(open)
+      const store =
+        kind === "D1" ? createMealPlanningStore(createClockedD1TestDb().d1) : createInMemoryMealPlanningStore()
+      await store.loadOrCreateProfile(CHAT)
+      await createPlan(store, input())
+      const baseline = await store.activePlan(CHAT)
+      if (!baseline) throw new Error("Expected an active plan")
+      const scope = { planId: "plan-1", chatId: CHAT, baseVersion: 1 }
+      const weeklyInventory = { items: [], notes: [] }
+      const weeklyExceptions = {
+        items: [{ kind: "school_closed" as const, instruction: "Closed Monday", appliesTo: { day: "Mon" } }],
+      }
+      expect(await store.updateWeeklyContext({ ...scope, weeklyInventory, weeklyExceptions })).toEqual({ ok: true })
+      const staleContext = { weeklyInventory, weeklyExceptions: { items: [] } }
+      const stale = { ok: false, reason: "stale" }
+      expect(
+        await store.promotePlanVersion(promoteInput({ expectedWeekContext: baseline.plan, inventory: staleContext })),
+      ).toEqual(stale)
+      expect(
+        await store.updateWeeklyContext({ ...scope, ...staleContext, expectedWeekContext: baseline.plan }),
+      ).toEqual(stale)
+      expect((await store.activePlan(CHAT))?.plan).toMatchObject({ currentVersion: 1, weeklyExceptions })
+      vi.setSystemTime(late)
+      expect(await store.completeEligibleMealPlan({ ...scope, weekEnd: cutoff })).toEqual({
+        added: 0,
+        skipped: 0,
+        invalid: 0,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps in-memory completion evidence independent of submitted objects and read results", async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(open)
+      const store = await newStore()
+      const weeklyExceptions = {
+        items: [{ kind: "school_closed" as const, instruction: "Closed Monday", appliesTo: { day: "Mon" } }],
+      }
+      await createPlan(store, input({ weeklyExceptions }))
+      const read = await store.activePlan(CHAT)
+      if (!read) throw new Error("Expected an active plan")
+      vi.setSystemTime(late)
+      weeklyExceptions.items.length = 0
+      read.plan.weeklyExceptions.items.length = 0
+      expect(await store.completeEligibleMealPlan({ planId: "plan-1", chatId: CHAT, weekEnd: cutoff })).toEqual({
+        added: 0,
+        skipped: 0,
+        invalid: 0,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(["null", "{}"])("records invalid completion when the definition snapshot is %s", async (snapshot) => {
+    let now = open
+    const { db, d1 } = createClockedD1TestDb(() => now)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, input())
+    db.prepare("UPDATE meal_plan_version SET provisional_meals_json = ?").run(snapshot)
+    now = late
+    const target = { planId: "plan-1", chatId: CHAT, weekEnd: cutoff }
+    expect(await store.completeEligibleMealPlan(target)).toEqual({ added: 0, skipped: 0, invalid: 1 })
+    expect(d1Scalar(db, "SELECT invalid_count FROM meal_plan_completion")).toBe(1)
+    expect(await store.completeEligibleMealPlan(target)).toBeNull()
+  })
+
+  it("surfaces unreadable rejection history without replacing the stored evidence", async () => {
+    const { db, d1 } = createClockedD1TestDb(() => open)
+    const store = createMealPlanningStore(d1)
+    await store.loadOrCreateProfile(CHAT)
+    await createPlan(store, input())
+    const unreadable = '["already-rejected",'
+    db.prepare("UPDATE meal_plan SET rejected_meal_ids_json = ?").run(unreadable)
+    await expect(
+      store.rejectPlanDishes({ planId: "plan-1", chatId: CHAT, version: 1, mealIds: [dish.id] }),
+    ).rejects.toThrow()
+    expect(d1Scalar(db, "SELECT rejected_meal_ids_json FROM meal_plan")).toBe(unreadable)
+  })
+
   it("uses the frozen exceptions on an unchanged plan and keeps a dish with another surviving cell", async () => {
     let now = open
     const store = createMealPlanningStore(createClockedD1TestDb(() => now).d1)
@@ -1690,7 +1777,7 @@ describe("completed week repertoire", () => {
       weeklyInventory: { items: [], notes: [] },
       weeklyExceptions: {
         items: [
-          { kind: "school_closed", instruction: "Closed Monday", appliesTo: { day: "Mon" } },
+          { kind: "school_closed", instruction: "Closed Monday", appliesTo: { day: " Mon " } },
           { kind: "half_day", instruction: "Half Tuesday", appliesTo: { day: "Tue" } },
           { kind: "half_day", instruction: "Half Wednesday", appliesTo: { day: "Wed" } },
           { kind: "full_day", instruction: "Full Wednesday", appliesTo: { day: "Wed" } },
@@ -1707,6 +1794,7 @@ describe("completed week repertoire", () => {
 
   it.each([
     ["school_closed", { day: 1 }],
+    ["school_closed", { day: "Monday-ish" }],
     ["school_closed", undefined],
     ["half_day", { day: " " }],
     ["half_day", {}],
@@ -1858,14 +1946,17 @@ describe("completed week repertoire", () => {
       Mon: null,
       Tue: { ...(hasValidCell ? original.candidate.grid.Mon : { "home-lunch": null }), breakfast: { dish: 42 } },
       Wed: [],
-      Thu: { breakfast: { dish: " " } },
+      Thu: {
+        breakfast: { dish: " " },
+        "home-lunch": { ...original.candidate.grid.Mon["home-lunch"], items: 42 },
+      },
     }
     db.prepare("UPDATE meal_plan_version SET candidate_json = ? WHERE plan_id = 'plan-1'").run(
       JSON.stringify({ ...original.candidate, grid }),
     )
     now = late
     const target = { planId: "plan-1", chatId: CHAT, weekEnd: cutoff }
-    const counts = { added: hasValidCell ? 1 : 0, skipped: 0, invalid: hasValidCell ? 4 : 5 }
+    const counts = { added: hasValidCell ? 1 : 0, skipped: 0, invalid: hasValidCell ? 5 : 6 }
     expect(await store.completeEligibleMealPlan(target)).toEqual(counts)
     expect(d1Scalar(db, "SELECT invalid_count FROM meal_plan_completion")).toBe(counts.invalid)
     expect(await store.completeEligibleMealPlan(target)).toBeNull()
@@ -1921,6 +2012,14 @@ describe("completed week repertoire", () => {
     try {
       await handleMealCompletionCron({}, store)
       expect(attempts).not.toContain(String(failedCount))
+      expect(logged).toHaveBeenCalledWith(
+        JSON.stringify({
+          event: "meal-plan-completion",
+          outcome: "failed",
+          planId: "0",
+          failureCategory: "store-error",
+        }),
+      )
       await handleMealCompletionCron({}, store)
       expect(attempts).toContain(String(failedCount))
       expect(attempts.filter((id) => id === "0")).toHaveLength(2)

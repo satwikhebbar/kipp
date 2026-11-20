@@ -274,6 +274,8 @@ export interface PromotePlanVersionInput {
   provisionalMealDefinitions?: MealDefinition[]
   /** Week-scoped state captured by the revision session; omit (or null) to skip the refresh. */
   inventory?: { weeklyInventory: WeeklyInventory; weeklyExceptions: WeeklyExceptions } | null
+  /** Week context read by the planner, which can change without a new plan version. */
+  expectedWeekContext?: Pick<MealPlanRecord, "weeklyInventory" | "weeklyExceptions">
   /** The submission that drove this revision; omit (or null) only defensively — every revision is submission-driven. */
   feedbackBatch?: FeedbackBatchInput | null
   /** Token usage of the revision's generation session(s); omitted when unavailable. */
@@ -288,6 +290,7 @@ export interface UpdateWeeklyContextInput {
   baseVersion: number
   weeklyInventory: WeeklyInventory
   weeklyExceptions: WeeklyExceptions
+  expectedWeekContext?: PromotePlanVersionInput["expectedWeekContext"]
 }
 
 export type UpdateWeeklyContextResult = { ok: true } | { ok: false; reason: "stale" }
@@ -817,6 +820,15 @@ function versionKey(planId: string, version: number): string {
   return `${planId}:${version}`
 }
 
+/** Mirrors the D1 snapshot comparison for in-memory writes. */
+function matchesWeekContext(plan: MealPlanRecord, expected: PromotePlanVersionInput["expectedWeekContext"]): boolean {
+  return (
+    !expected ||
+    (JSON.stringify(plan.weeklyInventory) === JSON.stringify(expected.weeklyInventory) &&
+      JSON.stringify(plan.weeklyExceptions) === JSON.stringify(expected.weeklyExceptions))
+  )
+}
+
 /** Constructs the hydrated `MealPlanRecord` a create batch just wrote (always the fresh active plan at version 1). */
 function makePlanRecord(input: CreateActivePlanInput, now: string): MealPlanRecord {
   return {
@@ -1279,6 +1291,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
              SELECT plan_id, ?, ?, ?, 'revision', current_version, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${D1_NOW_ISO}, ?
              FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}
+               AND weekly_inventory_json = COALESCE(?, weekly_inventory_json)
+               AND weekly_exceptions_json = COALESCE(?, weekly_exceptions_json)
                AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
                AND (? = 0 OR EXISTS (SELECT 1 FROM feedback_batch
                                      WHERE batch_id = ? AND plan_id = meal_plan.plan_id
@@ -1302,6 +1316,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             input.planId,
             input.chatId,
             input.baseVersion,
+            input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyInventory) : null,
+            input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyExceptions) : null,
             input.chatId,
             consumeExistingBatch ? 1 : 0,
             batchId,
@@ -1416,8 +1432,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             .map((definition) => definition.id),
         )
         if (mealIds.some((id) => !provisionalIds.has(id))) return false
-        const priorRaw = String(row.rejected_meal_ids_json ?? "[]")
-        const prior = parseJson<string[]>(priorRaw, [])
+        const priorRaw = String(row.rejected_meal_ids_json)
+        const prior = decodeCompletionRejectedIds(priorRaw)
         const next = JSON.stringify([...new Set([...prior, ...mealIds])])
         if (next === priorRaw) return true
         const result = await db
@@ -1437,7 +1453,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const result = await db
         .prepare(
           `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ${D1_NOW_ISO}
-           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}`,
+           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}
+             AND weekly_inventory_json = COALESCE(?, weekly_inventory_json)
+             AND weekly_exceptions_json = COALESCE(?, weekly_exceptions_json)`,
         )
         .bind(
           JSON.stringify(input.weeklyInventory),
@@ -1445,6 +1463,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.planId,
           input.chatId,
           input.baseVersion,
+          input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyInventory) : null,
+          input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyExceptions) : null,
         )
         .run()
       return Number(result.meta.changes) === 1
@@ -1969,11 +1989,15 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const record = eligiblePlan(plan)
       const profile = backing.profiles.get(target.chatId)
       if (!record || !profile) return null
-      const { additions, counts } = completionAdditions(record, profile.profile)
+      const weeklyExceptions = decodeCompletionWeeklyExceptions(JSON.stringify(plan.weeklyExceptions))
+      const { additions, counts } = completionAdditions(
+        { ...record, plan: { ...plan, weeklyExceptions } },
+        profile.profile,
+      )
       if (additions.length) {
         profile.profile = {
           ...profile.profile,
-          mealDefinitions: [...(profile.profile.mealDefinitions ?? []), ...additions],
+          mealDefinitions: [...(profile.profile.mealDefinitions ?? []), ...structuredClone(additions)],
         }
         profile.updatedAt = nowIso()
       }
@@ -2035,7 +2059,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         previous.updatedAt = now
       }
       const plan = makePlanRecord(input, now)
-      backing.plans.set(input.planId, plan)
+      backing.plans.set(input.planId, structuredClone(plan))
       const version = makeVersionRecord(
         input.planId,
         1,
@@ -2050,7 +2074,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         now,
         input.allowNewFoodsSnapshot ?? null,
       )
-      backing.versions.set(versionKey(input.planId, 1), version)
+      backing.versions.set(versionKey(input.planId, 1), structuredClone(version))
       profile.interactionGeneration += 1
       profile.updatedAt = now
       generations.delete(input.chatId)
@@ -2066,6 +2090,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         plan?.status !== "active" ||
         plan.chatId !== input.chatId ||
         plan.currentVersion !== input.baseVersion ||
+        !matchesWeekContext(plan, input.expectedWeekContext) ||
         plan.weekEnd <= now
       if (stale) return { ok: false as const, reason: "stale" as const }
       const profile = backing.profiles.get(input.chatId)
@@ -2097,10 +2122,10 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         now,
         input.allowNewFoodsSnapshot ?? null,
       )
-      backing.versions.set(versionKey(input.planId, newVersion), version)
+      backing.versions.set(versionKey(input.planId, newVersion), structuredClone(version))
       if (input.inventory) {
-        plan.weeklyInventory = input.inventory.weeklyInventory
-        plan.weeklyExceptions = input.inventory.weeklyExceptions
+        plan.weeklyInventory = structuredClone(input.inventory.weeklyInventory)
+        plan.weeklyExceptions = structuredClone(input.inventory.weeklyExceptions)
         plan.updatedAt = now
       }
       plan.currentVersion = newVersion
@@ -2194,10 +2219,11 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         plan?.status !== "active" ||
         plan.chatId !== input.chatId ||
         plan.currentVersion !== input.baseVersion ||
+        !matchesWeekContext(plan, input.expectedWeekContext) ||
         plan.weekEnd <= nowIso()
       if (stale) return { ok: false as const, reason: "stale" as const }
-      plan.weeklyInventory = input.weeklyInventory
-      plan.weeklyExceptions = input.weeklyExceptions
+      plan.weeklyInventory = structuredClone(input.weeklyInventory)
+      plan.weeklyExceptions = structuredClone(input.weeklyExceptions)
       plan.updatedAt = nowIso()
       return { ok: true as const }
     },
@@ -2245,7 +2271,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       if (!plan) return null
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
       if (!version) return null
-      return { plan, version }
+      return structuredClone({ plan, version })
     },
 
     async latestPlanForWeek(chatId, weekStart) {
@@ -2256,7 +2282,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       }
       if (!plan) return null
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
-      return version ? { plan, version } : null
+      return version ? structuredClone({ plan, version }) : null
     },
 
     async listPlanHistory(chatId) {
@@ -2279,7 +2305,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         .slice(0, MAX_MEAL_PLAN_HISTORY)
         .flatMap((plan) => {
           const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
-          return version ? [{ plan, version }] : []
+          return version ? [structuredClone({ plan, version })] : []
         })
     },
 
@@ -2287,7 +2313,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const plan = backing.plans.get(planId)
       if (!plan || plan.chatId !== chatId) return null
       const version = backing.versions.get(versionKey(plan.planId, plan.currentVersion))
-      return version ? { plan, version } : null
+      return version ? structuredClone({ plan, version }) : null
     },
 
     async activePlanPointer(chatId) {

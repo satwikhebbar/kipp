@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { mealCellSchema } from "./corpus/schema"
 import { HALF_DAY_SNACK_MAX_COOK_MINUTES, halfDayDroppedSlotIds, isHalfDay } from "./half-day"
 import type { ActivePlanRecord } from "./store"
 import type { MealDefinition, MealProfile, WeeklyExceptions } from "./types"
@@ -6,7 +7,11 @@ import { EXCEPTION_KINDS } from "./types"
 
 const nonblank = z.string().refine((value) => value.trim().length > 0)
 const namesSchema = z.array(nonblank)
-const gridCellSchema = z.object({ dish: nonblank })
+const gridCellSchema = mealCellSchema.extend({ dish: nonblank }).strip()
+const calendarDaySchema = z
+  .string()
+  .trim()
+  .pipe(z.enum(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]))
 
 /** Reads the stored rejection evidence or aborts completion if it is unreadable. */
 export function decodeCompletionRejectedIds(raw: string): string[] {
@@ -18,12 +23,15 @@ const weeklyExceptionsSchema = z.object({
       .object({
         kind: z.enum(EXCEPTION_KINDS),
         instruction: z.string(),
-        appliesTo: z.object({ day: nonblank.optional(), mealSlots: namesSchema.optional() }).optional(),
+        appliesTo: z
+          .object({ day: z.string().trim().pipe(nonblank).optional(), mealSlots: namesSchema.optional() })
+          .optional(),
       })
       .refine(
         ({ kind, appliesTo }) =>
-          (kind !== "school_closed" && kind !== "half_day" && kind !== "full_day") || appliesTo?.day !== undefined,
-        { message: "Calendar exception requires an applicable day" },
+          (kind !== "school_closed" && kind !== "half_day" && kind !== "full_day") ||
+          calendarDaySchema.safeParse(appliesTo?.day).success,
+        { message: "Calendar exception requires a supported day" },
       ),
   ),
 })
@@ -86,9 +94,19 @@ export function completionAdditions(record: ActivePlanRecord, profile: MealProfi
   const schedule = { days: [], slots: [] }
   const referenced = new Set<string>()
   const counts: CompletionCounts = { added: 0, skipped: 0, invalid: 0 }
+  if (!Array.isArray(version.provisionalMealDefinitions)) {
+    counts.invalid++
+    return { additions: [], counts }
+  }
   const grid: unknown = version.candidate?.grid
   if (!isGridObject(grid)) counts.invalid++
-  for (const [day, cells] of Object.entries(isGridObject(grid) ? grid : {})) {
+  for (const [rawDay, cells] of Object.entries(isGridObject(grid) ? grid : {})) {
+    const parsedDay = calendarDaySchema.safeParse(rawDay)
+    if (!parsedDay.success) {
+      counts.invalid++
+      continue
+    }
+    const day = parsedDay.data
     if (closed.has(day)) continue
     if (!isGridObject(cells)) {
       counts.invalid++

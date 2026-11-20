@@ -15,9 +15,16 @@ import {
   runAgentCenteredMealPlanningWorkflow,
   runMealPlanningEditWorkflow,
 } from "../meal-planning/agent-workflow"
+import { handleMealCompletionCron } from "../meal-planning/completion-cron"
 import { MEAL_NO_CHANGES, MEAL_STALE_PLAN } from "../meal-planning/messages"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
-import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
+import type {
+  MealCell,
+  MealDefinition,
+  MealPlanContext,
+  MealPlanEvaluation,
+  MealPlanSelectionCandidate,
+} from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 import { createClockedD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
@@ -423,6 +430,84 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  it("selects a dish from the completed week as familiar in the next plan", async () => {
+    vi.useFakeTimers()
+    const previousStart = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(previousStart)
+    const previousWeek = resolvePlanningWeek(previousStart, TZ)
+    const { d1 } = createClockedD1TestDb()
+    const store = createMealPlanningStore(d1)
+    const env = makeEnv(fakeRouter().namespace, d1)
+    const dish: MealDefinition = {
+      id: "new-roasted-peanuts",
+      name: "Roasted peanuts",
+      vegetarian: true,
+      principalIngredients: ["peanut"],
+      requiredIngredients: ["peanut"],
+      optionalIngredients: [],
+      suitableSlots: ["snack1"],
+      packedFood: { suitable: true, dry: true },
+      typicalCookMinutes: 0,
+      priorNightPrep: "none",
+      status: "provisional",
+    }
+    await store.loadOrCreateProfile(CHAT)
+    await store.startPlanGeneration({ chatId: CHAT, generationId: "previous", expiresAt: previousWeek.weekEnd })
+    await store.createActivePlan({
+      chatId: CHAT,
+      planId: "previous",
+      instanceId: "previous",
+      generationId: "previous",
+      weekStart: previousWeek.weekStart,
+      weekEnd: previousWeek.weekEnd,
+      timezone: TZ,
+      allowNewFoodsSnapshot: true,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+      provisionalMealDefinitions: [dish],
+      candidate: {
+        grid: {
+          Mon: {
+            snack1: {
+              dish: dish.name,
+              vegetarian: true,
+              items: dish.requiredIngredients,
+              cookMinutes: 0,
+              priorNightPrep: false,
+            },
+          },
+        },
+        easyBuys: [],
+        policyOutcomes: {},
+      },
+      evaluation: {} as MealPlanEvaluation,
+    })
+    const nextInvocation = Date.parse("2026-09-14T03:30:00.000Z")
+    vi.setSystemTime(nextInvocation)
+    await handleMealCompletionCron(env)
+    const selection = seedCandidate()
+    // The existing cross-week variety policy permits dry snacks to repeat.
+    selection.grid.Mon.snack1 = { mealDefinitionId: dish.id }
+    const network = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: selection }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(selection) }]),
+    ])
+    await runAgentCenteredMealPlanningWorkflow(
+      env,
+      mealEvent(nextInvocation),
+      createMemoizingStep([], nextInvocation) as never,
+    )
+    const prompt = network.deepseekBodies[0].messages.at(-1)?.content
+    const established = prompt
+      ?.split("- Established meal definitions")[1]
+      ?.split("- Plan-local provisional definitions")[0]
+    expect(established).toContain(`"id":"${dish.id}","name":"${dish.name}"`)
+    const next = await store.activePlan(CHAT)
+    expect(next?.plan.weekStart).toBe(resolvePlanningWeek(nextInvocation, TZ).weekStart)
+    expect(next?.version.candidate.grid.Mon.snack1.dish).toBe(dish.name)
+    expect(next?.version.provisionalMealDefinitions).toEqual([])
   })
 
   it.each([
