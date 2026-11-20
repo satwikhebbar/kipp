@@ -20,8 +20,13 @@ The WebView authenticates using raw Telegram `initData`; the Worker verifies
 its HMAC, timestamp, replay fingerprint, configured parent, and a server-owned
 private-chat review context. `/mealsettings` opens a short-lived settings-only
 session from the admitted user's private chat and also works before a plan
-exists. Browser requests use an opaque, memory-only bearer session. URLs and
-logs never receive plan/chat identity, launch data, or bearer credentials.
+exists. The button URL carries a separate opaque, one-time `launch` reference
+in its query string. That reference authorizes exchange for a settings session;
+it is distinct from Telegram `initData` and the resulting memory-only bearer
+session. Treat the launch reference as a credential and redact query strings
+in dashboard and application request logs. Browser requests use only the
+bearer session after exchange; logs must not record URLs, init data, launch
+references, or bearer credentials.
 Profile and schedule values stay in memory and are fetched from the server; the
 settings editor does not write them to browser or Telegram device storage.
 Device storage contains only the local draft payload, its

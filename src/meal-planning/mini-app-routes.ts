@@ -160,7 +160,6 @@ async function readPlanDto(
   store: MealPlanningStore,
   session: MiniAppContext["session"] & { scope: "review"; planId: string },
 ) {
-  await store.loadOrCreateProfile(session.chatId)
   const history = await store.listPlanHistory(session.chatId)
   const generation = await store.activePlanGeneration(session.chatId)
   const requestedPlanId = new URL(request.url).searchParams.get("planId")?.trim() || session.planId
@@ -439,6 +438,8 @@ miniAppRoutes.put("/mini-app/api/profile", async (c) => {
     const parsed = mealProfileConfigurationRequestSchema.safeParse(body)
     if (!parsed.success) return jsonResponse({ error: "invalid_configuration" }, HTTP_STATUS.BAD_REQUEST)
     const current = await store.loadOrCreateProfile(session.chatId)
+    if (parsed.data.expectedVersion !== current.configurationVersion)
+      return jsonResponse({ error: "version_conflict" }, HTTP_STATUS.CONFLICT)
     const profile = mergeEditableMealProfile(current.profile, parsed.data.profile)
     if (parsed.data.eligibleEstablishedMeals) {
       const requested = parsed.data.eligibleEstablishedMeals

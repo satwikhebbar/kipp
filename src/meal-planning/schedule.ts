@@ -105,11 +105,31 @@ export function validateMealSchedule(schedule: MealSchedule, profile?: MealProfi
     return parsed.error.issues.map((issue) => `${issue.path.join(".") || "schedule"}: ${issue.message}`)
   if (!profile || profile.allowNewFoods) return []
   const established = profile.mealDefinitions?.filter((definition) => definition.status === "established") ?? []
-  return schedule.slots.flatMap((slot) =>
-    established.some((definition) => definition.suitableSlots.includes(slot.id))
-      ? []
-      : [
-          `${slot.name} (${slot.id}) has no eligible established meals; select an established meal for this slot or enable new foods`,
-        ],
-  )
+  const errors: string[] = []
+  for (const slot of schedule.slots) {
+    const fits = (definition: (typeof established)[number], halfDay: boolean) => {
+      const behavior = slot.halfDayBehavior ?? legacyHalfDayBehavior(slot.id)
+      const eligible =
+        definition.suitableSlots.includes(slot.id) ||
+        (halfDay && behavior.action === "quick" && definition.halfDaySnack === true)
+      const packed =
+        !slot.packed || Boolean(definition.packedFood?.suitable && (!slot.dry || definition.packedFood.dry))
+      const cookLimit = halfDay && behavior.action === "quick" ? behavior.maxCookMinutes : slot.maxCookMinutes
+      const cook = cookLimit === null || definition.typicalCookMinutes <= cookLimit
+      return eligible && packed && cook
+    }
+    const occurrences = schedule.days
+      .map((day) => ({ halfDay: schedule.halfDays?.includes(day) === true }))
+      .filter(({ halfDay }) => !halfDay || slot.halfDayBehavior?.action !== "omit")
+    if (occurrences.some(({ halfDay }) => !fitsAny(established, fits, halfDay)))
+      errors.push(
+        `${slot.name} (${slot.id}) has no eligible established meals that meet its packing and cook-time requirements`,
+      )
+  }
+  return errors
+}
+
+/** Returns whether at least one established meal satisfies a scheduled occurrence. */
+function fitsAny<T>(items: T[], fits: (item: T, halfDay: boolean) => boolean, halfDay: boolean): boolean {
+  return items.some((item) => fits(item, halfDay))
 }

@@ -65,6 +65,8 @@ async function seedPlan(
     weekStart,
     weekEnd,
     timezone: "Asia/Kolkata",
+    schedule: SEED_SCHEDULE,
+    establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
     instanceId: `instance-${planId}`,
     generationId,
     candidate: { grid, easyBuys: [], policyOutcomes: {} },
@@ -189,6 +191,15 @@ describe("Mini App HTTP boundary", () => {
         eligibleEstablishedMeals: original.eligibleEstablishedMeals,
         location: { country: "India", city: "Bengaluru" },
       }
+      const ownerSupplied = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ ...configuration, chatId: "other-chat" }),
+        }),
+        testEnv,
+      )
+      expect(ownerSupplied.status).toBe(400)
       const saved = await miniAppRoutes.fetch(
         new Request("https://kipp.example/mini-app/api/profile", {
           method: "PUT",
@@ -204,6 +215,15 @@ describe("Mini App HTTP boundary", () => {
       expect(savedConfig.profile.mealDefinitions).toEqual(original.profile.mealDefinitions)
       expect(savedConfig.profile.dishRepertoire).toEqual(original.profile.dishRepertoire)
       expect(savedConfig.location).toEqual({ country: "India", city: "Bengaluru" })
+      const staleVersion = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify(configuration),
+        }),
+        testEnv,
+      )
+      expect(staleVersion.status).toBe(409)
       expect(savedConfig.customPolicies).toContainEqual({
         id: "household-rule",
         label: "Household rule",
@@ -353,6 +373,34 @@ describe("Mini App HTTP boundary", () => {
     try {
       const { testEnv, token } = await authenticatedPlanFixture("plan-profile", "2026-09-21", "2026-09-26")
       const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+      const profileResponse = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", { headers }),
+        testEnv,
+      )
+      const current = (await profileResponse.json()) as {
+        configurationVersion: number
+        profile: MealProfile
+        customPolicies: Array<{ id: string; label: string; scope: string; value: string }>
+        schedule: MealSchedule
+        eligibleEstablishedMeals: Record<string, string[]>
+        location: { country: string; city: string } | null
+      }
+      const validBody = {
+        expectedVersion: current.configurationVersion,
+        profile: {
+          dietaryExclusions: current.profile.dietaryExclusions,
+          foodPreferences: current.profile.foodPreferences,
+          allowNewFoods: current.profile.allowNewFoods,
+          sensoryGuidelines: current.profile.sensoryGuidelines,
+          morningCookingBudgetMinutes: current.profile.morningCookingBudgetMinutes,
+          priorNightPrepAllowed: current.profile.priorNightPrepAllowed,
+          pantryBaseline: current.profile.pantryBaseline,
+        },
+        customPolicies: current.customPolicies,
+        schedule: current.schedule,
+        eligibleEstablishedMeals: current.eligibleEstablishedMeals,
+        location: current.location,
+      }
       for (const body of ['{"chatId":"other-chat"}', "{}"])
         expect(
           (
@@ -362,18 +410,43 @@ describe("Mini App HTTP boundary", () => {
             )
           ).status,
         ).toBe(400)
-      expect(
-        (
-          await miniAppRoutes.fetch(
-            new Request("https://kipp.example/mini-app/api/profile", {
-              method: "PUT",
-              headers: { ...headers, "Content-Length": "70000" },
-              body: "{}",
-            }),
-            testEnv,
-          )
-        ).status,
-      ).toBe(400)
+      const ordinaryWrite = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(validBody),
+        }),
+        testEnv,
+      )
+      expect(ordinaryWrite.status).toBe(200)
+      const ordinarySaved = (await ordinaryWrite.json()) as { configurationVersion: number }
+      const oversizedBody = {
+        ...validBody,
+        expectedVersion: ordinarySaved.configurationVersion,
+        profile: {
+          ...validBody.profile,
+          dietaryExclusions: Array(100).fill("x".repeat(160)),
+          foodPreferences: { favourites: Array(100).fill("y".repeat(160)), avoid: Array(100).fill("z".repeat(160)) },
+          sensoryGuidelines: Array(100).fill("g".repeat(160)),
+          pantryBaseline: Array(100).fill("p".repeat(160)),
+        },
+      }
+      const oversized = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", {
+          method: "PUT",
+          headers: { ...headers, "Content-Length": "70000" },
+          body: JSON.stringify(oversizedBody),
+        }),
+        testEnv,
+      )
+      expect(oversized.status).toBe(400)
+      const afterOversized = await miniAppRoutes.fetch(
+        new Request("https://kipp.example/mini-app/api/profile", { headers }),
+        testEnv,
+      )
+      expect(((await afterOversized.json()) as { configurationVersion: number }).configurationVersion).toBe(
+        ordinarySaved.configurationVersion,
+      )
     } finally {
       vi.useRealTimers()
     }
@@ -541,11 +614,14 @@ describe("Mini App HTTP boundary", () => {
     const calls: Array<{ path: string; method: string }> = []
     const submissions: Array<Record<string, unknown>> = []
     let delayNextSave = false
+    let delayNextProfileGet = false
     let conflictNextSave = false
+    let conflictSequence = 0
     let slotConflictNextSave = false
     let eligibilityConflictNextSave: { slotId: string; eligibleIds: string[] } | null = null
     let halfDayConflictNextSave: "half" | "full" | null = null
     const delayedSave = { release: undefined as (() => void) | undefined }
+    const delayedGet = { release: undefined as (() => void) | undefined }
     client.fetch = async (input, init) => {
       const path = String(input)
       const method = init?.method ?? "GET"
@@ -562,6 +638,8 @@ describe("Mini App HTTP boundary", () => {
           })
         }
         const data = submitted as typeof serverSettings & { expectedVersion: number }
+        if (data.expectedVersion !== serverSettings.configurationVersion)
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         if (submissions.length === 1) {
           serverSettings = {
             ...serverSettings,
@@ -570,12 +648,19 @@ describe("Mini App HTTP boundary", () => {
           }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
-        if (conflictNextSave) {
+        if (conflictNextSave || conflictSequence > 0) {
           conflictNextSave = false
+          const sequenceConflict = conflictSequence > 0
+          if (sequenceConflict) conflictSequence -= 1
           serverSettings = {
             ...serverSettings,
             configurationVersion: serverSettings.configurationVersion + 1,
-            profile: { ...serverSettings.profile, sensoryGuidelines: ["Other session preference"] },
+            profile: {
+              ...serverSettings.profile,
+              sensoryGuidelines: [
+                sequenceConflict ? `Remote revision ${2 - conflictSequence}` : "Other session preference",
+              ],
+            },
           }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
@@ -638,7 +723,15 @@ describe("Mini App HTTP boundary", () => {
         }
         return new Response(JSON.stringify(serverSettings))
       }
-      if (path === "/mini-app/api/profile") return new Response(JSON.stringify(serverSettings))
+      if (path === "/mini-app/api/profile") {
+        if (delayNextProfileGet) {
+          delayNextProfileGet = false
+          await new Promise<void>((resolve) => {
+            delayedGet.release = resolve
+          })
+        }
+        return new Response(JSON.stringify(serverSettings))
+      }
       return new Response(JSON.stringify({ error: "unexpected_request" }), { status: 404 })
     }
     const scripts = [...MINI_APP_SHELL.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
@@ -660,6 +753,7 @@ describe("Mini App HTTP boundary", () => {
 
     const app = window.document.getElementById("app")
     expect(app?.textContent).toContain("Household settings")
+    expect(app?.textContent).toContain("/mealplan this week")
     expect(app?.querySelector(".settings-form")).not.toBeNull()
     expect(calls[0]?.path).toBe("/mini-app/api/session?launch=private-launch")
     expect(calls.some((call) => call.path.includes("/mini-app/api/plan"))).toBe(false)
@@ -732,7 +826,14 @@ describe("Mini App HTTP boundary", () => {
       },
     })
     expect(app?.textContent).toContain("changed in another session")
+    delayNextProfileGet = true
     app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    expect(delayedGet.release).toBeDefined()
+    const disabledDuringReapply = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      disabled: boolean
+    }
+    expect(disabledDuringReapply.disabled).toBe(true)
+    delayedGet.release?.()
     await settle()
 
     const reapplied = submissions[1]
@@ -921,6 +1022,19 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     expect(serverSettings.schedule.days).toEqual(["Mon", "Wed"])
     expect(serverSettings.schedule.halfDays ?? []).toEqual([])
+
+    conflictSequence = 2
+    const localExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    localExclusions.value = "egg\nsesame"
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(serverSettings.profile.sensoryGuidelines).toEqual(["Remote revision 2"])
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(serverSettings.profile.sensoryGuidelines).toEqual(["Remote revision 2"])
+    expect(serverSettings.profile.dietaryExclusions).toEqual(["egg", "sesame"])
 
     const reviewNavigation = window.document.createElement("button")
     reviewNavigation.textContent = "Back to meal plan"
@@ -1236,6 +1350,8 @@ describe("Mini App HTTP boundary", () => {
         weekStart: "2026-09-27T18:30:00.000Z",
         weekEnd: "2026-10-03T18:29:59.000Z",
         timezone: "Asia/Kolkata",
+        schedule: SEED_SCHEDULE,
+        establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
         instanceId: "instance-pending-plan",
         generationId,
         candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
