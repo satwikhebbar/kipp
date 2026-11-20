@@ -18,9 +18,13 @@ enabled as required by [production runtime configuration](production-runtime-con
 
 The WebView authenticates using raw Telegram `initData`; the Worker verifies
 its HMAC, timestamp, replay fingerprint, configured parent, and a server-owned
-private-chat review context. Browser requests use an opaque, memory-only bearer
-session. URLs and logs never receive plan/chat identity, launch data, or bearer
-credentials. Device storage contains only the local draft payload, its
+private-chat review context. `/mealsettings` opens a short-lived settings-only
+session from the admitted user's private chat and also works before a plan
+exists. Browser requests use an opaque, memory-only bearer session. URLs and
+logs never receive plan/chat identity, launch data, or bearer credentials.
+Profile and schedule values stay in memory and are fetched from the server; the
+settings editor does not write them to browser or Telegram device storage.
+Device storage contains only the local draft payload, its
 idempotency key, and the minimal plan/version key needed to isolate that draft
 batch; it never contains a chat ID, raw launch data, or bearer credential.
 
@@ -37,6 +41,20 @@ retry for interrupted workflow processing.
 Before release, use a production-like public HTTPS origin and the configured
 parent account on both Android and iOS Telegram clients:
 
+- Send `/mealsettings` in the private bot chat before creating a plan. Edit a
+  dietary exclusion, save, and use **Reload from server** to confirm the saved
+  value returns. Confirm the settings form does not include a client-supplied
+  chat ID.
+- Change the schedule to two weekdays including Sunday, add and reorder a
+  custom slot, select an established meal for it, and choose a recurring
+  half-day behavior. Save and reload; confirm the values remain. When new foods
+  are disabled, leave an eligible established meal selected for every slot.
+- Open settings from an existing plan review, edit the future schedule, and
+  return to the plan. Confirm its displayed grid remains on the plan's pinned
+  schedule and feedback still submits against that plan.
+- Simulate a stale configuration version. Confirm the editor offers **Reload
+  latest and reapply my edits**, and that a successful reapply returns the
+  canonical saved configuration.
 - Run `/mealplan`; verify the persisted plan message has both feedback actions.
 - Open the Mini App and confirm the dark board, safe-area spacing, theme,
   six-day selection, compact holiday `🏖 Holiday` disabled state, and selectable
