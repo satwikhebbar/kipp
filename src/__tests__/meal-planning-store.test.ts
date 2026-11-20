@@ -1664,7 +1664,7 @@ describe("completed week repertoire", () => {
     }
   })
 
-  it.each(["D1", "memory"])("%s preserves a closure saved while a revision is planning", async (kind) => {
+  it.each(["D1", "memory"])("%s replays a saved closure and preserves newer context", async (kind) => {
     vi.useFakeTimers()
     try {
       vi.setSystemTime(open)
@@ -1679,17 +1679,38 @@ describe("completed week repertoire", () => {
       const weeklyExceptions = {
         items: [{ kind: "school_closed" as const, instruction: "Closed Monday", appliesTo: { day: "Mon" } }],
       }
-      expect(await store.updateWeeklyContext({ ...scope, weeklyInventory, weeklyExceptions })).toEqual({ ok: true })
+      const update = { ...scope, weeklyInventory, weeklyExceptions, expectedWeekContext: baseline.plan }
+      expect(await store.updateWeeklyContext(update)).toEqual({ ok: true })
+      const saved = await store.activePlan(CHAT)
+      if (!saved) throw new Error("Expected the saved context")
+      vi.setSystemTime(Date.parse(open) + 1000)
+      expect(await store.updateWeeklyContext(update)).toEqual({ ok: true })
+      expect(await store.activePlan(CHAT)).toEqual(saved)
+
+      const newerInventory = { ...weeklyInventory, notes: ["New inventory note"] }
+      expect(
+        await store.updateWeeklyContext({
+          ...update,
+          weeklyInventory: newerInventory,
+          expectedWeekContext: saved.plan,
+        }),
+      ).toEqual({ ok: true })
       const staleContext = { weeklyInventory, weeklyExceptions: { items: [] } }
       const stale = { ok: false, reason: "stale" }
+      expect(await store.updateWeeklyContext(update)).toEqual(stale)
       expect(
         await store.promotePlanVersion(promoteInput({ expectedWeekContext: baseline.plan, inventory: staleContext })),
       ).toEqual(stale)
       expect(
         await store.updateWeeklyContext({ ...scope, ...staleContext, expectedWeekContext: baseline.plan }),
       ).toEqual(stale)
-      expect((await store.activePlan(CHAT))?.plan).toMatchObject({ currentVersion: 1, weeklyExceptions })
+      expect((await store.activePlan(CHAT))?.plan).toMatchObject({
+        currentVersion: 1,
+        weeklyExceptions,
+        weeklyInventory: newerInventory,
+      })
       vi.setSystemTime(late)
+      expect(await store.updateWeeklyContext({ ...update, weeklyInventory: newerInventory })).toEqual(stale)
       expect(await store.completeEligibleMealPlan({ ...scope, weekEnd: cutoff })).toEqual({
         added: 0,
         skipped: 0,

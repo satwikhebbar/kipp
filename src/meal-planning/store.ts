@@ -1450,24 +1450,35 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
     },
 
     async updateWeeklyContext(input) {
-      const result = await db
-        .prepare(
-          `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ${D1_NOW_ISO}
-           WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}
-             AND weekly_inventory_json = COALESCE(?, weekly_inventory_json)
-             AND weekly_exceptions_json = COALESCE(?, weekly_exceptions_json)`,
-        )
-        .bind(
-          JSON.stringify(input.weeklyInventory),
-          JSON.stringify(input.weeklyExceptions),
-          input.planId,
-          input.chatId,
-          input.baseVersion,
-          input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyInventory) : null,
-          input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyExceptions) : null,
-        )
-        .run()
-      return Number(result.meta.changes) === 1
+      const next = [JSON.stringify(input.weeklyInventory), JSON.stringify(input.weeklyExceptions)]
+      const scope = [input.planId, input.chatId, input.baseVersion]
+      const activeVersion = `plan_id = ? AND chat_id = ? AND current_version = ?
+                             AND status = 'active' AND week_end > ${D1_NOW_ISO}`
+      // A step may retry after its write commits. Confirm the intended state
+      // without rewriting it, and require the same active version and cutoff.
+      const [write, current] = await db.batch([
+        db
+          .prepare(
+            `UPDATE meal_plan SET weekly_inventory_json = ?, weekly_exceptions_json = ?, updated_at = ${D1_NOW_ISO}
+             WHERE ${activeVersion}
+               AND weekly_inventory_json = COALESCE(?, weekly_inventory_json)
+               AND weekly_exceptions_json = COALESCE(?, weekly_exceptions_json)
+               AND (weekly_inventory_json != ? OR weekly_exceptions_json != ?)`,
+          )
+          .bind(
+            ...next,
+            ...scope,
+            input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyInventory) : null,
+            input.expectedWeekContext ? JSON.stringify(input.expectedWeekContext.weeklyExceptions) : null,
+            ...next,
+          ),
+        db
+          .prepare(
+            `SELECT 1 FROM meal_plan WHERE ${activeVersion} AND weekly_inventory_json = ? AND weekly_exceptions_json = ?`,
+          )
+          .bind(...scope, ...next),
+      ])
+      return Number(write.meta.changes) === 1 || current.results.length === 1
         ? { ok: true as const }
         : { ok: false as const, reason: "stale" as const }
     },
@@ -2219,9 +2230,10 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         plan?.status !== "active" ||
         plan.chatId !== input.chatId ||
         plan.currentVersion !== input.baseVersion ||
-        !matchesWeekContext(plan, input.expectedWeekContext) ||
         plan.weekEnd <= nowIso()
       if (stale) return { ok: false as const, reason: "stale" as const }
+      if (matchesWeekContext(plan, input)) return { ok: true as const }
+      if (!matchesWeekContext(plan, input.expectedWeekContext)) return { ok: false as const, reason: "stale" as const }
       plan.weeklyInventory = structuredClone(input.weeklyInventory)
       plan.weeklyExceptions = structuredClone(input.weeklyExceptions)
       plan.updatedAt = nowIso()
