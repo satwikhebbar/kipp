@@ -253,8 +253,9 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
   const normalize = (text: string) => text.trim().toLowerCase().replace(/’/gu, "'").replace(/\s+/gu, " ")
   const rejection =
     /^(?:please )?(?:i |we )?(?:reject|do not want|don't want|do not like|don't like|never serve|remove) /u
+  // Keep a continuation such as "but keep it on Monday" attached to the removal.
   const clauseBreak =
-    /[;.!?]+|(?:,?\s+but\s+|(?:,\s*|\s+and\s+)(?=(?:please )?(?:i |we )?(?:add|use|keep|prefer|serve|move|swap|choose|include|put|make|change|switch|remove|reject|do |don't |never )\b))/u
+    /[;.!?]+|,?\s+but\s+(?=[^,;.!?]+ is fine(?:[;.!?]|$))|(?:,\s*(?:and )?|\s+and\s+)(?=(?:please )?(?:i |we )?(?:add|use|prefer|serve|move|swap|choose|include|put|make|change|switch|remove|reject|do |don't |never )\b)/u
   const names = definitions
     .filter((definition) => definition.status === "provisional")
     .flatMap((definition) =>
@@ -268,6 +269,7 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
     for (const clause of normalize(item.text).split(clauseBreak)) {
       const cue = rejection.exec(clause.trim())
       if (!cue) continue
+      const clauseMatches = new Set<string>()
       let target = clause.trim().slice(cue[0].length)
       while (target) {
         target = target.replace(/^(?:the|a|an) /u, "")
@@ -277,9 +279,13 @@ export function explicitRejectedMealIds(items: FeedbackItem[], definitions: Meal
         if (!longest) break
 
         const suffix = target.slice(longest.name.length).trimStart()
+        if (names.every(({ name, id }) => name !== longest.name || id === longest.id)) clauseMatches.add(longest.id)
+        // A qualifier on the last target can apply to the entire list.
+        if (!suffix || /^(?:,\s*)?please$/u.test(suffix)) {
+          for (const id of clauseMatches) matches.add(id)
+          break
+        }
         const listSeparator = /^(?:,\s*(?:and )?|and )/u.exec(suffix)
-        if (suffix && suffix !== "please" && !listSeparator) break
-        if (names.every(({ name, id }) => name !== longest.name || id === longest.id)) matches.add(longest.id)
         if (!listSeparator) break
         target = suffix.slice(listSeparator[0].length)
       }
