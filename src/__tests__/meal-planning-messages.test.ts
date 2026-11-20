@@ -90,6 +90,7 @@ const VERSION: MealPlanVersionRecord = {
   usage: null,
   createdAt: "2026-09-07T00:00:00.000Z",
   allowNewFoodsSnapshot: true,
+  recurringHalfDaysSnapshot: null,
 }
 
 describe("renderPlanMessage", () => {

@@ -1,5 +1,10 @@
 import type { CompletionCounts } from "./completion"
-import { completionAdditions, decodeCompletionRejectedIds, decodeCompletionWeeklyExceptions } from "./completion"
+import {
+  completionAdditions,
+  decodeCompletionRecurringHalfDays,
+  decodeCompletionRejectedIds,
+  decodeCompletionWeeklyExceptions,
+} from "./completion"
 import type {
   CustomPolicy,
   FeedbackItem,
@@ -133,6 +138,8 @@ export interface MealPlanVersionRecord {
   createdAt: string
   /** Historical profile policy captured when this immutable version was evaluated. */
   allowNewFoodsSnapshot: boolean | null
+  /** Recurring half-days used during evaluation. Null for versions saved before schedule tracking. */
+  recurringHalfDaysSnapshot: string[] | null
 }
 
 /** The active plan plus its current version — the read shape for the live loop and the iteration-2 mini-app. */
@@ -237,6 +244,7 @@ export interface CreateActivePlanInput {
   usage?: VersionUsage
   /** Profile policy snapshot used to evaluate this version. */
   allowNewFoodsSnapshot?: boolean
+  recurringHalfDaysSnapshot?: string[]
 }
 
 /** Result of a committed initial-plan batch. */
@@ -282,6 +290,7 @@ export interface PromotePlanVersionInput {
   usage?: VersionUsage
   /** Profile policy snapshot used to evaluate this version. */
   allowNewFoodsSnapshot?: boolean
+  recurringHalfDaysSnapshot?: string[]
 }
 
 export interface UpdateWeeklyContextInput {
@@ -864,7 +873,7 @@ function makeVersionRecord(
   provisionalMealDefinitions: MealDefinition[],
   usage: VersionUsage | null,
   now: string,
-  allowNewFoodsSnapshot: boolean | null = null,
+  input: Pick<CreateActivePlanInput, "allowNewFoodsSnapshot" | "recurringHalfDaysSnapshot">,
 ): MealPlanVersionRecord {
   return {
     planId,
@@ -878,7 +887,8 @@ function makeVersionRecord(
     provisionalMealDefinitions,
     usage: usage ? { ...usage } : null,
     createdAt: now,
-    allowNewFoodsSnapshot,
+    allowNewFoodsSnapshot: input.allowNewFoodsSnapshot ?? null,
+    recurringHalfDaysSnapshot: input.recurringHalfDaysSnapshot ?? null,
   }
 }
 
@@ -888,7 +898,7 @@ const PLAN_WITH_VERSION_COLUMNS = `
          p.replaced_at, p.approved_version, p.rejected_version, p.rejected_meal_ids_json,
          v.version, v.candidate_json, v.evaluation_json, v.request_kind, v.base_version,
          v.feedback_batch_id, v.video_json, v.provisional_meals_json,
-         v.usage_input_tokens, v.usage_output_tokens, v.usage_model,
+         v.usage_input_tokens, v.usage_output_tokens, v.usage_model, v.recurring_half_days_json,
          v.cost_usd, v.cost_status, v.allow_new_foods_snapshot,
          v.created_at AS version_created_at`
 const PLAN_WITH_VERSION_FROM = `
@@ -974,6 +984,7 @@ function mealPlanFromRow(row: Record<string, unknown>): ActivePlanRecord {
                 : { costUsd: row.cost_status === "reported" ? Number(row.cost_usd) : null }),
             },
       createdAt: String(row.version_created_at),
+      recurringHalfDaysSnapshot: parseJson<string[] | null>(String(row.recurring_half_days_json ?? ""), null),
       allowNewFoodsSnapshot:
         row.allow_new_foods_snapshot === null || row.allow_new_foods_snapshot === undefined
           ? null
@@ -1042,6 +1053,11 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         // Completion must fail closed if evidence that excludes a dish is unreadable.
         record.plan.weeklyExceptions = decodeCompletionWeeklyExceptions(String(row.weekly_exceptions_json))
         record.plan.rejectedMealIds = decodeCompletionRejectedIds(String(row.rejected_meal_ids_json))
+        if (row.recurring_half_days_json != null) {
+          record.version.recurringHalfDaysSnapshot = decodeCompletionRecurringHalfDays(
+            String(row.recurring_half_days_json),
+          )
+        }
         const { additions, counts } = completionAdditions(record, profile)
         const attempt = crypto.randomUUID()
         const ledger = db
@@ -1052,6 +1068,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           JOIN meal_profile profile ON profile.chat_id = p.chat_id
           WHERE p.plan_id = ? AND p.chat_id = ? AND p.week_end = ? AND p.current_version = ?
             AND p.weekly_exceptions_json = ? AND p.rejected_meal_ids_json = ?
+            AND v.recurring_half_days_json IS ?
             AND profile.profile_json = ? AND ${ELIGIBLE_FOR_COMPLETION}`)
           .bind(
             attempt,
@@ -1064,6 +1081,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             record.plan.currentVersion,
             row.weekly_exceptions_json,
             row.rejected_meal_ids_json,
+            row.recurring_half_days_json,
             prior,
           )
         const statements = [ledger]
@@ -1186,8 +1204,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
                                             usage_input_tokens, usage_output_tokens, usage_model,
-                                            cost_usd, cost_status, allow_new_foods_snapshot, created_at)
-             SELECT plan_id, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, created_at
+                                            cost_usd, cost_status, allow_new_foods_snapshot, recurring_half_days_json, created_at)
+             SELECT plan_id, 1, ?, ?, 'initial_plan', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, created_at
              FROM (${createdPlan})`,
           )
           .bind(
@@ -1201,6 +1219,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
             input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
             input.allowNewFoodsSnapshot == null ? null : input.allowNewFoodsSnapshot ? 1 : 0,
+            input.recurringHalfDaysSnapshot === undefined ? null : JSON.stringify(input.recurringHalfDaysSnapshot),
             ...proof,
           ),
         // The staged row is private to this batch. Replace the prior active row before activating it.
@@ -1260,7 +1279,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.provisionalMealDefinitions ?? [],
           input.usage ?? null,
           createdAt,
-          input.allowNewFoodsSnapshot ?? null,
+          input,
         ),
         generation: Number(result.interaction_generation),
         previousReplaced: Number(results[2].meta.changes) >= 1,
@@ -1287,8 +1306,9 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             `INSERT INTO meal_plan_version (plan_id, version, candidate_json, evaluation_json, request_kind,
                                             base_version, feedback_batch_id, video_json, provisional_meals_json,
                                             usage_input_tokens, usage_output_tokens, usage_model,
-                                            cost_usd, cost_status, allow_new_foods_snapshot, created_at, write_attempt_id)
-             SELECT plan_id, ?, ?, ?, 'revision', current_version, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${D1_NOW_ISO}, ?
+                                            cost_usd, cost_status, allow_new_foods_snapshot, recurring_half_days_json,
+                                            created_at, write_attempt_id)
+             SELECT plan_id, ?, ?, ?, 'revision', current_version, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${D1_NOW_ISO}, ?
              FROM meal_plan
              WHERE plan_id = ? AND chat_id = ? AND current_version = ? AND status = 'active' AND week_end > ${D1_NOW_ISO}
                AND weekly_inventory_json = COALESCE(?, weekly_inventory_json)
@@ -1312,6 +1332,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             typeof input.usage?.costUsd === "number" ? input.usage.costUsd : null,
             input.usage?.costStatus ?? versionCostStatus(input.usage?.costUsd),
             input.allowNewFoodsSnapshot == null ? null : input.allowNewFoodsSnapshot ? 1 : 0,
+            input.recurringHalfDaysSnapshot === undefined ? null : JSON.stringify(input.recurringHalfDaysSnapshot),
             attemptId,
             input.planId,
             input.chatId,
@@ -1384,7 +1405,7 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           input.provisionalMealDefinitions ?? [],
           input.usage ?? null,
           String(result.created_at),
-          input.allowNewFoodsSnapshot ?? null,
+          input,
         ),
         generation: Number(result.interaction_generation),
       }
@@ -2083,7 +2104,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         input.provisionalMealDefinitions ?? [],
         input.usage ?? null,
         now,
-        input.allowNewFoodsSnapshot ?? null,
+        input,
       )
       backing.versions.set(versionKey(input.planId, 1), structuredClone(version))
       profile.interactionGeneration += 1
@@ -2131,7 +2152,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
         input.provisionalMealDefinitions ?? [],
         input.usage ?? null,
         now,
-        input.allowNewFoodsSnapshot ?? null,
+        input,
       )
       backing.versions.set(versionKey(input.planId, newVersion), structuredClone(version))
       if (input.inventory) {

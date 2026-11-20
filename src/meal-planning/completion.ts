@@ -12,6 +12,12 @@ const calendarDaySchema = z
   .string()
   .trim()
   .pipe(z.enum(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]))
+const recurringHalfDaysSchema = z.array(calendarDaySchema)
+
+/** Reads the version's frozen recurring half-days. Failed decoding defers completion. */
+export function decodeCompletionRecurringHalfDays(raw: string): string[] {
+  return recurringHalfDaysSchema.parse(JSON.parse(raw))
+}
 
 /** Reads the stored rejection evidence or aborts completion if it is unreadable. */
 export function decodeCompletionRejectedIds(raw: string): string[] {
@@ -91,7 +97,11 @@ export function completionAdditions(record: ActivePlanRecord, profile: MealProfi
   const closed = new Set(
     weeklyExceptions.items.filter((item) => item.kind === "school_closed").map((item) => item.appliesTo?.day),
   )
-  const schedule = { days: [], slots: [] }
+  const schedule = {
+    days: [],
+    slots: [],
+    halfDays: recurringHalfDaysSchema.parse(version.recurringHalfDaysSnapshot ?? []),
+  }
   const referenced = new Set<string>()
   const counts: CompletionCounts = { added: 0, skipped: 0, invalid: 0 }
   if (!Array.isArray(version.provisionalMealDefinitions)) {

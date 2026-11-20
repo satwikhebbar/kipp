@@ -731,6 +731,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const active = await store.activePlan(CHAT)
     if (!active) throw new Error("missing saved plan")
     const batchId = "context-retry-batch"
+    expect(active.version.recurringHalfDaysSnapshot).toEqual(["Sat"])
     expect(
       await store.acceptFeedbackBatch({
         batchId,
@@ -782,6 +783,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const saved = await store.activePlan(CHAT)
     expect(saved?.plan.currentVersion).toBe(2)
     expect(saved?.plan.weeklyExceptions.items).toEqual([closure])
+    expect(saved?.version.recurringHalfDaysSnapshot).toEqual(["Sat"])
     expect(saved?.version.candidate.grid.Thu).toBeUndefined()
     expect(saved?.version.candidate.grid.Mon.snack1.dish).toBe("vegetable cutlet")
     expect(await store.feedbackBatch(batchId)).toMatchObject({ status: "consumed" })

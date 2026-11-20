@@ -426,6 +426,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
             planning.decisionsCostUsd,
           ),
           allowNewFoodsSnapshot: profile.profile.allowNewFoods,
+          recurringHalfDaysSnapshot: context.schedule.halfDays ?? [],
         })
       } catch (error) {
         if (error instanceof PlanWeekClosedError) return "week-closed" as const
@@ -1349,6 +1350,7 @@ async function runRevision(
       provisionalMealDefinitions: propose.provisionalMealDefinitions,
       usage: makeVersionUsage(roundUsage, roundDecisionsCostUsd),
       allowNewFoodsSnapshot: profile.profile.allowNewFoods,
+      recurringHalfDaysSnapshot: context.schedule.halfDays ?? [],
       inventory: {
         weeklyInventory: propose.weeklyInventory,
         weeklyExceptions: propose.weeklyExceptions,

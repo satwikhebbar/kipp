@@ -1814,6 +1814,74 @@ describe("completed week repertoire", () => {
   })
 
   it.each([
+    ["D1", "initial"],
+    ["D1", "revision"],
+    ["D1", "legacy"],
+    ["memory", "initial"],
+    ["memory", "revision"],
+    ["memory", "legacy"],
+  ])("%s applies the saved recurring half-days (%s)", async (backend, kind) => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(open)
+      const fixture = backend === "D1" ? createClockedD1TestDb() : null
+      const store = fixture ? createMealPlanningStore(fixture.d1) : createInMemoryMealPlanningStore()
+      const profile = await store.loadOrCreateProfile(CHAT)
+      const droppedSnack = { ...dish, id: "drop-snack", name: "Canceled snack" }
+      const keptLunch = { ...dish, id: "keep-lunch", name: "Full-day squash" }
+      const cell = { dish: dish.name, items: [], vegetarian: true, cookMinutes: 25, priorNightPrep: true }
+      const original = input({
+        recurringHalfDaysSnapshot: kind === "initial" ? ["Fri", "Sat"] : undefined,
+        provisionalMealDefinitions: [dish, droppedSnack, keptLunch],
+        candidate: candidate({
+          Fri: { "school-lunch": { ...cell, dish: keptLunch.name } },
+          Sat: { snack2: { ...cell, dish: droppedSnack.name }, "school-lunch": cell },
+        }),
+        weeklyExceptions: { items: [{ kind: "full_day", instruction: "Full Friday", appliesTo: { day: "Fri" } }] },
+      })
+      await createPlan(store, original)
+      if (kind === "revision") {
+        expect(
+          await store.promotePlanVersion(
+            promoteInput({
+              recurringHalfDaysSnapshot: ["Fri", "Sat"],
+              allowNewFoodsSnapshot: true,
+              candidate: original.candidate,
+              provisionalMealDefinitions: original.provisionalMealDefinitions,
+            }),
+          ),
+        ).toMatchObject({ ok: true })
+        expect(await store.decidePlanVersion({ planId: "plan-1", chatId: CHAT, version: 2, action: "accept" })).toBe(
+          true,
+        )
+      }
+      const persisted = await store.activePlan(CHAT)
+      expect(persisted?.version.recurringHalfDaysSnapshot).toEqual(kind === "legacy" ? null : ["Fri", "Sat"])
+      // A profile edit after the version was saved has no bearing on completion.
+      const laterSchedule = { ...SEED_SCHEDULE, halfDays: kind === "legacy" ? ["Sat"] : [] }
+      if (fixture) {
+        fixture.db
+          .prepare("UPDATE meal_profile SET schedule_json = ? WHERE chat_id = ?")
+          .run(JSON.stringify(laterSchedule), CHAT)
+      } else {
+        profile.schedule = laterSchedule
+      }
+      vi.setSystemTime(late)
+      expect(await store.completeEligibleMealPlan({ planId: "plan-1", chatId: CHAT, weekEnd: cutoff })).toEqual({
+        added: kind === "legacy" ? 3 : 1,
+        skipped: 0,
+        invalid: 0,
+      })
+      const ids = (await store.loadOrCreateProfile(CHAT)).profile.mealDefinitions?.map((entry) => entry.id)
+      expect(ids).toContain(keptLunch.id)
+      expect(ids?.includes(dish.id)).toBe(kind === "legacy")
+      expect(ids?.includes(droppedSnack.id)).toBe(kind === "legacy")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
     ["school_closed", { day: 1 }],
     ["school_closed", { day: "Monday-ish" }],
     ["school_closed", undefined],
