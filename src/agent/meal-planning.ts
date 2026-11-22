@@ -472,6 +472,7 @@ export function createEvaluateMealPlanTool(
   context: MealPlanContext,
   revisionBase?: MealPlanCandidate,
   applyClassification?: (selection: MealPlanSelectionEvaluation) => Promise<MealPlanSelectionEvaluation>,
+  resolveReferences?: <T extends MealPlanSelectionCandidate | MealPlanSelectionPatch>(candidate: T) => T,
 ): ToolDefinition {
   const isRevision = revisionBase !== undefined
   const policyIds = context.customPolicies.map((policy) => policy.id)
@@ -488,9 +489,10 @@ export function createEvaluateMealPlanTool(
       const internalCandidate = isRevision
         ? mealPlanSelectionPatchFromWire(candidate as MealPlanSelectionWirePatch, policyIds)
         : mealPlanSelectionCandidateFromWire(candidate as MealPlanSelectionWireCandidate, policyIds)
+      const resolvedCandidate = resolveReferences ? resolveReferences(internalCandidate) : internalCandidate
       const selection = revisionBase
-        ? evaluateMealPlanSelectionPatch(internalCandidate as MealPlanSelectionPatch, revisionBase, context)
-        : evaluateMealPlanSelection(internalCandidate as MealPlanSelectionCandidate, context)
+        ? evaluateMealPlanSelectionPatch(resolvedCandidate as MealPlanSelectionPatch, revisionBase, context)
+        : evaluateMealPlanSelection(resolvedCandidate as MealPlanSelectionCandidate, context)
       return (applyClassification ? await applyClassification(selection) : selection).evaluation
     },
   }

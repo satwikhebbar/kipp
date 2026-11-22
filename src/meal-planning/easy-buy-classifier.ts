@@ -32,6 +32,13 @@ export interface PackedMealCheck {
   dish: string
   ingredients: readonly string[]
   drySlot: boolean
+  halfDay?: boolean
+  /** A uniquely named catalog match is context, not proof about the actual preparation. */
+  matchingCatalogEntry?: {
+    halfDaySnack: boolean
+    packedFood?: { suitable: boolean; dry: boolean }
+    suitableSlots: readonly string[]
+  }
 }
 
 export interface PackedMealClassification {
@@ -175,7 +182,15 @@ export function createEasyBuyClassifier(
       packedMeals.forEach((meal, index) => {
         questions[`packed_meal_${index}`] = {
           type: "noul",
-          instructions: `Is the meal "${meal.dish}" with ingredients [${meal.ingredients.join(", ")}] suitable for ${meal.day} ${meal.slot} in an ordinary school lunchbox? It must travel safely without likely spilling or leaking, be independently edible by hand or ordinary spoon, and require no reheating, cooking, assembly, or special equipment.${meal.drySlot ? " This is a dry slot, so the food must also be dry and spill-resistant." : ""}`,
+          instructions: {
+            question: `Is the actual meal suitable for this slot in an ordinary school lunchbox? It must travel safely without likely spilling or leaking, be independently edible by hand or ordinary spoon, and require no reheating, cooking, assembly, or special equipment.${meal.drySlot ? " This is a dry slot, so the food must also be dry and spill-resistant." : ""} A matching catalog entry provides household context, but does not override the actual meal's ingredients or these requirements.`,
+            dish: meal.dish,
+            ingredients: meal.ingredients,
+            day: meal.day,
+            slot: meal.slot,
+            halfDay: meal.halfDay ?? false,
+            ...(meal.matchingCatalogEntry ? { matchingCatalogEntry: meal.matchingCatalogEntry } : {}),
+          },
           criteria: {
             true: "The actual meal meets every stated transport, eating, preparation, and slot requirement.",
             false: "The actual meal violates any stated transport, eating, preparation, or slot requirement.",

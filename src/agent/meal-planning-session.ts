@@ -12,8 +12,9 @@ import {
   evaluateMealPlanSelectionPatch,
   isConcretePlanFeedback,
 } from "../meal-planning/evaluation"
-import { effectiveMealSlot } from "../meal-planning/half-day"
+import { effectiveMealSlot, isHalfDay } from "../meal-planning/half-day"
 import { normalizeIngredient } from "../meal-planning/ingredient-normalization"
+import { resolveMealSessionReferences } from "../meal-planning/session-references"
 import type {
   FailureCode,
   FeedbackItem,
@@ -69,7 +70,7 @@ School meals are always vegetarian (no meat); normal packed snacks are dry and n
 For home-lunch, select the vegetable curry/subzi as the meal represented in the home-lunch slot. The parent can choose the accompanying staple (plain rice or chapati) and protein dish (dal, kadhi, sambar, or another lentil-based dish) separately for now. A flavored-rice meal such as pulao or tomato rice is an explicit exception and may stand alone.
 Respect the household's operating limits supplied in the context: hard dietary exclusions, unavailable weekly inventory, the per-day morning cook budget, and prior-night-prep rules.
 Plans default to healthy, nutritious meals; the persistent custom policies define any exceptions. The context also lists the household's persistent custom policies; record exactly one concise outcome with a short rationale for every persistent policy, and never claim certainty when a policy cannot be interpreted confidently.
-Build the initial grid or revision patch from meal selections. The context provides complete structured catalog records: use their listed slots, packing facts, cook minutes, prep requirement, and required ingredients rather than inferring them. Established meals use their mealDefinitionId; copy that ID exactly from a catalog record in the context and never invent, derive, or reuse an opaque ID from memory. ingredientChoices may contain only the permitted choices listed for that definition, and usesPriorNightPrep is meaningful only when prep is optional.
+Build the initial grid or revision patch from meal selections. The context provides complete structured catalog records: use their listed slots, packing facts, cook minutes, prep requirement, and required ingredients rather than inferring them. Established meals use their session-local reference (such as M1) as mealDefinitionId; use only the reference shown in this session. ingredientChoices may contain only the permitted choices listed for that definition, and usesPriorNightPrep is meaningful only when prep is optional.
 For an initial plan, verify every required ingredient against the context's weekly inventory, pantry baseline, or easy buys; do not assume a near-match is available. For a revision, do not select an explicitly unavailable ingredient; the server adds other newly required ingredients to easyBuys after the revised plan is merged. If a catalog ingredient and the parent inventory use different names for the same ingredient, explicitly map the inventory spelling to the catalog spelling in ingredientAliasesUsed. Use this only for a genuine semantic match, for example [{ "availableIngredient": "rajma", "definitionIngredient": "kidney beans" }]; both names must be present in the context.
 Treat fresh produce in the weekly inventory as enough for one meal only, except onion, tomato, and potato, which may be reused across meals; do not schedule the same other fresh vegetable as the base of multiple meals unless the parent explicitly supplies a quantity or says it is available for reuse.
 When new foods are allowed and no suitable known meal can be selected, submit a structured proposal, for example: { "proposedMeal": { "name": "Carrot rice", "principalIngredients": ["rice", "carrot"], "vegetarian": true, "suitableSlots": ["home-lunch"], "packedFood": { "suitable": false, "dry": false }, "cookMinutes": 20, "priorNightPrep": "optional", "ingredients": ["rice", "carrot"] }, "usesPriorNightPrep": false }. For every proposed meal, keep principalIngredients and ingredients limited to dense, primary, meal-defining ingredients: grains, pulses, flour, dairy, specifically named produce, or prepared components. Do not add vague aggregates such as "vegetable" or "mixed vegetable", and do not add routine pantry seasonings or cooking basics such as salt, oil, turmeric, chilli, cumin, mustard seeds, curry leaves, or generic spices. Those are covered by the pantry baseline and must not create ingredient-availability failures. A new packed meal must travel safely in an ordinary lunchbox, have no likely spill or leak, be independently edible by hand or ordinary spoon, and require no reheating, cooking, assembly, or special equipment; dry slots additionally require dry spill-resistant food. Reuse a plan-local provisional meal only when its provisionalMealId appears in the current context's Plan-local provisional definitions; copy that ID exactly. Never reuse a provisional ID from memory, another plan, or an unrelated conversation.
@@ -80,7 +81,7 @@ easyBuys is the short list of ordinary ingredients you are adding this week: sta
 Validate the candidate with evaluate_meal_plan, revise objective failures, self-check the free-form policies, then finish with exactly one terminal action. Call propose_plan only when the evaluation passes and every submitted feedback is represented by a feedbackItems entry or an outcome rationale. Include a short justification in propose_plan explaining the plan in plain language. Call needs_clarification when a targeted question is required to plan confidently; include every failure code from the latest evaluation when there is one. Before evaluation, use an empty reasonCodes list unless the clarification is caused directly by a known hard constraint; then include its applicable failure code, such as hard_exclusion. Keep the message concise, in plain language. Never expose opaque ids, credentials, or internal tokens in the message.
 
 ## Examples
-Known selection example: { "mealDefinitionId": "meal_opaque_paratha", "ingredientChoices": ["spinach"], "ingredientAliasesUsed": [{ "availableIngredient": "whole-wheat atta", "definitionIngredient": "wheat flour" }], "usesPriorNightPrep": true }.
+Known selection example (only if M1 is the relevant meal in this session): { "mealDefinitionId": "M1", "ingredientChoices": ["spinach"], "ingredientAliasesUsed": [{ "availableIngredient": "whole-wheat atta", "definitionIngredient": "wheat flour" }], "usesPriorNightPrep": true }.
 `
 
 export interface MealPlanningAgentSessionOptions {
@@ -282,8 +283,11 @@ export async function runMealPlanningAgentSession(
       },
     }
   }
-  const evaluationTool = createEvaluateMealPlanTool(options.context, options.revisionBaseCandidate, (selection) =>
-    classifySemanticChecks(selection, options.context),
+  const evaluationTool = createEvaluateMealPlanTool(
+    options.context,
+    options.revisionBaseCandidate,
+    (selection) => classifySemanticChecks(selection, options.context),
+    (candidate) => resolveMealSessionReferences(candidate, options.context),
   )
   const registry: ToolRegistry = {
     [MEAL_PLANNING_TOOL.EVALUATE]: {
@@ -304,9 +308,12 @@ export async function runMealPlanningAgentSession(
       batching: "isolated",
       handler: async (input) => {
         const policyIds = options.context.customPolicies.map((policy) => policy.id)
-        const candidate = isRevisionPatch
-          ? mealPlanSelectionPatchFromWire(input.candidate, policyIds)
-          : mealPlanSelectionCandidateFromWire(input.candidate, policyIds)
+        const candidate = resolveMealSessionReferences(
+          isRevisionPatch
+            ? mealPlanSelectionPatchFromWire(input.candidate, policyIds)
+            : mealPlanSelectionCandidateFromWire(input.candidate, policyIds),
+          options.context,
+        )
         const authoritative = options.context.feedbackItems ?? []
         const submitted: FeedbackItem[] = input.feedbackItems ?? []
         // Feedback targets and scopes are server-owned. An optional model echo
@@ -458,7 +465,27 @@ function packedMealChecks(selection: MealPlanSelectionEvaluation, context: MealP
     for (const [slotId, cell] of Object.entries(slots)) {
       const slot = effectiveMealSlot(context, day, slotId)
       if (!slot?.packed) continue
-      checks.push({ day, slot: slotId, dish: cell.dish, ingredients: cell.items, drySlot: slot.dry })
+      const matches = (context.profile.mealDefinitions ?? []).filter(
+        (meal) => meal.status === "established" && meal.name === cell.dish,
+      )
+      const catalog = matches.length === 1 ? matches[0] : undefined
+      checks.push({
+        day,
+        slot: slotId,
+        dish: cell.dish,
+        ingredients: cell.items,
+        drySlot: slot.dry,
+        halfDay: isHalfDay(context, day),
+        ...(catalog
+          ? {
+              matchingCatalogEntry: {
+                halfDaySnack: catalog.halfDaySnack === true,
+                packedFood: catalog.packedFood,
+                suitableSlots: catalog.suitableSlots,
+              },
+            }
+          : {}),
+      })
     }
   }
   return checks
