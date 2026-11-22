@@ -664,6 +664,7 @@ describe("Mini App HTTP boundary", () => {
     let conflictSequence = 0
     let slotConflictNextSave = false
     let eligibilityConflictNextSave: { slotId: string; eligibleIds: string[] } | null = null
+    let dayConflictNextSave = false
     let halfDayConflictNextSave: "half" | "full" | null = null
     const delayedSave = { release: undefined as (() => void) | undefined }
     const delayedGet = { release: undefined as (() => void) | undefined }
@@ -737,6 +738,15 @@ describe("Mini App HTTP boundary", () => {
               ...serverSettings.eligibleEstablishedMeals,
               [conflict.slotId]: conflict.eligibleIds,
             },
+          }
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
+        }
+        if (dayConflictNextSave) {
+          dayConflictNextSave = false
+          serverSettings = {
+            ...serverSettings,
+            configurationVersion: serverSettings.configurationVersion + 1,
+            schedule: { ...serverSettings.schedule, days: ["Tue"], halfDays: [] },
           }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
@@ -843,7 +853,10 @@ describe("Mini App HTTP boundary", () => {
       (input) => (input as unknown as { value: string }).value,
     )
     expect(new Set(policyIds).size).toBe(policyIds.length)
-    while (true) {
+    const generatedPolicyCount = [...(app?.querySelectorAll(".settings-policy") ?? [])].filter((row) =>
+      (row.querySelector('[data-policy="id"]') as unknown as { value: string }).value.startsWith("household-rule-"),
+    ).length
+    for (let attempt = 0; attempt < generatedPolicyCount; attempt += 1) {
       const generatedPolicy = [...(app?.querySelectorAll(".settings-policy") ?? [])].find((row) =>
         (row.querySelector('[data-policy="id"]') as unknown as { value: string }).value.startsWith("household-rule-"),
       )
@@ -852,6 +865,11 @@ describe("Mini App HTTP boundary", () => {
         .querySelector('button[data-action="remove-policy"]')
         ?.dispatchEvent(new window.Event("click", { bubbles: true }))
     }
+    expect(
+      [...(app?.querySelectorAll(".settings-policy") ?? [])].filter((row) =>
+        (row.querySelector('[data-policy="id"]') as unknown as { value: string }).value.startsWith("household-rule-"),
+      ),
+    ).toHaveLength(0)
     app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     const policy = [...(app?.querySelectorAll(".settings-policy") ?? [])].at(-1)
     ;(policy?.querySelector('[data-policy="id"]') as unknown as { value: string }).value = "avoid-red-dye"
@@ -1099,6 +1117,59 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     expect(serverSettings.schedule.days).toEqual(["Mon", "Wed"])
     expect(serverSettings.schedule.halfDays ?? []).toEqual([])
+
+    serverSettings = {
+      ...serverSettings,
+      configurationVersion: serverSettings.configurationVersion + 1,
+      schedule: { ...serverSettings.schedule, days: ["Mon", "Tue"], halfDays: [] },
+    }
+    app?.querySelector('button[data-action="reload"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    dayConflictNextSave = true
+    const conflictingDays = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    conflictingDays.forEach((input) => {
+      input.checked = input.value === "Mon"
+    })
+    const conflictingHalfDays = [...(app?.querySelectorAll('input[name="halfDays"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    conflictingHalfDays.forEach((input) => {
+      input.checked = input.value === "Mon"
+    })
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("schedule.day.Mon")
+    app
+      ?.querySelector('button[data-action="use-latest-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("Choose at least one day and one meal slot.")
+    const resolvedDays = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    expect(resolvedDays.every((input) => !input.checked)).toBe(true)
+    const submissionsBeforeInvalidSave = submissions.length
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(submissions).toHaveLength(submissionsBeforeInvalidSave)
+    expect(serverSettings.schedule.days).toEqual(["Tue"])
+    const retryDays = [...(app?.querySelectorAll('input[name="days"]') ?? [])] as unknown as {
+      value: string
+      checked: boolean
+    }[]
+    const tue = retryDays.find((input) => input.value === "Tue")
+    if (!tue) throw new Error("missing Tuesday selection")
+    tue.checked = true
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(serverSettings.schedule.days).toEqual(["Tue"])
 
     conflictSequence = 2
     const localExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }

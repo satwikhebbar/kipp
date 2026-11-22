@@ -1631,7 +1631,6 @@ describe("meal-planning evaluator", () => {
     const original = baseCandidate()
     original.grid.Tue.breakfast.priorNightPrep = true
     const recentPlan = structuredClone(original.grid)
-    delete recentPlan.Tue.breakfast
     const context = baseContext({
       profile: { ...baseContext().profile, priorNightPrepAllowed: false },
       recentPlan,
