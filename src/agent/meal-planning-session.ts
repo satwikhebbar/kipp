@@ -143,6 +143,7 @@ export async function runMealPlanningAgentSession(
 ): Promise<MealPlanningAgentSessionResult> {
   let terminal: MealPlanningTerminalOutcome | null = null
   let latestEvaluation: MealPlanEvaluation | null = null
+  const clarificationExchanges = acceptedClarificationExchanges(initialMessages)
   // The workflow always supplies this for revisions. Keeping the session's
   // low-level test harness usable without persisted state preserves existing
   // full-candidate callers, while production revisions always use patches.
@@ -166,7 +167,7 @@ export async function runMealPlanningAgentSession(
     if (!classifier || !selection.candidate || !selection.evaluation.pass) return selection
     const packedMeals = packedMealChecks(selection, context)
     const persistentPolicies = persistentPolicyChecks(selection, context)
-    const feedbackChecks = authoritativeFeedbackChecks(selection, context)
+    const feedbackChecks = authoritativeFeedbackChecks(selection, context, clarificationExchanges)
     if (
       selection.candidate.easyBuys.length === 0 &&
       packedMeals.length === 0 &&
@@ -531,10 +532,37 @@ function persistentPolicyChecks(
   })
 }
 
+/** Collects only answered, accepted clarification calls from the persisted session transcript. */
+function acceptedClarificationExchanges(
+  messages: readonly ToolConversationMessage[],
+): { question: string; answer: string }[] {
+  const calls = new Map<string, string>()
+  const exchanges: { question: string; answer: string }[] = []
+  let acceptedQuestion: string | undefined
+  for (const message of messages) {
+    if (message.role === "assistant" && "toolCalls" in message) {
+      for (const call of message.toolCalls) {
+        if (call.name !== MEAL_PLANNING_TOOL.CLARIFY || !call.input || typeof call.input !== "object") continue
+        const question = (call.input as { message?: unknown }).message
+        if (typeof question === "string") calls.set(call.id, question)
+      }
+    } else if (message.role === "tool" && message.name === MEAL_PLANNING_TOOL.CLARIFY) {
+      const output = message.output as { ok?: unknown; output?: { accepted?: unknown } } | null
+      acceptedQuestion =
+        output?.ok === true && output.output?.accepted === true ? calls.get(message.toolCallId) : undefined
+    } else if (message.role === "user" && acceptedQuestion !== undefined) {
+      exchanges.push({ question: acceptedQuestion, answer: message.text })
+      acceptedQuestion = undefined
+    }
+  }
+  return exchanges
+}
+
 /** Builds semantic checks from authoritative feedback and its scoped before-and-after cells. */
 function authoritativeFeedbackChecks(
   selection: MealPlanSelectionEvaluation,
   context: MealPlanContext,
+  clarificationExchanges: readonly { question: string; answer: string }[],
 ): FeedbackCheck[] {
   const candidate = selection.candidate
   const beforePlan = context.feedbackReferencePlan ?? context.recentPlan
@@ -573,6 +601,7 @@ function authoritativeFeedbackChecks(
       {
         feedbackId: item.id,
         text: item.text,
+        clarificationExchanges,
         scope: effectiveScope,
         changes,
         hasReferenceCells: changes.some((change) => change.before !== null),

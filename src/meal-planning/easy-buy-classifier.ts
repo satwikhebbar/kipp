@@ -105,6 +105,7 @@ export interface FeedbackPlanCell {
 export interface FeedbackCheck {
   feedbackId: string
   text: string
+  clarificationExchanges?: readonly { question: string; answer: string }[]
   scope: { day?: string; slot?: string }
   changes: readonly FeedbackPlanChange[]
   citedOutcomes: readonly FeedbackCitedOutcome[]
@@ -221,8 +222,9 @@ export function createEasyBuyClassifier(
         questions[`feedback_${index}`] = {
           type: "noul",
           instructions: {
-            question: `Does the final plan satisfy this authoritative feedback request? Compare before-and-after cells only within the supplied scope, including whether any reference or candidate cell exists there. Compare the reviewed and final easy-buy lists and their additions/removals against the request. Evaluate any cited policy outcome and rationale against the request, inventory facts, and plan. A cell change or a rationale that only cites the feedback id is not sufficient.`,
+            question: `Does the final plan satisfy this authoritative feedback request? Use relevant clarification exchanges as parent-provided context, including later corrections, only where they relate to this feedback. Do not infer that an answer applies to an unrelated item or widens the supplied scope. Compare before-and-after cells only within the supplied scope, including whether any reference or candidate cell exists there. Compare the reviewed and final easy-buy lists and their additions/removals against the request. Evaluate any cited policy outcome and rationale against the request, inventory facts, and plan. A cell change or a rationale that only cites the feedback id is not sufficient.`,
             feedback: check.text,
+            clarificationExchanges: check.clarificationExchanges ?? [],
             scope: check.scope,
             beforeAfter: check.changes,
             citedOutcomes: check.citedOutcomes,
