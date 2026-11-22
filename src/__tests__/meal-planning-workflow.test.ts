@@ -6,6 +6,7 @@ import { createInteractionRouter } from "../core/interaction-router-client"
 import type { Env } from "../core/types"
 import {
   explicitRejectedMealIds,
+  findRevisionRepairableCells,
   type MealPlanningLiveEvent,
   miniAppLaunchUrl,
   renderHouseholdContext,
@@ -25,6 +26,8 @@ import type {
   MealPlanEvaluation,
   MealPlanSelectionCandidate,
 } from "../meal-planning/types"
+import type { MealCell, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
+import type { MealCell, MealPlanCandidate, MealPlanContext, MealPlanSelectionCandidate } from "../meal-planning/types"
 import { resolvePlanningWeek } from "../meal-planning/week"
 import type { MealPlanningWorkflowParams } from "../meal-planning/workflow"
 import { createClockedD1TestDb, d1Count, d1Scalar } from "./d1-test-db"
@@ -129,6 +132,25 @@ it("renders scoped and plan-wide revision feedback without storage ids", () => {
   ).toBe(
     "- Feedback for Tue school-lunch: Use a simpler dish.\n- Feedback for every meal on Thu: Make the day lighter.\n- Plan-wide feedback: Use less oil.",
   )
+})
+
+it("includes retained prep-violating cells in revision repair scope when prep is disabled", () => {
+  const candidate = {
+    grid: {
+      Mon: {
+        breakfast: { dish: "paratha", items: ["wheat"], priorNightPrep: true, vegetarian: true, cookMinutes: 10 },
+      },
+    },
+    easyBuys: [],
+    policyOutcomes: {},
+  } as MealPlanCandidate
+  const profile = { ...SEED_PROFILE, priorNightPrepAllowed: false }
+
+  expect(findRevisionRepairableCells(candidate, profile)).toContainEqual({ day: "Mon", slotId: "breakfast" })
+  expect(findRevisionRepairableCells(candidate, { ...profile, priorNightPrepAllowed: true })).not.toContainEqual({
+    day: "Mon",
+    slotId: "breakfast",
+  })
 })
 
 it("renders neutral current-time and planning-week facts for relative-date requests", () => {

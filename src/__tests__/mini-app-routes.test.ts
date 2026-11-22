@@ -828,6 +828,31 @@ describe("Mini App HTTP boundary", () => {
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
 
     app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const firstAddedPolicy = [...(app?.querySelectorAll(".settings-policy") ?? [])].at(-1)
+    const firstAddedId = firstAddedPolicy?.querySelector('[data-policy="id"]') as unknown as { value: string }
+    expect(firstAddedId.value).toBe("household-rule-2")
+    app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const currentFirstAdded = [...(app?.querySelectorAll(".settings-policy") ?? [])].find(
+      (row) => (row.querySelector('[data-policy="id"]') as unknown as { value: string }).value === firstAddedId.value,
+    )
+    currentFirstAdded
+      ?.querySelector('button[data-action="remove-policy"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const policyIds = [...(app?.querySelectorAll('.settings-policy [data-policy="id"]') ?? [])].map(
+      (input) => (input as unknown as { value: string }).value,
+    )
+    expect(new Set(policyIds).size).toBe(policyIds.length)
+    while (true) {
+      const generatedPolicy = [...(app?.querySelectorAll(".settings-policy") ?? [])].find((row) =>
+        (row.querySelector('[data-policy="id"]') as unknown as { value: string }).value.startsWith("household-rule-"),
+      )
+      if (!generatedPolicy) break
+      generatedPolicy
+        .querySelector('button[data-action="remove-policy"]')
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    }
+    app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     const policy = [...(app?.querySelectorAll(".settings-policy") ?? [])].at(-1)
     ;(policy?.querySelector('[data-policy="id"]') as unknown as { value: string }).value = "avoid-red-dye"
     ;(policy?.querySelector('[data-policy="label"]') as unknown as { value: string }).value = "Avoid red dye"
@@ -906,7 +931,14 @@ describe("Mini App HTTP boundary", () => {
     ])
     expect((reapplied.eligibleEstablishedMeals as Record<string, string[]>)[addedId.value]).toEqual([eligible.value])
     expect(app?.textContent).toContain("Settings saved.")
+    delayNextProfileGet = true
     app?.querySelector('button[data-action="reload"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    expect(delayedGet.release).toBeDefined()
+    const disabledDuringReload = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      disabled: boolean
+    }
+    expect(disabledDuringReload.disabled).toBe(true)
+    delayedGet.release?.()
     await settle()
     expect(calls.filter((call) => call.path === "/mini-app/api/profile" && call.method === "GET")).toHaveLength(3)
     expect((app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string })?.value).toContain(

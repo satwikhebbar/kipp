@@ -72,6 +72,24 @@ export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext,
   return `${WEEK_CONTEXT_EXTRACTION_PROMPT}\nSchedule days: ${context.schedule.days.join(", ")}\nRecurring half days: ${context.schedule.halfDays?.join(", ") || "none"}\nMeal slots: ${context.schedule.slots.map((slot) => slot.id).join(", ")}`
 }
 
+/** Find retained cells that no longer comply with current hard profile rules. */
+export function findRevisionRepairableCells(
+  candidate: MealPlanCandidate,
+  profile: MealPlanContext["profile"],
+): Array<{ day: string; slotId: string }> {
+  return Object.entries(candidate.grid).flatMap(([day, cells]) =>
+    Object.entries(cells)
+      .filter(
+        ([, cell]) =>
+          (!profile.priorNightPrepAllowed && cell.priorNightPrep) ||
+          cell.items.some((item) =>
+            profile.dietaryExclusions.some((excluded) => normalizeIngredient(item) === normalizeIngredient(excluded)),
+          ),
+      )
+      .map(([slotId]) => ({ day, slotId })),
+  )
+}
+
 export interface MealPlanningLiveEvent {
   interactionKind?: WorkflowInteractionKind
   source?: "telegram-text" | "telegram-reply" | "mini-app"
@@ -267,7 +285,7 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   }
   if (context.revisionRepairableCells?.length) {
     lines.push(
-      `- Required hard-exclusion repairs (replace only these removed cells to eliminate the excluded ingredient): ${context.revisionRepairableCells.map(({ day, slotId }) => `${day} ${slotId}`).join(", ")}`,
+      `- Required profile-rule repairs (replace only these cells to remove an ingredient excluded by current dietary rules or prior-night prep that current settings do not allow): ${context.revisionRepairableCells.map(({ day, slotId }) => `${day} ${slotId}`).join(", ")}`,
     )
   }
   if (context.priorWeekPlan) {
@@ -1251,17 +1269,7 @@ async function runRevision(
     ...profile,
     profile: { ...profile.profile, mealDefinitions: active.plan.establishedMealDefinitions },
   }
-  const revisionRepairableCells = Object.entries(active.version.candidate.grid).flatMap(([day, cells]) =>
-    Object.entries(cells)
-      .filter(([, cell]) =>
-        cell.items.some((item) =>
-          profile.profile.dietaryExclusions.some(
-            (excluded) => normalizeIngredient(item) === normalizeIngredient(excluded),
-          ),
-        ),
-      )
-      .map(([slotId]) => ({ day, slotId })),
-  )
+  const revisionRepairableCells = findRevisionRepairableCells(active.version.candidate, planProfile.profile)
   const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, planProfile)
   const feedbackReference = {
     recentPlan: revisionBaseCandidate.grid,

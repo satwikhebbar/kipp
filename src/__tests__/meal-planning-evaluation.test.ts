@@ -1627,6 +1627,30 @@ describe("meal-planning evaluator", () => {
     }
   })
 
+  it("allows a scoped revision to repair a retained cell that now violates prep settings", () => {
+    const original = baseCandidate()
+    original.grid.Tue.breakfast.priorNightPrep = true
+    const recentPlan = structuredClone(original.grid)
+    delete recentPlan.Tue.breakfast
+    const context = baseContext({
+      profile: { ...baseContext().profile, priorNightPrepAllowed: false },
+      recentPlan,
+      request: { kind: "revision", text: "Use banana for Monday breakfast." },
+      feedbackItems: [
+        { id: "monday-breakfast", text: "Use banana for Monday breakfast.", scope: { day: "Mon", slot: "breakfast" } },
+      ],
+      revisionRepairableCells: [{ day: "Tue", slotId: "breakfast" }],
+    })
+    const candidate = structuredClone(original)
+    candidate.grid.Tue.breakfast = cellFor("breakfast", "paratha")
+    candidate.grid.Mon.breakfast = cellFor("breakfast", "banana")
+
+    const evaluation = evaluateMealPlan(candidate, context)
+    expect(failureCodes(evaluation)).not.toContain("prior_night_prep_not_allowed")
+    expect(failureCodes(evaluation)).not.toContain("unscoped_cell_changed")
+    expect(evaluation.failures).not.toContainEqual(expect.objectContaining({ code: "unaddressed_feedback" }))
+  })
+
   it("flags feedback that no changed cell or outcome rationale addresses", () => {
     const context = baseContext({
       request: { kind: "revision", text: "Fix the Tuesday school lunch." },
