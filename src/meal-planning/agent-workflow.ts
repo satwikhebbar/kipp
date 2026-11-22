@@ -25,10 +25,13 @@ import {
   MEAL_NO_CHANGES,
   MEAL_OPEN_FEEDBACK_PROMPT,
   MEAL_PLAN_GENERATING,
+  MEAL_PLANNING_ATTEMPTS_EXHAUSTED,
   MEAL_PLANNING_CANCELED,
+  MEAL_PLANNING_INCOMPLETE,
   MEAL_STALE_PLAN,
   renderPlanLaunchMessage,
 } from "./messages"
+import { mealSessionReferences } from "./session-references"
 import {
   type ActivePlanRecord,
   createMealPlanningStore,
@@ -90,9 +93,9 @@ type PlanningOutcome =
   | { kind: "abandoned" }
 
 /** Render meal definition. */
-function renderMealDefinition(meal: MealDefinition): string {
+function renderMealDefinition(meal: MealDefinition, reference: string): string {
   return JSON.stringify({
-    id: meal.id,
+    id: reference,
     name: meal.name,
     suitableSlots: meal.suitableSlots,
     halfDaySnack: meal.halfDaySnack ?? false,
@@ -176,6 +179,7 @@ export function renderPlanningTimeContext(
 /** Renders the household operating context the planning model must see (profile, schedule, policies, week state). */
 export function renderHouseholdContext(context: MealPlanContext): string {
   const p = context.profile
+  const references = mealSessionReferences(context)
   const lines = [
     `Household operating context:`,
     `- Schedule days: ${context.schedule.days.join(", ")}`,
@@ -190,10 +194,15 @@ export function renderHouseholdContext(context: MealPlanContext): string {
     `- Established meal definitions (one JSON record per available catalog meal; select only by id):\n${
       (p.mealDefinitions ?? [])
         .filter((meal) => meal.status === "established")
-        .map((meal) => `    ${renderMealDefinition(meal)}`)
+        .map((meal) => `    ${renderMealDefinition(meal, references.byId.get(meal.id) ?? "")}`)
         .join("\n") || "    none"
     }`,
-    `- Plan-local provisional definitions (one JSON record per reusable meal):\n${(context.provisionalMealDefinitions ?? []).map((meal) => `    ${renderMealDefinition(meal)}`).join("\n") || "    none"}`,
+    `- Plan-local provisional definitions (one JSON record per reusable meal):\n${
+      (context.provisionalMealDefinitions ?? [])
+        .filter((meal) => meal.status === "provisional")
+        .map((meal) => `    ${renderMealDefinition(meal, references.provisionalById.get(meal.id) ?? "")}`)
+        .join("\n") || "    none"
+    }`,
     `- Food preferences: favourites = ${p.foodPreferences.favourites.join(", ") || "none"}, avoid = ${p.foodPreferences.avoid.join(", ") || "none"}`,
     `- New foods allowed: ${p.allowNewFoods ? "yes" : "no"}`,
     `- Sensory guidelines: ${p.sensoryGuidelines.join(", ") || "none"}`,
@@ -220,7 +229,7 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   const halfDaySnacks = (p.mealDefinitions ?? []).filter((meal) => meal.status === "established" && meal.halfDaySnack)
   if (halfDaySnacks.length) {
     lines.push(
-      `- Half-day snack candidates (use only for snack1 on a half-day): ${halfDaySnacks.map((meal) => `${meal.id} (${meal.name})`).join(", ")}`,
+      `- Half-day snack candidates (use only for snack1 on a half-day): ${halfDaySnacks.map((meal) => `${references.byId.get(meal.id)} (${meal.name})`).join(", ")}`,
     )
   }
   lines.push(`- Request kind: ${context.request.kind}`)
@@ -582,7 +591,7 @@ async function runPlanningSession(
       }
     })
     if (session === null) {
-      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
+      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-exception`)
       return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
     usage = addUsage(usage, session.usage, hasUsage)
@@ -606,7 +615,12 @@ async function runPlanningSession(
       })
     logAgentSession(env, event.instanceId, session)
     if (!session.completed || !session.terminal) {
-      await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-failed`)
+      const reason = session.failureReason ?? "missing-terminal"
+      const message =
+        reason === "provider-turn-limit" || reason === "tool-call-limit"
+          ? MEAL_PLANNING_ATTEMPTS_EXHAUSTED
+          : MEAL_PLANNING_INCOMPLETE
+      await notify(env, step, event.payload.chatId, message, `${notifyPrefix}-session-incomplete-${reason}`)
       return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
     }
     const terminal = session.terminal
@@ -629,7 +643,7 @@ async function runPlanningSession(
       return { outcome: { kind: "week_context_updated", update: terminal.update }, usage, decisionsCostUsd }
     return { outcome: { kind: "proposed", propose: terminal }, usage, decisionsCostUsd }
   }
-  await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-exhausted`)
+  await notify(env, step, event.payload.chatId, MEAL_PLANNING_ATTEMPTS_EXHAUSTED, `${notifyPrefix}-session-exhausted`)
   return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
 }
 

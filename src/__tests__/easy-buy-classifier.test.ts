@@ -128,7 +128,7 @@ describe("easy-buy classifier", () => {
       async decide({ questions }) {
         instructions = Object.values(questions)
           .filter((question) => question.type === "noul")
-          .map((question) => question.instructions)
+          .map((question) => JSON.stringify(question.instructions))
           .join(" ")
         return {
           id: "gen-dec",

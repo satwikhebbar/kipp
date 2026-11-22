@@ -699,7 +699,7 @@ describe("agent-centered meal-planning Telegram integration", () => {
 
     await handleTelegramWebhook(message("/mealplan this week"), env)
     const { step, run } = startedWorkflowRun(wf, env)
-    await waitForMessageText(network, "couldn't reach")
+    await waitForMessageText(network, "technical problem")
 
     const store = createMealPlanningStore(env.MEAL_PLANNING_DB as D1Database)
     expect(await store.activePlan("100")).toBeNull()

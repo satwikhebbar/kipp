@@ -53,6 +53,9 @@ it("renders complete structured catalog facts for the planning agent", () => {
     request: { kind: "initial_plan", text: "Plan this week." },
   }
   const rendered = renderHouseholdContext(context)
+  expect(rendered).toContain('"id":"M1"')
+  expect(rendered).not.toContain(context.profile.mealDefinitions?.[0]?.id ?? "missing")
+  expect(renderHouseholdContext(context)).toBe(rendered)
   expect(rendered).toContain("Recurring half days: Sat")
   expect(renderWeekContextExtractionPrompt(context)).toContain("emit full_day")
   expect(rendered).toContain("one JSON record per available catalog meal")
@@ -2268,7 +2271,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect((await createMealPlanningStore(d1).activePlan(CHAT))?.plan.currentVersion).toBe(1)
   })
 
-  it("sends meal-agent-unavailable and persists nothing when the agent fails", async () => {
+  it("reports an incomplete session and persists nothing when the agent fails to hand off", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
@@ -2282,7 +2285,29 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
 
     const store = createMealPlanningStore(d1)
     expect(await store.activePlan(CHAT)).toBeNull()
-    expect(telegramMessages.some((message) => message.text.includes("couldn't reach"))).toBe(true)
+    expect(telegramMessages.some((message) => message.text.includes("couldn't complete the meal plan"))).toBe(true)
+    expect(step.do.mock.calls.map(([name]) => name)).toContain(
+      "meal-planning-notify-initial-session-incomplete-missing-required-handoff",
+    )
+  })
+
+  it("reports an exhausted turn budget in the notice and step history", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const step = createFakeStep([], Date.parse(resolvePlanningWeek(invokedAtMs, TZ).weekEnd))
+    const responses = Array.from({ length: 8 }, () => deepseekResponse([{ name: "unknown_tool", input: {} }]))
+    const { telegramMessages } = stubNetwork(responses)
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    expect(await createMealPlanningStore(d1).activePlan(CHAT)).toBeNull()
+    expect(telegramMessages.some((message) => message.text.includes("within the available attempts"))).toBe(true)
+    expect(step.do.mock.calls.map(([name]) => name)).toContain(
+      "meal-planning-notify-initial-session-incomplete-provider-turn-limit",
+    )
   })
 
   it("logs the session failure category when the agent fails", async () => {
@@ -2333,7 +2358,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
     const store = createMealPlanningStore(d1)
     expect(await store.activePlan(CHAT)).toBeNull()
-    expect(telegramMessages.some((text) => text.includes("couldn't reach"))).toBe(true)
+    expect(telegramMessages.some((text) => text.includes("technical problem"))).toBe(true)
+    expect(step.do.mock.calls.map(([name]) => name)).toContain("meal-planning-notify-initial-session-exception")
   })
 
   it("keeps the saved same-week plan active when a replacement provider request fails", async () => {
@@ -2392,7 +2418,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     ])
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan")).toBe(1)
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan_version")).toBe(1)
-    expect(telegramMessages.some((text) => text.includes("couldn't reach"))).toBe(true)
+    expect(telegramMessages.some((text) => text.includes("technical problem"))).toBe(true)
   })
 
   it("delivers stale notices in independent edit runs with memoized steps", async () => {
@@ -2481,6 +2507,29 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
 
     expect(telegramMessages.some((message) => message.text.includes("already updated"))).toBe(true)
     expect(telegramMessages.some((message) => message.text.includes("being generated"))).toBe(false)
+  })
+
+  it("reports exhausted attempts after repeated clarification replies", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    stubUuidSequence()
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const events = Array.from({ length: 10 }, (_, index) => ({
+      interactionId: `uuid-${index + 1}`,
+      source: "telegram-reply" as const,
+      text: "yes",
+    }))
+    const step = createFakeStep(events, Date.parse(week.weekEnd))
+    const { telegramMessages } = stubNetwork(Array.from({ length: 10 }, () => clarifyResponse("Please clarify.")))
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    expect(telegramMessages.at(-1)?.text).toContain("attempts")
+    expect(telegramMessages.at(-1)?.text).not.toContain("technical problem")
+    expect(step.do).toHaveBeenCalledWith("meal-planning-notify-initial-session-exhausted", expect.any(Function))
   })
 
   it("carries the clarification transcript into the next provider request", async () => {

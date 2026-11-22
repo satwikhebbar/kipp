@@ -9,6 +9,7 @@ import { MEAL_PLANNING_AGENT_PROMPT, runMealPlanningAgentSession } from "../agen
 import { loadScenarios } from "../meal-planning/corpus/load"
 import { createEasyBuyClassifier } from "../meal-planning/easy-buy-classifier"
 import { evaluateMealPlan } from "../meal-planning/evaluation"
+import { mealSessionReferences, resolveMealSessionReferences } from "../meal-planning/session-references"
 import type {
   MealCell,
   MealDefinition,
@@ -276,6 +277,47 @@ function noPaneerRevision() {
 }
 
 describe("bounded meal-planning agent session", () => {
+  it("resolves stable short references for evaluation and proposal across provider turns", async () => {
+    const candidate = passingCandidate()
+    const ctx = contextWithCandidateDefinitions(context(), candidate)
+    const refs = mealSessionReferences(ctx)
+    const selection = selectionCandidate(candidate)
+    for (const slots of Object.values(selection.grid))
+      for (const entry of Object.values(slots))
+        if ("mealDefinitionId" in entry) entry.mealDefinitionId = refs.byId.get(entry.mealDefinitionId) ?? "missing"
+    const wire = mealPlanSelectionCandidateToWire(selection)
+    const provider = providerWith(
+      { toolCalls: [call("evaluate", "evaluate_meal_plan", wire)], usage: { inputTokens: 0, outputTokens: 0 } },
+      proposeResponse({ candidate: wire }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], { context: ctx })
+    expect(result.terminal).toMatchObject({ kind: "propose_plan" })
+    expect(mealSessionReferences(ctx).byId).toEqual(refs.byId)
+    expect(selection.grid.Mon.breakfast).toMatchObject({ mealDefinitionId: expect.stringMatching(/^M\d+$/) })
+  })
+
+  it("resolves provisional revision references and rejects unknown or wrong-kind references", () => {
+    const provisional = {
+      ...fixtureDefinition("paniyaram", "snack1"),
+      id: "long-provisional-id",
+      status: "provisional" as const,
+    }
+    const ctx = { ...context(), provisionalMealDefinitions: [provisional] }
+    const patch = {
+      grid: {
+        Sat: {
+          snack1: { provisionalMealId: "P1" },
+          snack2: { mealDefinitionId: "P1" },
+          breakfast: { mealDefinitionId: "M9999" },
+        },
+      },
+    }
+    const resolved = resolveMealSessionReferences(patch, ctx)
+    expect(resolved.grid.Sat.snack1.provisionalMealId).toBe("long-provisional-id")
+    expect(resolved.grid.Sat.snack2.mealDefinitionId).toContain("unknown-session-reference")
+    expect(resolved.grid.Sat.breakfast.mealDefinitionId).toContain("unknown-session-reference")
+  })
+
   it("accepts propose_plan only when the candidate passes evaluation", async () => {
     const provider = providerWith(
       evaluateResponse(passingCandidate()),
@@ -398,6 +440,64 @@ describe("bounded meal-planning agent session", () => {
       reasonCodes: ["packed_slot_semantically_unsuitable"],
     })
     expect(result.decisionUsage.costUsd).toBeCloseTo(0.002)
+  })
+
+  it.each([
+    0.99, 0.01,
+  ])("provides half-day catalog context without bypassing packed-food checks (%s)", async (score) => {
+    const candidate = passingCandidate()
+    delete candidate.grid.Sat.snack2
+    delete candidate.grid.Sat["school-lunch"]
+    candidate.grid.Sat.snack1 = { ...cell("Paniyaram", ["rice"], "snack1"), cookMinutes: 20 }
+    const ctx = contextWithCandidateDefinitions(context(), candidate)
+    ctx.schedule.halfDays = ["Sat"]
+    const paniyaram = ctx.profile.mealDefinitions?.find((meal) => meal.name === "Paniyaram")
+    if (!paniyaram) throw new Error("missing Paniyaram fixture")
+    paniyaram.halfDaySnack = true
+    paniyaram.suitableSlots = ["breakfast", "school-lunch"]
+    let evidence: unknown
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        const answers = Object.fromEntries(
+          Object.entries(questions).map(([id, question]) => {
+            const details = question.instructions
+            const isPaniyaram = typeof details === "object" && details !== null && details.dish === "Paniyaram"
+            if (isPaniyaram) evidence = details
+            return [id, { type: "noul" as const, noul: isPaniyaram ? score : 0.99 }]
+          }),
+        )
+        return {
+          id: "gen",
+          model: "decisions",
+          provider: "OpenAI",
+          answers,
+          usage: { inputTokens: 1, outputTokens: 0, costUsd: 0 },
+        }
+      },
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      ...(score > 0.8
+        ? [proposeResponse(proposeInput(candidate))]
+        : [
+            clarifyResponse({
+              message: "Please choose another snack.",
+              reasonCodes: ["packed_slot_semantically_unsuitable"],
+              interaction: { kind: "reply" },
+            }),
+          ]),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: ctx,
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    expect(evidence).toMatchObject({
+      day: "Sat",
+      slot: "snack1",
+      halfDay: true,
+      matchingCatalogEntry: { halfDaySnack: true, packedFood: { suitable: true, dry: true } },
+    })
+    expect(result.terminal?.kind).toBe(score > 0.8 ? "propose_plan" : "needs_clarification")
   })
 
   it.each([
@@ -1422,13 +1522,16 @@ describe("bounded meal-planning agent session", () => {
   it("accepts a one-cell revision patch without asking the model to reconstruct untouched catalog ids", async () => {
     const base = passingCandidate()
     const raw = [{ id: "tg-1", text: "Use poha on Monday", scope: { day: "Mon", slot: "breakfast" } }]
-    const patch = { grid: { Mon: { breakfast: { mealDefinitionId: "fixture_poha_breakfast" } } } }
+    const ctx = context({ request: { kind: "revision", text: raw[0].text }, feedbackItems: raw, recentPlan: base.grid })
+    const reference = mealSessionReferences(ctx).byId.get("fixture_poha_breakfast")
+    if (!reference) throw new Error("missing poha reference")
+    const patch = { grid: { Mon: { breakfast: { mealDefinitionId: reference } } } }
     const provider = providerWith(
       evaluatePatchResponse(patch),
       proposeResponse({ candidate: mealPlanSelectionPatchToWire(patch) }),
     )
     const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: raw[0].text }], {
-      context: context({ request: { kind: "revision", text: raw[0].text }, feedbackItems: raw, recentPlan: base.grid }),
+      context: ctx,
       revisionBaseCandidate: base,
     })
     expect(result.terminal).toMatchObject({ kind: "propose_plan" })

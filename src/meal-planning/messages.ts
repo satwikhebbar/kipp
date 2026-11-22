@@ -8,7 +8,11 @@ or the next one (invoked Thu–Sun). Overrides:
 /mealplan this week
 /mealplan next week`
 
-export const MEAL_AGENT_UNAVAILABLE = "I couldn't reach the meal-planning agent. Please try again shortly."
+export const MEAL_AGENT_UNAVAILABLE =
+  "The meal-planning agent encountered a technical problem. Please try again shortly."
+export const MEAL_PLANNING_INCOMPLETE = "I couldn't complete the meal plan. Please try again."
+export const MEAL_PLANNING_ATTEMPTS_EXHAUSTED =
+  "I couldn't complete the meal plan within the available attempts. Please try again."
 export const MEAL_STALE_PLAN =
   "This plan was already updated — tap [Give feedback] on the newest plan message to try again."
 export const MEAL_PLANNING_CANCELED = "No reply received — run /mealplan to try again."
