@@ -2509,6 +2509,29 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(telegramMessages.some((message) => message.text.includes("being generated"))).toBe(false)
   })
 
+  it("reports exhausted attempts after repeated clarification replies", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    stubUuidSequence()
+    const { d1 } = createD1TestDb()
+    const { namespace } = fakeRouter()
+    const week = resolvePlanningWeek(invokedAtMs, TZ)
+    const events = Array.from({ length: 10 }, (_, index) => ({
+      interactionId: `uuid-${index + 1}`,
+      source: "telegram-reply" as const,
+      text: "yes",
+    }))
+    const step = createFakeStep(events, Date.parse(week.weekEnd))
+    const { telegramMessages } = stubNetwork(Array.from({ length: 10 }, () => clarifyResponse("Please clarify.")))
+
+    await runAgentCenteredMealPlanningWorkflow(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    expect(telegramMessages.at(-1)?.text).toContain("attempts")
+    expect(telegramMessages.at(-1)?.text).not.toContain("technical problem")
+    expect(step.do).toHaveBeenCalledWith("meal-planning-notify-initial-session-exhausted", expect.any(Function))
+  })
+
   it("carries the clarification transcript into the next provider request", async () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")

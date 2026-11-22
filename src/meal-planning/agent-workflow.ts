@@ -643,7 +643,7 @@ async function runPlanningSession(
       return { outcome: { kind: "week_context_updated", update: terminal.update }, usage, decisionsCostUsd }
     return { outcome: { kind: "proposed", propose: terminal }, usage, decisionsCostUsd }
   }
-  await notify(env, step, event.payload.chatId, MEAL_AGENT_UNAVAILABLE, `${notifyPrefix}-session-exhausted`)
+  await notify(env, step, event.payload.chatId, MEAL_PLANNING_ATTEMPTS_EXHAUSTED, `${notifyPrefix}-session-exhausted`)
   return { outcome: { kind: "abandoned" }, usage, decisionsCostUsd }
 }
 
