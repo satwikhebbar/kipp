@@ -982,6 +982,78 @@ describe("bounded meal-planning agent session", () => {
     expect(result.decisionUsage).toEqual({ inputTokens: 10, outputTokens: 2, costUsd: 0.005 })
   })
 
+  it.each([
+    ["Yes, poha is fine", true],
+    ["No, not poha", false],
+  ])("provides accepted clarification exchanges to scoped feedback checks: %s", async (answer, approved) => {
+    const { candidate, feedback, context: revisionContext } = noPaneerRevision()
+    candidate.grid.Wed["home-lunch"] = cell("poha", ["rice"], "home-lunch")
+    const question = "Is poha an acceptable replacement?"
+    let evidence: Record<string, unknown> | undefined
+    const decisions: DecisionsClient = {
+      async decide({ questions }) {
+        const check = questions.feedback_0
+        if (check?.type === "noul" && typeof check.instructions !== "string")
+          evidence = check.instructions as Record<string, unknown>
+        return {
+          id: "gen",
+          model: "test",
+          provider: "test",
+          answers: Object.fromEntries(
+            Object.keys(questions).map((id) => [
+              id,
+              {
+                type: "noul" as const,
+                noul: id === "feedback_0" && !approved ? 0.01 : 0.99,
+              },
+            ]),
+          ),
+          usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        }
+      },
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      proposeResponse(proposeInput(candidate)),
+      clarifyResponse({
+        message: "Which replacement works?",
+        reasonCodes: ["unaddressed_feedback"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(
+      provider,
+      [
+        { role: "user", text: feedback.text },
+        {
+          role: "assistant",
+          toolCalls: [{ id: "bad", name: "needs_clarification", input: { message: "Rejected question?" } }],
+        },
+        { role: "tool", toolCallId: "bad", name: "needs_clarification", output: { ok: false } },
+        { role: "user", text: "Unrelated reply" },
+        { role: "assistant", toolCalls: [{ id: "q", name: "needs_clarification", input: { message: question } }] },
+        {
+          role: "tool",
+          toolCallId: "q",
+          name: "needs_clarification",
+          output: { ok: true, output: { accepted: true } },
+        },
+        { role: "user", text: answer },
+      ],
+      {
+        context: contextWithCandidateDefinitions(revisionContext, candidate),
+        easyBuyClassifier: createEasyBuyClassifier(decisions),
+      },
+    )
+
+    expect(evidence).toMatchObject({
+      feedback: feedback.text,
+      scope: feedback.scope,
+      clarificationExchanges: [{ question, answer }],
+    })
+    expect(result.terminal?.kind).toBe(approved ? "propose_plan" : "needs_clarification")
+  })
+
   it("classifies a feedback scope absent from both plans and rejects an ID-only rationale", async () => {
     const candidate = passingCandidate()
     const feedback = {
