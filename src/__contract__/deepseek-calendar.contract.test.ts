@@ -65,6 +65,30 @@ describe("DeepSeek agent-centered Calendar native-tool contract", () => {
     expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "ready_to_create"])
   })
 
+  contractIt("preserves a dotted explicit time in the candidate", async () => {
+    const result = await runContract(
+      "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Meet with Arun Monday 2.30pm for 30min",
+    )
+
+    expect(result.completed).toBe(true)
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          toolCalls: expect.arrayContaining([
+            expect.objectContaining({
+              name: "evaluate_calendar_candidate",
+              input: expect.objectContaining({
+                proposal: expect.objectContaining({ startTime: "14:30", timeIsExplicit: true }),
+              }),
+            }),
+          ]),
+        }),
+      ]),
+    )
+  })
+
   contractIt("submits an untimed candidate for deterministic availability selection", async () => {
     const result = await runContract(
       "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a 30-minute call with Jamie on 2026-08-03; choose a policy-safe time.",
