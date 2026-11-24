@@ -18,6 +18,7 @@ import {
 } from "../meal-planning/agent-workflow"
 import { handleMealCompletionCron } from "../meal-planning/completion-cron"
 import { MEAL_NO_CHANGES, MEAL_STALE_PLAN } from "../meal-planning/messages"
+import { mealSessionReferences } from "../meal-planning/session-references"
 import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type {
   MealCell,
@@ -537,9 +538,17 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const nextInvocation = Date.parse("2026-09-14T03:30:00.000Z")
     vi.setSystemTime(nextInvocation)
     await handleMealCompletionCron(env)
+    const storedProfile = await store.loadOrCreateProfile(CHAT)
+    const dishReference = mealSessionReferences({
+      ...storedProfile,
+      weeklyInventory: { items: [], notes: [] },
+      weeklyExceptions: { items: [] },
+      request: { kind: "initial_plan", text: "Plan this week." },
+    }).byId.get(dish.id)
+    if (!dishReference) throw new Error(`No established meal reference for ${dish.name}`)
     const selection = seedCandidate()
     // The existing cross-week variety policy permits dry snacks to repeat.
-    selection.grid.Mon.snack1 = { mealDefinitionId: dish.id }
+    selection.grid.Mon.snack1 = { mealDefinitionId: dishReference }
     const network = stubNetwork([
       deepseekResponse([{ name: "evaluate_meal_plan", input: selection }]),
       deepseekResponse([{ name: "propose_plan", input: proposeInput(selection) }]),
@@ -553,7 +562,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const established = prompt
       ?.split("- Established meal definitions")[1]
       ?.split("- Plan-local provisional definitions")[0]
-    expect(established).toContain(`"name":"${dish.name}"`)
+    expect(established).toContain(`"id":"${dishReference}","name":"${dish.name}"`)
     const next = await store.activePlan(CHAT)
     expect(next?.plan.weekStart).toBe(resolvePlanningWeek(nextInvocation, TZ).weekStart)
     expect(next?.version.candidate.grid.Mon.snack1.dish).toBe(dish.name)
