@@ -75,7 +75,7 @@ function queueRevision(
   })
 }
 
-import { createD1TestDb, d1Count } from "../__tests__/d1-test-db"
+import { createClockedD1TestDb, d1Count } from "../__tests__/d1-test-db"
 import {
   type MealPlanningLiveEvent,
   runAgentCenteredMealPlanningWorkflow,
@@ -323,12 +323,12 @@ function mealWorkflowBinding() {
 
 function runtimeEnv(overrides: Partial<Env>): {
   env: Env
-  db: ReturnType<typeof createD1TestDb>["db"]
+  db: ReturnType<typeof createClockedD1TestDb>["db"]
   network: ReturnType<typeof createFakeNetwork>
 } {
   const network = createFakeNetwork()
   vitest.stubGlobal("fetch", network.fetch)
-  const { db, d1 } = createD1TestDb()
+  const { db, d1 } = createClockedD1TestDb()
   const router = createFakeInteractionRouter()
   const env = {
     TELEGRAM_BOT_TOKEN: "bot:token",
@@ -799,13 +799,18 @@ describe("meal edit recovery in the actual Workflow runtime", () => {
     }> = []
     const checkpoints: string[] = []
     const entries: string[] = []
+    // Pick a Monday ahead of the real D1 clock. Overriding Date in the Worker
+    // controls its workflow inputs but leaves the database clock independent.
+    const probeDate = new Date()
+    probeDate.setUTCDate(probeDate.getUTCDate() + ((8 - probeDate.getUTCDay()) % 7 || 7))
+    probeDate.setUTCHours(3, 30, 0, 0)
     const source = `
       import { MealPlanningWorkflow } from "./src/meal-planning/workflow";
       import { InteractionRouterDO } from "./src/core/interaction-router";
       import { createMealPlanningStore, SEED_PROFILE, SEED_MEAL_IDS } from "./src/meal-planning/store";
       export {InteractionRouterDO};
       const OriginalDate = Date;
-      const probeNow = ${Date.parse("2026-09-07T03:30:00.000Z")};
+      const probeNow = ${probeDate.getTime()};
       globalThis.Date = class extends OriginalDate {
         constructor(...args) { super(...(args.length ? args : [probeNow])); }
         static now() { return probeNow; }

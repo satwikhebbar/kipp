@@ -291,8 +291,10 @@ export class InteractionRouterDO implements DurableObject {
       : input.replyTo !== undefined
         ? this.ctx.storage.sql
             .exec(
-              "SELECT * FROM interactions WHERE bot_message_id = ? ORDER BY CASE kind WHEN ? THEN 0 ELSE 1 END, rowid DESC LIMIT 1",
+              "SELECT * FROM interactions WHERE bot_message_id = ? AND kind NOT IN (?, ?) ORDER BY CASE kind WHEN ? THEN 0 ELSE 1 END, rowid DESC LIMIT 1",
               input.replyTo,
+              INTERACTION_KIND.MEAL_VERSION_ACCEPT,
+              INTERACTION_KIND.MEAL_VERSION_REJECT,
               INTERACTION_KIND.REVISION_FEEDBACK,
             )
             .toArray()

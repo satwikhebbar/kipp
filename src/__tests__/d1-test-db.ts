@@ -14,18 +14,22 @@ class D1BoundStatement {
     private readonly db: DatabaseSync,
     readonly sql: string,
     readonly params: Array<string | number | null>,
+    private readonly beforeExecute?: (sql: string) => void,
   ) {}
 
   run(): D1ResultLike {
+    this.beforeExecute?.(this.sql)
     return executeD1(this.db, this.sql, this.params)
   }
 
   first(): Record<string, unknown> | null {
+    this.beforeExecute?.(this.sql)
     const row = this.db.prepare(this.sql).get(...this.params) as Record<string, unknown> | undefined
     return row ?? null
   }
 
   all(): D1ResultLike {
+    this.beforeExecute?.(this.sql)
     return executeD1(this.db, this.sql, this.params)
   }
 }
@@ -40,19 +44,19 @@ function executeD1(db: DatabaseSync, sql: string, params: Array<string | number 
 }
 
 /** Minimal D1Database adapter over `node:sqlite`; `batch` runs in one transaction. */
-function createD1Adapter(db: DatabaseSync): D1Database {
+function createD1Adapter(db: DatabaseSync, beforeExecute?: (sql: string) => void): D1Database {
   return {
     prepare(sql: string) {
       return {
         bind(...params: Array<string | number | null>) {
-          return new D1BoundStatement(db, sql, params)
+          return new D1BoundStatement(db, sql, params, beforeExecute)
         },
       }
     },
     batch(statements: D1BoundStatement[]) {
       db.exec("BEGIN")
       try {
-        const results = statements.map((statement) => executeD1(db, statement.sql, statement.params))
+        const results = statements.map((statement) => statement.run())
         db.exec("COMMIT")
         return results
       } catch (error) {
@@ -67,7 +71,10 @@ function createD1Adapter(db: DatabaseSync): D1Database {
  * Creates an in-memory SQLite database with every ordered migration applied,
  * exposed through a D1-shaped adapter — so tests exercise the store's real SQL.
  */
-export function createD1TestDb(throughMigration?: string): { db: DatabaseSync; d1: D1Database } {
+export function createD1TestDb(
+  throughMigration?: string,
+  beforeExecute?: (sql: string) => void,
+): { db: DatabaseSync; d1: D1Database } {
   const db = new DatabaseSync(":memory:")
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../../migrations")
   for (const migration of readdirSync(migrationsDir)
@@ -75,7 +82,19 @@ export function createD1TestDb(throughMigration?: string): { db: DatabaseSync; d
     .sort()) {
     db.exec(readFileSync(join(migrationsDir, migration), "utf8"))
   }
-  return { db, d1: createD1Adapter(db) }
+  return { db, d1: createD1Adapter(db, beforeExecute) }
+}
+
+/** Shares the workflow fixture clock with SQLite. Store tests use the real database clock by default. */
+export function createClockedD1TestDb(
+  now: () => string = () => new Date().toISOString(),
+): ReturnType<typeof createD1TestDb> {
+  const result = createD1TestDb()
+  result.db.function("strftime", (format, value) => {
+    if (format !== "%Y-%m-%dT%H:%M:%fZ" || value !== "now") throw new Error("Unsupported test clock query")
+    return now()
+  })
+  return result
 }
 
 /** Counts rows for a `SELECT count(*) AS count ...` query. */

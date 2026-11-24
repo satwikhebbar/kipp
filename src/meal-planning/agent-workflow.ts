@@ -39,6 +39,7 @@ import {
   type MealPlanningStore,
   type MealPlanRecord,
   type MealPlanVersionRecord,
+  PlanWeekClosedError,
   type PromotePlanVersionInput,
   type PromotePlanVersionResult,
   type StoredMealProfile,
@@ -256,6 +257,85 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   return lines.join("\n")
 }
 
+/** Finds provisional dishes directly targeted by explicit rejection feedback. */
+export function explicitRejectedMealIds(items: FeedbackItem[], definitions: MealDefinition[]): string[] {
+  const normalize = (text: string) => text.trim().toLowerCase().replace(/’/gu, "'").replace(/\s+/gu, " ")
+  const rejection = "reject|do not want|don't want|do not like|don't like|never serve|remove"
+  const otherAction =
+    "add|use|keep|like|prefer|serve|move|swap|choose|include|put|make|change|switch|do not remove|don't remove"
+  const actionPrefix = "(?:please )?(?:i |we )?"
+  const actionWords = `${rejection}|${otherAction}`
+  const leadingAction = new RegExp(`^${actionPrefix}(${actionWords}) `, "u")
+  // These boundaries identify candidate clauses. Their targets must still prove independence.
+  const actionBoundary = new RegExp(
+    `(?:,\\s*(?:(?:and|but) )?|\\s+(?:and|but) )(?=${actionPrefix}(?:${actionWords}) )`,
+    "u",
+  )
+  const contrast = /,?\s+but\s+(?=[^,;.!?]+ is fine$)/u
+  const rejectsDish = new RegExp(`^(?:${rejection})$`, "u")
+  const schedule =
+    /^(?:on|to|for|from|except on) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?: instead)?$/u
+  const names = definitions
+    .flatMap((definition) =>
+      [definition.name, ...(definition.aliases ?? [])].map((name) => ({ definition, name: normalize(name) })),
+    )
+    .filter(({ name }) => name.length > 0)
+    .sort((left, right) => right.name.length - left.name.length)
+  const parseTargets = (text: string, allowSchedule: boolean): MealDefinition[] | null => {
+    const targets: MealDefinition[] = []
+    while (text) {
+      const target = text.replace(/^(?:the|a|an) /u, "")
+      const longest = names.find(({ name }) => target.startsWith(name) && /^[\s,]|^$/u.test(target.slice(name.length)))
+      if (!longest) return null
+      const ambiguous = names.some(
+        ({ name, definition }) => name === longest.name && definition.id !== longest.definition.id,
+      )
+      if (ambiguous) return null
+      targets.push(longest.definition)
+      const suffix = target.slice(longest.name.length).trimStart()
+      if (!suffix || /^(?:,\s*)?please$/u.test(suffix) || (allowSchedule && schedule.test(suffix))) return targets
+      const separator = /^(?:,\s*(?:and )?|and )/u.exec(suffix)
+      if (!separator) return null
+      text = suffix.slice(separator[0].length)
+    }
+    return null
+  }
+
+  const matches = new Set<string>()
+  const preserved = new Set<string>()
+  feedback: for (const item of items) {
+    // A cell edit can leave the same dish elsewhere in the week.
+    if (item.target?.kind === "cell" || item.scope) continue
+    const rejected = new Set<string>()
+    for (const sentence of normalize(item.text).split(/[;.!?]+/u)) {
+      const statement = sentence.trim()
+      if (!statement || /^(?:thanks|thank you)$/u.test(statement)) continue
+      const clauses = statement
+        .replace(/^(?:and|but|then|instead),? /u, "")
+        .split(contrast)
+        .flatMap((part) => part.split(actionBoundary))
+      for (const part of clauses) {
+        const clause = part.trim()
+        const cue = leadingAction.exec(clause)
+        const isRejection = Boolean(cue && rejectsDish.test(cue[1]))
+        const actionTarget = cue ? clause.slice(cue[0].length) : clause.replace(/ is fine$/u, "")
+        const targetText = cue && !isRejection ? actionTarget.replace(/ instead$/u, "") : actionTarget
+        const planWideRejection = isRejection ? parseTargets(targetText, false) : null
+        const targets = planWideRejection ?? (cue || targetText !== clause ? parseTargets(targetText, true) : null)
+        // Any unmatched instruction can qualify or reverse an earlier removal.
+        // Leave the entire item to revision unless every substantive clause is understood.
+        if (!targets) continue feedback
+        for (const target of targets) {
+          if (!planWideRejection) preserved.add(target.id)
+          else if (target.status === "provisional") rejected.add(target.id)
+        }
+      }
+    }
+    for (const id of rejected) matches.add(id)
+  }
+  return [...matches].filter((id) => !preserved.has(id))
+}
+
 /**
  * Runs the bounded meal-planning workflow: load household state, resolve the
  * target week, run the planning-agent session (with 15-min clarification
@@ -354,12 +434,25 @@ export async function runAgentCenteredMealPlanningWorkflow(
             addUsage(extractionUsage ?? ZERO_USAGE, planning.usage, extractionUsage !== null),
             planning.decisionsCostUsd,
           ),
+          allowNewFoodsSnapshot: profile.profile.allowNewFoods,
+          recurringHalfDaysSnapshot: context.schedule.halfDays ?? [],
         })
       } catch (error) {
+        if (error instanceof PlanWeekClosedError) return "week-closed" as const
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
         throw error
       }
     })
+    if (created === "week-closed") {
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        "That planning week has closed. Run /mealplan to request a new plan.",
+        "meal-planning-notify-week-closed",
+      )
+      return
+    }
     if (!created) return
     const persisted = created
     await stepDo(step, "meal-planning-finish-generation-lease", () =>
@@ -781,12 +874,21 @@ async function sendPlanAndRegister(
   const sent = await step.do(`meal-planning-send-plan-${occurrence}`, async () => {
     const callbackToken = crypto.randomUUID()
     const interactionId = crypto.randomUUID()
+    const acceptToken = version.version > 1 ? crypto.randomUUID() : undefined
+    const acceptId = acceptToken ? crypto.randomUUID() : undefined
     const buttons: Array<Record<string, unknown>> = [{ text: "Give feedback", callback_data: callbackToken }]
+    if (acceptToken) buttons.push({ text: "Accept plan", callback_data: acceptToken })
     if (miniAppUrl) buttons.push({ text: "Review this week's plan", web_app: { url: miniAppUrl } })
     const sentMessage = await createTelegramClient(env.TELEGRAM_BOT_TOKEN).sendMessage(chatId, message, {
       replyMarkup: { inline_keyboard: [buttons] },
     })
-    return { interactionId, callbackToken, messageId: sentMessage.messageId }
+    return {
+      interactionId,
+      callbackToken,
+      acceptId,
+      acceptToken,
+      messageId: sentMessage.messageId,
+    }
   })
   await step.do(`meal-planning-register-feedback-${occurrence}`, async () => {
     const router = createInteractionRouter(env.INTERACTION_ROUTER, chatId)
@@ -802,6 +904,20 @@ async function sendPlanAndRegister(
       interactionGroup: MEAL_PLANNING_GROUP,
       generation,
     } satisfies InteractionRegistration)
+    if (sent.acceptId && sent.acceptToken) {
+      await router.register({
+        interactionId: sent.acceptId,
+        version: version.version,
+        workflowId: plan.instanceId,
+        edit: {},
+        kind: INTERACTION_KIND.MEAL_VERSION_ACCEPT,
+        callbackToken: sent.acceptToken,
+        botMessageId: sent.messageId,
+        expiresAt: Date.parse(plan.weekEnd),
+        interactionGroup: MEAL_PLANNING_GROUP,
+        generation,
+      } satisfies InteractionRegistration)
+    }
   })
 }
 
@@ -871,8 +987,36 @@ export async function runMealPlanningEditWorkflow(
     const profile = await stepDo(step, "meal-edit-load-profile", () => store.loadOrCreateProfile(chatId))
     const generation = profile.interactionGeneration
     const kind = payload?.interactionKind
+    const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
+    if (kind === INTERACTION_KIND.MEAL_VERSION_ACCEPT || kind === INTERACTION_KIND.MEAL_VERSION_REJECT) {
+      if (!active || edit.planInstanceId !== active.plan.instanceId) {
+        await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-version-decision-stale-${iteration}`)
+        return
+      }
+      const accepted = await stepDo(step, `meal-planning-version-decision-${iteration}`, () =>
+        store.decidePlanVersion({
+          chatId,
+          planId: active.plan.planId,
+          version: payload.version ?? active.plan.currentVersion,
+          action: kind === INTERACTION_KIND.MEAL_VERSION_ACCEPT ? "accept" : "reject",
+        }),
+      )
+      if (accepted) {
+        await notify(
+          env,
+          step,
+          chatId,
+          kind === INTERACTION_KIND.MEAL_VERSION_ACCEPT
+            ? "This plan version is accepted."
+            : "This plan version was rejected.",
+          `meal-planning-version-decision-notify-${iteration}`,
+        )
+      } else {
+        await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-version-decision-stale-${iteration}`)
+      }
+      return
+    }
     if (kind === INTERACTION_KIND.MEAL_FEEDBACK) {
-      const active = await stepDo(step, `meal-planning-read-active-${iteration}`, () => store.activePlan(chatId))
       if (!active) return
       if (edit.planInstanceId !== active.plan.instanceId) {
         await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-notify-live-${iteration}-stale-plan`)
@@ -942,6 +1086,25 @@ export async function runMealPlanningEditWorkflow(
       const submission = feedbackBatch ? { items: feedbackBatch.items } : submissionFromPayload(payload)
       if (!submission) return
       try {
+        const rejectedMealIds = explicitRejectedMealIds(submission.items, [
+          ...active.version.provisionalMealDefinitions,
+          ...(profile.profile.mealDefinitions ?? []),
+        ])
+        if (rejectedMealIds.length) {
+          const recorded = await stepDo(step, `meal-planning-reject-feedback-dishes-${iteration}`, () =>
+            store.rejectPlanDishes({
+              chatId,
+              planId: active.plan.planId,
+              version: active.plan.currentVersion,
+              mealIds: rejectedMealIds,
+            }),
+          )
+          if (!recorded) {
+            if (feedbackBatch) await failMiniAppBatch(env, step, store, chatId, feedbackBatch.batchId, iteration)
+            else await notify(env, step, chatId, MEAL_STALE_PLAN, `meal-planning-reject-feedback-stale-${iteration}`)
+            return
+          }
+        }
         await runRevision(env, step, event, store, profile, active, submission, iteration, false, feedbackBatch)
       } catch (error) {
         if (isWorkflowInterruption(error)) throw error
@@ -1102,12 +1265,20 @@ async function runRevision(
         planId: active.plan.planId,
         chatId: event.payload.chatId,
         baseVersion: active.plan.currentVersion,
+        expectedWeekContext: active.plan,
         weeklyInventory: updatedContext.weeklyInventory,
         weeklyExceptions: updatedContext.weeklyExceptions,
       }),
     )
     if (!persisted.ok) {
-      await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-context`)
+      if (feedbackBatch) {
+        await stepDo(step, `meal-planning-stale-mini-app-batch-${occurrence}`, () =>
+          store.markFeedbackBatchStale(feedbackBatch.batchId, new Date().toISOString()),
+        )
+        await notifyMiniAppBatchTerminal(env, step, store, event.payload.chatId, feedbackBatch.batchId, iteration)
+      } else {
+        await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-context`)
+      }
       return null
     }
     // Standalone Telegram context facts may intentionally stop after the
@@ -1186,11 +1357,14 @@ async function runRevision(
       planId: active.plan.planId,
       chatId: event.payload.chatId,
       baseVersion: active.plan.currentVersion,
+      expectedWeekContext: active.plan,
       candidate: enriched.candidate,
       video: enriched.video,
       evaluation: propose.evaluation,
       provisionalMealDefinitions: propose.provisionalMealDefinitions,
       usage: makeVersionUsage(roundUsage, roundDecisionsCostUsd),
+      allowNewFoodsSnapshot: profile.profile.allowNewFoods,
+      recurringHalfDaysSnapshot: context.schedule.halfDays ?? [],
       inventory: {
         weeklyInventory: propose.weeklyInventory,
         weeklyExceptions: propose.weeklyExceptions,
@@ -1215,7 +1389,7 @@ async function runRevision(
       outcome: "failed",
       failureCategory: result.reason,
     })
-    await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-plan`)
+    if (!feedbackBatch) await notify(env, step, event.payload.chatId, MEAL_STALE_PLAN, `${notifyPrefix}-stale-plan`)
     return null
   }
   const updated = await stepDo(step, `meal-planning-read-updated-${occurrence}`, () =>

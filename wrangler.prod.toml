@@ -85,4 +85,4 @@ binding = "RECIPE_VIDEO_CACHE"
 id = "5ad314a012d44e9b9aabf70d86279915"
 
 [triggers]
-crons = ["0 9 * * *", "0 8 * * 1", "0 9 * * 1"]
+crons = ["0 9 * * *", "0 8 * * 1", "0 9 * * 1", "15 * * * *"]

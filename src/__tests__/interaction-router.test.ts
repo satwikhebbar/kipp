@@ -170,6 +170,26 @@ describe("InteractionRouterDO retention", () => {
 describe("persistent edit authority", () => {
   beforeEach(() => vi.spyOn(Date, "now").mockReturnValue(NOW))
 
+  it("routes replies to revised plans as feedback and requires tokens for version decisions", async () => {
+    const { namespace } = sqliteInteractionRouter()
+    const router = createInteractionRouter(namespace, "chat")
+    const common = { version: 2, workflowId: "meal-wf", botMessageId: 101, expiresAt: NOW + 100 }
+    await router.register({ ...common, interactionId: "feedback", kind: INTERACTION_KIND.MEAL_FEEDBACK, edit: {} })
+    const decisions = [INTERACTION_KIND.MEAL_VERSION_ACCEPT, INTERACTION_KIND.MEAL_VERSION_REJECT]
+    for (const kind of decisions) {
+      await router.register({ ...common, interactionId: kind, callbackToken: kind, kind })
+    }
+
+    expect(await router.resolve({ replyToMessageId: 101, text: "Less oil", telegramUpdateId: 1 })).toMatchObject({
+      interaction: { kind: INTERACTION_KIND.MEAL_FEEDBACK, text: "Less oil" },
+    })
+    for (const [index, kind] of decisions.entries()) {
+      expect(await router.resolve({ callbackToken: kind, telegramUpdateId: index + 2 })).toMatchObject({
+        interaction: { kind },
+      })
+    }
+  })
+
   it("keeps unrelated resources and chats independent while an edit holds a lock", async () => {
     const { namespace } = sqliteInteractionRouter()
     const first = createInteractionRouter(namespace, "chat-a")

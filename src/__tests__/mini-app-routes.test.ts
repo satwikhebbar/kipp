@@ -5,10 +5,10 @@ import type { Env } from "../core/types"
 import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
 import { createMealPlanningStore } from "../meal-planning/store"
 import type { MealGrid } from "../meal-planning/types"
-import { createD1TestDb } from "./d1-test-db"
+import { createClockedD1TestDb } from "./d1-test-db"
 
 function env(): Env {
-  const { d1 } = createD1TestDb()
+  const { d1 } = createClockedD1TestDb()
   return {
     MEAL_PLANNING_DB: d1,
     TELEGRAM_BOT_TOKEN: "bot-token",
@@ -92,9 +92,11 @@ async function authenticatedPlanFixture(
   weekEnd: string,
   grid: MealGrid = {},
 ): Promise<{ d1: D1Database; store: ReturnType<typeof createMealPlanningStore>; testEnv: Env; token: string }> {
-  const { d1 } = createD1TestDb()
+  let persistedAt: string | undefined = new Date(Math.min(Date.parse(weekStart), Date.now() - 1)).toISOString()
+  const { d1 } = createClockedD1TestDb(() => persistedAt ?? new Date().toISOString())
   const store = createMealPlanningStore(d1)
   await seedPlan(store, planId, weekStart, weekEnd, grid)
+  persistedAt = undefined
   await store.upsertMiniAppReviewContext({ telegramUserId: "42", chatId: "chat-42", planId, weekEnd })
   const testEnv = { TELEGRAM_BOT_TOKEN: BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID: "42", MEAL_PLANNING_DB: d1 } as Env
   const session = await miniAppRoutes.fetch(
@@ -393,7 +395,7 @@ describe("Mini App HTTP boundary", () => {
     vi.useFakeTimers({ toFake: ["Date"] })
     vi.setSystemTime(FAKE_NOW)
     try {
-      const { db, d1 } = createD1TestDb()
+      const { db, d1 } = createClockedD1TestDb()
       const store = createMealPlanningStore(d1)
       await store.loadOrCreateProfile("chat-42")
       const generationId = "generation-first-plan"
@@ -575,7 +577,7 @@ describe("Mini App HTTP boundary", () => {
   })
 
   it("terminalizes and notifies once when a batch has no workflow dispatch capability", async () => {
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const batch = {
       batchId: "mini-batch-1",
       planId: "plan-1",
@@ -617,7 +619,7 @@ describe("Mini App HTTP boundary", () => {
   })
 
   it("logs the workflow dispatch phase and provider error when the instance is unreachable", async () => {
-    const { db, d1 } = createD1TestDb()
+    const { db, d1 } = createClockedD1TestDb()
     const batch = {
       batchId: "mini-batch-unreachable",
       planId: "plan-1",
