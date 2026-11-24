@@ -142,6 +142,39 @@ describe("Calendar agent contracts", () => {
     expect(ledger.records).toHaveLength(1)
   })
 
+  it("rejects missing or malformed explicit times while allowing untimed candidates", async () => {
+    const tool = createEvaluateCalendarCandidateTool({
+      getBusyIntervals: vi.fn().mockResolvedValue([]),
+      ledger: createCalendarPlanLedger(),
+      version: 1,
+      expiresAt: Date.parse("2026-08-04T00:00:00.000Z"),
+      timeZone: "Asia/Kolkata",
+      now: Date.parse("2026-08-01T00:00:00.000Z"),
+    })
+    const guard = new ToolGuard({ [tool.name]: tool }, [tool.name])
+    const proposal = {
+      title: "Call Jamie",
+      localDate: "2026-08-03",
+      durationMinutes: 30,
+      dateIsExplicit: true,
+      timeIsExplicit: true,
+      classification: "ordinary",
+      needsClarification: false,
+    }
+    for (const startTime of [undefined, "2.30pm", "25:00"]) {
+      await expect(
+        guard.execute(tool.name, { kind: "one_off", proposal: { ...proposal, startTime } }),
+      ).resolves.toMatchObject({
+        ok: false,
+        category: "invalid-state",
+        rejectionCodes: ["explicit_start_time_requires_24_hour_hh_mm"],
+      })
+    }
+    await expect(
+      guard.execute(tool.name, { kind: "one_off", proposal: { ...proposal, timeIsExplicit: false } }),
+    ).resolves.toMatchObject({ ok: true, output: { kind: "ready" } })
+  })
+
   it("rejects a default horizon when the transcript supplied an explicit occurrence count", async () => {
     const tool = createEvaluateCalendarCandidateTool(
       {

@@ -78,7 +78,7 @@ describe("bounded Calendar agent session", () => {
       proposal: {
         title: " ",
         localDate: "",
-        startTime: "bad",
+        startTime: "19:00",
         durationMinutes: 20,
         dateIsExplicit: false,
         timeIsExplicit: true,
@@ -111,14 +111,8 @@ describe("bounded Calendar agent session", () => {
             id: "complete-ask",
             name: "needs_user_input",
             input: {
-              message: "Please provide a title, date, valid time, and duration in 15-minute increments.",
-              reasonCodes: [
-                "unsupported_configuration",
-                "missing_date",
-                "invalid_title",
-                "invalid_duration_increment",
-                "missing_or_invalid_time",
-              ],
+              message: "Please provide a title, date, and duration in 15-minute increments.",
+              reasonCodes: ["unsupported_configuration", "missing_date", "invalid_title", "invalid_duration_increment"],
               interaction: { kind: "reply" },
             },
           },
@@ -131,7 +125,7 @@ describe("bounded Calendar agent session", () => {
 
     expect(result.terminal).toMatchObject({
       kind: "needs_user_input",
-      reasonCodes: expect.arrayContaining(["missing_date", "invalid_title", "missing_or_invalid_time"]),
+      reasonCodes: expect.arrayContaining(["missing_date", "invalid_title"]),
     })
     expect(result.providerTurns).toBe(3)
   })
@@ -202,6 +196,68 @@ describe("bounded Calendar agent session", () => {
     expect(result.toolExecutions).toContainEqual(
       expect.objectContaining({ tool: "needs_user_input", outcome: "failed", failureCategory: "invalid-state" }),
     )
+  })
+
+  it("repairs an omitted explicit time from the conversation before asking the user", async () => {
+    const proposal = {
+      title: "Meet with Arun - 2026-08-03 14:30 - 30min",
+      localDate: "2026-08-03",
+      durationMinutes: 30,
+      dateIsExplicit: true,
+      timeIsExplicit: true,
+      classification: "family-social",
+      needsClarification: false,
+    }
+    let turn = 0
+    const provider: ToolProviderClient = {
+      generate: vi.fn(async ({ messages }) => {
+        turn++
+        if (turn === 1)
+          return {
+            toolCalls: [{ id: "missing", name: "evaluate_calendar_candidate", input: { kind: "one_off", proposal } }],
+            usage: { inputTokens: 0, outputTokens: 0 },
+          }
+        if (turn === 2) {
+          expect(messages.at(-1)).toMatchObject({
+            role: "tool",
+            output: {
+              ok: false,
+              category: "invalid-state",
+              rejectionCodes: ["explicit_start_time_requires_24_hour_hh_mm"],
+            },
+          })
+          return {
+            toolCalls: [
+              {
+                id: "fixed",
+                name: "evaluate_calendar_candidate",
+                input: { kind: "one_off", proposal: { ...proposal, startTime: "14:30" } },
+              },
+            ],
+            usage: { inputTokens: 0, outputTokens: 0 },
+          }
+        }
+        return {
+          toolCalls: [
+            {
+              id: "ready",
+              name: "ready_to_create",
+              input: { planId: toolOutput(messages, "evaluate_calendar_candidate").planId },
+            },
+          ],
+          usage: { inputTokens: 0, outputTokens: 0 },
+        }
+      }),
+    }
+    const sessionOptions = options()
+    const result = await runCalendarAgentSession(
+      provider,
+      [{ role: "user", text: "Meet with Arun Monday 2.30pm for 30min" }],
+      sessionOptions,
+    )
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.toolNames).toEqual(["evaluate_calendar_candidate", "evaluate_calendar_candidate", "ready_to_create"])
+    expect(sessionOptions.evaluation.getBusyIntervals).toHaveBeenCalledOnce()
   })
 
   it("repairs a dropped explicit occurrence count before issuing a plan", async () => {

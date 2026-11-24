@@ -1,8 +1,9 @@
 import { z } from "zod"
 import { type CalendarEvaluationContext, evaluateCalendarCandidate } from "../calendar/evaluation"
+import { localMinutes } from "../calendar/scheduling"
 import type { CalendarIssueCode } from "../calendar/validation"
 import type { GoogleCalendarClient } from "../integrations/google-calendar"
-import type { ToolDefinition } from "../runtime/tools"
+import { type ToolDefinition, ToolHandlerError } from "../runtime/tools"
 
 export const CALENDAR_AGENT_TOOL = {
   LIST_EVENTS: "list_calendar_events",
@@ -34,10 +35,13 @@ export const oneOffCandidateSchema = z
   .object({
     title: z.string(),
     localDate: z.string(),
-    startTime: z.string().optional(),
+    startTime: z
+      .string()
+      .optional()
+      .describe("Required when timeIsExplicit is true. Use 24-hour HH:mm, for example 2.30pm becomes 14:30."),
     durationMinutes: z.number().int(),
     dateIsExplicit: z.boolean(),
-    timeIsExplicit: z.boolean(),
+    timeIsExplicit: z.boolean().describe("True when the user supplied a specific time; then startTime is required."),
     classification: classificationSchema,
     description: z.string().optional(),
     location: z.string().optional(),
@@ -111,8 +115,11 @@ export const recurringCandidateSchema = z
     dateIsExplicit: z
       .boolean()
       .describe("True only when the user explicitly supplied or confirmed the first occurrence date."),
-    startTime: z.string().optional(),
-    timeIsExplicit: z.boolean(),
+    startTime: z
+      .string()
+      .optional()
+      .describe("Required when timeIsExplicit is true. Use 24-hour HH:mm, for example 2.30pm becomes 14:30."),
+    timeIsExplicit: z.boolean().describe("True when the user supplied a specific time; then startTime is required."),
     durationMinutes: z.number().int(),
     classification: classificationSchema,
     recurrence: recurrenceRuleSchema,
@@ -243,6 +250,12 @@ export function createEvaluateCalendarCandidateTool(
     output: calendarEvaluationOutputSchema,
     privacy: "private",
     batching: "isolated",
-    handler: async (candidate) => evaluateCalendarCandidate(candidate, context),
+    handler: async (candidate) => {
+      if (candidate.proposal.timeIsExplicit && localMinutes(candidate.proposal.startTime ?? "") === null)
+        throw new ToolHandlerError("Explicit start time is missing or invalid", "invalid-state", undefined, [
+          "explicit_start_time_requires_24_hour_hh_mm",
+        ])
+      return evaluateCalendarCandidate(candidate, context)
+    },
   }
 }
