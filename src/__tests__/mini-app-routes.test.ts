@@ -1281,6 +1281,25 @@ describe("Mini App HTTP boundary", () => {
     await assertLateFailurePreservesPlanAndDraft("conflict", "walnut")
     await assertLateFailurePreservesPlanAndDraft("server-error", "cashew")
     await assertLateFailurePreservesPlanAndDraft("network-error", "almond")
+
+    const discardedDraft = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    discardedDraft.value = "egg\nsesame\npeanut\ndiscard-me"
+    lateSaveOutcome = "server-error"
+    delayNextSave = true
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    delayedSave.release?.()
+    await settle()
+    app?.querySelector('button[data-action="reload"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    const reloadedDraft = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    expect(reloadedDraft.value).not.toContain("discard-me")
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+    await settle()
+    const reopenedAfterReload = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    expect(reopenedAfterReload.value).not.toContain("discard-me")
   })
 
   it("leaves a single week as a simple header without a redundant status", async () => {
