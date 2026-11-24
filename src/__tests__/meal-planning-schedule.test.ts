@@ -111,6 +111,18 @@ describe("configurable meal schedules", () => {
     ).toBe(true)
   })
 
+  it("enforces the 20-minute cap for half-day snacks even when the slot is listed", () => {
+    const definition = {
+      ...(SEED_PROFILE.mealDefinitions?.find((meal) => meal.halfDaySnack) as NonNullable<
+        typeof SEED_PROFILE.mealDefinitions
+      >[number]),
+      suitableSlots: ["morning-tea"],
+      typicalCookMinutes: 25,
+    }
+    expect(mealDefinitionFitsSlot(definition, context(CUSTOM_SUNDAY_SCHEDULE), "Sun", "morning-tea")).toBe(false)
+    expect(mealDefinitionFitsSlot(definition, context(CUSTOM_SUNDAY_SCHEDULE), "Mon", "morning-tea")).toBe(true)
+  })
+
   it("allows half-day-only eligibility on required half-day slots but not ordinary days", () => {
     const definition = {
       ...(SEED_PROFILE.mealDefinitions?.find((meal) => meal.halfDaySnack) as NonNullable<

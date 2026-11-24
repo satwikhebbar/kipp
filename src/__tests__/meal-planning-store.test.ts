@@ -1324,6 +1324,23 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     expect(d1Count(db, "SELECT count(*) AS count FROM meal_profile")).toBe(0)
   })
 
+  it("rejects an initial plan generated against an outdated profile configuration", async () => {
+    const { store, db } = createD1Store()
+    const original = await store.loadOrCreateProfile(CHAT)
+    await store.saveMealProfileConfiguration({
+      chatId: CHAT,
+      expectedVersion: original.configurationVersion,
+      profile: original.profile,
+      customPolicies: original.customPolicies,
+      schedule: original.schedule,
+      location: original.location,
+    })
+    await expect(
+      createPlan(store, createInput({ profileConfigurationVersion: original.configurationVersion })),
+    ).rejects.toThrow("meal profile changed during plan generation")
+    expect(d1Count(db, "SELECT count(*) AS count FROM meal_plan")).toBe(0)
+  })
+
   it("createActivePlan with a missing profile does not replace a prior active plan (supersede guarded)", async () => {
     const { store, db } = createD1Store()
     await store.loadOrCreateProfile(CHAT)
@@ -2032,7 +2049,8 @@ describe("completed week repertoire", () => {
       vi.setSystemTime(open)
       const store =
         kind === "D1" ? createMealPlanningStore(createClockedD1TestDb().d1) : createInMemoryMealPlanningStore()
-      await store.loadOrCreateProfile(CHAT)
+      const initialProfile = await store.loadOrCreateProfile(CHAT)
+      const initialConfigurationVersion = initialProfile.configurationVersion
       await createPlan(store, input())
       expect(await store.claimDueMealCompletion(new Set())).toBeNull()
       vi.setSystemTime(cutoff)
@@ -2042,6 +2060,7 @@ describe("completed week repertoire", () => {
       expect(await store.completeEligibleMealPlan(target)).toEqual({ added: 1, skipped: 0, invalid: 0 })
       expect(await store.completeEligibleMealPlan(target)).toBeNull()
       const loaded = await store.loadOrCreateProfile(CHAT)
+      expect(loaded.configurationVersion).toBe(initialConfigurationVersion + 1)
       expect(loaded.profile.mealDefinitions).toContainEqual({ ...dish, status: "established" })
       expect((await store.activePlan(CHAT))?.version.provisionalMealDefinitions).toEqual([dish])
     } finally {

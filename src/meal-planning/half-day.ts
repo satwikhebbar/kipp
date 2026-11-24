@@ -53,8 +53,7 @@ export function mealDefinitionFitsSlot(
 ): boolean {
   const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
   const behavior = slot?.halfDayBehavior ?? legacyHalfDayBehavior(slotId)
-  return (
-    definition.suitableSlots.includes(slotId) ||
-    (definition.halfDaySnack === true && isHalfDay(context, day) && behavior.action === "quick")
-  )
+  const halfDayQuickSnack = definition.halfDaySnack === true && isHalfDay(context, day) && behavior.action === "quick"
+  if (halfDayQuickSnack) return definition.typicalCookMinutes <= HALF_DAY_SNACK_MAX_COOK_MINUTES
+  return definition.suitableSlots.includes(slotId)
 }

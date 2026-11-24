@@ -375,6 +375,7 @@ describe("Mini App HTTP boundary", () => {
           eligibleEstablishedMeals: Record<string, string[]>
         }
       const profile = await read()
+      expect(profile.schedule.days).toEqual(["Sun"])
       expect(profile.schedule.halfDays).toEqual([])
       expect(validateMealSchedule(profile.schedule, profile.profile)).toEqual([])
       const savedResponse = await miniAppRoutes.fetch(
@@ -674,6 +675,22 @@ describe("Mini App HTTP boundary", () => {
       calls.push({ path, method })
       if (path.startsWith("/mini-app/api/session"))
         return new Response(JSON.stringify({ token: "settings-session", scope: "settings" }), { status: 201 })
+      if (path.startsWith("/mini-app/api/plan"))
+        return new Response(
+          JSON.stringify({
+            status: "current",
+            plan: {
+              planId: "plan-selected-after-back",
+              version: 1,
+              weekStart: "2026-09-27T18:30:00.000Z",
+              timezone: "Asia/Kolkata",
+              schedule: { days: ["Mon"], slots: [{ id: "lunch", name: "Lunch" }] },
+              candidate: { grid: { Mon: { lunch: { dish: "Rice", items: ["Rice"] } } }, easyBuys: [] },
+              weeklyExceptions: { items: [] },
+            },
+            history: [],
+          }),
+        )
       if (path === "/mini-app/api/profile" && method === "PUT") {
         const submitted = JSON.parse(String(init?.body)) as Record<string, unknown>
         submissions.push(submitted)
@@ -1167,8 +1184,12 @@ describe("Mini App HTTP boundary", () => {
     const tue = retryDays.find((input) => input.value === "Tue")
     if (!tue) throw new Error("missing Tuesday selection")
     tue.checked = true
+    const retrySubmissionCount = submissions.length
+    const retryVersion = serverSettings.configurationVersion
     app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
     await settle()
+    expect(submissions).toHaveLength(retrySubmissionCount + 1)
+    expect(serverSettings.configurationVersion).toBe(retryVersion + 1)
     expect(serverSettings.schedule.days).toEqual(["Tue"])
 
     conflictSequence = 2
@@ -1205,6 +1226,18 @@ describe("Mini App HTTP boundary", () => {
     expect(serverSettings.profile.dietaryExclusions).toEqual(["egg", "sesame", "peanut"])
     const savedExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
     expect(savedExclusions.value).toContain("peanut")
+
+    delayNextSave = true
+    savedExclusions.value = "egg\nsesame\npeanut\nwalnut"
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    expect(app?.textContent).toContain("Rice")
+    delayedSave.release?.()
+    await settle()
+    expect(app?.textContent).toContain("Rice")
+    expect(app?.textContent).not.toContain("Settings saved.")
   })
 
   it("leaves a single week as a simple header without a redundant status", async () => {

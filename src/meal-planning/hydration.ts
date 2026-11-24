@@ -1,5 +1,5 @@
 import { computeCoverageSet } from "./coverage"
-import { effectiveMealSlot, mealDefinitionFitsSlot } from "./half-day"
+import { effectiveMealSlot, HALF_DAY_SNACK_MAX_COOK_MINUTES, mealDefinitionFitsSlot } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   MealCell,
@@ -42,6 +42,8 @@ function selectionAliases(selection: MealSelection): Record<string, string> {
 function validateProposal(proposal: NewMealProposal): string | undefined {
   if (!proposal.name.trim()) return "name is required"
   if (!proposal.vegetarian) return "new meals must be vegetarian"
+  if (proposal.halfDaySnack && proposal.cookMinutes > HALF_DAY_SNACK_MAX_COOK_MINUTES)
+    return `half-day snacks must take no more than ${HALF_DAY_SNACK_MAX_COOK_MINUTES} cook minutes`
   if (!proposal.principalIngredients.length) return "principalIngredients is required"
   if (!proposal.suitableSlots.length) return "suitableSlots is required"
   if (!proposal.ingredients.length) return "ingredients is required"

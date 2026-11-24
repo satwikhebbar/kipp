@@ -2145,6 +2145,51 @@ describe("structured meal hydration", () => {
     expect(halfDayResult.candidate?.grid.Wed.snack1).toMatchObject({ dish: "Dosa", cookMinutes: 15 })
   })
 
+  it("rejects over-limit half-day snacks before they can be provisioned or selected", () => {
+    const quickSchedule = {
+      ...SEED_SCHEDULE,
+      slots: SEED_SCHEDULE.slots.map((slot) =>
+        slot.id === "snack1" ? { ...slot, halfDayBehavior: { action: "quick" as const, maxCookMinutes: 40 } } : slot,
+      ),
+    }
+    const halfDayContext = baseContext({
+      schedule: quickSchedule,
+      profile: { ...SEED_PROFILE, allowNewFoods: true, mealDefinitions: [] },
+      weeklyExceptions: { items: [{ kind: "half_day", appliesTo: { day: "Wed" }, instruction: "Short day" }] },
+    })
+    const overLimitProposal = {
+      proposedMeal: {
+        name: "Slow snack",
+        principalIngredients: ["rice"],
+        vegetarian: true as const,
+        suitableSlots: ["snack1"],
+        halfDaySnack: true,
+        packedFood: { suitable: true, dry: true },
+        cookMinutes: 25,
+        priorNightPrep: "none" as const,
+        ingredients: ["rice"],
+      },
+    }
+    const proposed = hydrateMealPlan(
+      { grid: { Wed: { snack1: overLimitProposal } }, easyBuys: [], policyOutcomes: {} },
+      halfDayContext,
+    )
+    expect(proposed.failures.map((failure) => failure.code)).toEqual(["invalid_new_meal"])
+
+    const established = {
+      ...definition,
+      suitableSlots: ["snack1"],
+      halfDaySnack: true,
+      packedFood: { suitable: true, dry: true },
+      typicalCookMinutes: 25,
+    }
+    const selected = hydrateMealPlan(
+      { grid: { Wed: { snack1: { mealDefinitionId: established.id } } }, easyBuys: [], policyOutcomes: {} },
+      { ...halfDayContext, profile: { ...halfDayContext.profile, mealDefinitions: [established] } },
+    )
+    expect(selected.failures.map((failure) => failure.code)).toEqual(["slot_unsuitable"])
+  })
+
   it("maps none, optional, and required prep definitions deterministically", () => {
     const none = { ...definition, id: "none", priorNightPrep: "none" as const }
     const required = {

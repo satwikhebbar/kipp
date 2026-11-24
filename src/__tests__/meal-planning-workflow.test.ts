@@ -2871,8 +2871,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       createFakeStep([], Date.parse(week.weekEnd)) as never,
     )
     // The saved plan predates a newly configured recurring Thursday half-day.
-    db.prepare("UPDATE meal_profile SET schedule_json = ?").run(
-      JSON.stringify({ ...SEED_SCHEDULE, halfDays: ["Thu", "Sat"] }),
+    const savedHalfDaySchedule = { ...SEED_SCHEDULE, halfDays: ["Thu", "Sat"] }
+    db.prepare("UPDATE meal_profile SET schedule_json = ?").run(JSON.stringify(savedHalfDaySchedule))
+    db.prepare("UPDATE meal_plan SET schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(savedHalfDaySchedule),
+      CHAT,
     )
     const before = await createMealPlanningStore(d1).activePlan(CHAT)
     const dish = before?.version.candidate.grid.Thu["school-lunch"].dish
@@ -2900,6 +2903,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.plan.weeklyExceptions.items).toContainEqual({
+      kind: "full_day",
+      appliesTo: { day: "Thu" },
+      instruction: "Thursday is a full day this week",
+    })
     expect(active?.version.candidate.grid.Thu["school-lunch"].dish).toBe("vegetable cutlet")
     expect(deepseekBodies).toHaveLength(5)
     expect(deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")).toContain(`Replace ${dish}`)

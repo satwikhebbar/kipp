@@ -18,7 +18,7 @@ import { stripNullProperties } from "../runtime/tool-runner"
 import { computeCoverageSet, projectEligibleGrid } from "./coverage"
 import { createEasyBuyClassifier } from "./easy-buy-classifier"
 import { applicablePlanFeedback, isConcretePlanFeedback } from "./evaluation"
-import { effectiveMealSlot, isHalfDay } from "./half-day"
+import { effectiveMealSlot, HALF_DAY_SNACK_MAX_COOK_MINUTES, isHalfDay } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -65,7 +65,7 @@ const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "~openai/gpt-luna-latest"
 const ZERO_USAGE: LLMUsage = { inputTokens: 0, outputTokens: 0 }
-const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, full school days, or schedule changes. When the parent explicitly says a recurring half-day is a full school day for this week, emit full_day for that day. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and let the configured half-day slot behavior determine coverage. Do not assume school-lunch is the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
+const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, full school days, or schedule changes. When the parent explicitly says a recurring half-day is a full school day for this week, emit full_day for that day. For a half-day, always omit mealSlots; half-day coverage follows the saved schedule slot behavior. Do not assume school-lunch is the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
 /** Render week context extraction prompt. */
 export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext, "schedule">): string {
@@ -266,7 +266,10 @@ export function renderHouseholdContext(context: MealPlanContext): string {
   const quickSlots = context.schedule.slots.filter((slot) => slot.halfDayBehavior?.action === "quick")
   for (const slot of quickSlots) {
     const candidates = (p.mealDefinitions ?? []).filter(
-      (meal) => meal.status === "established" && (meal.suitableSlots.includes(slot.id) || meal.halfDaySnack),
+      (meal) =>
+        meal.status === "established" &&
+        (meal.suitableSlots.includes(slot.id) ||
+          (meal.halfDaySnack && meal.typicalCookMinutes <= HALF_DAY_SNACK_MAX_COOK_MINUTES)),
     )
     lines.push(
       `- Quick half-day slot ${slot.id} candidates (max ${slot.halfDayBehavior?.action === "quick" ? slot.halfDayBehavior.maxCookMinutes : 0} cook minutes): ${candidates.map((meal) => `${references.byId.get(meal.id) ?? meal.id} (${meal.name})`).join(", ") || "none"}`,
@@ -482,6 +485,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
             context.profile.mealDefinitions?.filter((definition) => definition.status === "established") ?? [],
           instanceId: event.instanceId,
           generationId,
+          profileConfigurationVersion: profile.configurationVersion,
           candidate: enriched.candidate,
           video: enriched.video,
           evaluation: outcome.propose.evaluation,
@@ -497,10 +501,22 @@ export async function runAgentCenteredMealPlanningWorkflow(
         })
       } catch (error) {
         if (error instanceof PlanWeekClosedError) return "week-closed" as const
+        if (error instanceof Error && error.message.startsWith("meal profile changed during plan generation"))
+          return "profile-changed" as const
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
         throw error
       }
     })
+    if (created === "profile-changed") {
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        "Your household settings changed while the plan was being generated. Run /mealplan again to use the latest settings.",
+        "meal-planning-profile-changed",
+      )
+      return
+    }
     if (created === "week-closed") {
       await notify(
         env,

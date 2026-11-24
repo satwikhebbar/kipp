@@ -283,6 +283,8 @@ export interface CreateActivePlanInput {
   instanceId: string
   /** Generation lease token; plan creation is rejected when it is absent, expired, or superseded. */
   generationId: string
+  /** Profile configuration version used to generate and evaluate this initial plan. */
+  profileConfigurationVersion?: number
   candidate: MealPlanCandidate
   evaluation: MealPlanEvaluation
   weeklyInventory: WeeklyInventory
@@ -1149,6 +1151,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
           .bind(target.planId, target.chatId, target.weekEnd)
           .first()
         if (!row) return null
+        if (row.schedule_json == null || row.established_meal_definitions_json == null) {
+          await this.loadOrCreateProfile(target.chatId)
+          continue
+        }
         const prior = String(row.profile_json)
         const profile = JSON.parse(prior) as MealProfile
         const record = mealPlanFromRow(row)
@@ -1343,6 +1349,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
         interaction_generation: number | null
         week_closed: number
         lease_valid: number
+        profile_exists: number
+        profile_version_matches: number
       }>([
         db
           .prepare(
@@ -1352,7 +1360,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
                                     created_at, updated_at, write_attempt_id)
              SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'replaced', 0, ?, ?, ${D1_NOW_ISO}, ${D1_NOW_ISO}, ?
              WHERE ? > ${D1_NOW_ISO}
-               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?)
+               AND EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?
+                           AND (? IS NULL OR version = ?))
                AND EXISTS (SELECT 1 FROM meal_plan_generation
                            WHERE chat_id = ? AND generation_id = ? AND status = 'generating'
                              AND expires_at > ${D1_NOW_ISO})`,
@@ -1371,6 +1380,8 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
             attemptId,
             input.weekEnd,
             input.chatId,
+            input.profileConfigurationVersion ?? null,
+            input.profileConfigurationVersion ?? null,
             input.chatId,
             input.generationId,
           ),
@@ -1429,15 +1440,31 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
                     ? <= ${D1_NOW_ISO} AS week_closed,
                     EXISTS (SELECT 1 FROM meal_plan_generation
                             WHERE chat_id = ? AND generation_id = ? AND status = 'generating'
-                              AND expires_at > ${D1_NOW_ISO}) AS lease_valid`,
+                              AND expires_at > ${D1_NOW_ISO}) AS lease_valid,
+                    EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?) AS profile_exists,
+                    EXISTS (SELECT 1 FROM meal_profile WHERE chat_id = ?
+                            AND (? IS NULL OR version = ?)) AS profile_version_matches`,
           )
-          .bind(...proof, input.chatId, input.weekEnd, input.chatId, input.generationId),
+          .bind(
+            ...proof,
+            input.chatId,
+            input.weekEnd,
+            input.chatId,
+            input.generationId,
+            input.chatId,
+            input.chatId,
+            input.profileConfigurationVersion ?? null,
+            input.profileConfigurationVersion ?? null,
+          ),
       ])
       const result = results[6].results[0]
       if (!result.created_at) {
         if (result.week_closed) throw new PlanWeekClosedError()
         if (!result.lease_valid) throw new Error(`generation lease missing or expired for chat ${input.chatId}`)
-        throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+        if (!result.profile_exists) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+        if (!result.profile_version_matches)
+          throw new Error(`meal profile changed during plan generation for chat ${input.chatId}`)
+        throw new Error(`meal_plan creation failed for chat ${input.chatId}`)
       }
       const createdAt = String(result.created_at)
       return {
@@ -2347,6 +2374,10 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       const profile = backing.profiles.get(target.chatId)
       if (!record || !profile) return null
       const weeklyExceptions = decodeCompletionWeeklyExceptions(JSON.stringify(plan.weeklyExceptions))
+      if (!plan.schedule || !plan.establishedMealDefinitions) {
+        plan.schedule ??= structuredClone(profile.schedule)
+        plan.establishedMealDefinitions ??= structuredClone(profile.profile.mealDefinitions ?? [])
+      }
       const { additions, counts } = completionAdditions(
         { ...record, plan: { ...plan, weeklyExceptions } },
         profile.profile,
@@ -2356,6 +2387,7 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
           ...profile.profile,
           mealDefinitions: [...(profile.profile.mealDefinitions ?? []), ...structuredClone(additions)],
         }
+        profile.configurationVersion = (profile.configurationVersion ?? 1) + 1
         profile.updatedAt = nowIso()
       }
       completed.add(target.planId)
@@ -2436,6 +2468,11 @@ export function createInMemoryMealPlanningStore(options: InMemoryMealPlanningSto
       if (input.weekEnd <= now) throw new PlanWeekClosedError()
       const profile = backing.profiles.get(input.chatId)
       if (!profile) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
+      if (
+        input.profileConfigurationVersion !== undefined &&
+        profile.configurationVersion !== input.profileConfigurationVersion
+      )
+        throw new Error(`meal profile changed during plan generation for chat ${input.chatId}`)
       const generation = generations.get(input.chatId)
       if (
         !generation ||
