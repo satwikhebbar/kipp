@@ -152,7 +152,7 @@ describe("configurable meal schedules", () => {
       ...(SEED_PROFILE.mealDefinitions?.find((meal) => meal.halfDaySnack) as NonNullable<
         typeof SEED_PROFILE.mealDefinitions
       >[number]),
-      suitableSlots: ["morning-tea"],
+      suitableSlots: ["morning-tea", "supper"],
       halfDaySnack: true,
       packedFood: { suitable: true, dry: true },
       typicalCookMinutes: 25,

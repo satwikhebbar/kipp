@@ -710,7 +710,11 @@ describe("Mini App HTTP boundary", () => {
         }
         if (lateSaveOutcome === "conflict") {
           lateSaveOutcome = null
-          serverSettings = { ...serverSettings, configurationVersion: serverSettings.configurationVersion + 1 }
+          serverSettings = {
+            ...serverSettings,
+            configurationVersion: serverSettings.configurationVersion + 1,
+            profile: { ...serverSettings.profile, pantryBaseline: ["oats"] },
+          }
           return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
         }
         if (lateSaveOutcome === "server-error") {
@@ -1251,17 +1255,53 @@ describe("Mini App HTTP boundary", () => {
     window.dispatchEvent(new window.Event("popstate"))
     await settle()
     expect(app?.textContent).toContain("Rice")
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+    await settle()
+    const reopenedDuringSave = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    const reopenedValueBeforeLateSuccess = reopenedDuringSave.value
     delayedSave.release?.()
     await settle()
-    expect(app?.textContent).toContain("Rice")
     expect(app?.textContent).not.toContain("Settings saved.")
+    const reopenedAfterLateSuccess = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+    } | null
+    expect(reopenedAfterLateSuccess?.value).toBe(reopenedValueBeforeLateSuccess)
+    reopenedDuringSave.value = "egg\nsesame\nmacadamia"
+    const staleViewSubmissionCount = submissions.length
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(submissions).toHaveLength(staleViewSubmissionCount + 1)
+    expect(submissions.at(-1)?.expectedVersion).toBe(serverSettings.configurationVersion - 1)
+    expect(app?.textContent).toContain("changed in another session")
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("profile.dietaryExclusions")
+    app
+      ?.querySelector('button[data-action="keep-local-conflicts"]')
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(serverSettings.profile.dietaryExclusions).toEqual(["egg", "sesame", "macadamia"])
+    app?.querySelector(".settings-card .head button")?.dispatchEvent(new window.Event("click"))
+    await settle()
 
     const assertLateFailurePreservesPlanAndDraft = async (
       outcome: "conflict" | "server-error" | "network-error",
       retainedValue: string,
     ) => {
+      if (!app?.querySelector(".settings-open")) {
+        app?.querySelector(".settings-card .head button")?.dispatchEvent(new window.Event("click"))
+        await settle()
+      }
       app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
       await settle()
+      if (app?.querySelector('button[data-action="reapply"]')) {
+        app.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+        await settle()
+        app
+          .querySelector('button[data-action="keep-local-conflicts"]')
+          ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+        await settle()
+      }
       const field = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
       field.value = `egg\nsesame\npeanut\n${retainedValue}`
       lateSaveOutcome = outcome
@@ -1280,8 +1320,16 @@ describe("Mini App HTTP boundary", () => {
       await settle()
       const reopened = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
       expect(reopened.value).toContain(retainedValue)
+      const reopenedSave = app?.querySelector(".settings-save") as unknown as { disabled: boolean }
+      if (outcome === "conflict") {
+        expect(reopenedSave.disabled).toBe(true)
+        expect(app?.querySelector('button[data-action="reapply"]')).not.toBeNull()
+      } else {
+        expect(reopenedSave.disabled).toBe(false)
+      }
     }
     await assertLateFailurePreservesPlanAndDraft("conflict", "walnut")
+    expect(serverSettings.profile.pantryBaseline).toEqual(["oats"])
     await assertLateFailurePreservesPlanAndDraft("server-error", "cashew")
     await assertLateFailurePreservesPlanAndDraft("network-error", "almond")
 
