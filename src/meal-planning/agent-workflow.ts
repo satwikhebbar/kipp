@@ -32,8 +32,8 @@ import {
   MEAL_STALE_PLAN,
   renderPlanLaunchMessage,
 } from "./messages"
-import { mealSessionReferences } from "./session-references"
 import { validateMealSchedule } from "./schedule"
+import { mealSessionReferences } from "./session-references"
 import {
   type ActivePlanRecord,
   createMealPlanningStore,
@@ -269,7 +269,7 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       (meal) => meal.status === "established" && (meal.suitableSlots.includes(slot.id) || meal.halfDaySnack),
     )
     lines.push(
-`- Quick half-day slot ${slot.id} candidates (max ${slot.halfDayBehavior?.action === "quick" ? slot.halfDayBehavior.maxCookMinutes : 0} cook minutes): ${candidates.map((meal) => `${references.byId.get(meal.id) ?? meal.id} (${meal.name})`).join(", ") || "none"}`,
+      `- Quick half-day slot ${slot.id} candidates (max ${slot.halfDayBehavior?.action === "quick" ? slot.halfDayBehavior.maxCookMinutes : 0} cook minutes): ${candidates.map((meal) => `${references.byId.get(meal.id) ?? meal.id} (${meal.name})`).join(", ") || "none"}`,
     )
   }
   lines.push(`- Request kind: ${context.request.kind}`)

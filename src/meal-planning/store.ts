@@ -1470,7 +1470,10 @@ export function createMealPlanningStore(db: D1Database): MealPlanningStore {
       const insertedVersion =
         "SELECT plan_id, version, created_at FROM meal_plan_version WHERE plan_id = ? AND version = ? AND write_attempt_id = ?"
       const proof = [input.planId, newVersion, attemptId] as const
-      const profilePresent = await db.prepare("SELECT version FROM meal_profile WHERE chat_id = ?").bind(input.chatId).first()
+      const profilePresent = await db
+        .prepare("SELECT version FROM meal_profile WHERE chat_id = ?")
+        .bind(input.chatId)
+        .first()
       if (!profilePresent) throw new Error(`meal_profile row missing for chat ${input.chatId}`)
       if (Number(profilePresent.version) !== input.profileConfigurationVersion)
         return { ok: false as const, reason: "stale" as const }

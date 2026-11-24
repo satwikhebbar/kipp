@@ -827,6 +827,8 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
   it("cleans expired settings launches when creating a new live launch", async () => {
     const { d1, db } = createD1TestDb()
     const store = createMealPlanningStore(d1)
@@ -1040,8 +1042,8 @@ describe("createMealPlanningStore (D1, real SQL)", () => {
         planId: "legacy-history",
         instanceId: "history-instance",
         generationId: "history-generation",
-        weekStart: "2026-09-14T00:00:00.000Z",
-        weekEnd: "2026-09-19T23:59:59.000Z",
+        weekStart: "2999-09-14T00:00:00.000Z",
+        weekEnd: "2999-09-19T23:59:59.000Z",
       }),
     )
     const legacySchedule = {

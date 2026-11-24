@@ -98,8 +98,7 @@ export function completionAdditions(record: ActivePlanRecord, profile: MealProfi
     weeklyExceptions.items.filter((item) => item.kind === "school_closed").map((item) => item.appliesTo?.day),
   )
   const schedule = {
-    days: [],
-    slots: [],
+    ...plan.schedule,
     halfDays: recurringHalfDaysSchema.parse(version.recurringHalfDaysSnapshot ?? []),
   }
   const referenced = new Set<string>()
@@ -123,7 +122,7 @@ export function completionAdditions(record: ActivePlanRecord, profile: MealProfi
       continue
     }
     const dropped = isHalfDay({ schedule, weeklyExceptions }, day)
-      ? halfDayDroppedSlotIds(Object.keys(cells).map((id) => ({ id })))
+      ? halfDayDroppedSlotIds(schedule.slots.filter((slot) => Object.hasOwn(cells, slot.id)))
       : []
     for (const [slot, cell] of Object.entries(cells)) {
       if (dropped.includes(slot)) continue

@@ -3,7 +3,7 @@ import { TokenVaultDO } from "../core/token-vault"
 import { createTokenVault } from "../core/token-vault-client"
 import type { Env } from "../core/types"
 import { MEAL_COMPLETION_CRON } from "../meal-planning/completion-cron"
-import { createMealPlanningStore } from "../meal-planning/store"
+import { createMealPlanningStore, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealDefinition, MealPlanEvaluation } from "../meal-planning/types"
 import { handleAuthCallback, handleAuthStart } from "../triggers/linkedin-auth"
 import { createClockedD1TestDb } from "./d1-test-db"
@@ -548,6 +548,8 @@ describe("scheduled() cron failure notification", () => {
       weekStart: new Date().toISOString(),
       weekEnd,
       timezone: "UTC",
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "instance",
       generationId: "gen",
       allowNewFoodsSnapshot: true,
