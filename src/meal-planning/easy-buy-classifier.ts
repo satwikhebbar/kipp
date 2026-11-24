@@ -1,5 +1,5 @@
 import type { DecisionQuestion, DecisionsClient, DecisionUsage } from "../providers/openrouter-decisions"
-import { findProhibitedEasyBuys } from "./easy-buys"
+import { findProhibitedEasyBuys, isKnownOrdinaryEasyBuy } from "./easy-buys"
 import type { PolicyOutcomeValue, WeeklyInventory } from "./types"
 
 /** Default probability above which an easy buy is accepted as ordinary; caller-overridable. */
@@ -152,7 +152,7 @@ export function createEasyBuyClassifier(
   return {
     async classify(easyBuys, packedMeals = [], persistentPolicies = [], feedbackChecks = []) {
       const deterministic = new Set(findProhibitedEasyBuys(easyBuys))
-      const candidates = easyBuys.filter((buy) => !deterministic.has(buy))
+      const candidates = easyBuys.filter((buy) => !deterministic.has(buy) && !isKnownOrdinaryEasyBuy(buy))
       if (
         candidates.length === 0 &&
         packedMeals.length === 0 &&
