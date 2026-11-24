@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { Env } from "../core/types"
 import { createSettingsLaunchReference } from "../meal-planning/mini-app-auth"
 import { MINI_APP_SHELL, miniAppRoutes, startFeedbackBatch } from "../meal-planning/mini-app-routes"
+import { mealProfileConfigurationRequestSchema } from "../meal-planning/profile-configuration"
 import { validateMealSchedule } from "../meal-planning/schedule"
 import { createMealPlanningStore, SEED_PROFILE, SEED_SCHEDULE } from "../meal-planning/store"
 import type { MealGrid, MealProfile, MealSchedule, WeeklyExceptions } from "../meal-planning/types"
@@ -473,10 +474,12 @@ describe("Mini App HTTP boundary", () => {
           ...validBody.profile,
           dietaryExclusions: Array(100).fill("x".repeat(160)),
           foodPreferences: { favourites: Array(100).fill("y".repeat(160)), avoid: Array(100).fill("z".repeat(160)) },
-          sensoryGuidelines: Array(100).fill("g".repeat(160)),
+          sensoryGuidelines: Array(50).fill("g".repeat(500)),
           pantryBaseline: Array(100).fill("p".repeat(160)),
         },
       }
+      expect(mealProfileConfigurationRequestSchema.safeParse(oversizedBody).success).toBe(true)
+      expect(new TextEncoder().encode(JSON.stringify(oversizedBody)).byteLength).toBeGreaterThan(64 * 1024)
       const oversized = await miniAppRoutes.fetch(
         new Request("https://kipp.example/mini-app/api/profile", {
           method: "PUT",
