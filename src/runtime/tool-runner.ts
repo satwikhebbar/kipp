@@ -22,6 +22,8 @@ export interface ToolExecutionSummary {
   validationPaths?: string[]
   /** Safe schema expectations only; excludes values and provider text. */
   validationErrors?: string[]
+  /** Enum failure codes only; excludes values and provider text. */
+  rejectionCodes?: string[]
   /** Safe upstream HTTP status when explicitly surfaced by the handler. */
   status?: number
 }
@@ -179,6 +181,7 @@ export async function runTools(
               failureCategory: result.category,
               ...(result.validationPaths?.length ? { validationPaths: result.validationPaths } : {}),
               ...(result.validationErrors?.length ? { validationErrors: result.validationErrors } : {}),
+              ...(result.rejectionCodes?.length ? { rejectionCodes: result.rejectionCodes } : {}),
               ...(result.status === undefined ? {} : { status: result.status }),
             },
       )

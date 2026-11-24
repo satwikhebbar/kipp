@@ -601,6 +601,7 @@ async function dispatchRoutedInteraction(
       interactionVersion: interaction.version,
       interactionKind: interaction.kind,
       telegramUpdateId: interaction.telegramUpdateId,
+      ...(interaction.kind.startsWith("calendar-invite-") ? { inputKind } : {}),
       ...(setupOrigin !== undefined ? { setupOrigin } : {}),
       ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
     },

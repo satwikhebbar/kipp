@@ -3,8 +3,15 @@ import { runCalendarAgentSession } from "../agent/calendar-session"
 import { createCalendarPlanLedger } from "../calendar/plan"
 import type { ToolConversationMessage, ToolProviderClient } from "../providers"
 
-function providerWith(...responses: Awaited<ReturnType<ToolProviderClient["generate"]>>[]): ToolProviderClient {
-  return { generate: vi.fn().mockImplementation(async () => responses.shift()) }
+function providerWith(
+  ...responses: Array<Awaited<ReturnType<ToolProviderClient["generate"]>> | ToolProviderClient["generate"]>
+): ToolProviderClient {
+  return {
+    generate: vi.fn().mockImplementation(async (request) => {
+      const response = responses.shift()
+      return typeof response === "function" ? response(request) : response
+    }),
+  }
 }
 
 function options() {
@@ -28,6 +35,74 @@ function toolOutput(messages: ToolConversationMessage[], name: string): Record<s
 }
 
 describe("bounded Calendar agent session", () => {
+  it("recovers from a too-wide list request and evaluates the named virtual meeting", async () => {
+    const provider = providerWith(
+      {
+        toolCalls: [
+          {
+            id: "wide-list",
+            name: "list_calendar_events",
+            input: { timeMin: "2026-11-23T00:00:00+05:30", timeMax: "2026-12-24T23:59:59+05:30" },
+          },
+        ],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      {
+        toolCalls: [
+          {
+            id: "evaluate",
+            name: "evaluate_calendar_candidate",
+            input: {
+              kind: "one_off",
+              proposal: {
+                title: "Virtual meeting with Jamie",
+                localDate: "2026-11-24",
+                startTime: "11:30",
+                durationMinutes: 30,
+                dateIsExplicit: true,
+                timeIsExplicit: true,
+                classification: "ordinary",
+                needsClarification: false,
+                meeting: { guestNames: ["Jamie"] },
+              },
+            },
+          },
+        ],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      async ({ messages }) => ({
+        toolCalls: [
+          {
+            id: "ready",
+            name: "ready_to_create",
+            input: { planId: toolOutput(messages, "evaluate_calendar_candidate").planId },
+          },
+        ],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      }),
+    )
+
+    const sessionOptions = options()
+    sessionOptions.evaluation.now = Date.parse("2026-11-23T05:08:21Z")
+    sessionOptions.evaluation.expiresAt = Date.parse("2026-11-23T05:23:21Z")
+    const result = await runCalendarAgentSession(
+      provider,
+      [{ role: "user", text: "Book a virtual meeting with Jamie for tomorrow at 11.30am" }],
+      sessionOptions,
+    )
+
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.meeting).toEqual({ guestNames: ["Jamie"] })
+    expect(result.calendarFailureKind).toBeUndefined()
+    expect(result.toolExecutions[0]).toMatchObject({
+      tool: "list_calendar_events",
+      outcome: "failed",
+      rejectionCodes: ["invalid_event_list_range"],
+    })
+    expect(sessionOptions.calendar.listEvents).not.toHaveBeenCalled()
+    expect(sessionOptions.evaluation.getBusyIntervals).toHaveBeenCalledOnce()
+  })
+
   it("accepts ready_to_create only for the plan issued by the current evaluation", async () => {
     const provider = providerWith(
       {

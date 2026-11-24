@@ -140,6 +140,12 @@ export const INTERACTION_KIND = {
   LINKEDIN_RETRY: "linkedin-retry",
   LINKEDIN_CANCEL: "linkedin-cancel",
   CALENDAR_CLARIFICATION: "calendar-clarification",
+  CALENDAR_INVITE_CONFIRM: "calendar-invite-confirm",
+  CALENDAR_INVITE_CHANGE: "calendar-invite-change",
+  CALENDAR_INVITE_CHANGE_GUEST: "calendar-invite-change-guest",
+  CALENDAR_INVITE_CONTACT: "calendar-invite-contact",
+  CALENDAR_INVITE_EMAIL: "calendar-invite-email",
+  CALENDAR_INVITE_CANCEL: "calendar-invite-cancel",
   CALENDAR_CONFLICT_ALTERNATIVE: "calendar-conflict-alternative",
   CALENDAR_CONFLICT_REPLACE: "calendar-conflict-replace",
   CALENDAR_CONFLICT_CANCEL: "calendar-conflict-cancel",
@@ -211,6 +217,8 @@ export const TOKEN_PROVIDER = {
   GOOGLE_CALENDAR: "google-calendar",
   BUFFER: "buffer",
 } as const
+
+export const CALENDAR_INVITE_ACTION_GROUP = "calendar-invite:"
 
 export type TokenProvider = (typeof TOKEN_PROVIDER)[keyof typeof TOKEN_PROVIDER]
 

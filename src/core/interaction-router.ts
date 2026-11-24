@@ -1,6 +1,12 @@
 import { NotesRouter } from "../notes/router"
 import type { InteractionRegistration, InteractionResolveInput } from "./interaction-router-client"
-import { type Env, INTERACTION_KIND, type WorkflowInteraction, type WorkflowInteractionKind } from "./types"
+import {
+  CALENDAR_INVITE_ACTION_GROUP,
+  type Env,
+  INTERACTION_KIND,
+  type WorkflowInteraction,
+  type WorkflowInteractionKind,
+} from "./types"
 
 interface Registration {
   interactionId: string
@@ -37,6 +43,7 @@ export const CONSUMED_INTERACTION_RETENTION_MS = 3_600_000 // ponytail: 1 hour
 const PLAIN_TEXT_INTERACTION_KINDS = [
   INTERACTION_KIND.REVISION_FEEDBACK,
   INTERACTION_KIND.CALENDAR_CLARIFICATION,
+  INTERACTION_KIND.CALENDAR_INVITE_EMAIL,
   INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
   INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
   INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
@@ -331,6 +338,15 @@ export class InteractionRouterDO implements DurableObject {
     if (row.expires_at <= Date.now()) return json({ interaction: null, reason: "expired" })
     if (row.consumed_update_id !== null && !row.edit_json) return json({ interaction: null })
     if (this.isGenerationInvalidated(row)) return json({ interaction: null, reason: "stale" })
+    if (row.interaction_group?.startsWith(CALENDAR_INVITE_ACTION_GROUP)) {
+      if (!token) return json({ interaction: null })
+      this.ctx.storage.sql.exec(
+        "DELETE FROM interactions WHERE interaction_group = ? AND version = ? AND interaction_id != ?",
+        row.interaction_group,
+        row.version,
+        row.interaction_id,
+      )
+    }
     this.claimInteraction(row.interaction_id, numericUpdateId)
     const interaction: ResolvedInteraction = {
       interactionId: row.interaction_id,

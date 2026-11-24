@@ -3,7 +3,7 @@ import { startEditWorkflow } from "../core/edit-workflow"
 import { CONSUMED_INTERACTION_RETENTION_MS, InteractionRouterDO } from "../core/interaction-router"
 import { createInteractionRouter } from "../core/interaction-router-client"
 import type { Env } from "../core/types"
-import { INTERACTION_KIND } from "../core/types"
+import { CALENDAR_INVITE_ACTION_GROUP, INTERACTION_KIND } from "../core/types"
 import { sqliteInteractionRouter } from "./fixtures/interaction-router"
 
 const NOW = 1_000_000
@@ -93,15 +93,48 @@ describe("InteractionRouterDO retention", () => {
     await router.fetch(post("/resolve", { telegramUpdateId: 12, text: "2026-08-03 at 11:00" }))
 
     expect(exec).toHaveBeenCalledWith(
-      expect.stringContaining("kind IN (?, ?, ?, ?, ?, ?, ?)"),
+      expect.stringContaining("kind IN (?, ?, ?, ?, ?, ?, ?, ?)"),
       INTERACTION_KIND.REVISION_FEEDBACK,
       INTERACTION_KIND.CALENDAR_CLARIFICATION,
+      INTERACTION_KIND.CALENDAR_INVITE_EMAIL,
       INTERACTION_KIND.CALENDAR_CONFLICT_REPLACE,
       INTERACTION_KIND.CALENDAR_RECURRENCE_NEW_TIME,
       INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
       INTERACTION_KIND.MEAL_CLARIFICATION,
       INTERACTION_KIND.MEAL_FEEDBACK_REPLY,
     )
+  })
+
+  it("accepts only one callback from an invite approval keyboard", async () => {
+    const { namespace } = sqliteInteractionRouter()
+    const router = createInteractionRouter(namespace, "123")
+    const common = {
+      workflowId: "invite-workflow",
+      interactionGroup: `${CALENDAR_INVITE_ACTION_GROUP}invite-workflow`,
+      version: 1,
+      botMessageId: 200,
+      expiresAt: NOW + 1000,
+    }
+    await router.register({
+      ...common,
+      interactionId: "confirm",
+      callbackToken: "confirm-token",
+      kind: INTERACTION_KIND.CALENDAR_INVITE_CONFIRM,
+    })
+    await router.register({
+      ...common,
+      interactionId: "change",
+      callbackToken: "change-token",
+      kind: INTERACTION_KIND.CALENDAR_INVITE_CHANGE,
+    })
+    expect(
+      (await router.resolve({ telegramUpdateId: 1, replyToMessageId: 200, text: "__calendar-invite-confirm__" }))
+        .interaction,
+    ).toBeNull()
+    expect((await router.resolve({ telegramUpdateId: 2, callbackToken: "change-token" })).interaction?.kind).toBe(
+      INTERACTION_KIND.CALENDAR_INVITE_CHANGE,
+    )
+    expect((await router.resolve({ telegramUpdateId: 3, callbackToken: "confirm-token" })).interaction).toBeNull()
   })
 
   it("deletes a group's lower-generation unconsumed rows when a registration carries a generation", async () => {

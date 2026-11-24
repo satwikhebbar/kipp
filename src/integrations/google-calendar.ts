@@ -1,11 +1,15 @@
 import { calendarDayBounds } from "../calendar/scheduling"
+import { isCalendarAttendeeEmail, MAX_EVENT_LIST_RANGE_MS } from "../calendar/validation"
 import { createTokenVault } from "../core/token-vault-client"
 import { type Env, type GoogleCalendarTokens, TOKEN_PROVIDER } from "../core/types"
 import { HTTP_STATUS, isTransientHttpStatus } from "../runtime/http"
 import { logRuntime } from "../runtime/logging"
+import { GOOGLE_ACCOUNT_EMAIL_SCOPE, GOOGLE_CONTACTS_SCOPE, hasGoogleScope, refreshGoogleAccess } from "./google-access"
 
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const GOOGLE_CALENDAR_API_URL = "https://www.googleapis.com/calendar/v3"
+const GOOGLE_CONTACT_SEARCH_URL = "https://people.googleapis.com/v1/people:searchContacts"
+const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+const CONTACT_SEARCH_WARMUP_MS = 5_000
 const REFRESH_SKEW_MS = 60_000
 const MAX_TRANSIENT_RETRIES = 2
 const RETRY_DELAY_MS = 250
@@ -17,6 +21,7 @@ const CALENDAR_EVENT_CONFLICT_STATUS = HTTP_STATUS.CONFLICT
 const MANAGED_BY_PROPERTY = "kipp.managedBy"
 const REQUEST_ID_PROPERTY = "kipp.requestId"
 const SCHEMA_VERSION_PROPERTY = "kipp.schemaVersion"
+const MEETING_PROPERTY = "kipp.meeting"
 const MANAGED_BY_VALUE = "calendar-agent"
 const SCHEMA_VERSION = "1"
 const PRIVATE_VISIBILITY = "private"
@@ -25,9 +30,7 @@ const POPUP_REMINDER_METHOD = "popup"
 const MAX_CALENDAR_INSTANCES_PER_PAGE = "2500"
 const MAX_VISIBLE_EVENTS = 50
 const EVENT_LIST_FETCH_LIMIT = String(MAX_VISIBLE_EVENTS + 1)
-const MAX_EVENT_LIST_RANGE_DAYS = 31
 const MILLIS_PER_DAY = 86_400_000
-const MAX_EVENT_LIST_RANGE_MS = MAX_EVENT_LIST_RANGE_DAYS * MILLIS_PER_DAY
 const MIN_FREEBUSY_SPLIT_RANGE_MS = MILLIS_PER_DAY
 const GOOGLE_TIME_RANGE_TOO_LONG = "timeRangeTooLong"
 
@@ -53,6 +56,22 @@ export interface ManagedCalendarException {
   originalStart: string
   start: string
   end: string
+}
+
+export interface CalendarAttendee {
+  name?: string
+  email: string
+}
+
+export type ContactSearchResult =
+  | { kind: "found"; attendees: CalendarAttendee[] }
+  | { kind: "needs_consent" | "unavailable" }
+
+export interface SavedMeeting {
+  etag?: string
+  calendarUrl?: string
+  meetUrl?: string
+  conference: "ready" | "pending" | "failed"
 }
 
 export interface CalendarEventProjection {
@@ -115,6 +134,15 @@ interface GoogleCalendarEventResponse {
   end?: { dateTime?: string; date?: string; timeZone?: string }
   originalStartTime?: { dateTime?: string }
   etag?: string
+  organizer?: { email?: string; self?: boolean }
+  attendees?: Array<{ email?: string; organizer?: boolean }>
+  attendeesOmitted?: boolean
+  guestsCanModify?: boolean
+  htmlLink?: string
+  conferenceData?: {
+    createRequest?: { requestId?: string; status?: { statusCode?: string } }
+    entryPoints?: Array<{ entryPointType?: string; uri?: string }>
+  }
 }
 
 interface GoogleCalendarInstancesResponse {
@@ -151,6 +179,10 @@ export interface GoogleCalendarClient {
   findManagedEvent(id: string, requestId: string): Promise<boolean>
   createManagedEvent(event: ManagedCalendarEvent): Promise<void>
   updateManagedEvent(event: ManagedCalendarEvent): Promise<void>
+  searchContacts(name: string): Promise<ContactSearchResult>
+  createMeeting(event: ManagedCalendarEvent, attendees: CalendarAttendee[]): Promise<void>
+  readMeeting(event: ManagedCalendarEvent, attendees: CalendarAttendee[]): Promise<SavedMeeting>
+  updateMeeting(event: ManagedCalendarEvent, attendees: CalendarAttendee[], expectedEtag: string): Promise<void>
   reconcileManagedSeries(event: ManagedCalendarEvent, exceptions: ManagedCalendarException[]): Promise<void>
   deleteManagedEvent(id: string): Promise<void>
   findConflictingEvents(
@@ -161,6 +193,22 @@ export interface GoogleCalendarClient {
     timeZone: string,
   ): Promise<ConflictEventSnapshot[]>
   moveExistingEvent(id: string, start: string, end: string, expectedEtag?: string): Promise<ExistingEventUpdateResult>
+}
+
+/** Compares only organizer-owned fields that Kipp can approve for a meeting edit. */
+function matchesMeetingTimeAndTitle(saved: GoogleCalendarEventResponse, event: ManagedCalendarEvent): boolean {
+  return (
+    saved.summary === event.summary &&
+    sameInstant(saved.start?.dateTime ?? "", event.start) &&
+    sameInstant(saved.end?.dateTime ?? "", event.end)
+  )
+}
+
+/** Exposes only Google-owned HTTPS links to Telegram. */
+function googleEventLink(value: string | undefined, host: string): string | undefined {
+  if (!value) return undefined
+  const url = URL.parse(value)
+  return url?.protocol === "https:" && url.hostname === host && !url.username && !url.password ? value : undefined
 }
 
 /** Returns the epoch ms at which the token expires. */
@@ -275,55 +323,37 @@ async function googleErrorReason(response: Response): Promise<string | undefined
 export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
   const vault = createTokenVault(env, TOKEN_PROVIDER.GOOGLE_CALENDAR)
 
-  function credentials(): { clientId: string; clientSecret: string } {
+  async function refreshTokens(tokens: GoogleCalendarTokens): Promise<GoogleCalendarTokens> {
     if (!env.GOOGLE_CALENDAR_CLIENT_ID || !env.GOOGLE_CALENDAR_CLIENT_SECRET)
       throw new GoogleCalendarError("Google Calendar is not configured", "permanent")
-    return { clientId: env.GOOGLE_CALENDAR_CLIENT_ID, clientSecret: env.GOOGLE_CALENDAR_CLIENT_SECRET }
-  }
-
-  async function refreshTokens(tokens: GoogleCalendarTokens): Promise<GoogleCalendarTokens> {
-    if (!tokens.refresh_token) throw new GoogleCalendarError("Google Calendar requires reconnection", "authorization")
-    const { clientId, clientSecret } = credentials()
-    const response = await fetch(GOOGLE_TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: tokens.refresh_token,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
-    })
-    if (!response.ok) throw new GoogleCalendarError("Google Calendar requires reconnection", "authorization")
-    const data = (await response.json()) as { access_token?: string; expires_in?: number; scope?: string }
-    if (!data.access_token || typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in))
-      throw new GoogleCalendarError("Google Calendar requires reconnection", "authorization")
-    const updated: GoogleCalendarTokens = {
-      ...tokens,
-      access_token: data.access_token,
-      expires_in: data.expires_in,
-      created_at: new Date().toISOString(),
-      ...(data.scope ? { scope: data.scope } : {}),
+    const updated = await refreshGoogleAccess(env, tokens)
+    if (!updated) throw new GoogleCalendarError("Google Calendar requires reconnection", "authorization")
+    const { ok, superseded } = await vault.writeTokens(updated, tokens.access_token)
+    if (superseded) {
+      const latest = (await vault.readTokens()).tokens
+      if (isGoogleCalendarTokens(latest) && tokenExpiry(latest) > Date.now()) return latest
     }
-    const { ok } = await vault.writeTokens(updated)
     if (!ok) throw new GoogleCalendarError("Calendar credentials could not be stored", "permanent")
     return updated
   }
 
-  async function accessToken(): Promise<string> {
+  async function usableTokens(): Promise<GoogleCalendarTokens> {
     const { tokens } = await vault.readTokens()
     if (!isGoogleCalendarTokens(tokens))
       throw new GoogleCalendarError("Google Calendar is not connected", "authorization")
-    const usable = tokenExpiry(tokens) > Date.now() + REFRESH_SKEW_MS ? tokens : await refreshTokens(tokens)
-    return usable.access_token
+    return tokenExpiry(tokens) > Date.now() + REFRESH_SKEW_MS ? tokens : refreshTokens(tokens)
   }
 
-  async function request(path: string, init: RequestInit): Promise<Response> {
+  function request(path: string, init: RequestInit): Promise<Response> {
+    return requestUrl(`${GOOGLE_CALENDAR_API_URL}${path}`, init)
+  }
+
+  async function requestUrl(url: string, init: RequestInit, accessToken?: string): Promise<Response> {
     let lastFailure: GoogleCalendarError | null = null
     for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
       try {
-        const token = await accessToken()
-        const response = await fetch(`${GOOGLE_CALENDAR_API_URL}${path}`, {
+        const token = accessToken ?? (await usableTokens()).access_token
+        const response = await fetch(url, {
           ...init,
           headers: { Authorization: `Bearer ${token}`, ...init.headers },
           signal: AbortSignal.timeout(GOOGLE_CALENDAR_REQUEST_TIMEOUT_MS),
@@ -363,6 +393,166 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       }
     }
     throw lastFailure ?? new GoogleCalendarError("Google Calendar request failed", "permanent")
+  }
+
+  /** Searches saved Google Contacts with a names-and-addresses projection. */
+  async function searchContacts(name: string): Promise<ContactSearchResult> {
+    try {
+      const tokens = await usableTokens()
+      if (!hasGoogleScope(tokens.scope, GOOGLE_CONTACTS_SCOPE)) return { kind: "needs_consent" }
+      const query = (value: string) => {
+        const params = new URLSearchParams({ query: value, readMask: "names,emailAddresses", pageSize: "10" })
+        return fetch(`${GOOGLE_CONTACT_SEARCH_URL}?${params}`, {
+          headers: { Authorization: `Bearer ${tokens.access_token}` },
+          signal: AbortSignal.timeout(GOOGLE_CALENDAR_REQUEST_TIMEOUT_MS),
+        })
+      }
+      const warmup = await query("")
+      await warmup.body?.cancel()
+      if (!warmup.ok) return { kind: "unavailable" }
+      // The People API refreshes its search cache asynchronously after warmup.
+      await new Promise((resolve) => setTimeout(resolve, CONTACT_SEARCH_WARMUP_MS))
+      const response = await query(name)
+      if (!response.ok) return { kind: "unavailable" }
+      const data = (await response.json()) as {
+        results?: Array<{
+          person?: { names?: Array<{ displayName?: string }>; emailAddresses?: Array<{ value?: string }> }
+        }>
+      }
+      const attendees = new Map<string, CalendarAttendee>()
+      for (const { person } of data.results ?? []) {
+        const displayName = person?.names?.[0]?.displayName
+        for (const address of person?.emailAddresses ?? []) {
+          const email = address.value?.trim()
+          if (email && isCalendarAttendeeEmail(email) && !attendees.has(email.toLowerCase()))
+            attendees.set(email.toLowerCase(), { email, ...(displayName ? { name: displayName } : {}) })
+        }
+      }
+      return { kind: "found", attendees: [...attendees.values()] }
+    } catch {
+      return { kind: "unavailable" }
+    }
+  }
+
+  /** Verifies ownership and recipients on the organizer's copy of a saved Meet invitation. */
+  async function readMeetingEvent(event: ManagedCalendarEvent, attendees: CalendarAttendee[], accessToken?: string) {
+    const response = await requestUrl(
+      `${GOOGLE_CALENDAR_API_URL}/calendars/primary/events/${encodeURIComponent(event.id)}`,
+      { method: "GET" },
+      accessToken,
+    )
+    if (!response.ok) throw new GoogleCalendarError("Meeting could not be verified", "permanent")
+    const saved = (await response.json()) as GoogleCalendarEventResponse
+    const expected = attendees.map((attendee) => attendee.email.toLowerCase()).sort()
+    const organizerEmail = saved.organizer?.self ? saved.organizer.email?.toLowerCase() : undefined
+    const actual = saved.attendees
+      ?.filter(({ email, organizer }) => {
+        const address = email?.toLowerCase()
+        return !(organizer && address && address === organizerEmail && !expected.includes(address))
+      })
+      .map(({ email }) => email?.toLowerCase())
+      .sort()
+    if (
+      saved.id !== event.id ||
+      saved.extendedProperties?.private?.[REQUEST_ID_PROPERTY] !== event.requestId ||
+      saved.extendedProperties?.private?.[MEETING_PROPERTY] !== "meet" ||
+      saved.guestsCanModify === true ||
+      saved.attendeesOmitted ||
+      JSON.stringify(actual) !== JSON.stringify(expected)
+    )
+      throw new GoogleCalendarError("Meeting recipients or permissions changed", "permanent")
+    return saved
+  }
+
+  /** Creates one invitation and reconciles ambiguous inserts with the same event ID. */
+  async function createMeeting(event: ManagedCalendarEvent, attendees: CalendarAttendee[]): Promise<void> {
+    const tokens = await usableTokens()
+    if (!hasGoogleScope(tokens.scope, GOOGLE_ACCOUNT_EMAIL_SCOPE))
+      throw new GoogleCalendarError("Google Account email access requires reconnection", "authorization")
+    const profileResponse = await requestUrl(GOOGLE_USERINFO_URL, { method: "GET" }, tokens.access_token)
+    if (!profileResponse.ok) throw new GoogleCalendarError("Google Account email could not be read", "permanent")
+    const { email, verified_email } = (await profileResponse.json()) as { email?: unknown; verified_email?: unknown }
+    if (verified_email !== true || typeof email !== "string" || !isCalendarAttendeeEmail(email))
+      throw new GoogleCalendarError("Google Account email could not be verified", "permanent")
+    const guests = attendees.filter((attendee) => attendee.email.toLowerCase() !== email.toLowerCase())
+    const body = calendarEventBody(event)
+    body.extendedProperties.private[MEETING_PROPERTY] = "meet"
+    try {
+      const response = await requestUrl(
+        `${GOOGLE_CALENDAR_API_URL}/calendars/primary/events?sendUpdates=all&conferenceDataVersion=1`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...body,
+            attendees: [{ email, responseStatus: "accepted" }, ...guests.map(({ email }) => ({ email }))],
+            guestsCanModify: false,
+            conferenceData: { createRequest: { requestId: event.id, conferenceSolutionKey: { type: "hangoutsMeet" } } },
+          }),
+        },
+        tokens.access_token,
+      )
+      if (response.ok) return
+      if (response.status !== CALENDAR_EVENT_CONFLICT_STATUS)
+        throw new GoogleCalendarError("Meeting could not be created", "permanent")
+    } catch (error) {
+      if (!(error instanceof GoogleCalendarError) || error.kind !== "transient") throw error
+    }
+    const saved = await readMeetingEvent(event, attendees, tokens.access_token)
+    // Google can omit default fields or normalize time zones. Verify the substantive approved projection.
+    if (
+      !matchesMeetingTimeAndTitle(saved, event) ||
+      saved.transparency === "transparent" ||
+      (saved.description ?? "") !== (event.description ?? "") ||
+      (saved.location ?? "") !== (event.location ?? "")
+    )
+      throw new GoogleCalendarError("Meeting could not be verified", "permanent")
+  }
+
+  /** Reads Meet status from the existing event without resending its invitation. */
+  async function readMeeting(event: ManagedCalendarEvent, attendees: CalendarAttendee[]): Promise<SavedMeeting> {
+    const saved = await readMeetingEvent(event, attendees)
+    if (!matchesMeetingTimeAndTitle(saved, event))
+      throw new GoogleCalendarError("Meeting time or title changed", "permanent")
+    const video = saved.conferenceData?.entryPoints?.find((point) => point.entryPointType === "video")
+    const meetUrl = googleEventLink(video?.uri, "meet.google.com")
+    return {
+      etag: saved.etag,
+      calendarUrl: googleEventLink(saved.htmlLink, "calendar.google.com"),
+      meetUrl,
+      conference: meetUrl
+        ? "ready"
+        : saved.conferenceData?.createRequest?.status?.statusCode === "failure"
+          ? "failed"
+          : "pending",
+    }
+  }
+
+  /** Edits only the approved title/time, preserving RSVP, Meet and guest permissions. */
+  async function updateMeeting(event: ManagedCalendarEvent, attendees: CalendarAttendee[], expectedEtag: string) {
+    const current = await readMeetingEvent(event, attendees)
+    if (matchesMeetingTimeAndTitle(current, event)) return
+    if (current.etag !== expectedEtag)
+      throw new GoogleCalendarError("Meeting changed while awaiting approval", "permanent")
+    const { summary, start, end } = calendarEventBody(event)
+    try {
+      const response = await request(
+        `/calendars/primary/events/${encodeURIComponent(event.id)}?sendUpdates=all&conferenceDataVersion=1`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", "If-Match": expectedEtag },
+          body: JSON.stringify({ summary, start, end }),
+        },
+      )
+      if (response.ok) return
+      if (response.status !== HTTP_STATUS.PRECONDITION_FAILED)
+        throw new GoogleCalendarError("Meeting could not be updated", "permanent")
+    } catch (error) {
+      if (!(error instanceof GoogleCalendarError) || error.kind !== "transient") throw error
+    }
+    const saved = await readMeetingEvent(event, attendees)
+    if (!matchesMeetingTimeAndTitle(saved, event))
+      throw new GoogleCalendarError("Meeting update could not be verified", "permanent")
   }
 
   async function getBusyWindow(timeMin: string, timeMax: string): Promise<BusyInterval[]> {
@@ -433,7 +623,13 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       })
       if (pageToken) query.set("pageToken", pageToken)
       const response = await request(`/calendars/${PRIMARY_CALENDAR_ID}/events?${query.toString()}`, { method: "GET" })
-      if (!response.ok) throw new GoogleCalendarError("Calendar events could not be read", "permanent")
+      if (!response.ok)
+        throw new GoogleCalendarError(
+          "Calendar events could not be read",
+          "permanent",
+          response.status,
+          await googleErrorReason(response),
+        )
       const data = (await response.json()) as GoogleCalendarEventsResponse
       for (const item of data.items ?? []) {
         const allDay = Boolean(item.start?.date && item.end?.date)
@@ -666,7 +862,14 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
           end,
           allDay,
           etag: item.etag ?? "",
-          movable: !item.recurrence && !item.originalStartTime && !allDay && Boolean(item.etag),
+          movable:
+            !item.recurrence &&
+            !item.originalStartTime &&
+            !allDay &&
+            Boolean(item.etag) &&
+            !item.attendees?.length &&
+            !item.attendeesOmitted &&
+            !item.extendedProperties?.private?.[MEETING_PROPERTY],
         })
         if (snapshots.length >= MAX_VISIBLE_EVENTS) break
       }
@@ -748,6 +951,10 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     findManagedEvent,
     createManagedEvent,
     updateManagedEvent,
+    searchContacts,
+    createMeeting,
+    readMeeting,
+    updateMeeting,
     reconcileManagedSeries,
     deleteManagedEvent,
     findConflictingEvents,

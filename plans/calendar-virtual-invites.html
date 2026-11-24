@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Telegram virtual 1:1s with Google Meet</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { max-width: 76ch; margin: 0 auto; padding: 2rem 1.25rem 4rem; font: 1rem/1.6 system-ui, sans-serif; }
+    h1, h2 { line-height: 1.2; }
+    h2 { margin-top: 2rem; }
+    li + li { margin-top: .6rem; }
+    blockquote { margin: 1.25rem 0; padding: .25rem 1rem; border-inline-start: 3px solid #627daf; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Telegram virtual 1:1s with Google Meet</h1>
+    <p>Implementation plan for Beads issue <code>agent-harness-0sg.7</code>. The first release books one timed, non-recurring meeting with one guest on the connected account’s primary calendar. Search saved Google Contacts by name or accept a manually entered email. Store attendees as a list so a future release can approve several addresses together. Defer Other contacts, Workspace directory search, recurring invites, guest availability, and guest replacement after sending.</p>
+
+    <h2>Telegram conversation</h2>
+    <blockquote>
+      <p><strong>You</strong> “/calendar Virtual 1:1 with Priya on Tuesday at 3 pm for 30 minutes.”</p>
+      <p><strong>Kipp</strong> “Book Virtual 1:1 with Priya for Tue, 24 Nov, 3:00–3:30 pm IST? Google Calendar will invite Priya &lt;priya@example.com&gt; and add Google Meet.”</p>
+      <p><strong>Create &amp; send invite</strong> · <strong>Change</strong> · <strong>Cancel</strong></p>
+    </blockquote>
+    <ol>
+      <li>Recognize explicit virtual meeting language and extract the guest name. Ask for missing information. Ask the owner to revise requests for multiple guests or recurring invitations before offering to book anything.</li>
+      <li>Show a small set of choices when names or email addresses are ambiguous. Offer manual entry when a match is missing, a contact has no email, or Contacts access is unavailable. Even a single match appears in the final approval with its full email.</li>
+      <li>Reuse Calendar scheduling and alternative slots. Choosing a slot leads to the final invite prompt with the title, date, time range and zone, recipient, and Google Meet. Any change requires fresh approval. Cancel and expiry end the draft before any Calendar write.</li>
+      <li>After approval, recheck the slot. If it has become unavailable, return to scheduling and ask for fresh approval for the new slot. After booking, show the saved details and the Meet link when ready.</li>
+    </ol>
+
+    <h2>1. Add read-only Contacts lookup</h2>
+    <p>Request <code>contacts.readonly</code> and <code>userinfo.email</code> alongside the existing Calendar scopes in the protected <code>/setup/google-calendar</code> flow. Initial setup and Telegram reauthorization use the same URL and OAuth client. Verify that the grant refreshes with all four scopes before updating the encrypted token vault. After reconnecting, explicitly retry or start a fresh request.</p>
+    <p>Add a People API client using the existing Google credential lifecycle. Send the documented empty-query warmup before <code>people:searchContacts</code> and request only <code>names,emailAddresses</code>. Deduplicate candidate addresses and distinguish an empty result from an access or service failure. Read on demand. Keep contact results and explicit email input in workflow-owned state, use opaque callback identifiers, and log outcome metadata. A manual email can bypass the People API entirely.</p>
+    <p><a href="https://developers.google.com/people/api/rest/v1/people/searchContacts">People API search</a> · <a href="https://developers.google.com/people/v1/contacts#search_the_users_contacts">Search warmup</a> · <a href="https://developers.google.com/identity/protocols/oauth2/web-server">Google OAuth</a></p>
+
+    <h2>2. Require approval in the Calendar workflow</h2>
+    <p>Extend the typed Calendar intent in <code>src/agent/calendar.ts</code> and workflow-owned plan in <code>src/calendar/plan.ts</code>. Give the planner the meeting intent and any unresolved name. Keep lookup, recipient selection, and confirmation in deterministic workflow code. Route manual email replies directly to the pending interaction. Keep resolved addresses and provider results out of model tools and transcripts. Carry explicit meeting intent across scheduling turns. A later proposal that drops the guest or conference field must still require approval.</p>
+    <p>Reuse versioned actions in <code>src/calendar/agent-workflow.ts</code>. Bind Create &amp; send invite to the exact plan, guest list, workflow, owner chat, and expiry. Consume it once through the interaction router. Require valid approval at the write boundary for direct proposals and alternative slots. Route backdated or newly conflicting slots through the normal scheduling checks before trying again.</p>
+    <p>Offer alternative slots or another time for an invited request whose slot is busy. The existing <em>Move it</em> flow automatically creates the requested event as part of a multi-write operation, so omit that action for invited requests in the first release. Also keep invited meetings out of the personal-block move and undo path. Use their own Edit flow for changes that notify the guest.</p>
+
+    <h2>3. Create the event and preserve the invitation on edit</h2>
+    <ul>
+      <li>In <code>src/integrations/google-calendar.ts</code>, insert the busy event with the approved guest and the connected Google account. Set the organizer’s RSVP to Yes and let the guest respond independently. Use <code>sendUpdates=all</code> and <code>conferenceDataVersion=1</code>. Request <code>hangoutsMeet</code> with a conference request ID stable across retries of that creation. Reuse the existing stable event ID. After an ambiguous response, read back the same event and verify Kipp’s request marker and the approved event fields.</li>
+      <li>Use Google Calendar’s native <em>Propose a new time</em> action for this timed invitation. Set <code>guestsCanModify</code> to <code>false</code> so the organizer reviews proposals and controls changes to the scheduled time.</li>
+      <li>Google may return a pending conference. Check the saved event with a bounded retry and show the video link when ready. If it remains pending or fails, tell the owner that Calendar saved the event and give its Calendar link when available. Recover lost Telegram confirmations from the saved event without another insert or notification.</li>
+      <li>Use the existing short-lived Edit action for title or time changes. Obtain fresh approval for the revised invitation. Patch the approved fields, preserve guest response state and conference data, and notify the guest for a real change. Use the event’s ETag and verify after an uncertain update to avoid overwriting a concurrent change or sending another notification. Guest changes and Meet removal are outside this edit flow.</li>
+    </ul>
+    <p><a href="https://developers.google.com/workspace/calendar/api/v3/reference/events/insert">Calendar insert parameters</a> · <a href="https://developers.google.com/workspace/calendar/api/guides/create-events">Conference creation and status</a> · <a href="https://developers.google.com/workspace/calendar/api/v3/reference/events/patch">Calendar patch parameters</a> · <a href="https://support.google.com/a/users/answer/9283119?hl=en">Guest time proposals</a></p>
+
+    <h2>4. Verify and roll out</h2>
+    <ol>
+      <li>Update the Calendar spec and setup runbook. Enable People API in the existing Google Cloud project and verify the OAuth consent configuration. Reconnect the dev account, check that Contacts lookup works after token refresh, and confirm that its primary calendar can create Meet conferences. The design reuses existing Worker bindings and configuration.</li>
+      <li>Extend existing Calendar unit and Telegram integration suites for matching, missing grants, manual entry, and privacy. Assert zero writes before approval and one insert for an approved event despite duplicate callbacks or an ambiguous provider response. Cover direct and alternative-slot plans, canceled, stale and superseded approval, a conflict appearing after approval, pending and failed conferences, invitation-preserving edits, and personal blocks with an existing Calendar-only grant. Use the Calendar contract suite to verify meeting-intent extraction across turns.</li>
+      <li>Run <code>pnpm check</code>. Smoke-test with the separate dev bot and a controlled Google Calendar guest account. Check the calendar before approval, then verify the busy event, working Meet link, and received invitation. Submit <em>Propose a new time</em> as the guest. Verify the organizer can review the suggestion and the meeting stays where it is until accepted. Verify one time update through Telegram and clean up the test event. Enable the API for the production OAuth client and reconnect the production account when the feature is ready for release.</li>
+    </ol>
+    <p><a href="../docs/calendar-workflow-spec.md">Calendar workflow spec</a> · <a href="../README.md#calendar-operational-runbook">Calendar operational runbook</a> · <a href="https://developers.google.com/people/v1/getting-started">Enable People API</a></p>
+  </main>
+</body>
+</html>

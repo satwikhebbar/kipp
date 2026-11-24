@@ -1,15 +1,23 @@
 import { createTokenVault, TOKEN_PROVIDER } from "../core/token-vault-client"
 import type { Env, GoogleCalendarTokens } from "../core/types"
+import {
+  GOOGLE_ACCOUNT_EMAIL_SCOPE,
+  GOOGLE_CONTACTS_SCOPE,
+  GOOGLE_TOKEN_URL,
+  hasGoogleScope,
+  refreshGoogleAccess,
+} from "../integrations/google-access"
 import { extractCookie, hasSetupAccess } from "./oauth"
 
 const GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const OAUTH_COOKIE_NAME = "google-calendar-oauth-session"
 const OAUTH_STATE_MAX_AGE_SECONDS = 300 // ponytail: 5 minutes
 
-export const GOOGLE_CALENDAR_SCOPES = [
+const GOOGLE_CALENDAR_SCOPES = [
   "https://www.googleapis.com/auth/calendar.events.owned",
   "https://www.googleapis.com/auth/calendar.events.freebusy",
+  GOOGLE_CONTACTS_SCOPE,
+  GOOGLE_ACCOUNT_EMAIL_SCOPE,
 ] as const
 
 /** Builds the OAuth redirect URI for Google Calendar. */
@@ -37,6 +45,7 @@ export async function handleGoogleCalendarAuthStart(request: Request, host: stri
   url.searchParams.set("client_id", credentials.clientId)
   url.searchParams.set("redirect_uri", redirectUrl(env, host))
   url.searchParams.set("scope", GOOGLE_CALENDAR_SCOPES.join(" "))
+  url.searchParams.set("include_granted_scopes", "true")
   url.searchParams.set("access_type", "offline")
   url.searchParams.set("prompt", "consent")
   url.searchParams.set("state", state)
@@ -97,7 +106,17 @@ export async function handleGoogleCalendarAuthCallback(
     ...(data.refresh_token ? { refresh_token: data.refresh_token } : {}),
     ...(data.scope ? { scope: data.scope } : {}),
   }
-  const { ok } = await vault.writeTokens(tokens)
+  const refreshed = GOOGLE_CALENDAR_SCOPES.every((scope) => hasGoogleScope(tokens.scope, scope))
+    ? await refreshGoogleAccess(env, tokens).catch(() => null)
+    : null
+  if (!refreshed || !GOOGLE_CALENDAR_SCOPES.every((scope) => hasGoogleScope(refreshed.scope, scope)))
+    return new Response("Try setup again and grant Calendar, Contacts, and Google Account email access.", {
+      status: 400,
+    })
+
+  const { ok } = await vault.writeTokens(refreshed)
   if (!ok) return new Response("OAuth setup failed", { status: 500 })
-  return new Response("Google Calendar connected", { status: 200 })
+  return new Response("Google Calendar and Contacts connected", {
+    status: 200,
+  })
 }

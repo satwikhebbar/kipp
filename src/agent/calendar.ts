@@ -1,7 +1,7 @@
 import { z } from "zod"
 import { type CalendarEvaluationContext, evaluateCalendarCandidate } from "../calendar/evaluation"
 import { localMinutes } from "../calendar/scheduling"
-import type { CalendarIssueCode } from "../calendar/validation"
+import { type CalendarIssueCode, MAX_EVENT_LIST_RANGE_MS } from "../calendar/validation"
 import type { GoogleCalendarClient } from "../integrations/google-calendar"
 import { type ToolDefinition, ToolHandlerError } from "../runtime/tools"
 
@@ -12,6 +12,8 @@ export const CALENDAR_AGENT_TOOL = {
   NEEDS_USER_INPUT: "needs_user_input",
 } as const
 const MAX_LISTED_CALENDAR_EVENTS = 50
+const MAX_PROPOSED_GUESTS = 10
+const MAX_GUEST_NAME_LENGTH = 120
 
 export type CalendarTerminalOutcome =
   | { kind: "ready_to_create"; planId: string }
@@ -46,6 +48,13 @@ export const oneOffCandidateSchema = z
     description: z.string().optional(),
     location: z.string().optional(),
     reminderMinutes: z.number().int().optional(),
+    meeting: z
+      .object({ guestNames: z.array(z.string().min(1).max(MAX_GUEST_NAME_LENGTH)).max(MAX_PROPOSED_GUESTS) })
+      .strict()
+      .optional()
+      .describe(
+        "Use for an explicit virtual meeting or guest invitation. Copy only guest names the user supplied. Use an empty list if no name was given. Never infer an address.",
+      ),
     needsClarification: z
       .boolean()
       .describe(
@@ -233,7 +242,14 @@ export function createListCalendarEventsTool(calendar: Pick<GoogleCalendarClient
     output: listCalendarEventsOutputSchema,
     privacy: "private",
     batching: "allowed",
-    handler: async ({ timeMin, timeMax }) => calendar.listEvents(timeMin, timeMax),
+    handler: async ({ timeMin, timeMax }) => {
+      const duration = Date.parse(timeMax) - Date.parse(timeMin)
+      if (!(duration > 0 && duration <= MAX_EVENT_LIST_RANGE_MS))
+        throw new ToolHandlerError("Calendar event range is invalid", "invalid-state", undefined, [
+          "invalid_event_list_range",
+        ])
+      return calendar.listEvents(timeMin, timeMax)
+    },
   }
 }
 

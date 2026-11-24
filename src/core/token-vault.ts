@@ -43,6 +43,7 @@ export class TokenVaultDO implements DurableObject {
   private readonly ctx: DurableObjectState
   private readonly env: Env
   private bufferQueue: Promise<void> = Promise.resolve()
+  private googleWriteQueue: Promise<void> = Promise.resolve()
   private bufferRefresh: Promise<BufferAccess> | null = null
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -92,7 +93,7 @@ export class TokenVaultDO implements DurableObject {
         case "writeTokens":
           if (typeof args.tokens !== "object" || args.tokens === null || Array.isArray(args.tokens))
             return new Response(JSON.stringify({ ok: false }), { status: 400 })
-          return this.#writeTokens(tokenProvider(args.provider), args.tokens as StoredTokens)
+          return this.#writeTokens(tokenProvider(args.provider), args.tokens as StoredTokens, args.expectedAccessToken)
         case "rewrap":
           return this.#rewrap(tokenProvider(args.provider))
         default:
@@ -151,12 +152,32 @@ export class TokenVaultDO implements DurableObject {
     return Response.json({ tokens: result as unknown as StoredTokens })
   }
 
-  async #writeTokens(provider: TokenProvider | null, tokens: StoredTokens): Promise<Response> {
+  async #writeTokens(
+    provider: TokenProvider | null,
+    tokens: StoredTokens,
+    expectedAccessToken: unknown,
+  ): Promise<Response> {
     if (!provider) return new Response("invalid provider", { status: 400 })
     if (!tokens.access_token || typeof tokens.access_token !== "string") return Response.json({ ok: false })
-    const envelope = await this.#encrypt(tokens as unknown as Record<string, unknown>)
-    await this.ctx.storage.put(tokenKey(provider), envelope)
-    return Response.json({ ok: true })
+    const key = tokenKey(provider)
+    const store = async () => {
+      if (typeof expectedAccessToken === "string") {
+        const previous = await this.ctx.storage.get<Envelope>(key)
+        const current = previous && (await this.#decrypt(previous))
+        if (current?.access_token !== expectedAccessToken) return Response.json({ ok: false, superseded: true })
+      }
+      const envelope = await this.#encrypt(tokens as unknown as Record<string, unknown>)
+      await this.ctx.storage.put(key, envelope)
+      return Response.json({ ok: true })
+    }
+    if (provider !== TOKEN_PROVIDER.GOOGLE_CALENDAR) return store()
+    // Refreshes and consent callbacks share this queue so a stale refresh cannot undo a grant upgrade.
+    const write = this.googleWriteQueue.then(store)
+    this.googleWriteQueue = write.then(
+      () => {},
+      () => {},
+    )
+    return write
   }
 
   async #rewrap(provider: TokenProvider | null): Promise<Response> {
