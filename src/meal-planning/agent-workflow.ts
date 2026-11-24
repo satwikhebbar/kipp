@@ -268,8 +268,8 @@ export function renderHouseholdContext(context: MealPlanContext): string {
     const candidates = (p.mealDefinitions ?? []).filter(
       (meal) =>
         meal.status === "established" &&
-        (meal.suitableSlots.includes(slot.id) ||
-          (meal.halfDaySnack && meal.typicalCookMinutes <= HALF_DAY_SNACK_MAX_COOK_MINUTES)),
+        (!meal.halfDaySnack || meal.typicalCookMinutes <= HALF_DAY_SNACK_MAX_COOK_MINUTES) &&
+        (meal.suitableSlots.includes(slot.id) || meal.halfDaySnack),
     )
     lines.push(
       `- Quick half-day slot ${slot.id} candidates (max ${slot.halfDayBehavior?.action === "quick" ? slot.halfDayBehavior.maxCookMinutes : 0} cook minutes): ${candidates.map((meal) => `${references.byId.get(meal.id) ?? meal.id} (${meal.name})`).join(", ") || "none"}`,

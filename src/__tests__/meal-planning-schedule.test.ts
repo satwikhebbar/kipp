@@ -139,6 +139,33 @@ describe("configurable meal schedules", () => {
     )
   })
 
+  it("rejects a required half-day snack slot when its only meal exceeds the global cap", () => {
+    const schedule = {
+      ...CUSTOM_SUNDAY_SCHEDULE,
+      slots: CUSTOM_SUNDAY_SCHEDULE.slots.map((slot) =>
+        slot.id === "morning-tea"
+          ? { ...slot, halfDayBehavior: { action: "quick" as const, maxCookMinutes: 40 } }
+          : slot,
+      ),
+    }
+    const slowSnack = {
+      ...(SEED_PROFILE.mealDefinitions?.find((meal) => meal.halfDaySnack) as NonNullable<
+        typeof SEED_PROFILE.mealDefinitions
+      >[number]),
+      suitableSlots: ["morning-tea"],
+      halfDaySnack: true,
+      packedFood: { suitable: true, dry: true },
+      typicalCookMinutes: 25,
+    }
+    expect(
+      validateMealSchedule(schedule, {
+        ...SEED_PROFILE,
+        allowNewFoods: false,
+        mealDefinitions: [slowSnack],
+      }),
+    ).toEqual(expect.arrayContaining([expect.stringContaining("no eligible established meals")]))
+  })
+
   it("rejects malformed weekday, duplicate slot, and all-omitted half-day configurations", () => {
     expect(validateMealSchedule({ ...CUSTOM_SUNDAY_SCHEDULE, days: ["Funday"] })).not.toEqual([])
     expect(

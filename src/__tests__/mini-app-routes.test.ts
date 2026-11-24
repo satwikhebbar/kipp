@@ -660,6 +660,7 @@ describe("Mini App HTTP boundary", () => {
     const calls: Array<{ path: string; method: string }> = []
     const submissions: Array<Record<string, unknown>> = []
     let delayNextSave = false
+    let lateSaveOutcome: "conflict" | "server-error" | "network-error" | null = null
     let delayNextProfileGet = false
     let conflictNextSave = false
     let conflictSequence = 0
@@ -699,6 +700,19 @@ describe("Mini App HTTP boundary", () => {
           await new Promise<void>((resolve) => {
             delayedSave.release = resolve
           })
+        }
+        if (lateSaveOutcome === "network-error") {
+          lateSaveOutcome = null
+          throw new Error("offline")
+        }
+        if (lateSaveOutcome === "conflict") {
+          lateSaveOutcome = null
+          serverSettings = { ...serverSettings, configurationVersion: serverSettings.configurationVersion + 1 }
+          return new Response(JSON.stringify({ error: "version_conflict" }), { status: 409 })
+        }
+        if (lateSaveOutcome === "server-error") {
+          lateSaveOutcome = null
+          return new Response(JSON.stringify({ error: "unavailable" }), { status: 500 })
         }
         const data = submitted as typeof serverSettings & { expectedVersion: number }
         if (data.expectedVersion !== serverSettings.configurationVersion)
@@ -1238,6 +1252,35 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     expect(app?.textContent).toContain("Rice")
     expect(app?.textContent).not.toContain("Settings saved.")
+
+    const assertLateFailurePreservesPlanAndDraft = async (
+      outcome: "conflict" | "server-error" | "network-error",
+      retainedValue: string,
+    ) => {
+      app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+      await settle()
+      const field = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+      field.value = `egg\nsesame\npeanut\n${retainedValue}`
+      lateSaveOutcome = outcome
+      delayNextSave = true
+      app
+        ?.querySelector(".settings-form")
+        ?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+      await settle()
+      window.dispatchEvent(new window.Event("popstate"))
+      await settle()
+      expect(app?.textContent).toContain("Rice")
+      delayedSave.release?.()
+      await settle()
+      expect(app?.textContent).toContain("Rice")
+      app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+      await settle()
+      const reopened = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+      expect(reopened.value).toContain(retainedValue)
+    }
+    await assertLateFailurePreservesPlanAndDraft("conflict", "walnut")
+    await assertLateFailurePreservesPlanAndDraft("server-error", "cashew")
+    await assertLateFailurePreservesPlanAndDraft("network-error", "almond")
   })
 
   it("leaves a single week as a simple header without a redundant status", async () => {

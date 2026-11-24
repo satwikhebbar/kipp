@@ -1,8 +1,10 @@
-import { legacyHalfDayBehavior } from "./schedule"
+import { HALF_DAY_SNACK_MAX_COOK_MINUTES, legacyHalfDayBehavior } from "./schedule"
+
+export { HALF_DAY_SNACK_MAX_COOK_MINUTES } from "./schedule"
+
 import type { MealDefinition, MealPlanContext, MealSlot } from "./types"
 
 export const HALF_DAY_SNACK_SLOT_ID = "snack1"
-export const HALF_DAY_SNACK_MAX_COOK_MINUTES = 20
 
 /** Whether a configured day is a recurring or one-off half day. */
 export function isHalfDay(context: Pick<MealPlanContext, "schedule" | "weeklyExceptions">, day: string): boolean {

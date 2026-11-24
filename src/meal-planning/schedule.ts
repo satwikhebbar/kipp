@@ -2,6 +2,7 @@ import { z } from "zod"
 import type { MealProfile, MealSchedule, MealSlot } from "./types"
 
 export const MEAL_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const
+export const HALF_DAY_SNACK_MAX_COOK_MINUTES = 20
 const MAX_HALF_DAY_COOK_MINUTES = 120
 const MAX_MEAL_SLOT_NAME_LENGTH = 80
 const MAX_MEAL_COOK_MINUTES = 600
@@ -115,7 +116,14 @@ export function validateMealSchedule(schedule: MealSchedule, profile?: MealProfi
       const packed =
         !slot.packed || Boolean(definition.packedFood?.suitable && (!slot.dry || definition.packedFood.dry))
       const cookLimit = halfDay && behavior.action === "quick" ? behavior.maxCookMinutes : slot.maxCookMinutes
-      const cook = cookLimit === null || definition.typicalCookMinutes <= cookLimit
+      const cook =
+        (cookLimit === null || definition.typicalCookMinutes <= cookLimit) &&
+        !(
+          halfDay &&
+          behavior.action === "quick" &&
+          definition.halfDaySnack &&
+          definition.typicalCookMinutes > HALF_DAY_SNACK_MAX_COOK_MINUTES
+        )
       const prep = profile.priorNightPrepAllowed || definition.priorNightPrep !== "required"
       return eligible && packed && cook && prep
     }

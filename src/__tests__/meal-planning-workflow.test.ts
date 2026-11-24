@@ -76,6 +76,29 @@ it("renders complete structured catalog facts for the planning agent", () => {
   expect(rendered).not.toContain(" | ")
   expect(rendered).toContain("Rajma, carrot (two carrots), paneer (unavailable)")
   expect(rendered).not.toContain("Rajma (available)")
+
+  const slowSnack: MealDefinition = {
+    id: "slow-half-day-snack",
+    name: "Slow half-day snack",
+    vegetarian: true,
+    principalIngredients: ["rice"],
+    requiredIngredients: ["rice"],
+    optionalIngredients: [],
+    suitableSlots: ["snack1"],
+    halfDaySnack: true,
+    packedFood: { suitable: true, dry: true },
+    typicalCookMinutes: 25,
+    priorNightPrep: "none",
+    status: "established",
+  }
+  const quickSlotLine = renderHouseholdContext({
+    ...context,
+    profile: { ...context.profile, mealDefinitions: [...(context.profile.mealDefinitions ?? []), slowSnack] },
+  })
+    .split("\n")
+    .find((line) => line.startsWith("- Quick half-day slot snack1"))
+  expect(quickSlotLine).toBeDefined()
+  expect(quickSlotLine).not.toContain("Slow half-day snack")
 })
 
 it("requires the planner to self-check singular ingredient names", () => {
