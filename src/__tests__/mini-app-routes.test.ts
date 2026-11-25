@@ -1841,7 +1841,10 @@ describe("Mini App HTTP boundary", () => {
     expect(app?.querySelector(".settings-form")).not.toBeNull()
   })
 
-  it("preserves submitted-plan drafts when storage reads fail during accepted cleanup", async () => {
+  it.each([
+    "storage callback error",
+    "valid JSON with a non-array drafts value",
+  ])("preserves submitted-plan storage when cleanup encounters a %s", async (failureCase) => {
     const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
     Object.defineProperty(window, "location", {
       value: new URL("https://kipp.example/mini-app"),
@@ -1853,7 +1856,7 @@ describe("Mini App HTTP boundary", () => {
     let failReadForKey: string | null = null
     const storage = {
       getItem: (key: string, callback: (error: Error | null, value?: string) => void) => {
-        if (key === failReadForKey) {
+        if (key === failReadForKey && failureCase === "storage callback error") {
           failReadForKey = null
           callback(new Error("storage unavailable"))
           return
@@ -1943,33 +1946,39 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     expect(delayedFeedback.release).toBeDefined()
 
-    showOtherPlan = true
-    window.dispatchEvent(new window.Event("kipp:plan-load"))
-    await settle()
-    showOtherPlan = false
-    window.dispatchEvent(new window.Event("kipp:plan-load"))
-    await settle()
-    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
-    const laterSheet = window.document.querySelector(".sheet")
-    ;(laterSheet?.querySelector("textarea") as unknown as { value: string }).value = "Unsent note"
-    ;[...(laterSheet?.querySelectorAll("button") ?? [])]
-      .find((button) => button.textContent === "Add feedback")
-      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
-    await settle()
-    const beforeFailedRead = savedDrafts.get(draftKey)
-    expect(beforeFailedRead).toContain("Submitted note")
-    expect(beforeFailedRead).toContain("Unsent note")
-
-    showOtherPlan = true
-    window.dispatchEvent(new window.Event("kipp:plan-load"))
-    await settle()
+    let expectedStoredValue: string | undefined
+    if (failureCase === "storage callback error") {
+      showOtherPlan = true
+      window.dispatchEvent(new window.Event("kipp:plan-load"))
+      await settle()
+      showOtherPlan = false
+      window.dispatchEvent(new window.Event("kipp:plan-load"))
+      await settle()
+      app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+      const laterSheet = window.document.querySelector(".sheet")
+      ;(laterSheet?.querySelector("textarea") as unknown as { value: string }).value = "Unsent note"
+      ;[...(laterSheet?.querySelectorAll("button") ?? [])]
+        .find((button) => button.textContent === "Add feedback")
+        ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+      await settle()
+      expectedStoredValue = savedDrafts.get(draftKey)
+      expect(expectedStoredValue).toContain("Submitted note")
+      expect(expectedStoredValue).toContain("Unsent note")
+      showOtherPlan = true
+      window.dispatchEvent(new window.Event("kipp:plan-load"))
+      await settle()
+    } else {
+      expectedStoredValue = '{"drafts":{}}'
+      savedDrafts.set(draftKey, expectedStoredValue)
+    }
     failReadForKey = draftKey
     delayedFeedback.release?.()
     await settle()
 
-    expect(savedDrafts.get(draftKey)).toBe(beforeFailedRead)
+    expect(savedDrafts.get(draftKey)).toBe(expectedStoredValue)
     expect(removedKeys).not.toContain(draftKey)
-    expect(app?.querySelector(".meal")).not.toBeNull()
+    if (failureCase === "storage callback error") expect(app?.querySelector(".meal")).not.toBeNull()
+    else expect(app?.textContent).toContain("Feedback sent — continue in Telegram.")
   })
 
   it("leaves a single week as a simple header without a redundant status", async () => {
