@@ -673,7 +673,10 @@ describe("Mini App HTTP boundary", () => {
     let eligibilityConflictNextSave: { slotId: string; eligibleIds: string[] } | null = null
     let dayConflictNextSave = false
     let halfDayConflictNextSave: "half" | "full" | null = null
-    const delayedSave = { release: undefined as (() => void) | undefined }
+    const delayedSave = {
+      release: undefined as (() => void) | undefined,
+      releases: [] as Array<() => void>,
+    }
     const delayedGet = { release: undefined as (() => void) | undefined }
     const delayedPlan = { release: undefined as (() => void) | undefined }
     client.fetch = async (input, init) => {
@@ -716,6 +719,7 @@ describe("Mini App HTTP boundary", () => {
           delayNextSave = false
           await new Promise<void>((resolve) => {
             delayedSave.release = resolve
+            delayedSave.releases.push(resolve)
           })
         }
         if (lateSaveOutcome === "network-error") {
@@ -1429,6 +1433,128 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     const reopenedAfterReload = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
     expect(reopenedAfterReload.value).not.toContain("discard-me")
+
+    const firstPendingSaveIndex = delayedSave.releases.length
+    const olderSaveField = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    olderSaveField.value = "egg\nsesame\nolder save"
+    delayNextSave = true
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(delayedSave.releases).toHaveLength(firstPendingSaveIndex + 1)
+    const releaseOlderSave = delayedSave.releases[firstPendingSaveIndex]
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+    await settle()
+    const newerSaveField = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    newerSaveField.value = "egg\nsesame\nnewer save"
+    delayNextSave = true
+    app?.querySelector(".settings-form")?.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+    expect(delayedSave.releases).toHaveLength(firstPendingSaveIndex + 2)
+    lateSaveOutcome = "server-error"
+    delayedSave.releases[firstPendingSaveIndex + 1]?.()
+    await settle()
+    expect(app?.textContent).toContain("Settings could not be saved.")
+    lateSaveOutcome = "server-error"
+    releaseOlderSave?.()
+    await settle()
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+    await settle()
+    const retainedNewerSave = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    expect(retainedNewerSave.value).toBe("egg\nsesame\nnewer save")
+  })
+
+  it("keeps state and settings views when earlier plan or feedback operations finish late", async () => {
+    const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
+    const location = new URL("https://kipp.example/mini-app")
+    Object.defineProperty(window, "location", { value: location, configurable: true })
+    Object.defineProperty(window, "Telegram", {
+      value: { WebApp: { initData: "signed-launch-data", ready: vi.fn(), expand: vi.fn() } },
+      configurable: true,
+    })
+    const plan = {
+      planId: "plan-feedback-removal",
+      version: 1,
+      weekStart: "2026-09-27T18:30:00.000Z",
+      timezone: "Asia/Kolkata",
+      schedule: { days: ["Mon"], slots: [{ id: "lunch", name: "Lunch" }] },
+      candidate: { grid: { Mon: { lunch: { dish: "Rice", items: ["Rice"] } } }, easyBuys: [] },
+      weeklyExceptions: { items: [] },
+    }
+    const profile = JSON.parse(JSON.stringify(SEED_PROFILE)) as MealProfile
+    const schedule = JSON.parse(JSON.stringify(SEED_SCHEDULE)) as MealSchedule
+    const settings = {
+      configurationVersion: 1,
+      profile,
+      customPolicies: [],
+      schedule,
+      location: null,
+      eligibleEstablishedMeals: Object.fromEntries(
+        schedule.slots.map((slot) => [
+          slot.id,
+          (profile.mealDefinitions ?? [])
+            .filter((definition) => definition.status === "established" && definition.suitableSlots.includes(slot.id))
+            .map((definition) => definition.id),
+        ]),
+      ),
+    }
+    const storedDraft = JSON.stringify([{ target: { kind: "plan" }, text: "Use less salt" }])
+    const localStorage = {
+      getItem: (key: string) => (key === "kipp-meal-drafts:plan-feedback-removal:v1" ? storedDraft : null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    }
+    const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
+    let delayProfileGet = false
+    const delayedProfile = { release: undefined as (() => void) | undefined }
+    client.fetch = async (input) => {
+      const path = String(input)
+      if (path === "/mini-app/api/session")
+        return new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
+      if (path === "/mini-app/api/plan") return new Response(JSON.stringify({ status: "current", plan, history: [] }))
+      if (path === "/mini-app/api/profile") {
+        if (delayProfileGet) {
+          delayProfileGet = false
+          await new Promise<void>((resolve) => {
+            delayedProfile.release = resolve
+          })
+        }
+        return new Response(JSON.stringify(settings))
+      }
+      return new Response(JSON.stringify({ error: "unexpected_request" }), { status: 404 })
+    }
+    const scripts = [...MINI_APP_SHELL.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
+    const context = {
+      window,
+      document: window.document,
+      MutationObserver: client.MutationObserver,
+      Event: window.Event,
+      Response,
+      URL,
+      fetch: (...args: Parameters<typeof fetch>) => client.fetch(...args),
+      localStorage,
+    }
+    scripts.forEach((script) => {
+      runInNewContext(script, context)
+    })
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+    await settle()
+    const app = window.document.getElementById("app")
+    expect(app?.querySelector(".draft button")?.textContent).toBe("Remove")
+
+    delayProfileGet = true
+    app?.querySelector(".draft button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(delayedProfile.release).toBeDefined()
+    expect(app?.querySelector(".status")?.textContent).toBe("Loading household settings…")
+    delayedProfile.release?.()
+    await settle()
+    expect(app?.querySelector(".settings-form")).not.toBeNull()
+    expect(localStorage.removeItem).toHaveBeenCalledWith("kipp-meal-drafts:plan-feedback-removal:v1")
   })
 
   it("leaves a single week as a simple header without a redundant status", async () => {
@@ -1566,6 +1692,8 @@ describe("Mini App HTTP boundary", () => {
       { planId: "plan-old", lifecycle: "historical", weekStart: "2026-09-20T18:30:00.000Z" },
     ]
     const calls: string[] = []
+    let planRequestCount = 0
+    const delayedInitialPlan = { release: undefined as (() => void) | undefined }
     let generating = false
     let firstPlanGenerating = false
     client.fetch = async (input) => {
@@ -1575,6 +1703,14 @@ describe("Mini App HTTP boundary", () => {
         return new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
       const selected = new URL(path, location.origin).searchParams.get("planId")
       const historical = selected === "plan-old"
+      if (!historical && planRequestCount++ === 0) {
+        await new Promise<void>((resolve) => {
+          delayedInitialPlan.release = resolve
+        })
+        return new Response(
+          JSON.stringify({ status: "generating", currentPlan: plan("plan-current"), history: entries }),
+        )
+      }
       return new Response(
         JSON.stringify({
           status: historical ? "historical" : firstPlanGenerating || generating ? "generating" : "current",
@@ -1602,6 +1738,17 @@ describe("Mini App HTTP boundary", () => {
     const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
     await settle()
     const app = window.document.getElementById("app")
+    expect(delayedInitialPlan.release).toBeDefined()
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    expect(app?.querySelector(".read-only-indicator")).toBeNull()
+    delayedInitialPlan.release?.()
+    await settle()
+    app?.append(window.document.createElement("span"))
+    await settle()
+    expect(app?.querySelector(".notice")).toBeNull()
+    expect(app?.querySelector(".read-only-indicator")).toBeNull()
+    expect(app?.querySelector(".plan-change")?.hidden).toBe(false)
     const selectedWeek = () => {
       const select = app?.querySelector(".week-select") as unknown as {
         value: string
