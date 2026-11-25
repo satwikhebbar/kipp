@@ -1003,6 +1003,24 @@ describe("Mini App HTTP boundary", () => {
     expect(serverSettings.profile.sensoryGuidelines).toEqual(["Use gentle seasoning"])
     expect(app?.textContent).toContain("Current week only (saved)")
 
+    delayNextProfileGet = true
+    app?.querySelector('button[data-action="reload"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(delayedGet.release).toBeDefined()
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    expect(app?.textContent).toContain("Rice")
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+    await settle()
+    const editsAfterReopen = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    editsAfterReopen.value = "egg\nsesame\nnewer view edit"
+    delayedGet.release?.()
+    await settle()
+    const editsAfterStaleReload = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+    } | null
+    expect(editsAfterStaleReload?.value).toBe("egg\nsesame\nnewer view edit")
+
     const profileOnlyExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
       value: string
     }
@@ -1330,6 +1348,11 @@ describe("Mini App HTTP boundary", () => {
     }
     await assertLateFailurePreservesPlanAndDraft("conflict", "walnut")
     expect(serverSettings.profile.pantryBaseline).toEqual(["oats"])
+    app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    expect(app?.querySelector('button[data-action="reapply"]')).not.toBeNull()
+    app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("Settings saved.")
     await assertLateFailurePreservesPlanAndDraft("server-error", "cashew")
     await assertLateFailurePreservesPlanAndDraft("network-error", "almond")
 
