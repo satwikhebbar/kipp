@@ -665,6 +665,8 @@ describe("Mini App HTTP boundary", () => {
     let delayNextSave = false
     let lateSaveOutcome: "conflict" | "server-error" | "network-error" | null = null
     let delayNextProfileGet = false
+    let delayNextPlanGet = false
+    let rejectNextPlanGet = false
     let conflictNextSave = false
     let conflictSequence = 0
     let slotConflictNextSave = false
@@ -673,13 +675,24 @@ describe("Mini App HTTP boundary", () => {
     let halfDayConflictNextSave: "half" | "full" | null = null
     const delayedSave = { release: undefined as (() => void) | undefined }
     const delayedGet = { release: undefined as (() => void) | undefined }
+    const delayedPlan = { release: undefined as (() => void) | undefined }
     client.fetch = async (input, init) => {
       const path = String(input)
       const method = init?.method ?? "GET"
       calls.push({ path, method })
       if (path.startsWith("/mini-app/api/session"))
         return new Response(JSON.stringify({ token: "settings-session", scope: "settings" }), { status: 201 })
-      if (path.startsWith("/mini-app/api/plan"))
+      if (path.startsWith("/mini-app/api/plan")) {
+        if (delayNextPlanGet) {
+          delayNextPlanGet = false
+          await new Promise<void>((resolve) => {
+            delayedPlan.release = resolve
+          })
+        }
+        if (rejectNextPlanGet) {
+          rejectNextPlanGet = false
+          throw new Error("offline")
+        }
         return new Response(
           JSON.stringify({
             status: "current",
@@ -695,6 +708,7 @@ describe("Mini App HTTP boundary", () => {
             history: [],
           }),
         )
+      }
       if (path === "/mini-app/api/profile" && method === "PUT") {
         const submitted = JSON.parse(String(init?.body)) as Record<string, unknown>
         submissions.push(submitted)
@@ -1020,6 +1034,44 @@ describe("Mini App HTTP boundary", () => {
       value: string
     } | null
     expect(editsAfterStaleReload?.value).toBe("egg\nsesame\nnewer view edit")
+
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    expect(app?.textContent).toContain("Rice")
+    delayNextPlanGet = true
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    expect(delayedPlan.release).toBeDefined()
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+    await settle()
+    const editsDuringPlanLoad = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    editsDuringPlanLoad.value = "egg\nsesame\nedit during plan load"
+    delayedPlan.release?.()
+    await settle()
+    const editsAfterPlanLoad = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+    } | null
+    expect(editsAfterPlanLoad?.value).toBe("egg\nsesame\nedit during plan load")
+
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    delayNextPlanGet = true
+    rejectNextPlanGet = true
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    expect(delayedPlan.release).toBeDefined()
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click"))
+    await settle()
+    const editsDuringFailedPlanLoad = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+    }
+    editsDuringFailedPlanLoad.value = "egg\nsesame\nedit during failed plan load"
+    delayedPlan.release?.()
+    await settle()
+    const editsAfterFailedPlanLoad = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+    } | null
+    expect(editsAfterFailedPlanLoad?.value).toBe("egg\nsesame\nedit during failed plan load")
 
     const profileOnlyExclusions = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
       value: string
@@ -1350,6 +1402,9 @@ describe("Mini App HTTP boundary", () => {
     expect(serverSettings.profile.pantryBaseline).toEqual(["oats"])
     app?.querySelector('button[data-action="add-policy"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     expect(app?.querySelector('button[data-action="reapply"]')).not.toBeNull()
+    const policyInstructions = app?.querySelectorAll('[data-policy="value"]') ?? []
+    const newPolicyInstruction = policyInstructions[policyInstructions.length - 1] as unknown as { value: string }
+    newPolicyInstruction.value = "Keep the plan simple"
     app?.querySelector('button[data-action="reapply"]')?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
     expect(app?.textContent).toContain("Settings saved.")
