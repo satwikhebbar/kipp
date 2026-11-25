@@ -1557,6 +1557,190 @@ describe("Mini App HTTP boundary", () => {
     expect(localStorage.removeItem).toHaveBeenCalledWith("kipp-meal-drafts:plan-feedback-removal:v1")
   })
 
+  it("keeps delayed feedback add and submit callbacks inside their originating view", async () => {
+    const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
+    const location = new URL("https://kipp.example/mini-app")
+    Object.defineProperty(window, "location", { value: location, configurable: true })
+    let storedDrafts = "[]"
+    let delayNextDraftWrite = false
+    let delayNextProfileGet = false
+    let delayNextFeedback = false
+    const delayedDraftWrite = { release: undefined as (() => void) | undefined }
+    const delayedProfile = { release: undefined as (() => void) | undefined }
+    const delayedFeedback = { release: undefined as (() => void) | undefined }
+    const storage = {
+      getItem: (_key: string, callback: (error: Error | null, value?: string) => void) => callback(null, storedDrafts),
+      setItem: (_key: string, value: string, callback: (error?: Error | null) => void) => {
+        if (delayNextDraftWrite) {
+          delayNextDraftWrite = false
+          delayedDraftWrite.release = () => {
+            storedDrafts = value
+            callback(null)
+          }
+          return
+        }
+        storedDrafts = value
+        callback(null)
+      },
+      removeItem: (_key: string, callback: (error?: Error | null) => void) => {
+        storedDrafts = "[]"
+        callback(null)
+      },
+    }
+    const close = vi.fn()
+    Object.defineProperty(window, "Telegram", {
+      value: {
+        WebApp: { initData: "signed-launch-data", ready: vi.fn(), expand: vi.fn(), close, DeviceStorage: storage },
+      },
+      configurable: true,
+    })
+    const plan = {
+      planId: "plan-delayed-feedback",
+      version: 1,
+      weekStart: "2026-09-27T18:30:00.000Z",
+      timezone: "Asia/Kolkata",
+      schedule: { days: ["Mon"], slots: [{ id: "lunch", name: "Lunch" }] },
+      candidate: { grid: { Mon: { lunch: { dish: "Rice", items: ["Rice"] } } }, easyBuys: [] },
+      weeklyExceptions: { items: [] },
+    }
+    const profile = JSON.parse(JSON.stringify(SEED_PROFILE)) as MealProfile
+    const schedule = JSON.parse(JSON.stringify(SEED_SCHEDULE)) as MealSchedule
+    const settings = {
+      configurationVersion: 1,
+      profile,
+      customPolicies: [],
+      schedule,
+      location: null,
+      eligibleEstablishedMeals: Object.fromEntries(
+        schedule.slots.map((slot) => [
+          slot.id,
+          (profile.mealDefinitions ?? [])
+            .filter((definition) => definition.status === "established" && definition.suitableSlots.includes(slot.id))
+            .map((definition) => definition.id),
+        ]),
+      ),
+    }
+    const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
+    client.fetch = async (input) => {
+      const path = String(input)
+      if (path === "/mini-app/api/session")
+        return new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
+      if (path === "/mini-app/api/plan") return new Response(JSON.stringify({ status: "current", plan, history: [] }))
+      if (path === "/mini-app/api/profile") {
+        if (delayNextProfileGet) {
+          delayNextProfileGet = false
+          await new Promise<void>((resolve) => {
+            delayedProfile.release = resolve
+          })
+        }
+        return new Response(JSON.stringify(settings))
+      }
+      if (path === "/mini-app/api/feedback") {
+        if (delayNextFeedback) {
+          delayNextFeedback = false
+          await new Promise<void>((resolve) => {
+            delayedFeedback.release = resolve
+          })
+        }
+        return new Response(JSON.stringify({ status: "accepted" }), { status: 202 })
+      }
+      return new Response(JSON.stringify({ error: "unexpected_request" }), { status: 404 })
+    }
+    let delayedClose: (() => void) | undefined
+    const scripts = [...MINI_APP_SHELL.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
+    const context = {
+      window,
+      document: window.document,
+      MutationObserver: client.MutationObserver,
+      Event: window.Event,
+      Response,
+      URL,
+      fetch: (...args: Parameters<typeof fetch>) => client.fetch(...args),
+      setTimeout: (callback: () => void) => {
+        delayedClose = callback
+        return 1
+      },
+      crypto: { randomUUID: () => "feedback-id" },
+      localStorage: { getItem: () => null },
+    }
+    scripts.forEach((script) => {
+      runInNewContext(script, context)
+    })
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+    await settle()
+    const app = window.document.getElementById("app")
+
+    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const addSheet = window.document.querySelector(".sheet")
+    const feedbackText = addSheet?.querySelector("textarea") as unknown as { value: string }
+    feedbackText.value = "Make the lunch less salty"
+    delayNextDraftWrite = true
+    ;[...(addSheet?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Add feedback")
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    expect(delayedDraftWrite.release).toBeDefined()
+    delayNextProfileGet = true
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(delayedProfile.release).toBeDefined()
+    delayedDraftWrite.release?.()
+    await settle()
+    expect(app?.querySelector(".status")?.textContent).toBe("Loading household settings…")
+    delayedProfile.release?.()
+    await settle()
+    expect(app?.querySelector(".settings-form")).not.toBeNull()
+
+    app?.querySelector(".settings-card .head button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.querySelector(".draft")).not.toBeNull()
+    delayNextFeedback = true
+    app
+      ?.querySelectorAll(".drafts button")
+      .item(1)
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(delayedFeedback.release).toBeDefined()
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    const newerSettingsField = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
+    newerSettingsField.value = "edit while feedback is sending"
+    delayedFeedback.release?.()
+    await settle()
+    const settingsAfterLateFeedback = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
+      value: string
+    } | null
+    expect(settingsAfterLateFeedback?.value).toBe("edit while feedback is sending")
+    expect(app?.textContent).not.toContain("Feedback sent")
+    expect(storedDrafts).toBe("[]")
+
+    app?.querySelector(".settings-card .head button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const secondSheet = window.document.querySelector(".sheet")
+    const secondText = secondSheet?.querySelector("textarea") as unknown as { value: string }
+    secondText.value = "Use familiar food"
+    ;[...(secondSheet?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Add feedback")
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    app
+      ?.querySelectorAll(".drafts button")
+      .item(1)
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("Feedback sent — continue in Telegram.")
+    expect(delayedClose).toBeDefined()
+    window.dispatchEvent(new window.Event("popstate"))
+    await settle()
+    app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    delayedClose?.()
+    expect(close).not.toHaveBeenCalled()
+    expect(app?.querySelector(".settings-form")).not.toBeNull()
+  })
+
   it("leaves a single week as a simple header without a redundant status", async () => {
     const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
     const app = window.document.getElementById("app")
