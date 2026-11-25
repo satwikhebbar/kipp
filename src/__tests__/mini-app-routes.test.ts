@@ -1673,7 +1673,12 @@ describe("Mini App HTTP boundary", () => {
         delayedClose = callback
         return 1
       },
-      crypto: { randomUUID: () => "feedback-id" },
+      crypto: {
+        randomUUID: (() => {
+          let id = 0
+          return () => `feedback-id-${++id}`
+        })(),
+      },
       localStorage: { getItem: () => null },
     }
     scripts.forEach((script) => {
@@ -1722,13 +1727,43 @@ describe("Mini App HTTP boundary", () => {
     window.dispatchEvent(new window.Event("kipp:plan-load"))
     await settle()
     expect(app?.textContent).toContain("Keep the other plan feedback")
+
+    showOtherPlan = false
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    expect(app?.textContent).toContain("Make the lunch less salty")
+    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const returningPlanSheet = window.document.querySelector(".sheet")
+    const returningPlanFeedback = returningPlanSheet?.querySelector("textarea") as unknown as { value: string }
+    returningPlanFeedback.value = "Keep the new lunch note"
+    ;[...(returningPlanSheet?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Add feedback")
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+
     delayedFeedback.release?.()
     await settle()
-    expect(app?.querySelector(".draft")?.textContent).toContain("Keep the other plan feedback")
-    expect(savedDrafts.has(originalDraftKey)).toBe(false)
+    expect(app?.textContent).not.toContain("Make the lunch less salty")
+    expect(app?.textContent).toContain("Keep the new lunch note")
+    expect(savedDrafts.has(originalDraftKey)).toBe(true)
+    expect(JSON.parse(savedDrafts.get(originalDraftKey) ?? "{}").drafts).toEqual([
+      { target: { kind: "cell", day: "Mon", slot: "lunch" }, text: "Keep the new lunch note" },
+    ])
     expect(savedDrafts.get(otherPlanDraftKey)).toBe(otherPlanDraftStorage)
     expect(app?.textContent).not.toContain("Feedback sent")
 
+    app
+      ?.querySelectorAll(".drafts button")
+      .item(1)
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).toContain("Feedback sent — continue in Telegram.")
+    expect(savedDrafts.has(originalDraftKey)).toBe(false)
+
+    showOtherPlan = true
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    expect(app?.textContent).toContain("Keep the other plan feedback")
     app
       ?.querySelectorAll(".drafts button")
       .item(1)
