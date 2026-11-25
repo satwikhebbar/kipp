@@ -1534,6 +1534,7 @@ describe("Mini App HTTP boundary", () => {
       Event: window.Event,
       Response,
       URL,
+      crypto: { randomUUID: () => "legacy-draft-id" },
       fetch: (...args: Parameters<typeof fetch>) => client.fetch(...args),
       localStorage,
     }
@@ -1568,9 +1569,16 @@ describe("Mini App HTTP boundary", () => {
       idempotencyKey: "other-plan-feedback",
     })
     const savedDrafts = new Map<string, string>([[otherPlanDraftKey, otherPlanDrafts]])
+    const getStoredDrafts = (draftKey: string) =>
+      (
+        JSON.parse(savedDrafts.get(draftKey) ?? "{}") as {
+          drafts: { target: { kind: string; day?: string; slot?: string }; text: string }[]
+        }
+      ).drafts
     let delayNextDraftWrite = false
     let delayNextProfileGet = false
     let delayNextFeedback = false
+    const feedbackPosts: { idempotencyKey: string; items: unknown[] }[] = []
     const delayedDraftWrite = { release: undefined as (() => void) | undefined }
     const delayedProfile = { release: undefined as (() => void) | undefined }
     const delayedFeedback = { release: undefined as (() => void) | undefined }
@@ -1631,7 +1639,7 @@ describe("Mini App HTTP boundary", () => {
       ),
     }
     const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
-    client.fetch = async (input) => {
+    client.fetch = async (input, init) => {
       const path = String(input)
       if (path === "/mini-app/api/session")
         return new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
@@ -1649,6 +1657,8 @@ describe("Mini App HTTP boundary", () => {
         return new Response(JSON.stringify(settings))
       }
       if (path === "/mini-app/api/feedback") {
+        const body = JSON.parse(String(init?.body)) as { idempotencyKey: string; items: unknown[] }
+        feedbackPosts.push(body)
         if (delayNextFeedback) {
           delayNextFeedback = false
           await new Promise<void>((resolve) => {
@@ -1689,6 +1699,24 @@ describe("Mini App HTTP boundary", () => {
     const app = window.document.getElementById("app")
 
     app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const staleSheet = window.document.querySelector(".sheet")
+    const staleAdd = [...(staleSheet?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "Add feedback",
+    )
+    ;(staleSheet?.querySelector("textarea") as unknown as { value: string }).value = "Do not add to another plan"
+    showOtherPlan = true
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    expect(window.document.querySelector(".sheet")).toBeNull()
+    staleAdd?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.textContent).not.toContain("Do not add to another plan")
+    expect(savedDrafts.has(originalDraftKey)).toBe(false)
+    showOtherPlan = false
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+
+    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
     const addSheet = window.document.querySelector(".sheet")
     const feedbackText = addSheet?.querySelector("textarea") as unknown as { value: string }
     feedbackText.value = "Make the lunch less salty"
@@ -1722,7 +1750,6 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
-    const otherPlanDraftStorage = savedDrafts.get(otherPlanDraftKey)
     showOtherPlan = true
     window.dispatchEvent(new window.Event("kipp:plan-load"))
     await settle()
@@ -1740,16 +1767,42 @@ describe("Mini App HTTP boundary", () => {
       .find((button) => button.textContent === "Add feedback")
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
+    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const duplicateFeedbackSheet = window.document.querySelector(".sheet")
+    ;(duplicateFeedbackSheet?.querySelector("textarea") as unknown as { value: string }).value =
+      "Make the lunch less salty"
+    ;[...(duplicateFeedbackSheet?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Add feedback")
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+
+    showOtherPlan = true
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    expect(app?.textContent).toContain("Keep the other plan feedback")
 
     delayedFeedback.release?.()
     await settle()
-    expect(app?.textContent).not.toContain("Make the lunch less salty")
-    expect(app?.textContent).toContain("Keep the new lunch note")
+    expect(app?.textContent).toContain("Keep the other plan feedback")
     expect(savedDrafts.has(originalDraftKey)).toBe(true)
-    expect(JSON.parse(savedDrafts.get(originalDraftKey) ?? "{}").drafts).toEqual([
+    expect(getStoredDrafts(originalDraftKey).map(({ target, text }) => ({ target, text }))).toEqual([
       { target: { kind: "cell", day: "Mon", slot: "lunch" }, text: "Keep the new lunch note" },
+      { target: { kind: "cell", day: "Mon", slot: "lunch" }, text: "Make the lunch less salty" },
     ])
-    expect(savedDrafts.get(otherPlanDraftKey)).toBe(otherPlanDraftStorage)
+    expect(getStoredDrafts(otherPlanDraftKey).map(({ text }) => text)).toEqual(["Keep the other plan feedback"])
+
+    showOtherPlan = false
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    expect(app?.textContent).toContain("Keep the new lunch note")
+    expect(app?.querySelectorAll(".draft")).toHaveLength(2)
+    app
+      ?.querySelectorAll(".drafts button")
+      .item(1)
+      .dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(app?.querySelectorAll(".draft")).toHaveLength(1)
+    expect(app?.textContent).not.toContain("Make the lunch less salty")
     expect(app?.textContent).not.toContain("Feedback sent")
 
     app
@@ -1759,6 +1812,13 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     expect(app?.textContent).toContain("Feedback sent — continue in Telegram.")
     expect(savedDrafts.has(originalDraftKey)).toBe(false)
+    expect(feedbackPosts[0].items).toEqual([
+      { target: { kind: "cell", day: "Mon", slot: "lunch" }, text: "Make the lunch less salty" },
+    ])
+    expect(feedbackPosts[1].items).toEqual([
+      { target: { kind: "cell", day: "Mon", slot: "lunch" }, text: "Keep the new lunch note" },
+    ])
+    expect(feedbackPosts[1].idempotencyKey).not.toBe(feedbackPosts[0].idempotencyKey)
 
     showOtherPlan = true
     window.dispatchEvent(new window.Event("kipp:plan-load"))
