@@ -1841,6 +1841,137 @@ describe("Mini App HTTP boundary", () => {
     expect(app?.querySelector(".settings-form")).not.toBeNull()
   })
 
+  it("preserves submitted-plan drafts when storage reads fail during accepted cleanup", async () => {
+    const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
+    Object.defineProperty(window, "location", {
+      value: new URL("https://kipp.example/mini-app"),
+      configurable: true,
+    })
+    const draftKey = "kipp-meal-drafts:plan-storage-error:v1"
+    const savedDrafts = new Map<string, string>()
+    const removedKeys: string[] = []
+    let failReadForKey: string | null = null
+    const storage = {
+      getItem: (key: string, callback: (error: Error | null, value?: string) => void) => {
+        if (key === failReadForKey) {
+          failReadForKey = null
+          callback(new Error("storage unavailable"))
+          return
+        }
+        callback(null, savedDrafts.get(key) ?? "[]")
+      },
+      setItem: (key: string, value: string, callback: (error?: Error | null) => void) => {
+        savedDrafts.set(key, value)
+        callback(null)
+      },
+      removeItem: (key: string, callback: (error?: Error | null) => void) => {
+        removedKeys.push(key)
+        savedDrafts.delete(key)
+        callback(null)
+      },
+    }
+    Object.defineProperty(window, "Telegram", {
+      value: { WebApp: { initData: "signed-launch-data", ready: vi.fn(), expand: vi.fn(), DeviceStorage: storage } },
+      configurable: true,
+    })
+    const planFor = (planId: string) => ({
+      planId,
+      version: 1,
+      weekStart: "2026-09-27T18:30:00.000Z",
+      timezone: "Asia/Kolkata",
+      schedule: { days: ["Mon"], slots: [{ id: "lunch", name: "Lunch" }] },
+      candidate: { grid: { Mon: { lunch: { dish: "Rice", items: ["Rice"] } } }, easyBuys: [] },
+      weeklyExceptions: { items: [] },
+    })
+    const originalPlan = planFor("plan-storage-error")
+    const otherPlan = planFor("plan-storage-error-other")
+    let showOtherPlan = false
+    let delayNextFeedback = false
+    const delayedFeedback = { release: undefined as (() => void) | undefined }
+    const client = window as unknown as { fetch: typeof fetch; MutationObserver: typeof window.MutationObserver }
+    client.fetch = async (input) => {
+      const path = String(input)
+      if (path === "/mini-app/api/session")
+        return new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
+      if (path.startsWith("/mini-app/api/plan"))
+        return new Response(
+          JSON.stringify({ status: "current", plan: showOtherPlan ? otherPlan : originalPlan, history: [] }),
+        )
+      if (path === "/mini-app/api/feedback") {
+        if (delayNextFeedback) {
+          delayNextFeedback = false
+          await new Promise<void>((resolve) => {
+            delayedFeedback.release = resolve
+          })
+        }
+        return new Response(JSON.stringify({ status: "accepted" }), { status: 202 })
+      }
+      return new Response(JSON.stringify({ error: "unexpected_request" }), { status: 404 })
+    }
+    let uuid = 0
+    const scripts = [...MINI_APP_SHELL.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1])
+    scripts.forEach((script) => {
+      runInNewContext(script, {
+        window,
+        document: window.document,
+        MutationObserver: window.MutationObserver,
+        Event: window.Event,
+        Response,
+        URL,
+        crypto: { randomUUID: () => `storage-error-id-${++uuid}` },
+        fetch: (...args: Parameters<typeof fetch>) => client.fetch(...args),
+        setTimeout: () => 1,
+        localStorage: { getItem: () => null },
+      })
+    })
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+    await settle()
+    const app = window.document.getElementById("app")
+
+    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const initialSheet = window.document.querySelector(".sheet")
+    ;(initialSheet?.querySelector("textarea") as unknown as { value: string }).value = "Submitted note"
+    ;[...(initialSheet?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Add feedback")
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    delayNextFeedback = true
+    app
+      ?.querySelectorAll(".drafts button")
+      .item(1)
+      .dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    expect(delayedFeedback.release).toBeDefined()
+
+    showOtherPlan = true
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    showOtherPlan = false
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    const laterSheet = window.document.querySelector(".sheet")
+    ;(laterSheet?.querySelector("textarea") as unknown as { value: string }).value = "Unsent note"
+    ;[...(laterSheet?.querySelectorAll("button") ?? [])]
+      .find((button) => button.textContent === "Add feedback")
+      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
+    await settle()
+    const beforeFailedRead = savedDrafts.get(draftKey)
+    expect(beforeFailedRead).toContain("Submitted note")
+    expect(beforeFailedRead).toContain("Unsent note")
+
+    showOtherPlan = true
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    failReadForKey = draftKey
+    delayedFeedback.release?.()
+    await settle()
+
+    expect(savedDrafts.get(draftKey)).toBe(beforeFailedRead)
+    expect(removedKeys).not.toContain(draftKey)
+    expect(app?.querySelector(".meal")).not.toBeNull()
+  })
+
   it("leaves a single week as a simple header without a redundant status", async () => {
     const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
     const app = window.document.getElementById("app")
