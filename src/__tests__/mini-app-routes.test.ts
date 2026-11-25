@@ -1561,7 +1561,13 @@ describe("Mini App HTTP boundary", () => {
     const { window } = parseHTML('<main id="app"><div class="status">Loading your plan…</div></main>')
     const location = new URL("https://kipp.example/mini-app")
     Object.defineProperty(window, "location", { value: location, configurable: true })
-    let storedDrafts = "[]"
+    const originalDraftKey = "kipp-meal-drafts:plan-delayed-feedback:v1"
+    const otherPlanDraftKey = "kipp-meal-drafts:plan-other:v1"
+    const otherPlanDrafts = JSON.stringify({
+      drafts: [{ target: { kind: "plan" }, text: "Keep the other plan feedback" }],
+      idempotencyKey: "other-plan-feedback",
+    })
+    const savedDrafts = new Map<string, string>([[otherPlanDraftKey, otherPlanDrafts]])
     let delayNextDraftWrite = false
     let delayNextProfileGet = false
     let delayNextFeedback = false
@@ -1569,21 +1575,22 @@ describe("Mini App HTTP boundary", () => {
     const delayedProfile = { release: undefined as (() => void) | undefined }
     const delayedFeedback = { release: undefined as (() => void) | undefined }
     const storage = {
-      getItem: (_key: string, callback: (error: Error | null, value?: string) => void) => callback(null, storedDrafts),
+      getItem: (key: string, callback: (error: Error | null, value?: string) => void) =>
+        callback(null, savedDrafts.get(key) ?? "[]"),
       setItem: (_key: string, value: string, callback: (error?: Error | null) => void) => {
         if (delayNextDraftWrite) {
           delayNextDraftWrite = false
           delayedDraftWrite.release = () => {
-            storedDrafts = value
+            savedDrafts.set(_key, value)
             callback(null)
           }
           return
         }
-        storedDrafts = value
+        savedDrafts.set(_key, value)
         callback(null)
       },
       removeItem: (_key: string, callback: (error?: Error | null) => void) => {
-        storedDrafts = "[]"
+        savedDrafts.delete(_key)
         callback(null)
       },
     }
@@ -1594,15 +1601,18 @@ describe("Mini App HTTP boundary", () => {
       },
       configurable: true,
     })
-    const plan = {
-      planId: "plan-delayed-feedback",
+    const planFor = (planId: string) => ({
+      planId,
       version: 1,
       weekStart: "2026-09-27T18:30:00.000Z",
       timezone: "Asia/Kolkata",
       schedule: { days: ["Mon"], slots: [{ id: "lunch", name: "Lunch" }] },
       candidate: { grid: { Mon: { lunch: { dish: "Rice", items: ["Rice"] } } }, easyBuys: [] },
       weeklyExceptions: { items: [] },
-    }
+    })
+    const plan = planFor("plan-delayed-feedback")
+    const otherPlan = planFor("plan-other")
+    let showOtherPlan = false
     const profile = JSON.parse(JSON.stringify(SEED_PROFILE)) as MealProfile
     const schedule = JSON.parse(JSON.stringify(SEED_SCHEDULE)) as MealSchedule
     const settings = {
@@ -1625,7 +1635,10 @@ describe("Mini App HTTP boundary", () => {
       const path = String(input)
       if (path === "/mini-app/api/session")
         return new Response(JSON.stringify({ token: "session-token" }), { status: 201 })
-      if (path === "/mini-app/api/plan") return new Response(JSON.stringify({ status: "current", plan, history: [] }))
+      if (path.startsWith("/mini-app/api/plan")) {
+        const selectedPlan = showOtherPlan ? otherPlan : plan
+        return new Response(JSON.stringify({ status: "current", plan: selectedPlan, history: [] }))
+      }
       if (path === "/mini-app/api/profile") {
         if (delayNextProfileGet) {
           delayNextProfileGet = false
@@ -1704,33 +1717,25 @@ describe("Mini App HTTP boundary", () => {
     await settle()
     app?.querySelector(".settings-open")?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
-    const newerSettingsField = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as { value: string }
-    newerSettingsField.value = "edit while feedback is sending"
+    const otherPlanDraftStorage = savedDrafts.get(otherPlanDraftKey)
+    showOtherPlan = true
+    window.dispatchEvent(new window.Event("kipp:plan-load"))
+    await settle()
+    expect(app?.textContent).toContain("Keep the other plan feedback")
     delayedFeedback.release?.()
     await settle()
-    const settingsAfterLateFeedback = app?.querySelector('[data-setting="dietaryExclusions"]') as unknown as {
-      value: string
-    } | null
-    expect(settingsAfterLateFeedback?.value).toBe("edit while feedback is sending")
+    expect(app?.querySelector(".draft")?.textContent).toContain("Keep the other plan feedback")
+    expect(savedDrafts.has(originalDraftKey)).toBe(false)
+    expect(savedDrafts.get(otherPlanDraftKey)).toBe(otherPlanDraftStorage)
     expect(app?.textContent).not.toContain("Feedback sent")
-    expect(storedDrafts).toBe("[]")
 
-    app?.querySelector(".settings-card .head button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
-    await settle()
-    app?.querySelector(".meal button")?.dispatchEvent(new window.Event("click", { bubbles: true }))
-    const secondSheet = window.document.querySelector(".sheet")
-    const secondText = secondSheet?.querySelector("textarea") as unknown as { value: string }
-    secondText.value = "Use familiar food"
-    ;[...(secondSheet?.querySelectorAll("button") ?? [])]
-      .find((button) => button.textContent === "Add feedback")
-      ?.dispatchEvent(new window.Event("click", { bubbles: true }))
-    await settle()
     app
       ?.querySelectorAll(".drafts button")
       .item(1)
       ?.dispatchEvent(new window.Event("click", { bubbles: true }))
     await settle()
     expect(app?.textContent).toContain("Feedback sent — continue in Telegram.")
+    expect(savedDrafts.has(otherPlanDraftKey)).toBe(false)
     expect(delayedClose).toBeDefined()
     window.dispatchEvent(new window.Event("popstate"))
     await settle()
