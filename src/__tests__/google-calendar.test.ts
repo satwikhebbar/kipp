@@ -138,6 +138,18 @@ describe("Google Calendar client", () => {
     expect(fetch.mock.calls[2][0]).toContain(`/events/${EVENT.id}`)
   })
 
+  it("refuses to insert or verify an invitation addressed to its own organizer", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(200, ORGANIZER_PROFILE))
+    vi.stubGlobal("fetch", fetch)
+    const calendar = createGoogleCalendarClient(await environment(GOOGLE_ACCOUNT_EMAIL_SCOPE))
+    const self = [{ email: ORGANIZER_EMAIL.toUpperCase() }]
+    await expect(calendar.createMeeting(EVENT, self)).rejects.toThrow("Meeting guest is the organizer")
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    fetch.mockResolvedValueOnce(response(200, { ...SAVED_MEETING, attendees: [SAVED_MEETING.attendees[0]] }))
+    await expect(calendar.readMeeting(EVENT, self)).rejects.toThrow("Meeting recipients or permissions changed")
+  })
+
   it("requires reconnection before sending an invitation if the grant lacks account email access", async () => {
     const fetch = vi.fn()
     vi.stubGlobal("fetch", fetch)
@@ -722,6 +734,17 @@ describe("Google Calendar client", () => {
     await expect(
       createGoogleCalendarClient(await environment()).getBusyIntervals(EVENT.start, EVENT.end),
     ).resolves.toEqual(busy)
+  })
+
+  it.each([
+    { calendars: { primary: { errors: [{ reason: "internalError" }] } } },
+    { calendars: { primary: { errors: [{ reason: "internalError" }], busy: [] } } },
+    { calendars: {} },
+  ])("rejects an incomplete FreeBusy result (%j)", async (body) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(200, body)))
+    await expect(
+      createGoogleCalendarClient(await environment()).getBusyIntervals(ORIGINAL_ONE, ORIGINAL_ONE_END),
+    ).rejects.toThrow("Calendar availability could not be read")
   })
 
   it("bisects timeRangeTooLong FreeBusy requests and combines every successful result", async () => {

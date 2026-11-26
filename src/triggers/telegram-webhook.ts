@@ -2,7 +2,7 @@ import { CALENDAR_HELP } from "../calendar/messages"
 import { startEditWorkflow } from "../core/edit-workflow"
 import { createIdeaIngest } from "../core/idea-ingest"
 import { createInteractionRouter } from "../core/interaction-router-client"
-import { type Env, INTERACTION_KIND } from "../core/types"
+import { calendarInviteEventType, type Env, INTERACTION_KIND } from "../core/types"
 import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
@@ -20,6 +20,7 @@ const UNKNOWN_COMMAND_MESSAGE =
   "Unknown command. Use /add <text>, /generate [idea id], /note <thoughts>, /calendar <request>, /mealplan <request>, /mealsettings, or tap inline buttons."
 
 class NotesTransportError extends Error {}
+class CalendarInviteDeliveryError extends Error {}
 
 interface TelegramMessageEntity {
   type: string
@@ -181,6 +182,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     } catch (err) {
       if (err instanceof NotesTransportError || cq.data?.startsWith("n:"))
         return new Response("Retry Notes delivery", { status: 503 })
+      if (err instanceof CalendarInviteDeliveryError) return new Response("Retry Calendar delivery", { status: 503 })
       return handleBoundaryError(env, cq.message?.chat.id, err)
     }
   }
@@ -512,6 +514,7 @@ async function dispatchRoutedInteraction(
       ? env.MEAL_PLANNING_WORKFLOW
       : env.PIPELINE_WORKFLOW
   if (!workflow) {
+    if (interaction.pendingInviteDelivery) throw new CalendarInviteDeliveryError("Calendar workflow unavailable")
     logRuntime(env, {
       workflow: interaction.workflowId,
       interactionId: interaction.interactionId,
@@ -584,7 +587,6 @@ async function dispatchRoutedInteraction(
     }
     return true
   }
-  const instance = await workflow.get(interaction.workflowId)
   const interactionText =
     interaction.text ??
     (interaction.kind === INTERACTION_KIND.APPROVE
@@ -592,20 +594,29 @@ async function dispatchRoutedInteraction(
       : interaction.kind === INTERACTION_KIND.REVISE
         ? "__revise__"
         : `__${interaction.kind}__`)
-  await instance.sendEvent({
-    type: "telegram-reply",
-    payload: {
-      userId,
-      text: interactionText,
-      interactionId: interaction.interactionId,
-      interactionVersion: interaction.version,
-      interactionKind: interaction.kind,
-      telegramUpdateId: interaction.telegramUpdateId,
-      ...(interaction.kind.startsWith("calendar-invite-") ? { inputKind } : {}),
-      ...(setupOrigin !== undefined ? { setupOrigin } : {}),
-      ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
-    },
-  })
+  try {
+    const instance = await workflow.get(interaction.workflowId)
+    await instance.sendEvent({
+      type: interaction.pendingInviteDelivery ? calendarInviteEventType(interaction.version) : "telegram-reply",
+      payload: {
+        userId,
+        text: interactionText,
+        interactionId: interaction.interactionId,
+        interactionVersion: interaction.version,
+        interactionKind: interaction.kind,
+        telegramUpdateId: interaction.telegramUpdateId,
+        ...(interaction.kind.startsWith("calendar-invite-") ? { inputKind } : {}),
+        ...(setupOrigin !== undefined ? { setupOrigin } : {}),
+        ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
+      },
+    })
+    if (interaction.pendingInviteDelivery)
+      await router.acknowledgeInvite(interaction.interactionId, interaction.telegramUpdateId)
+  } catch (error) {
+    if (interaction.pendingInviteDelivery)
+      throw new CalendarInviteDeliveryError("Calendar decision delivery unavailable")
+    throw error
+  }
   logRuntime(env, {
     workflow: interaction.workflowId,
     interactionId: interaction.interactionId,

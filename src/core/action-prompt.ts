@@ -4,7 +4,7 @@ import { logRuntime } from "../runtime/logging"
 import { presentConversationTurn } from "./conversation-presenter"
 import { type ConnectionAction, type ConversationTurnCoordinator, createConversationTurn } from "./conversation-turn"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
-import type { Env, WorkflowInteractionKind } from "./types"
+import { calendarInviteEventType, type Env, type WorkflowInteractionKind } from "./types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "./workflow-events"
 
 export type ActionPromptOutcome =
@@ -126,7 +126,7 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
       step,
       `${name}-wait`,
       {
-        type: "telegram-reply",
+        type: options.requireCallbackId ? calendarInviteEventType(version) : "telegram-reply",
         timeout: "15 minutes" as never,
       },
     )

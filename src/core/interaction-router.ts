@@ -1,12 +1,6 @@
 import { NotesRouter } from "../notes/router"
-import type { InteractionRegistration, InteractionResolveInput } from "./interaction-router-client"
-import {
-  CALENDAR_INVITE_ACTION_GROUP,
-  type Env,
-  INTERACTION_KIND,
-  type WorkflowInteraction,
-  type WorkflowInteractionKind,
-} from "./types"
+import type { InteractionRegistration, InteractionResolveInput, RoutedInteraction } from "./interaction-router-client"
+import { CALENDAR_INVITE_ACTION_GROUP, type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "./types"
 
 interface Registration {
   interactionId: string
@@ -22,11 +16,6 @@ interface Registration {
   edit?: { sessionId?: string }
 }
 
-interface ResolvedInteraction extends WorkflowInteraction {
-  workflowId: string
-  edit?: { sessionId?: string }
-}
-
 type InteractionRow = {
   interaction_id: string
   version: number
@@ -34,6 +23,7 @@ type InteractionRow = {
   kind: WorkflowInteractionKind
   expires_at: number
   consumed_update_id: number | null
+  consumed_at: number | null
   interaction_group: string | null
   generation: number | null
   edit_json?: string | null
@@ -131,6 +121,7 @@ export class InteractionRouterDO implements DurableObject {
     if (url.pathname === "/register" && typeof body.kind === "string" && body.kind.startsWith("notes-"))
       return this.notes.register(body as unknown as InteractionRegistration)
     if (url.pathname === "/register") return this.register(body)
+    if (url.pathname === "/calendar-invite/ack") return this.acknowledgeInvite(body)
     if (url.pathname === "/resolve") return this.resolve(body)
     return new Response("Not found", { status: 404 })
   }
@@ -308,9 +299,10 @@ export class InteractionRouterDO implements DurableObject {
         : input.plainText !== undefined
           ? this.ctx.storage.sql
               .exec(
-                `SELECT * FROM interactions WHERE kind IN (${PLAIN_TEXT_INTERACTION_KINDS.map(() => "?").join(", ")}) AND (interaction_group IS NULL OR interaction_group NOT LIKE ?) AND (consumed_update_id IS NULL OR edit_json IS NOT NULL) ORDER BY rowid DESC LIMIT 1`,
+                `SELECT * FROM interactions WHERE kind IN (${PLAIN_TEXT_INTERACTION_KINDS.map(() => "?").join(", ")}) AND (interaction_group IS NULL OR interaction_group NOT LIKE ?) AND (consumed_update_id IS NULL OR edit_json IS NOT NULL) AND expires_at > ? ORDER BY rowid DESC LIMIT 1`,
                 ...PLAIN_TEXT_INTERACTION_KINDS,
                 `${CALENDAR_INVITE_ACTION_GROUP}%`,
+                Date.now(),
               )
               .toArray()
           : []
@@ -326,6 +318,19 @@ export class InteractionRouterDO implements DurableObject {
     )
   }
 
+  private acknowledgeInvite(body: Record<string, unknown>): Response {
+    if (typeof body.interactionId !== "string" || typeof body.telegramUpdateId !== "number")
+      return new Response("invalid acknowledgement", { status: 400 })
+    this.ctx.storage.sql.exec(
+      "UPDATE interactions SET consumed_at = ? WHERE interaction_id = ? AND consumed_update_id = ? AND interaction_group LIKE ? AND consumed_at IS NULL",
+      Date.now(),
+      body.interactionId,
+      body.telegramUpdateId,
+      `${CALENDAR_INVITE_ACTION_GROUP}%`,
+    )
+    return json({ ok: true })
+  }
+
   private resolve(body: Record<string, unknown>): Response {
     const updateId = body.telegramUpdateId
     if (!Number.isInteger(updateId)) return new Response("invalid update", { status: 400 })
@@ -337,24 +342,41 @@ export class InteractionRouterDO implements DurableObject {
     this.removeExpiredOrOldConsumedInteractions()
     if (!row) return json({ interaction: null })
     if (row.expires_at <= Date.now()) return json({ interaction: null, reason: "expired" })
-    if (row.consumed_update_id !== null && !row.edit_json) return json({ interaction: null })
     if (this.isGenerationInvalidated(row)) return json({ interaction: null, reason: "stale" })
-    if (row.interaction_group?.startsWith(CALENDAR_INVITE_ACTION_GROUP)) {
+    const pendingInviteDelivery = !row.edit_json && row.interaction_group?.startsWith(CALENDAR_INVITE_ACTION_GROUP)
+    let deliveryUpdateId = numericUpdateId
+    if (pendingInviteDelivery) {
       if (!token) return json({ interaction: null })
-      this.ctx.storage.sql.exec(
-        "DELETE FROM interactions WHERE interaction_group = ? AND version = ? AND interaction_id != ?",
-        row.interaction_group,
-        row.version,
-        row.interaction_id,
-      )
+      // Keep the winner through the keyboard's expiry. A registration retry can restore a sibling row.
+      const winner = this.ctx.storage.sql
+        .exec(
+          "SELECT interaction_id, consumed_update_id, consumed_at FROM interactions WHERE interaction_group = ? AND version = ? AND consumed_update_id IS NOT NULL LIMIT 1",
+          row.interaction_group,
+          row.version,
+        )
+        .toArray()[0] as Pick<InteractionRow, "interaction_id" | "consumed_update_id" | "consumed_at"> | undefined
+      if (winner) {
+        if (winner.interaction_id !== row.interaction_id || winner.consumed_at !== null)
+          return json({ interaction: null })
+        deliveryUpdateId = winner.consumed_update_id ?? numericUpdateId
+      } else {
+        this.ctx.storage.sql.exec(
+          "UPDATE interactions SET consumed_update_id = ? WHERE interaction_id = ?",
+          numericUpdateId,
+          row.interaction_id,
+        )
+      }
+    } else {
+      if (row.consumed_update_id !== null && !row.edit_json) return json({ interaction: null })
+      this.claimInteraction(row.interaction_id, numericUpdateId)
     }
-    this.claimInteraction(row.interaction_id, numericUpdateId)
-    const interaction: ResolvedInteraction = {
+    const interaction: RoutedInteraction = {
       interactionId: row.interaction_id,
       version: row.version,
       workflowId: row.workflow_id,
       kind: row.kind,
-      telegramUpdateId: numericUpdateId,
+      telegramUpdateId: deliveryUpdateId,
+      ...(pendingInviteDelivery ? { pendingInviteDelivery: true } : {}),
       ...(row.edit_json ? { edit: JSON.parse(row.edit_json) as { sessionId?: string } } : {}),
       ...(plainText !== undefined ? { text: plainText } : {}),
     }

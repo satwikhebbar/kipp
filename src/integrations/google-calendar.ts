@@ -80,6 +80,7 @@ export interface CalendarEventProjection {
   start: string
   end: string
   allDay: boolean
+  declined?: true
   transparency: "opaque" | "transparent"
 }
 
@@ -137,7 +138,7 @@ interface GoogleCalendarEventResponse {
   recurringEventId?: string
   etag?: string
   organizer?: { email?: string; self?: boolean }
-  attendees?: Array<{ email?: string; organizer?: boolean }>
+  attendees?: Array<{ email?: string; organizer?: boolean; self?: boolean; responseStatus?: string }>
   attendeesOmitted?: boolean
   guestsCanModify?: boolean
   htmlLink?: string
@@ -158,7 +159,7 @@ interface GoogleCalendarEventsResponse {
 }
 
 interface GoogleCalendarFreeBusyResponse {
-  calendars?: Record<string, { busy?: BusyInterval[] }>
+  calendars?: Record<string, { busy?: BusyInterval[]; errors?: Array<{ reason?: string }> }>
 }
 
 interface GoogleCalendarEventBody {
@@ -177,7 +178,7 @@ interface GoogleCalendarEventBody {
 
 export interface GoogleCalendarClient {
   getBusyIntervals(timeMin: string, timeMax: string): Promise<BusyInterval[]>
-  listEvents(timeMin: string, timeMax: string): Promise<CalendarEventList>
+  listEvents(timeMin: string, timeMax: string, options?: { forAvailability: true }): Promise<CalendarEventList>
   findManagedEvent(id: string, requestId: string): Promise<boolean>
   createManagedEvent(event: ManagedCalendarEvent): Promise<void>
   updateManagedEvent(event: ManagedCalendarEvent): Promise<void>
@@ -283,6 +284,12 @@ export class GoogleCalendarError extends Error {
     readonly retryCount = 0,
   ) {
     super(message)
+  }
+}
+
+export class MeetingGuestIsOrganizerError extends GoogleCalendarError {
+  constructor() {
+    super("Meeting guest is the organizer", "permanent")
   }
 }
 
@@ -453,7 +460,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     const actual = saved.attendees
       ?.filter(({ email, organizer }) => {
         const address = email?.toLowerCase()
-        return !(organizer && address && address === organizerEmail && !expected.includes(address))
+        return !(organizer && address && address === organizerEmail)
       })
       .map(({ email }) => email?.toLowerCase())
       .sort()
@@ -467,6 +474,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       saved.extendedProperties?.private?.[MEETING_PROPERTY] !== "meet" ||
       saved.guestsCanModify === true ||
       saved.attendeesOmitted ||
+      (organizerEmail !== undefined && expected.includes(organizerEmail)) ||
       JSON.stringify(actual) !== JSON.stringify(expected)
     )
       throw new GoogleCalendarError("Meeting recipients or permissions changed", "permanent")
@@ -483,7 +491,8 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     const { email, verified_email } = (await profileResponse.json()) as { email?: unknown; verified_email?: unknown }
     if (verified_email !== true || typeof email !== "string" || !isCalendarAttendeeEmail(email))
       throw new GoogleCalendarError("Google Account email could not be verified", "permanent")
-    const guests = attendees.filter((attendee) => attendee.email.toLowerCase() !== email.toLowerCase())
+    if (attendees.some((attendee) => attendee.email.toLowerCase() === email.toLowerCase()))
+      throw new MeetingGuestIsOrganizerError()
     const body = calendarEventBody(event)
     body.extendedProperties.private[MEETING_PROPERTY] = "meet"
     try {
@@ -494,7 +503,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ...body,
-            attendees: [{ email, responseStatus: "accepted" }, ...guests.map(({ email }) => ({ email }))],
+            attendees: [{ email, responseStatus: "accepted" }, ...attendees.map(({ email }) => ({ email }))],
             guestsCanModify: false,
             conferenceData: { createRequest: { requestId: event.id, conferenceSolutionKey: { type: "hangoutsMeet" } } },
           }),
@@ -578,7 +587,17 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         await googleErrorReason(response),
       )
     const data = (await response.json()) as GoogleCalendarFreeBusyResponse
-    return data.calendars?.[PRIMARY_CALENDAR_ID]?.busy ?? []
+    const calendar = data.calendars?.[PRIMARY_CALENDAR_ID]
+    if (calendar?.errors?.length || !Array.isArray(calendar?.busy)) {
+      const reason = calendar?.errors?.[0]?.reason
+      throw new GoogleCalendarError(
+        "Calendar availability could not be read",
+        reason === "internalError" ? "transient" : "permanent",
+        response.status,
+        reason === "internalError" || reason === "notFound" ? reason : undefined,
+      )
+    }
+    return calendar.busy
   }
 
   /** Bisects an availability request only when Google reports its undocumented range limit. */
@@ -608,7 +627,11 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     return getBusyRange(rangeStart, rangeEnd)
   }
 
-  async function listEvents(timeMin: string, timeMax: string): Promise<CalendarEventList> {
+  async function listEvents(
+    timeMin: string,
+    timeMax: string,
+    options?: { forAvailability: true },
+  ): Promise<CalendarEventList> {
     const rangeStart = Date.parse(timeMin)
     const rangeEnd = Date.parse(timeMax)
     if (
@@ -630,6 +653,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         showDeleted: "false",
         maxResults: EVENT_LIST_FETCH_LIMIT,
       })
+      if (options?.forAvailability) query.set("showHiddenInvitations", "true")
       if (pageToken) query.set("pageToken", pageToken)
       const response = await request(`/calendars/${PRIMARY_CALENDAR_ID}/events?${query.toString()}`, { method: "GET" })
       if (!response.ok)
@@ -644,13 +668,17 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         const allDay = Boolean(item.start?.date && item.end?.date)
         const start = item.start?.dateTime ?? item.start?.date
         const end = item.end?.dateTime ?? item.end?.date
-        if (!item.id || !start || !end) continue
+        if (item.status === "cancelled" || !item.id || !start || !end) continue
         events.push({
           reference: item.id,
           title: item.summary ?? "(untitled)",
           start,
           end,
           allDay,
+          ...(options?.forAvailability &&
+          item.attendees?.some((attendee) => attendee.self && attendee.responseStatus === "declined")
+            ? { declined: true as const }
+            : {}),
           transparency: item.transparency === "transparent" ? "transparent" : "opaque",
         })
         if (events.length > MAX_VISIBLE_EVENTS) break
@@ -859,7 +887,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         const allDay = Boolean(item.start?.date && item.end?.date)
         const start = item.start?.dateTime ?? item.start?.date
         const end = item.end?.dateTime ?? item.end?.date
-        if (!item.id || !start || !end) continue
+        if (item.status === "cancelled" || !item.id || !start || !end) continue
         const startMs = eventInstantMs(start, allDay, timeZone)
         const endMs = eventInstantMs(end, allDay, timeZone)
         if (startMs === null || endMs === null) continue

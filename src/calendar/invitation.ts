@@ -6,6 +6,7 @@ import {
   type CalendarAttendee,
   createGoogleCalendarClient,
   GoogleCalendarError,
+  MeetingGuestIsOrganizerError,
   type SavedMeeting,
 } from "../integrations/google-calendar"
 import { CALENDAR_CANCELLED, calendarPromptForActions, calendarSetupUrl, notify, promptForReply } from "./interactions"
@@ -247,14 +248,21 @@ export async function writeMeeting(
   etag: string | undefined,
   timeZone: string,
   turn: number,
-): Promise<MeetingConfirmation> {
+): Promise<MeetingConfirmation | null> {
   const identity = await managedEventIdentity(event.payload.chatId, event.payload.telegramMessageId)
   const body = managedEvent(identity, plan.proposal, plan.scheduled, timeZone)
   const calendar = createGoogleCalendarClient(env)
-  await step.do(`calendar-invite-write-${turn}`, async () => {
-    if (etag) await calendar.updateMeeting(body, attendees, etag)
-    else await calendar.createMeeting(body, attendees)
+  const written = await step.do(`calendar-invite-write-${turn}`, async () => {
+    try {
+      if (etag) await calendar.updateMeeting(body, attendees, etag)
+      else await calendar.createMeeting(body, attendees)
+    } catch (error) {
+      if (error instanceof MeetingGuestIsOrganizerError) return false
+      throw error
+    }
+    return true
   })
+  if (written === false) return null
   const read = (attempt: number) =>
     step.do(`calendar-invite-conference-${turn}-${attempt}`, async (): Promise<SavedMeeting | null> => {
       try {

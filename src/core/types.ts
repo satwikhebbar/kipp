@@ -220,6 +220,11 @@ export const TOKEN_PROVIDER = {
 
 export const CALENDAR_INVITE_ACTION_GROUP = "calendar-invite:"
 
+/** Scopes redeliverable invite decisions to a single keyboard version. */
+export function calendarInviteEventType(version: number): string {
+  return `calendar-invite-${version}`
+}
+
 export type TokenProvider = (typeof TOKEN_PROVIDER)[keyof typeof TOKEN_PROVIDER]
 
 /** Buffer credentials are only read and refreshed inside the encrypted vault. */

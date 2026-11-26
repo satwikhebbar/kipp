@@ -57,11 +57,17 @@ vitest.mock("../integrations/google-calendar", () => ({
     updateMeeting: mockUpdateMeeting,
   }),
   GoogleCalendarError: MockGoogleCalendarError,
+  MeetingGuestIsOrganizerError: class extends MockGoogleCalendarError {
+    constructor() {
+      super("Meeting guest is the organizer", "permanent")
+    }
+  },
 }))
 
 import type { CalendarCandidate } from "../calendar/evaluation"
 import { CalendarWorkflow, type CalendarWorkflowParams } from "../calendar/workflow"
-import { INTERACTION_KIND } from "../core/types"
+import { calendarInviteEventType, INTERACTION_KIND } from "../core/types"
+import { MeetingGuestIsOrganizerError } from "../integrations/google-calendar"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
 import { createWorkflowSanity } from "./helpers/workflow-sanity"
 import { calendarJourney, scriptedCalendar } from "./helpers/workflow-sanity-scenarios"
@@ -254,14 +260,21 @@ function liveWorkflowBinding() {
   let connected: Env | undefined
   const runs: Promise<void>[] = []
   let rejectWait: ((reason: Error) => void) | undefined
-  let waiter: ((event: unknown) => void) | undefined
-  const waitForQueuedEvent = () =>
+  let waiter: { type: string; resolve: (event: unknown) => void } | undefined
+  const waitForQueuedEvent = (_name: string, { type }: { type: string }) =>
     new Promise((resolve, reject) => {
       rejectWait = reject
-      const queued = events.shift()
-      if ((queued as { type?: string })?.type === "timeout") reject(workflowTimeoutError())
-      else if (queued) resolve(queued)
-      else waiter = resolve
+      const index = events.findIndex((event) => {
+        const eventType = (event as { type?: string }).type
+        return eventType === type || eventType === "timeout"
+      })
+      if (index < 0) {
+        waiter = { type, resolve }
+        return
+      }
+      const [queued] = events.splice(index, 1)
+      if ((queued as { type?: string }).type === "timeout") reject(workflowTimeoutError())
+      else resolve(queued)
     })
   return {
     connect: (env: Env) => {
@@ -291,8 +304,8 @@ function liveWorkflowBinding() {
     get: vitest.fn(() => ({
       status: async () => ({ status: "running" }),
       sendEvent: vitest.fn(async (event: unknown) => {
-        if (waiter) {
-          const resolve = waiter
+        if (waiter && waiter.type === (event as { type?: string }).type) {
+          const { resolve } = waiter
           waiter = undefined
           resolve(event)
         } else events.push(event)
@@ -444,11 +457,15 @@ describe("agent-centered Calendar Telegram integration", () => {
     const runtimeEnv = env({ INTERACTION_ROUTER: router.namespace, CALENDAR_WORKFLOW: calendar as never })
     const candidate = { ...ONE_OFF, proposal: { ...ONE_OFF.proposal, meeting: { guestNames: ["Jamie"] } } }
     mockReadMeeting.mockResolvedValueOnce({ conference: "pending", calendarUrl: "https://calendar.google.com/event" })
+    mockSearchContacts.mockResolvedValueOnce({
+      kind: "found",
+      attendees: [{ name: "Jamie Smith", email: "jamie@example.com" }],
+    })
     queueReady(candidate)
 
     await handleTelegramWebhook(message("/calendar Virtual 1:1 with Jamie on 2026-07-28 at 7pm"), runtimeEnv)
     const run = startWorkflow(calendar, runtimeEnv)
-    const approval = await waitForMessageText(network, "Guest: Jamie <jamie@example.com>")
+    const approval = await waitForMessageText(network, "Guest: Jamie Smith <jamie@example.com>")
     expect(network.getState().telegramMessages[approval].text).toContain("2026-07-28 19:00–19:30 (Asia/Kolkata)")
     expect(mockCreateMeeting).not.toHaveBeenCalled()
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()
@@ -464,7 +481,7 @@ describe("agent-centered Calendar Telegram integration", () => {
         start: "2026-07-28T13:30:00.000Z",
         end: "2026-07-28T14:00:00.000Z",
       }),
-      [{ name: "Jamie", email: "jamie@example.com" }],
+      [{ name: "Jamie Smith", email: "jamie@example.com" }],
     )
     expect(mockSearchContacts).toHaveBeenCalledWith("Jamie")
     expect(mockReadMeeting).toHaveBeenCalledTimes(2)
@@ -472,10 +489,15 @@ describe("agent-centered Calendar Telegram integration", () => {
 
     await handleTelegramWebhook(callback(callbackTokenByLabel(network, saved, "Edit"), 12), runtimeEnv)
     await waitForMessageText(network, "Reply with")
-    queueReady({ ...ONE_OFF, proposal: { ...ONE_OFF.proposal, startTime: "20:00" } })
+    queueReady({ ...candidate, proposal: { ...candidate.proposal, startTime: "20:00" } })
+    mockReadMeeting.mockImplementationOnce(async () => {
+      vitest.setSystemTime(new Date("2026-07-01T00:02:00.000Z"))
+      return { conference: "ready", etag: "etag-1" }
+    })
     await handleTelegramWebhook(message("Move it to 8pm", 13), runtimeEnv)
     const editApproval = await waitForMessageText(network, "20:00–20:30 (Asia/Kolkata)")
     expect(mockUpdateMeeting).not.toHaveBeenCalled()
+    vitest.setSystemTime(new Date("2026-07-01T00:16:00.000Z"))
     await handleTelegramWebhook(callback(callbackTokenByLabel(network, editApproval, "Send update"), 14), runtimeEnv)
     await waitForMessageText(network, "Updated: Call Jamie")
     await calendar.settled()
@@ -484,10 +506,103 @@ describe("agent-centered Calendar Telegram integration", () => {
         id: mockCreateMeeting.mock.calls[0][0].id,
         start: expect.stringContaining("14:30:00"),
       }),
-      [{ name: "Jamie", email: "jamie@example.com" }],
+      [{ name: "Jamie Smith", email: "jamie@example.com" }],
       "etag-1",
     )
     expect(mockUpdateManagedEvent).not.toHaveBeenCalled()
+  })
+
+  it("retries delivery of the same approval and rejects a sibling action during the retry", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ CALENDAR_WORKFLOW: calendar as never })
+    queueReady({ ...ONE_OFF, proposal: { ...ONE_OFF.proposal, meeting: { guestNames: [] } } })
+    await handleTelegramWebhook(
+      message("/calendar At 7pm on July 28, schedule a video call with jamie@example.com"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const approval = await waitForMessageText(network, "Guest: jamie@example.com")
+    const approve = callbackTokenByLabel(network, approval, "Create & send invite")
+    const instance = calendar.get()
+    const rejectedSend = vitest.fn().mockRejectedValue(new Error("Delivery unavailable"))
+    calendar.get.mockReturnValueOnce({ ...instance, sendEvent: rejectedSend })
+    expect((await handleTelegramWebhook(callback(approve, 11), runtimeEnv)).status).toBe(503)
+    expect(rejectedSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: calendarInviteEventType(1),
+        payload: expect.objectContaining({ telegramUpdateId: 11 }),
+      }),
+    )
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, approval, "Cancel"), 12), runtimeEnv)
+    expect(mockCreateMeeting).not.toHaveBeenCalled()
+
+    calendar.get.mockReturnValueOnce(instance)
+    expect((await handleTelegramWebhook(callback(approve, 13), runtimeEnv)).status).toBe(200)
+    await run
+    expect(instance.sendEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        type: calendarInviteEventType(1),
+        payload: expect.objectContaining({ telegramUpdateId: 11 }),
+      }),
+    )
+    expect(mockCreateMeeting).toHaveBeenCalledTimes(1)
+    expect(mockSearchContacts).not.toHaveBeenCalled()
+    expect(JSON.stringify(mockGenerate.mock.calls)).not.toContain("jamie@example.com")
+  })
+
+  it("asks for a different guest when the approved address belongs to the organizer", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ CALENDAR_WORKFLOW: calendar as never })
+    mockCreateMeeting.mockRejectedValueOnce(new MeetingGuestIsOrganizerError())
+    queueReady(ONE_OFF)
+    await handleTelegramWebhook(message("/calendar Virtual meeting with me@example.com on July 28 at 7pm"), runtimeEnv)
+    const run = startWorkflow(calendar, runtimeEnv)
+    const approval = await waitForMessageText(network, "Guest: me@example.com")
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, approval, "Create & send invite")), runtimeEnv)
+    await waitForMessageText(network, "That email belongs to the organizer")
+    await run
+    expect(mockReadMeeting).not.toHaveBeenCalled()
+  })
+
+  it("blocks an edit when an unrelated event appears at the exact saved meeting time", async () => {
+    const network = createFakeNetwork()
+    vitest.stubGlobal("fetch", network.fetch)
+    const calendar = liveWorkflowBinding()
+    const runtimeEnv = env({ CALENDAR_WORKFLOW: calendar as never })
+    queueReady(ONE_OFF)
+    await handleTelegramWebhook(
+      message("/calendar Virtual meeting with jamie@example.com on July 28 at 7pm"),
+      runtimeEnv,
+    )
+    const run = startWorkflow(calendar, runtimeEnv)
+    const approval = await waitForMessageText(network, "Guest: jamie@example.com")
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, approval, "Create & send invite")), runtimeEnv)
+    const saved = await waitForMessageText(network, "Added: Call Jamie")
+    await run
+    const { id, start, end } = mockCreateMeeting.mock.calls[0][0]
+    const meeting = { reference: id, title: "Call Jamie", start, end, allDay: false, transparency: "opaque" }
+    mockListEvents.mockResolvedValue({ events: [meeting], truncated: false })
+
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, saved, "Edit"), 12), runtimeEnv)
+    await waitForMessageText(network, "Reply with")
+    const revision = { ...ONE_OFF, proposal: { ...ONE_OFF.proposal, title: "Jamie catch-up" } }
+    queueReady(revision)
+    await handleTelegramWebhook(message("Rename it to Jamie catch-up", 13), runtimeEnv)
+    const edit = await waitForMessageText(network, "Update Jamie catch-up?")
+    mockListEvents.mockResolvedValue({
+      events: [meeting, { ...meeting, reference: "unrelated", title: "Another busy event" }],
+      truncated: false,
+    })
+    queueChoice(revision)
+    await handleTelegramWebhook(callback(callbackTokenByLabel(network, edit, "Send update"), 14), runtimeEnv)
+    await waitForMessageText(network, "safe alternative is available", edit)
+    calendar.timeout()
+    await calendar.settled()
+    expect(mockUpdateMeeting).not.toHaveBeenCalled()
   })
 
   it("does not book an invite when the owner sends approval text or cancels", async () => {

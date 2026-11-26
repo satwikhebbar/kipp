@@ -103,6 +103,55 @@ describe("bounded Calendar agent session", () => {
     expect(sessionOptions.evaluation.getBusyIntervals).toHaveBeenCalledOnce()
   })
 
+  it("keeps a rejected invitation candidate out of the accepted ordinary plan", async () => {
+    const proposal = {
+      title: "Focus time",
+      localDate: "2026-08-03",
+      startTime: "19:00",
+      durationMinutes: 30,
+      dateIsExplicit: true,
+      timeIsExplicit: true,
+      classification: "ordinary",
+      needsClarification: false,
+    }
+    const usage = { inputTokens: 0, outputTokens: 0 }
+    const provider = providerWith(
+      {
+        toolCalls: [
+          {
+            id: "rejected-invite",
+            name: "evaluate_calendar_candidate",
+            input: { kind: "one_off", proposal: { ...proposal, startTime: "7pm", meeting: { guestNames: ["Jamie"] } } },
+          },
+        ],
+        usage,
+      },
+      {
+        toolCalls: [
+          {
+            id: "ordinary",
+            name: "evaluate_calendar_candidate",
+            input: { kind: "one_off", proposal },
+          },
+        ],
+        usage,
+      },
+      async ({ messages }) => ({
+        toolCalls: [
+          {
+            id: "ready",
+            name: "ready_to_create",
+            input: { planId: toolOutput(messages, "evaluate_calendar_candidate").planId },
+          },
+        ],
+        usage,
+      }),
+    )
+    const result = await runCalendarAgentSession(provider, [{ role: "user", text: "Block some focus time" }], options())
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.meeting).toBeUndefined()
+  })
+
   it("accepts ready_to_create only for the plan issued by the current evaluation", async () => {
     const provider = providerWith(
       {

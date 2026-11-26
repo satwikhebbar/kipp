@@ -103,6 +103,7 @@ describe("InteractionRouterDO retention", () => {
       INTERACTION_KIND.MEAL_CLARIFICATION,
       INTERACTION_KIND.MEAL_FEEDBACK_REPLY,
       `${CALENDAR_INVITE_ACTION_GROUP}%`,
+      NOW,
     )
   })
 
@@ -141,7 +142,32 @@ describe("InteractionRouterDO retention", () => {
     )
   })
 
-  it("accepts only one callback from an invite approval keyboard", async () => {
+  it("routes plain text to a live meal prompt behind an expired Calendar prompt", async () => {
+    const clock = vi.spyOn(Date, "now")
+    const { namespace } = sqliteInteractionRouter()
+    const router = createInteractionRouter(namespace, "123")
+    await router.register({
+      version: 1,
+      workflowId: "meal",
+      interactionId: "meal-reply",
+      kind: INTERACTION_KIND.MEAL_CLARIFICATION,
+      expiresAt: NOW + 500,
+    })
+    await router.register({
+      version: 1,
+      workflowId: "calendar",
+      interactionId: "email-reply",
+      kind: INTERACTION_KIND.CALENDAR_INVITE_EMAIL,
+      botMessageId: 200,
+      expiresAt: NOW + 10,
+    })
+    clock.mockReturnValue(NOW + 10)
+    expect((await router.resolve({ telegramUpdateId: 1, text: "Vegetarian" })).interaction?.interactionId).toBe(
+      "meal-reply",
+    )
+  })
+
+  it("retains one invite decision through redelivery, acknowledgement, and registration retries", async () => {
     const { namespace } = sqliteInteractionRouter()
     const router = createInteractionRouter(namespace, "123")
     const common = {
@@ -170,7 +196,22 @@ describe("InteractionRouterDO retention", () => {
     expect((await router.resolve({ telegramUpdateId: 2, callbackToken: "change-token" })).interaction?.kind).toBe(
       INTERACTION_KIND.CALENDAR_INVITE_CHANGE,
     )
+    const confirm = {
+      ...common,
+      interactionId: "confirm",
+      callbackToken: "confirm-token",
+      kind: INTERACTION_KIND.CALENDAR_INVITE_CONFIRM,
+    }
+    await router.register(confirm)
     expect((await router.resolve({ telegramUpdateId: 3, callbackToken: "confirm-token" })).interaction).toBeNull()
+    expect((await router.resolve({ telegramUpdateId: 4, callbackToken: "change-token" })).interaction).toMatchObject({
+      telegramUpdateId: 2,
+      pendingInviteDelivery: true,
+    })
+    await router.acknowledgeInvite("change", 2)
+    await router.register(confirm)
+    expect((await router.resolve({ telegramUpdateId: 5, callbackToken: "change-token" })).interaction).toBeNull()
+    expect((await router.resolve({ telegramUpdateId: 6, callbackToken: "confirm-token" })).interaction).toBeNull()
   })
 
   it("deletes a group's lower-generation unconsumed rows when a registration carries a generation", async () => {

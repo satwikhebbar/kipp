@@ -70,6 +70,11 @@ const MAX_MULTI_ACTION_LABEL_CHARACTERS = 16
 const EXPLICIT_INVITATION =
   /^(?:please\s+)?(?:(?:book|schedule|create|set up)\s+(?:an?\s+)?)?(?:invite\s|send an? invit(?:e|ation) to\b|(?:virtual (?:meeting|call|1:1|with)|google meet|video (?:call|meeting)|online (?:call|meeting|1:1))\b|(?:meeting|call|appointment|1:1)\s+with\s+\[email supplied\])/i
 const EMAIL_IN_MESSAGE = /[^\s@<>,;:"()]+@[^\s@<>,;:"()]+/g
+const RECIPIENT_EMAIL_CONTEXT =
+  /(?:\b(?:meeting|call|appointment|1:1|google meet|virtual)\s+with|\binvite|\binvitation to|\bguest\s*:)\s*<?$/i
+const TITLE_CONTEXT = /\b(?:title(?:d)?|named|called)\s*(?:[:=]|\s)/i
+const EXPLICIT_GUEST_CHANGE =
+  /\b(?:(?:change|switch|replace|add|remove|swap|update)\s+(?:(?:the|a|an|my)\s+)?(?:guests?|attendees?|recipients?)\b|(?:invite|add|remove)\s+[^.!?]+?\s+instead\b|(?:invite|send (?:the )?invite to)\s+[^.!?@]+@)/i
 const TITLE_EMAIL_MARKER = /\[calendar email \d+\]/g
 
 interface PreparedCalendarOption {
@@ -108,6 +113,10 @@ export async function runAgentCenteredCalendarWorkflow(
   let guestNames: string[] = []
   let revisedGuestName: string | undefined
   let suppliedAddresses: string[] = []
+  const meetingEditId = editContext?.attendees
+    ? (await managedEventIdentity(event.payload.chatId, event.payload.telegramMessageId)).id
+    : undefined
+  let requestedGuestChange = Boolean(meetingEditId && EXPLICIT_GUEST_CHANGE.test(event.payload.requestText))
   const emailMarkers = new Map(editContext?.emailMarkers)
   const userText = (text: string, titleOrTimeOnly = false) => {
     if (
@@ -116,12 +125,14 @@ export async function runAgentCenteredCalendarWorkflow(
       EXPLICIT_INVITATION.test(text.replace(EMAIL_IN_MESSAGE, "[email supplied]"))
     )
       meetingRequested = true
-    const captureGuest = !titleOrTimeOnly && meetingRequested && !editContext && revisedGuestName === undefined
+    const captureGuest = !titleOrTimeOnly && !editContext && revisedGuestName === undefined
     const addresses: string[] = []
-    const redacted = text.replace(EMAIL_IN_MESSAGE, (match) => {
+    const redacted = text.replace(EMAIL_IN_MESSAGE, (match, offset: number) => {
       const address = match.replace(/[.!?]+$/, "")
       if (!isCalendarAttendeeEmail(address)) return "[email supplied]"
-      if (captureGuest) {
+      const prefix = text.slice(0, offset)
+      const bareGuest = meetingRequested && text.trim() === match
+      if (captureGuest && (bareGuest || (RECIPIENT_EMAIL_CONTEXT.test(prefix) && !TITLE_CONTEXT.test(prefix)))) {
         addresses.push(address)
         return `[email supplied]${match.slice(address.length)}`
       }
@@ -181,7 +192,7 @@ export async function runAgentCenteredCalendarWorkflow(
         )
         const evaluation: CalendarEvaluationContext = {
           getBusyIntervals: async (timeMin, timeMax) =>
-            withoutCreatedBaseline(await calendar.getBusyIntervals(timeMin, timeMax), baseline),
+            busyForCalendarPlan(calendar, timeMin, timeMax, baseline, timeZone, meetingEditId),
           ledger: sessionLedger,
           version: currentAgentVersion,
           expiresAt: turnExpiresAt,
@@ -401,6 +412,7 @@ export async function runAgentCenteredCalendarWorkflow(
             baseline,
             timeZone,
             editing ? turnExpiresAt : undefined,
+            meetingEditId,
           ))
         ) {
           messages.push(availabilityChangedMessage())
@@ -432,6 +444,7 @@ export async function runAgentCenteredCalendarWorkflow(
             baseline,
             timeZone,
             editing ? turnExpiresAt : undefined,
+            meetingEditId,
           ))
         ) {
           messages.push(availabilityChangedMessage())
@@ -470,13 +483,7 @@ export async function runAgentCenteredCalendarWorkflow(
           )
           return
         }
-        if (
-          editContext?.attendees &&
-          (suppliedAddresses.length ||
-            guestNames.some(
-              (name) => !editContext.attendees?.some((attendee) => attendee.name?.toLowerCase() === name.toLowerCase()),
-            ))
-        ) {
+        if (requestedGuestChange) {
           await notify(
             env,
             step,
@@ -535,6 +542,7 @@ export async function runAgentCenteredCalendarWorkflow(
             suppliedAddresses = result.attendees.map(({ email }) => email)
             revisedGuestName = result.attendees[0]?.name ?? ""
           }
+          requestedGuestChange = Boolean(meetingEditId && EXPLICIT_GUEST_CHANGE.test(result.reply))
           messages.push(agentBaseline(selectedPlan), { role: "user", text: userText(result.reply, true) })
           continue
         }
@@ -546,7 +554,8 @@ export async function runAgentCenteredCalendarWorkflow(
             selectedPlan,
             baseline,
             timeZone,
-            editing ? turnExpiresAt : undefined,
+            undefined,
+            meetingEditId,
           ))
         ) {
           if (!editing) {
@@ -574,7 +583,28 @@ export async function runAgentCenteredCalendarWorkflow(
           }
         }
         selectedPlan = withPlanTitle(selectedPlan, restoreTitle(selectedPlan.proposal.title))
-        meeting = await writeMeeting(env, step, event, selectedPlan, result.attendees, result.etag, timeZone, turn)
+        const savedMeeting = await writeMeeting(
+          env,
+          step,
+          event,
+          selectedPlan,
+          result.attendees,
+          result.etag,
+          timeZone,
+          turn,
+        )
+        if (!savedMeeting) {
+          await notify(
+            env,
+            step,
+            event.payload.chatId,
+            "That email belongs to the organizer. Start a new /calendar request with a different guest.",
+            `invite-organizer-guest-${turn}`,
+            responseTurn,
+          )
+          return
+        }
+        meeting = savedMeeting
         logRuntime(env, {
           workflow: event.instanceId,
           event: "calendar-write",
@@ -729,6 +759,7 @@ async function revalidateExactPlanInStep(
   baseline: CalendarPlan | null,
   timeZone: string,
   expiresAt?: number,
+  meetingEditId?: string,
 ): Promise<boolean> {
   const result = await step.do(name, async () => {
     try {
@@ -738,6 +769,7 @@ async function revalidateExactPlanInStep(
         baseline,
         timeZone,
         expiresAt ?? Date.now() + CALENDAR_INTERACTION_TTL_MS,
+        meetingEditId,
       )
     } catch (error) {
       if (!(error instanceof GoogleCalendarError) || error.kind !== "authorization") throw error
@@ -763,6 +795,7 @@ async function revalidateExactPlan(
   baseline: CalendarPlan | null,
   timeZone: string,
   expiresAt: number,
+  meetingEditId?: string,
 ): Promise<boolean> {
   const ledger = createCalendarPlanLedger()
   const evaluation = await evaluateCalendarCandidate(
@@ -771,7 +804,7 @@ async function revalidateExactPlan(
       : { kind: "recurring", proposal: expected.proposal },
     {
       getBusyIntervals: async (timeMin, timeMax) =>
-        withoutCreatedBaseline(await calendar.getBusyIntervals(timeMin, timeMax), baseline),
+        busyForCalendarPlan(calendar, timeMin, timeMax, baseline, timeZone, meetingEditId),
       ledger,
       version: 1,
       expiresAt,
@@ -789,6 +822,29 @@ async function revalidateExactPlan(
     }
   }
   return candidates.some((candidate) => sameCalendarPlan(candidate, expected))
+}
+
+/** Meeting edits exclude the saved event by ID, so a separate event at the same time still blocks the slot. */
+async function busyForCalendarPlan(
+  calendar: ReturnType<typeof createGoogleCalendarClient>,
+  timeMin: string,
+  timeMax: string,
+  baseline: CalendarPlan | null,
+  timeZone: string,
+  meetingEditId?: string,
+) {
+  if (!meetingEditId) return withoutCreatedBaseline(await calendar.getBusyIntervals(timeMin, timeMax), baseline)
+
+  const { events, truncated } = await calendar.listEvents(timeMin, timeMax, { forAvailability: true })
+  if (truncated) throw new GoogleCalendarError("Calendar availability could not be read", "permanent")
+  return events.flatMap((event) => {
+    if (event.reference === meetingEditId || event.transparency === "transparent" || event.declined) return []
+    if (!event.allDay) return [{ start: event.start, end: event.end }]
+    const start = calendarDayBounds(event.start, timeZone)?.timeMin
+    const end = calendarDayBounds(event.end, timeZone)?.timeMin
+    if (!start || !end) throw new GoogleCalendarError("Calendar availability could not be read", "permanent")
+    return [{ start, end }]
+  })
 }
 
 /** Removes only the exact event or series intervals created by this workflow during immediate Edit. */

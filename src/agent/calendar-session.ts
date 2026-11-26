@@ -118,12 +118,9 @@ export async function runCalendarAgentSession(
       ...evaluationTool,
       handler: guardedCalendarHandler(async (candidate) => {
         const typed = candidate as CalendarCandidate
-        if (typed.kind === "one_off" && typed.proposal.meeting)
-          meeting = typed.proposal.meeting.guestNames.length
-            ? typed.proposal.meeting
-            : (meeting ?? typed.proposal.meeting)
         const result = (await evaluationTool.handler(candidate)) as CalendarEvaluation
         latestEvaluation = result
+        meeting = typed.kind === "one_off" ? typed.proposal.meeting : undefined
         return result
       }),
     },
