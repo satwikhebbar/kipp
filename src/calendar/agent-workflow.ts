@@ -192,7 +192,7 @@ export async function runAgentCenteredCalendarWorkflow(
         )
         const evaluation: CalendarEvaluationContext = {
           getBusyIntervals: async (timeMin, timeMax) =>
-            busyForCalendarPlan(calendar, timeMin, timeMax, baseline, timeZone, meetingEditId),
+            busyForCalendarPlan(calendar, timeMin, timeMax, baseline, meetingEditId),
           ledger: sessionLedger,
           version: currentAgentVersion,
           expiresAt: turnExpiresAt,
@@ -804,7 +804,7 @@ async function revalidateExactPlan(
       : { kind: "recurring", proposal: expected.proposal },
     {
       getBusyIntervals: async (timeMin, timeMax) =>
-        busyForCalendarPlan(calendar, timeMin, timeMax, baseline, timeZone, meetingEditId),
+        busyForCalendarPlan(calendar, timeMin, timeMax, baseline, meetingEditId),
       ledger,
       version: 1,
       expiresAt,
@@ -830,18 +830,17 @@ async function busyForCalendarPlan(
   timeMin: string,
   timeMax: string,
   baseline: CalendarPlan | null,
-  timeZone: string,
   meetingEditId?: string,
 ) {
   if (!meetingEditId) return withoutCreatedBaseline(await calendar.getBusyIntervals(timeMin, timeMax), baseline)
 
-  const { events, truncated } = await calendar.listEvents(timeMin, timeMax, { forAvailability: true })
+  const { events, truncated, timeZone } = await calendar.listEvents(timeMin, timeMax, { forAvailability: true })
   if (truncated) throw new GoogleCalendarError("Calendar availability could not be read", "permanent")
   return events.flatMap((event) => {
     if (event.reference === meetingEditId || event.transparency === "transparent" || event.declined) return []
     if (!event.allDay) return [{ start: event.start, end: event.end }]
-    const start = calendarDayBounds(event.start, timeZone)?.timeMin
-    const end = calendarDayBounds(event.end, timeZone)?.timeMin
+    const start = timeZone && calendarDayBounds(event.start, timeZone)?.timeMin
+    const end = timeZone && calendarDayBounds(event.end, timeZone)?.timeMin
     if (!start || !end) throw new GoogleCalendarError("Calendar availability could not be read", "permanent")
     return [{ start, end }]
   })
@@ -1287,7 +1286,6 @@ async function handleConflictDisclosure(
         interval.timeMax,
         new Date(interval.start).toISOString(),
         new Date(interval.end).toISOString(),
-        timeZone,
       )) as ConflictEventSnapshot[]
       for (const snapshot of found) if (!seen.has(snapshot.id)) seen.set(snapshot.id, snapshot)
     }

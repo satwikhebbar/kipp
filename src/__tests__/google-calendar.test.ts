@@ -842,6 +842,18 @@ describe("Google Calendar client", () => {
     expect(fetch.mock.calls[1][0]).toContain("pageToken=next")
   })
 
+  it("retains the calendar time zone when listing events for availability", async () => {
+    const fetch = vi.fn().mockResolvedValue(response(200, { timeZone: "America/Los_Angeles", items: [] }))
+    vi.stubGlobal("fetch", fetch)
+    const client = createGoogleCalendarClient(await environment())
+    await expect(client.listEvents(EVENT.start, EVENT.end, { forAvailability: true })).resolves.toEqual({
+      events: [],
+      truncated: false,
+      timeZone: "America/Los_Angeles",
+    })
+    expect(new URL(fetch.mock.calls[0][0]).searchParams.has("timeZone")).toBe(false)
+  })
+
   it("rejects event-list ranges longer than 31 days before making a provider request", async () => {
     const fetch = vi.fn()
     vi.stubGlobal("fetch", fetch)
@@ -868,6 +880,7 @@ describe("Google Calendar client", () => {
 
   it("finds only events overlapping the requested interval and classifies each as movable", async () => {
     const events = {
+      timeZone: "UTC",
       items: [
         {
           id: "single",
@@ -922,7 +935,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T13:30:00.000Z",
       "2026-07-28T14:00:00.000Z",
-      "UTC",
     )
 
     expect(result.map(({ id, movable, etag }) => ({ id, movable, etag }))).toEqual([
@@ -938,6 +950,7 @@ describe("Google Calendar client", () => {
 
   it("treats an all-day date as a local-calendar day and blocks both sides of local midnight", async () => {
     const allDay = {
+      timeZone: "Asia/Kolkata",
       items: [
         { id: "holiday", summary: "Holiday", etag: "etag", start: { date: "2026-07-28" }, end: { date: "2026-07-29" } },
       ],
@@ -952,7 +965,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-27T18:45:00.000Z",
       "2026-07-27T19:00:00.000Z",
-      "Asia/Kolkata",
     )
     expect(afterLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
 
@@ -962,7 +974,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T18:15:00.000Z",
       "2026-07-28T18:30:00.000Z",
-      "Asia/Kolkata",
     )
     expect(beforeLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
 
@@ -972,9 +983,29 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T18:45:00.000Z",
       "2026-07-28T19:00:00.000Z",
-      "Asia/Kolkata",
     )
     expect(afterLocalMidnightNextDay.map(({ id }) => id)).toEqual([])
+  })
+
+  it("finds an all-day conflict that extends past midnight in the scheduling time zone", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response(200, {
+          timeZone: "America/Los_Angeles",
+          items: [{ id: "holiday", start: { date: "2026-07-28" }, end: { date: "2026-07-29" } }],
+        }),
+      ),
+    )
+    const client = createGoogleCalendarClient(await environment())
+    // July 29 at 10:00 in Kolkata is still July 28 in Los Angeles.
+    const conflicts = await client.findConflictingEvents(
+      "2026-07-28T18:30:00.000Z",
+      "2026-07-29T18:30:00.000Z",
+      "2026-07-29T04:30:00.000Z",
+      "2026-07-29T05:00:00.000Z",
+    )
+    expect(conflicts).toMatchObject([{ id: "holiday", allDay: true, movable: false }])
   })
 
   it("pages the conflicting-events read and propagates the page token", async () => {
@@ -1009,7 +1040,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T13:30:00.000Z",
       "2026-07-28T14:00:00.000Z",
-      "UTC",
     )
 
     expect(result.map(({ id }) => id)).toEqual(["event-1", "event-2"])
@@ -1027,7 +1057,6 @@ describe("Google Calendar client", () => {
         "2026-08-02T00:00:00.000Z",
         "2026-07-28T13:30:00.000Z",
         "2026-07-28T14:00:00.000Z",
-        "UTC",
       ),
     ).rejects.toMatchObject({ kind: "permanent" })
     expect(fetch).not.toHaveBeenCalled()

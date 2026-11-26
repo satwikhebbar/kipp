@@ -2,7 +2,7 @@ import { CALENDAR_HELP } from "../calendar/messages"
 import { startEditWorkflow } from "../core/edit-workflow"
 import { createIdeaIngest } from "../core/idea-ingest"
 import { createInteractionRouter } from "../core/interaction-router-client"
-import { calendarInviteEventType, type Env, INTERACTION_KIND } from "../core/types"
+import { CALENDAR_INVITE_CALLBACK_PREFIX, calendarInviteEventType, type Env, INTERACTION_KIND } from "../core/types"
 import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
@@ -21,6 +21,7 @@ const UNKNOWN_COMMAND_MESSAGE =
 
 class NotesTransportError extends Error {}
 class CalendarInviteDeliveryError extends Error {}
+class CalendarInviteRoutingError extends Error {}
 
 interface TelegramMessageEntity {
   type: string
@@ -163,7 +164,12 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
 
     try {
       const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-      await tg.answerCallbackQuery(cq.id)
+      if (cq.data?.startsWith(CALENDAR_INVITE_CALLBACK_PREFIX)) {
+        // Telegram may reject an old callback query when redelivering the update.
+        await tg.answerCallbackQuery(cq.id, undefined, AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS)).catch(() => {})
+      } else {
+        await tg.answerCallbackQuery(cq.id)
+      }
 
       if (cq.data && cq.message)
         await dispatchRoutedInteraction(
@@ -182,7 +188,9 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     } catch (err) {
       if (err instanceof NotesTransportError || cq.data?.startsWith("n:"))
         return new Response("Retry Notes delivery", { status: 503 })
-      if (err instanceof CalendarInviteDeliveryError) return new Response("Retry Calendar delivery", { status: 503 })
+      if (err instanceof CalendarInviteRoutingError) await handleBoundaryError(env, cq.message?.chat.id, err)
+      if (err instanceof CalendarInviteDeliveryError || err instanceof CalendarInviteRoutingError)
+        return new Response("Retry Calendar delivery", { status: 503 })
       return handleBoundaryError(env, cq.message?.chat.id, err)
     }
   }
@@ -495,7 +503,11 @@ async function dispatchRoutedInteraction(
     } catch {
       throw new NotesTransportError("Notes delivery unavailable")
     }
-  const { interaction, reason } = await router.resolve(input)
+  const { interaction, reason } = await router.resolve(input).catch((error: unknown) => {
+    if (input.callbackToken?.startsWith(CALENDAR_INVITE_CALLBACK_PREFIX))
+      throw new CalendarInviteRoutingError("Calendar decision routing unavailable", { cause: error })
+    throw error
+  })
   const inputKind = input.callbackToken ? "callback" : input.replyToMessageId !== undefined ? "reply" : "plain-text"
   if (!interaction) {
     if (input.callbackToken || (reason && input.replyToMessageId !== undefined)) {

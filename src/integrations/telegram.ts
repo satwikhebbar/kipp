@@ -57,11 +57,8 @@ export function createTelegramClient(token: string) {
     }
   }
 
-  async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
-    await call("answerCallbackQuery", {
-      callback_query_id: callbackQueryId,
-      ...(text ? { text } : {}),
-    })
+  async function answerCallbackQuery(callbackQueryId: string, text?: string, signal?: AbortSignal): Promise<void> {
+    await call("answerCallbackQuery", { callback_query_id: callbackQueryId, ...(text ? { text } : {}) }, signal)
   }
 
   return { sendMessage, answerCallbackQuery }

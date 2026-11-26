@@ -66,7 +66,7 @@ vitest.mock("../integrations/google-calendar", () => ({
 
 import type { CalendarCandidate } from "../calendar/evaluation"
 import { CalendarWorkflow, type CalendarWorkflowParams } from "../calendar/workflow"
-import { calendarInviteEventType, INTERACTION_KIND } from "../core/types"
+import { CALENDAR_INVITE_CALLBACK_PREFIX, calendarInviteEventType, INTERACTION_KIND } from "../core/types"
 import { MeetingGuestIsOrganizerError } from "../integrations/google-calendar"
 import { handleTelegramWebhook } from "../triggers/telegram-webhook"
 import { createWorkflowSanity } from "./helpers/workflow-sanity"
@@ -516,7 +516,20 @@ describe("agent-centered Calendar Telegram integration", () => {
     const network = createFakeNetwork()
     vitest.stubGlobal("fetch", network.fetch)
     const calendar = liveWorkflowBinding()
-    const runtimeEnv = env({ CALENDAR_WORKFLOW: calendar as never })
+    const { namespace } = createFakeInteractionRouter()
+    let routeUnavailable = false
+    const runtimeEnv = env({
+      CALENDAR_WORKFLOW: calendar as never,
+      INTERACTION_ROUTER: {
+        idFromName: namespace.idFromName,
+        get: (id: DurableObjectId) => ({
+          fetch: async (url: string, init: RequestInit) => {
+            if (routeUnavailable && url.endsWith("/resolve")) throw new Error("Router unavailable")
+            return namespace.get(id).fetch(url, init)
+          },
+        }),
+      } as unknown as DurableObjectNamespace,
+    })
     queueReady({ ...ONE_OFF, proposal: { ...ONE_OFF.proposal, meeting: { guestNames: [] } } })
     await handleTelegramWebhook(
       message("/calendar At 7pm on July 28, schedule a video call with jamie@example.com"),
@@ -525,6 +538,7 @@ describe("agent-centered Calendar Telegram integration", () => {
     const run = startWorkflow(calendar, runtimeEnv)
     const approval = await waitForMessageText(network, "Guest: jamie@example.com")
     const approve = callbackTokenByLabel(network, approval, "Create & send invite")
+    expect(approve.startsWith(CALENDAR_INVITE_CALLBACK_PREFIX)).toBe(true)
     const instance = calendar.get()
     const rejectedSend = vitest.fn().mockRejectedValue(new Error("Delivery unavailable"))
     calendar.get.mockReturnValueOnce({ ...instance, sendEvent: rejectedSend })
@@ -535,11 +549,22 @@ describe("agent-centered Calendar Telegram integration", () => {
         payload: expect.objectContaining({ telegramUpdateId: 11 }),
       }),
     )
-    await handleTelegramWebhook(callback(callbackTokenByLabel(network, approval, "Cancel"), 12), runtimeEnv)
+    const cancel = callbackTokenByLabel(network, approval, "Cancel")
+    expect((await handleTelegramWebhook(callback(cancel, 12), runtimeEnv)).status).toBe(200)
     expect(mockCreateMeeting).not.toHaveBeenCalled()
 
+    routeUnavailable = true
+    expect((await handleTelegramWebhook(callback(approve, 11), runtimeEnv)).status).toBe(503)
+    await waitForMessageText(network, "Something went wrong", approval)
+    expect(mockCreateMeeting).not.toHaveBeenCalled()
+    routeUnavailable = false
+    vitest.stubGlobal("fetch", (url: string, init: RequestInit) =>
+      String(url).includes("/answerCallbackQuery")
+        ? Promise.resolve(new Response("Query is too old", { status: 400 }))
+        : network.fetch(url, init),
+    )
     calendar.get.mockReturnValueOnce(instance)
-    expect((await handleTelegramWebhook(callback(approve, 13), runtimeEnv)).status).toBe(200)
+    expect((await handleTelegramWebhook(callback(approve, 11), runtimeEnv)).status).toBe(200)
     await run
     expect(instance.sendEvent).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
@@ -568,7 +593,10 @@ describe("agent-centered Calendar Telegram integration", () => {
     expect(mockReadMeeting).not.toHaveBeenCalled()
   })
 
-  it("blocks an edit when an unrelated event appears at the exact saved meeting time", async () => {
+  it.each([
+    "same-time event",
+    "all-day event in the calendar time zone",
+  ])("blocks a meeting edit when availability changes with a %s", async (conflict) => {
     const network = createFakeNetwork()
     vitest.stubGlobal("fetch", network.fetch)
     const calendar = liveWorkflowBinding()
@@ -593,8 +621,15 @@ describe("agent-centered Calendar Telegram integration", () => {
     queueReady(revision)
     await handleTelegramWebhook(message("Rename it to Jamie catch-up", 13), runtimeEnv)
     const edit = await waitForMessageText(network, "Update Jamie catch-up?")
+    const unrelated = { ...meeting, reference: "unrelated", title: "Another busy event" }
     mockListEvents.mockResolvedValue({
-      events: [meeting, { ...meeting, reference: "unrelated", title: "Another busy event" }],
+      events: [
+        meeting,
+        conflict === "same-time event"
+          ? unrelated
+          : { ...unrelated, allDay: true, start: "2026-07-29", end: "2026-07-30" },
+      ],
+      timeZone: "Pacific/Auckland",
       truncated: false,
     })
     queueChoice(revision)
@@ -1522,7 +1557,6 @@ describe("agent-centered Calendar Telegram integration", () => {
       expect.any(String),
       expect.any(String),
       expect.any(String),
-      "Asia/Kolkata",
     )
     expect(mockMoveExistingEvent).not.toHaveBeenCalled()
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()

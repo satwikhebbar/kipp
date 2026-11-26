@@ -87,6 +87,7 @@ export interface CalendarEventProjection {
 export interface CalendarEventList {
   events: CalendarEventProjection[]
   truncated: boolean
+  timeZone?: string
 }
 
 /** Minimal workflow-owned snapshot of an existing event overlapping the requested time. */
@@ -156,6 +157,7 @@ interface GoogleCalendarInstancesResponse {
 interface GoogleCalendarEventsResponse {
   items?: GoogleCalendarEventResponse[]
   nextPageToken?: string
+  timeZone?: string
 }
 
 interface GoogleCalendarFreeBusyResponse {
@@ -193,7 +195,6 @@ export interface GoogleCalendarClient {
     timeMax: string,
     requestedStart: string,
     requestedEnd: string,
-    timeZone: string,
   ): Promise<ConflictEventSnapshot[]>
   moveExistingEvent(id: string, start: string, end: string, expectedEtag?: string): Promise<ExistingEventUpdateResult>
 }
@@ -643,6 +644,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       throw new GoogleCalendarError("Calendar event range is invalid", "permanent")
 
     const events: CalendarEventProjection[] = []
+    let timeZone: string | undefined
     let pageToken: string | undefined
     do {
       const query = new URLSearchParams({
@@ -664,6 +666,8 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
           await googleErrorReason(response),
         )
       const data = (await response.json()) as GoogleCalendarEventsResponse
+      // With no timeZone query parameter, events.list returns the calendar's time zone.
+      timeZone ??= data.timeZone
       for (const item of data.items ?? []) {
         const allDay = Boolean(item.start?.date && item.end?.date)
         const start = item.start?.dateTime ?? item.start?.date
@@ -688,6 +692,7 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     return {
       events: events.slice(0, MAX_VISIBLE_EVENTS),
       truncated: events.length > MAX_VISIBLE_EVENTS || Boolean(pageToken),
+      ...(options?.forAvailability && timeZone ? { timeZone } : {}),
     }
   }
 
@@ -851,7 +856,6 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
     timeMax: string,
     requestedStart: string,
     requestedEnd: string,
-    timeZone: string,
   ): Promise<ConflictEventSnapshot[]> {
     const rangeStart = Date.parse(timeMin)
     const rangeEnd = Date.parse(timeMax)
@@ -888,8 +892,10 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
         const start = item.start?.dateTime ?? item.start?.date
         const end = item.end?.dateTime ?? item.end?.date
         if (item.status === "cancelled" || !item.id || !start || !end) continue
-        const startMs = eventInstantMs(start, allDay, timeZone)
-        const endMs = eventInstantMs(end, allDay, timeZone)
+        const startMs = eventInstantMs(start, allDay, data.timeZone ?? "")
+        const endMs = eventInstantMs(end, allDay, data.timeZone ?? "")
+        if (allDay && (startMs === null || endMs === null))
+          throw new GoogleCalendarError("Calendar all-day event bounds could not be read", "permanent")
         if (startMs === null || endMs === null) continue
         if (!(startMs < requestedEndMs && endMs > requestedStartMs)) continue
         snapshots.push({

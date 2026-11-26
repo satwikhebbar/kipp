@@ -4,7 +4,12 @@ import { logRuntime } from "../runtime/logging"
 import { presentConversationTurn } from "./conversation-presenter"
 import { type ConnectionAction, type ConversationTurnCoordinator, createConversationTurn } from "./conversation-turn"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
-import { calendarInviteEventType, type Env, type WorkflowInteractionKind } from "./types"
+import {
+  CALENDAR_INVITE_CALLBACK_PREFIX,
+  calendarInviteEventType,
+  type Env,
+  type WorkflowInteractionKind,
+} from "./types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "./workflow-events"
 
 export type ActionPromptOutcome =
@@ -81,7 +86,9 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
         label,
         kind,
         interactionId: crypto.randomUUID(),
-        callbackToken: keyboard ? crypto.randomUUID() : undefined,
+        callbackToken: keyboard
+          ? `${options.requireCallbackId ? CALENDAR_INVITE_CALLBACK_PREFIX : ""}${crypto.randomUUID()}`
+          : undefined,
       }))
       const controls = keyboard
         ? {

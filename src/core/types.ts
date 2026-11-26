@@ -219,6 +219,7 @@ export const TOKEN_PROVIDER = {
 } as const
 
 export const CALENDAR_INVITE_ACTION_GROUP = "calendar-invite:"
+export const CALENDAR_INVITE_CALLBACK_PREFIX = "ci:"
 
 /** Scopes redeliverable invite decisions to a single keyboard version. */
 export function calendarInviteEventType(version: number): string {
