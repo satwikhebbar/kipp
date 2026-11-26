@@ -828,6 +828,45 @@ describe("bounded meal-planning agent session", () => {
     expect(result.terminal?.kind).toBe("propose_plan")
   })
 
+  it("keeps known ordinary peanuts out of classifier outage failures", async () => {
+    const candidate: MealPlanCandidate = {
+      ...passingCandidate(),
+      grid: gridWith(
+        "Mon",
+        "breakfast",
+        cell("breakfast mix", ["plain peanuts", "roasted peanut", "carrot"], "breakfast"),
+      ),
+      easyBuys: ["plain peanuts", "roasted peanut", "carrot"],
+    }
+    const decisions: DecisionsClient = {
+      async decide() {
+        throw new Error("Decisions endpoint unavailable")
+      },
+    }
+    const provider = providerWith(
+      evaluateResponse(candidate),
+      clarifyResponse({
+        message: "Please review the plan.",
+        reasonCodes: ["easy_buy_not_ordinary", "packed_slot_unverified"],
+        interaction: { kind: "reply" },
+      }),
+    )
+    const result = await runMealPlanningAgentSession(provider, [{ role: "user", text: "plan" }], {
+      context: contextWithCandidateDefinitions(context(), candidate),
+      easyBuyClassifier: createEasyBuyClassifier(decisions),
+    })
+    const evaluation = result.messages.find(
+      (message) => message.role === "tool" && message.name === "evaluate_meal_plan",
+    )
+    expect(evaluation?.role).toBe("tool")
+    if (evaluation?.role !== "tool") throw new Error("missing evaluation")
+    const output = JSON.stringify(evaluation.output)
+    expect(output).toContain('easy buy \\"carrot\\" could not be verified')
+    expect(output).not.toContain('easy buy \\"plain peanuts\\" could not be verified')
+    expect(output).not.toContain('easy buy \\"roasted peanut\\" could not be verified')
+    expect(output).toContain("packed_slot_unverified")
+  })
+
   it("blocks a proposal when a persistent-policy outcome cannot be verified", async () => {
     let decisionCalls = 0
     const decisions: DecisionsClient = {

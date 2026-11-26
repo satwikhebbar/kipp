@@ -24,7 +24,7 @@ export const PROHIBITED_EASY_BUY_TOKENS = [
 
 /** Plain and roasted peanuts are ordinary buys even though other nuts are not. */
 export function isKnownOrdinaryEasyBuy(item: string): boolean {
-  return ["peanut", "roasted peanut"].includes(normalizeIngredient(item))
+  return ["peanut", "plain peanut", "roasted peanut"].includes(normalizeIngredient(item))
 }
 
 /** Word-boundary matcher per stem; the trailing `s?` tolerates a plural not at the end of the phrase. */

@@ -5,7 +5,7 @@ import type {
   PackedMealCheck,
   PersistentPolicyCheck,
 } from "../meal-planning/easy-buy-classifier"
-import { findProhibitedEasyBuys } from "../meal-planning/easy-buys"
+import { findProhibitedEasyBuys, isKnownOrdinaryEasyBuy } from "../meal-planning/easy-buys"
 import {
   evaluateMealPlan,
   evaluateMealPlanSelection,
@@ -194,7 +194,7 @@ export async function runMealPlanningAgentSession(
         const deterministic = new Set(findProhibitedEasyBuys(selection.candidate.easyBuys))
         classification = {
           nonOrdinaryEasyBuys: selection.candidate.easyBuys
-            .filter((item) => !deterministic.has(item))
+            .filter((item) => !deterministic.has(item) && !isKnownOrdinaryEasyBuy(item))
             .map((item) => ({
               item,
               detail: `easy buy "${item}" could not be verified because the semantic classifier request failed`,
