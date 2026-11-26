@@ -2,6 +2,7 @@ export const FAILURE_CODES = [
   "hard_exclusion",
   "non_vegetarian_school_meal",
   "missing_slot",
+  "unconfigured_cell",
   "extra_slot_for_closed_day",
   "extra_slot_for_half_day",
   "morning_capacity_exceeded",
@@ -63,7 +64,11 @@ export interface MealSlot {
   packed: boolean
   dry: boolean
   maxCookMinutes: number | null
+  /** How this slot changes on a recurring or one-off half day; absent only on legacy schedule JSON. */
+  halfDayBehavior?: HalfDayBehavior
 }
+
+export type HalfDayBehavior = { action: "keep" } | { action: "omit" } | { action: "quick"; maxCookMinutes: number }
 
 export interface MealSchedule {
   days: string[]
@@ -248,6 +253,8 @@ export interface MealPlanContext {
   priorWeekPlan?: MealGrid | null
   request: PlanRequest
   feedbackItems?: FeedbackItem[]
+  /** Cells removed from the revision base solely because a new hard exclusion invalidated them. */
+  revisionRepairableCells?: Array<{ day: string; slotId: string }>
   urgentUseByDay?: string
   requireUrgentUseEarly?: boolean
   requestedRepeats?: string[]

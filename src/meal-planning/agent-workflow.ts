@@ -15,9 +15,10 @@ import { createToolProvider, type ToolConversationMessage, type ToolProviderRequ
 import { createOpenRouterDecisionsClient } from "../providers/openrouter-decisions"
 import { logRuntime } from "../runtime/logging"
 import { stripNullProperties } from "../runtime/tool-runner"
-import { projectEligibleGrid } from "./coverage"
+import { computeCoverageSet, projectEligibleGrid } from "./coverage"
 import { createEasyBuyClassifier } from "./easy-buy-classifier"
 import { applicablePlanFeedback, isConcretePlanFeedback } from "./evaluation"
+import { effectiveMealSlot, HALF_DAY_SNACK_MAX_COOK_MINUTES, isHalfDay } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import {
   MEAL_AGENT_UNAVAILABLE,
@@ -31,6 +32,7 @@ import {
   MEAL_STALE_PLAN,
   renderPlanLaunchMessage,
 } from "./messages"
+import { validateMealSchedule } from "./schedule"
 import { mealSessionReferences } from "./session-references"
 import {
   type ActivePlanRecord,
@@ -63,11 +65,29 @@ const TRANSCRIPT_TEXT_MAX_CHARACTERS = 4_000
 const MEAL_PLANNER_PROVIDER = "openrouter"
 const MEAL_PLANNER_MODEL = "~openai/gpt-luna-latest"
 const ZERO_USAGE: LLMUsage = { inputTokens: 0, outputTokens: 0 }
-const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, full school days, or schedule changes. When the parent explicitly says a recurring half-day is a full school day for this week, emit full_day for that day. For a half-day, use mealSlots when the parent names the affected slots; when they only say a day is a half-day, omit mealSlots and the planner will treat school-lunch as the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
+const WEEK_CONTEXT_EXTRACTION_PROMPT = `Extract only concrete week-scoped facts from the parent's message. Return inventoryChanges for ingredients the parent says they have or do not have, using status available or unavailable, and exceptionAdds for explicit holidays, half-days, full school days, or schedule changes. When the parent explicitly says a recurring half-day is a full school day for this week, emit full_day for that day. For a half-day, always omit mealSlots; half-day coverage follows the saved schedule slot behavior. Do not assume school-lunch is the dropped slot. Ignore whether the parent used a singular or plural spelling: always force every ingredient name into its singular canonical form (for example, output "carrot" even when the parent says "carrots"). Use the exact schedule day and slot identifiers supplied below (for example, use "Mon" rather than "Monday" and "school-lunch" rather than "lunch"). Do not infer facts, add pantry staples, or plan meals. Return empty arrays when no such fact is stated.`
 
 /** Render week context extraction prompt. */
 export function renderWeekContextExtractionPrompt(context: Pick<MealPlanContext, "schedule">): string {
   return `${WEEK_CONTEXT_EXTRACTION_PROMPT}\nSchedule days: ${context.schedule.days.join(", ")}\nRecurring half days: ${context.schedule.halfDays?.join(", ") || "none"}\nMeal slots: ${context.schedule.slots.map((slot) => slot.id).join(", ")}`
+}
+
+/** Find retained cells that no longer comply with current hard profile rules. */
+export function findRevisionRepairableCells(
+  candidate: MealPlanCandidate,
+  profile: MealPlanContext["profile"],
+): Array<{ day: string; slotId: string }> {
+  return Object.entries(candidate.grid).flatMap(([day, cells]) =>
+    Object.entries(cells)
+      .filter(
+        ([, cell]) =>
+          (!profile.priorNightPrepAllowed && cell.priorNightPrep) ||
+          cell.items.some((item) =>
+            profile.dietaryExclusions.some((excluded) => normalizeIngredient(item) === normalizeIngredient(excluded)),
+          ),
+      )
+      .map(([slotId]) => ({ day, slotId })),
+  )
 }
 
 export interface MealPlanningLiveEvent {
@@ -191,6 +211,22 @@ export function renderHouseholdContext(context: MealPlanContext): string {
           `${s.id} (${s.packed ? "packed" : "not packed"}, ${s.dry ? "dry" : "not dry"}, maxCookMinutes: ${s.maxCookMinutes ?? "unlimited"})`,
       )
       .join(", ")}`,
+    `- Effective coverage: ${computeCoverageSet(context)
+      .required.map(({ day, slotId }) => `${day} ${slotId}`)
+      .join(", ")}`,
+    ...context.schedule.days
+      .filter((day) => isHalfDay(context, day))
+      .map((day) => {
+        const rules = context.schedule.slots.flatMap((slot) => {
+          const effective = effectiveMealSlot(context, day, slot.id)
+          if (!effective) return [`${slot.id}: omit`]
+          const behavior = slot.halfDayBehavior
+          return behavior?.action === "quick"
+            ? [`${slot.id}: keep, max ${behavior.maxCookMinutes} cook minutes`]
+            : [`${slot.id}: keep`]
+        })
+        return `- Half-day rules for ${day}: ${rules.join("; ")}`
+      }),
     `- Dietary exclusions (hard): ${p.dietaryExclusions.join(", ") || "none"}`,
     `- Established meal definitions (one JSON record per available catalog meal; select only by id):\n${
       (p.mealDefinitions ?? [])
@@ -227,10 +263,16 @@ export function renderHouseholdContext(context: MealPlanContext): string {
       lines.push(`    ${exception.kind}${target}: "${exception.instruction}"`)
     }
   }
-  const halfDaySnacks = (p.mealDefinitions ?? []).filter((meal) => meal.status === "established" && meal.halfDaySnack)
-  if (halfDaySnacks.length) {
+  const quickSlots = context.schedule.slots.filter((slot) => slot.halfDayBehavior?.action === "quick")
+  for (const slot of quickSlots) {
+    const candidates = (p.mealDefinitions ?? []).filter(
+      (meal) =>
+        meal.status === "established" &&
+        (!meal.halfDaySnack || meal.typicalCookMinutes <= HALF_DAY_SNACK_MAX_COOK_MINUTES) &&
+        (meal.suitableSlots.includes(slot.id) || meal.halfDaySnack),
+    )
     lines.push(
-      `- Half-day snack candidates (use only for snack1 on a half-day): ${halfDaySnacks.map((meal) => `${references.byId.get(meal.id)} (${meal.name})`).join(", ")}`,
+      `- Quick half-day slot ${slot.id} candidates (max ${slot.halfDayBehavior?.action === "quick" ? slot.halfDayBehavior.maxCookMinutes : 0} cook minutes): ${candidates.map((meal) => `${references.byId.get(meal.id) ?? meal.id} (${meal.name})`).join(", ") || "none"}`,
     )
   }
   lines.push(`- Request kind: ${context.request.kind}`)
@@ -243,6 +285,11 @@ export function renderHouseholdContext(context: MealPlanContext): string {
         )
       }
     }
+  }
+  if (context.revisionRepairableCells?.length) {
+    lines.push(
+      `- Required profile-rule repairs (replace only these cells to remove an ingredient excluded by current dietary rules or prior-night prep that current settings do not allow): ${context.revisionRepairableCells.map(({ day, slotId }) => `${day} ${slotId}`).join(", ")}`,
+    )
   }
   if (context.priorWeekPlan) {
     lines.push(`- Previous week's dishes (avoid repeating cooked meals unless exempt):`)
@@ -358,6 +405,17 @@ export async function runAgentCenteredMealPlanningWorkflow(
   const profile = await stepDo(step, "meal-planning-load-profile", () =>
     store.loadOrCreateProfile(event.payload.chatId),
   )
+  const scheduleIssues = validateMealSchedule(profile.schedule, profile.profile)
+  if (scheduleIssues.length > 0) {
+    await notify(
+      env,
+      step,
+      event.payload.chatId,
+      `Your meal schedule needs an eligible established meal for each slot when new foods are disabled. ${scheduleIssues.join("; ")}`,
+      "meal-planning-invalid-schedule",
+    )
+    return
+  }
   const generationId = event.instanceId
   await stepDo(step, "meal-planning-start-generation-lease", () =>
     store.startPlanGeneration({
@@ -368,7 +426,7 @@ export async function runAgentCenteredMealPlanningWorkflow(
   )
   let generationFinished = false
   try {
-    const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText)
+    const week = resolvePlanningWeek(event.payload.invokedAtMs, timezone, event.payload.requestText, profile.schedule)
     const recent = await stepDo(step, "meal-planning-read-recent", () => store.activePlan(event.payload.chatId))
     const priorWeek = await stepDo(step, "meal-planning-read-prior-week", () =>
       store.latestPlanForWeek(event.payload.chatId, previousPlanningWeekStart(week.weekStart, timezone)),
@@ -422,8 +480,12 @@ export async function runAgentCenteredMealPlanningWorkflow(
           weekStart: week.weekStart,
           weekEnd: week.weekEnd,
           timezone,
+          schedule: context.schedule,
+          establishedMealDefinitions:
+            context.profile.mealDefinitions?.filter((definition) => definition.status === "established") ?? [],
           instanceId: event.instanceId,
           generationId,
+          profileConfigurationVersion: profile.configurationVersion,
           candidate: enriched.candidate,
           video: enriched.video,
           evaluation: outcome.propose.evaluation,
@@ -439,10 +501,22 @@ export async function runAgentCenteredMealPlanningWorkflow(
         })
       } catch (error) {
         if (error instanceof PlanWeekClosedError) return "week-closed" as const
+        if (error instanceof Error && error.message.startsWith("meal profile changed during plan generation"))
+          return "profile-changed" as const
         if (error instanceof Error && error.message.startsWith("generation lease missing or expired")) return null
         throw error
       }
     })
+    if (created === "profile-changed") {
+      await notify(
+        env,
+        step,
+        event.payload.chatId,
+        "Your household settings changed while the plan was being generated. Run /mealplan again to use the latest settings.",
+        "meal-planning-profile-changed",
+      )
+      return
+    }
     if (created === "week-closed") {
       await notify(
         env,
@@ -1205,12 +1279,18 @@ async function runRevision(
   // requested cells cannot be silently dropped after the context update.
   // Scoped and concrete plan-wide Telegram requests retain their authority;
   // context-only facts are retired after applying their inventory or calendar update.
-  // A stored plan can predate a recurring schedule rule. Start every revision
-  // from the cells still eligible under the household's current schedule.
-  const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, profile)
+  // Keep the plan's captured slot shape and established catalog. Current
+  // dietary/profile rules below still apply when the next revision is evaluated.
+  const planProfile: StoredMealProfile = {
+    ...profile,
+    profile: { ...profile.profile, mealDefinitions: active.plan.establishedMealDefinitions },
+  }
+  const revisionRepairableCells = findRevisionRepairableCells(active.version.candidate, planProfile.profile)
+  const revisionBaseCandidate = withoutIneligibleCells(active.version.candidate, active.plan, planProfile)
   const feedbackReference = {
     recentPlan: revisionBaseCandidate.grid,
     feedbackReferencePlan: active.version.candidate.grid,
+    schedule: active.plan.schedule,
   }
   const feedbackItems =
     contextAlreadyUpdated && !feedbackBatch
@@ -1223,8 +1303,8 @@ async function runRevision(
     ),
   )
   const context: MealPlanContext = {
-    schedule: profile.schedule,
-    profile: profile.profile,
+    schedule: active.plan.schedule,
+    profile: planProfile.profile,
     customPolicies: profile.customPolicies,
     weeklyInventory: active.plan.weeklyInventory,
     weeklyExceptions: active.plan.weeklyExceptions,
@@ -1234,6 +1314,7 @@ async function runRevision(
     priorWeekPlan: priorWeek?.version.candidate.grid ?? null,
     request: { kind: "revision", text: feedbackItems.map((item) => item.text).join(" ") },
     feedbackItems,
+    revisionRepairableCells,
     provisionalMealDefinitions: active.version.provisionalMealDefinitions,
   }
   const messages: ToolConversationMessage[] = [
@@ -1358,6 +1439,7 @@ async function runRevision(
       chatId: event.payload.chatId,
       baseVersion: active.plan.currentVersion,
       expectedWeekContext: active.plan,
+      profileConfigurationVersion: profile.configurationVersion,
       candidate: enriched.candidate,
       video: enriched.video,
       evaluation: propose.evaluation,
@@ -1438,10 +1520,23 @@ function withoutIneligibleCells(
   plan: MealPlanRecord,
   profile: StoredMealProfile,
 ): MealPlanCandidate {
+  const excluded = new Set(profile.profile.dietaryExclusions.map(normalizeIngredient))
+  const exclusionCleanGrid = Object.fromEntries(
+    Object.entries(candidate.grid)
+      .map(([day, cells]) => [
+        day,
+        Object.fromEntries(
+          Object.entries(cells).filter(
+            ([, cell]) => !cell.items.some((item) => excluded.has(normalizeIngredient(item))),
+          ),
+        ),
+      ])
+      .filter(([, cells]) => Object.keys(cells).length),
+  )
   return {
     ...candidate,
-    grid: projectEligibleGrid(candidate.grid, {
-      schedule: profile.schedule,
+    grid: projectEligibleGrid(exclusionCleanGrid, {
+      schedule: plan.schedule,
       profile: profile.profile,
       customPolicies: profile.customPolicies,
       weeklyInventory: plan.weeklyInventory,

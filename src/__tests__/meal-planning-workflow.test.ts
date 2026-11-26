@@ -6,6 +6,7 @@ import { createInteractionRouter } from "../core/interaction-router-client"
 import type { Env } from "../core/types"
 import {
   explicitRejectedMealIds,
+  findRevisionRepairableCells,
   type MealPlanningLiveEvent,
   miniAppLaunchUrl,
   renderHouseholdContext,
@@ -21,6 +22,7 @@ import { createMealPlanningStore, SEED_MEAL_IDS, SEED_PROFILE, SEED_SCHEDULE } f
 import type {
   MealCell,
   MealDefinition,
+  MealPlanCandidate,
   MealPlanContext,
   MealPlanEvaluation,
   MealPlanSelectionCandidate,
@@ -74,6 +76,29 @@ it("renders complete structured catalog facts for the planning agent", () => {
   expect(rendered).not.toContain(" | ")
   expect(rendered).toContain("Rajma, carrot (two carrots), paneer (unavailable)")
   expect(rendered).not.toContain("Rajma (available)")
+
+  const slowSnack: MealDefinition = {
+    id: "slow-half-day-snack",
+    name: "Slow half-day snack",
+    vegetarian: true,
+    principalIngredients: ["rice"],
+    requiredIngredients: ["rice"],
+    optionalIngredients: [],
+    suitableSlots: ["snack1"],
+    halfDaySnack: true,
+    packedFood: { suitable: true, dry: true },
+    typicalCookMinutes: 25,
+    priorNightPrep: "none",
+    status: "established",
+  }
+  const quickSlotLine = renderHouseholdContext({
+    ...context,
+    profile: { ...context.profile, mealDefinitions: [...(context.profile.mealDefinitions ?? []), slowSnack] },
+  })
+    .split("\n")
+    .find((line) => line.startsWith("- Quick half-day slot snack1"))
+  expect(quickSlotLine).toBeDefined()
+  expect(quickSlotLine).not.toContain("Slow half-day snack")
 })
 
 it("requires the planner to self-check singular ingredient names", () => {
@@ -113,9 +138,10 @@ it("tells the planner that half-day snack candidates are conditional", () => {
     request: { kind: "initial_plan", text: "Plan this week." },
   }
   const rendered = renderHouseholdContext(context)
-  expect(rendered).toContain("Half-day snack candidates")
-  expect(rendered).toContain("use only for snack1 on a half-day")
-  expect(MEAL_PLANNING_AGENT_PROMPT).toContain("plan exactly breakfast, snack1, and home lunch")
+  expect(rendered).toContain("Quick half-day slot snack1 candidates")
+  expect(rendered).toContain("max 20 cook minutes")
+  expect(MEAL_PLANNING_AGENT_PROMPT).toContain("include each slot marked keep, omit each slot marked omit")
+  expect(MEAL_PLANNING_AGENT_PROMPT).not.toContain("plan exactly breakfast, snack1, and home lunch")
 })
 
 it("renders scoped and plan-wide revision feedback without storage ids", () => {
@@ -128,6 +154,25 @@ it("renders scoped and plan-wide revision feedback without storage ids", () => {
   ).toBe(
     "- Feedback for Tue school-lunch: Use a simpler dish.\n- Feedback for every meal on Thu: Make the day lighter.\n- Plan-wide feedback: Use less oil.",
   )
+})
+
+it("includes retained prep-violating cells in revision repair scope when prep is disabled", () => {
+  const candidate = {
+    grid: {
+      Mon: {
+        breakfast: { dish: "paratha", items: ["wheat"], priorNightPrep: true, vegetarian: true, cookMinutes: 10 },
+      },
+    },
+    easyBuys: [],
+    policyOutcomes: {},
+  } as MealPlanCandidate
+  const profile = { ...SEED_PROFILE, priorNightPrepAllowed: false }
+
+  expect(findRevisionRepairableCells(candidate, profile)).toContainEqual({ day: "Mon", slotId: "breakfast" })
+  expect(findRevisionRepairableCells(candidate, { ...profile, priorNightPrepAllowed: true })).not.toContainEqual({
+    day: "Mon",
+    slotId: "breakfast",
+  })
 })
 
 it("renders neutral current-time and planning-week facts for relative-date requests", () => {
@@ -466,6 +511,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: previousWeek.weekStart,
       weekEnd: previousWeek.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       allowNewFoodsSnapshot: true,
       weeklyInventory: { items: [], notes: [] },
       weeklyExceptions: { items: [] },
@@ -506,11 +553,218 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const established = prompt
       ?.split("- Established meal definitions")[1]
       ?.split("- Plan-local provisional definitions")[0]
-    expect(established).toContain(`"id":"${dish.id}","name":"${dish.name}"`)
+    expect(established).toContain(`"name":"${dish.name}"`)
     const next = await store.activePlan(CHAT)
     expect(next?.plan.weekStart).toBe(resolvePlanningWeek(nextInvocation, TZ).weekStart)
     expect(next?.version.candidate.grid.Mon.snack1.dish).toBe(dish.name)
     expect(next?.version.provisionalMealDefinitions).toEqual([])
+  })
+
+  it("generates and persists a custom Sunday half-day against configured slot rules", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createClockedD1TestDb(() => new Date().toISOString())
+    const { namespace } = fakeRouter()
+    const store = createMealPlanningStore(d1)
+    const stored = await store.loadOrCreateProfile(CHAT)
+    const schedule = {
+      days: ["Sun"],
+      halfDays: ["Sun"],
+      slots: [
+        {
+          id: "morning-tea",
+          name: "Morning tea",
+          packed: true,
+          dry: true,
+          maxCookMinutes: null,
+          halfDayBehavior: { action: "quick" as const, maxCookMinutes: 15 },
+        },
+        {
+          id: "supper",
+          name: "Supper",
+          packed: false,
+          dry: false,
+          maxCookMinutes: null,
+          halfDayBehavior: { action: "keep" as const },
+        },
+      ],
+    }
+    stored.profile.allowNewFoods = false
+    stored.profile.mealDefinitions = (stored.profile.mealDefinitions ?? []).map((definition) => ({
+      ...definition,
+      suitableSlots: ["morning-tea", "supper"],
+    }))
+    db.prepare("UPDATE meal_profile SET profile_json = ?, schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(stored.profile),
+      JSON.stringify(schedule),
+      CHAT,
+    )
+    const policyOutcomes = Object.fromEntries(
+      stored.customPolicies
+        .filter((policy) => policy.scope === "persistent")
+        .map((policy) => [policy.id, { outcome: "satisfied" as const, rationale: "ok" }]),
+    )
+    const candidate: MealPlanSelectionCandidate = {
+      grid: {
+        Sun: {
+          "morning-tea": { mealDefinitionId: SEED_MEAL_IDS.banana },
+          supper: { mealDefinitionId: SEED_MEAL_IDS.paratha },
+        },
+      },
+      easyBuys: [],
+      policyOutcomes,
+    }
+    const network = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: candidate }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(candidate) }]),
+      deepseekResponse([
+        {
+          name: "evaluate_meal_plan",
+          input: { grid: { Sun: { "morning-tea": { mealDefinitionId: SEED_MEAL_IDS["roasted chana"] } } } },
+        },
+      ]),
+      deepseekResponse([
+        {
+          name: "propose_plan",
+          input: proposeInput(
+            { grid: { Sun: { "morning-tea": { mealDefinitionId: SEED_MEAL_IDS["roasted chana"] } } } },
+            [{ id: "tg-412", text: "Replace banana with roasted chana on Sunday." }],
+          ),
+        },
+      ]),
+    ])
+    const week = resolvePlanningWeek(invokedAtMs, TZ, "", schedule)
+    await runAgentCenteredMealPlanningWorkflow(
+      makeEnv(namespace, d1),
+      mealEvent(invokedAtMs),
+      createFakeStep([], Date.parse(week.weekEnd)) as never,
+    )
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.schedule).toEqual(schedule)
+    expect(active?.plan.weekEnd).toBe("2026-09-13T18:29:59.000Z")
+    expect(active?.version.candidate.grid).toEqual(
+      expect.objectContaining({
+        Sun: expect.objectContaining({ "morning-tea": expect.any(Object), supper: expect.any(Object) }),
+      }),
+    )
+    const plannerContext = network.deepseekBodies[0]?.messages.at(-1)?.content ?? ""
+    expect(plannerContext).toContain("Effective coverage: Sun morning-tea, Sun supper")
+    expect(plannerContext).toContain("Half-day rules for Sun: morning-tea: keep, max 15 cook minutes; supper: keep")
+
+    const liveSchedule = { ...schedule, slots: [schedule.slots[1]] }
+    stored.profile.mealDefinitions = (stored.profile.mealDefinitions ?? []).map((definition) => ({
+      ...definition,
+      suitableSlots: ["supper"],
+    }))
+    db.prepare("UPDATE meal_profile SET profile_json = ?, schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(stored.profile),
+      JSON.stringify(liveSchedule),
+      CHAT,
+    )
+    const feedbackText = "Replace banana with roasted chana on Sunday."
+    await runMealPlanningEditWorkflow(
+      makeEnv(namespace, d1),
+      {
+        ...mealEvent(invokedAtMs),
+        instanceId: "edit-removed-custom-slot",
+        payload: {
+          ...mealEvent(invokedAtMs).payload,
+          edit: {
+            planInstanceId: mealEvent(invokedAtMs).instanceId,
+            userId: "42",
+            feedback: {
+              interactionKind: "meal-feedback-reply",
+              source: "telegram-reply",
+              text: feedbackText,
+              messageId: 412,
+            },
+          },
+        },
+      } as WorkflowEvent<MealPlanningWorkflowParams>,
+      createMemoizingStep([], invokedAtMs) as never,
+    )
+    const revised = await store.activePlan(CHAT)
+    expect(revised?.plan.currentVersion).toBe(2)
+    expect(revised?.plan.schedule).toEqual(schedule)
+    expect(revised?.version.candidate.grid.Sun["morning-tea"].dish).toBe("roasted chana")
+    expect((await store.loadOrCreateProfile(CHAT)).schedule).toEqual(liveSchedule)
+    expect(network.deepseekBodies[2]?.messages.at(-1)?.content).toContain("Schedule days: Sun")
+    expect(network.deepseekBodies[2]?.messages.at(-1)?.content).toContain("morning-tea")
+  })
+
+  it("retains custom-slot Telegram feedback through a mixed context update and follow-up revision", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createClockedD1TestDb(() => new Date().toISOString())
+    const { namespace } = fakeRouter()
+    const store = createMealPlanningStore(d1)
+    const stored = await store.loadOrCreateProfile(CHAT)
+    const schedule = {
+      days: ["Sun"],
+      slots: [
+        { id: "morning-tea", name: "Morning tea", packed: true, dry: true, maxCookMinutes: null },
+        { id: "supper", name: "Supper", packed: false, dry: false, maxCookMinutes: null },
+      ],
+    }
+    stored.profile.mealDefinitions = (stored.profile.mealDefinitions ?? []).map((definition) => ({
+      ...definition,
+      suitableSlots: ["morning-tea", "supper"],
+    }))
+    db.prepare("UPDATE meal_profile SET profile_json = ?, schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(stored.profile),
+      JSON.stringify(schedule),
+      CHAT,
+    )
+    const policyOutcomes = Object.fromEntries(
+      stored.customPolicies
+        .filter((policy) => policy.scope === "persistent")
+        .map((policy) => [policy.id, { outcome: "satisfied" as const, rationale: "ok" }]),
+    )
+    const initial: MealPlanSelectionCandidate = {
+      grid: {
+        Sun: {
+          "morning-tea": { mealDefinitionId: SEED_MEAL_IDS.banana },
+          supper: { mealDefinitionId: SEED_MEAL_IDS.paratha },
+        },
+      },
+      easyBuys: [],
+      policyOutcomes,
+    }
+    const revised = revisionPatch("Sun", "morning-tea", SEED_MEAL_IDS.poha)
+    const week = resolvePlanningWeek(invokedAtMs, TZ, "", schedule)
+    const step = createFakeStep(
+      [
+        {
+          interactionKind: "meal-feedback-reply",
+          source: "telegram-reply",
+          text: "We have no bananas. Change morning tea to poha.",
+          messageId: 413,
+        },
+      ],
+      Date.parse(week.weekEnd),
+    )
+    const { deepseekBodies } = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: initial }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(initial) }]),
+      deepseekResponse([
+        {
+          name: "update_week_context",
+          input: { inventoryChanges: [{ name: "banana", status: "unavailable" }], exceptionAdds: [], replan: false },
+        },
+      ]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: revised }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(revised) }]),
+    ])
+    await generateThenEdit(makeEnv(namespace, d1), mealEvent(invokedAtMs), step as never)
+
+    const active = await store.activePlan(CHAT)
+    expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.version.candidate.grid.Sun["morning-tea"].dish).toBe("poha")
+    expect(active?.plan.weeklyInventory.items).toContainEqual({ name: "banana", status: "unavailable" })
+    const followUpText = deepseekBodies[3]?.messages.map((message) => message.content ?? "").join("\n") ?? ""
+    expect(followUpText).toContain("Change morning tea to poha")
   })
 
   it.each([
@@ -552,6 +806,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
           weekStart: active.plan.weekStart,
           weekEnd: active.plan.weekEnd,
           timezone: TZ,
+          schedule: SEED_SCHEDULE,
+          establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
           candidate: active.version.candidate,
           evaluation: active.version.evaluation,
           weeklyInventory: active.plan.weeklyInventory,
@@ -1234,6 +1490,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "prior-workflow",
       generationId: "prior-workflow",
       candidate: {
@@ -1311,6 +1569,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: priorWeek.weekStart,
       weekEnd: priorWeek.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "prior-week-workflow",
       generationId: "prior-week-workflow",
       candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
@@ -1383,6 +1643,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "same-week-workflow",
       generationId: "same-week-workflow",
       candidate: { grid: priorGrid, easyBuys: [], policyOutcomes: {} } as never,
@@ -1599,6 +1861,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "wf-meal-1",
       generationId: "create",
       candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
@@ -1611,6 +1875,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       planId: "approved-plan",
       chatId: CHAT,
       baseVersion: 1,
+      profileConfigurationVersion: (await store.loadOrCreateProfile(CHAT)).configurationVersion,
       candidate: { grid: {}, easyBuys: [], policyOutcomes: {} },
       evaluation: {} as never,
       allowNewFoodsSnapshot: true,
@@ -1702,6 +1967,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "wf-meal-1",
       generationId: "create",
       candidate,
@@ -1900,6 +2167,138 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     expect(registrations.filter((registration) => registration.kind === "meal-feedback").length).toBe(2)
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 1, generation: 1 }))
     expect(registrations).toContainEqual(expect.objectContaining({ kind: "meal-feedback", version: 2, generation: 2 }))
+  })
+
+  it("promotes scoped feedback while repairing an untargeted cell invalidated by a new hard exclusion", async () => {
+    vi.useFakeTimers()
+    const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
+    vi.setSystemTime(invokedAtMs)
+    const { db, d1 } = createClockedD1TestDb(() => new Date().toISOString())
+    const { namespace } = fakeRouter()
+    const store = createMealPlanningStore(d1)
+    const initialProfile = await store.loadOrCreateProfile(CHAT)
+    initialProfile.profile = {
+      ...SEED_PROFILE,
+      mealDefinitions: (SEED_PROFILE.mealDefinitions ?? []).map((definition) => ({
+        ...definition,
+        suitableSlots: Object.keys(SLOT_COOK),
+        packedFood: { suitable: true, dry: true },
+        typicalCookMinutes: 0,
+        priorNightPrep: "none",
+        principalIngredients: [],
+        requiredIngredients: definition.id === SEED_MEAL_IDS.paratha ? ["peanut"] : [],
+        optionalIngredients: [],
+      })),
+    }
+    const safeMondayId = "test-safe-monday-breakfast"
+    const safeRepairId = "test-safe-exclusion-repair"
+    initialProfile.profile.mealDefinitions = [
+      ...(initialProfile.profile.mealDefinitions ?? []),
+      ...[
+        { id: safeMondayId, name: "Unique Monday toast" },
+        { id: safeRepairId, name: "Unique replacement porridge" },
+      ].map((definition) => ({
+        ...definition,
+        principalIngredients: [],
+        vegetarian: true as const,
+        suitableSlots: ["breakfast"],
+        packedFood: { suitable: false, dry: false },
+        typicalCookMinutes: 0,
+        priorNightPrep: "none" as const,
+        requiredIngredients: [],
+        optionalIngredients: [],
+        status: "established" as const,
+      })),
+    ]
+    initialProfile.profile.pantryBaseline = [...initialProfile.profile.pantryBaseline, "peanut"]
+    db.prepare("UPDATE meal_profile SET profile_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(initialProfile.profile),
+      CHAT,
+    )
+    const base = seedCandidate()
+    const initialMeals = initialProfile.profile.mealDefinitions ?? []
+    const usedMeals = new Set([safeMondayId, safeRepairId])
+    base.grid = {}
+    for (const day of DAYS) {
+      base.grid[day] = {}
+      const slots =
+        day === "Sat"
+          ? Object.keys(SLOT_COOK).filter((slot) => !["snack2", "school-lunch"].includes(slot))
+          : Object.keys(SLOT_COOK)
+      for (const slot of slots) {
+        const definition =
+          day === "Wed" && slot === "breakfast"
+            ? initialMeals.find((meal) => meal.id === SEED_MEAL_IDS.paratha)
+            : initialMeals.find(
+                (meal) =>
+                  !usedMeals.has(meal.id) &&
+                  meal.status === "established" &&
+                  meal.suitableSlots.includes(slot) &&
+                  (!meal.halfDaySnack || (day === "Sat" && slot === "snack1")),
+              )
+        if (!definition) throw new Error(`missing unique initial meal for ${day} ${slot}`)
+        base.grid[day][slot] = { mealDefinitionId: definition.id }
+        usedMeals.add(definition.id)
+      }
+    }
+    const feedbackText = "Mon breakfast: prefer Unique Monday toast"
+    const patch = {
+      grid: {
+        Mon: { breakfast: { mealDefinitionId: safeMondayId } },
+        Wed: { breakfast: { mealDefinitionId: safeRepairId } },
+      },
+    }
+    const network = stubNetwork([
+      deepseekResponse([{ name: "evaluate_meal_plan", input: base }]),
+      deepseekResponse([{ name: "propose_plan", input: proposeInput(base) }]),
+      deepseekResponse([{ name: "evaluate_meal_plan", input: patch }]),
+      deepseekResponse([
+        {
+          name: "propose_plan",
+          input: proposeInput(patch, [{ id: "tg-411", text: feedbackText }]),
+        },
+      ]),
+    ])
+    const env = makeEnv(namespace, d1)
+    await runAgentCenteredMealPlanningWorkflow(env, mealEvent(invokedAtMs), createFakeStep([], invokedAtMs) as never)
+    const activeBefore = await store.activePlan(CHAT)
+    if (!activeBefore) throw new Error("missing generated plan")
+    const previousGrid = structuredClone(activeBefore.version.candidate.grid)
+    initialProfile.profile.dietaryExclusions = ["peanut"]
+    db.prepare("UPDATE meal_profile SET profile_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(initialProfile.profile),
+      CHAT,
+    )
+    const event = {
+      ...mealEvent(invokedAtMs),
+      instanceId: "edit-exclusion-repair",
+      payload: {
+        ...mealEvent(invokedAtMs).payload,
+        edit: {
+          planInstanceId: mealEvent(invokedAtMs).instanceId,
+          userId: "42",
+          feedback: {
+            interactionKind: "meal-feedback-reply",
+            source: "telegram-reply",
+            text: feedbackText,
+            messageId: 411,
+          },
+        },
+      },
+    } as WorkflowEvent<MealPlanningWorkflowParams>
+    await runMealPlanningEditWorkflow(env, event, createMemoizingStep([], invokedAtMs) as never)
+    const activeAfter = await store.activePlan(CHAT)
+    expect(activeAfter?.plan.currentVersion).toBe(2)
+    expect(activeAfter?.version.candidate.grid.Mon.breakfast.dish).toBe("Unique Monday toast")
+    expect(activeAfter?.version.candidate.grid.Wed.breakfast.dish).toBe("Unique replacement porridge")
+    expect(activeAfter?.version.candidate.grid.Wed.breakfast.items).not.toContain("peanut")
+    for (const day of Object.keys(previousGrid)) {
+      for (const slot of Object.keys(previousGrid[day] ?? {})) {
+        if ((day === "Mon" || day === "Wed") && slot === "breakfast") continue
+        expect(activeAfter?.version.candidate.grid[day]?.[slot]).toEqual(previousGrid[day]?.[slot])
+      }
+    }
+    expect(network.deepseekBodies).toHaveLength(4)
   })
 
   it("consumes one claimed Mini App batch and ignores its duplicate delivery", async () => {
@@ -2495,8 +2894,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       createFakeStep([], Date.parse(week.weekEnd)) as never,
     )
     // The saved plan predates a newly configured recurring Thursday half-day.
-    db.prepare("UPDATE meal_profile SET schedule_json = ?").run(
-      JSON.stringify({ ...SEED_SCHEDULE, halfDays: ["Thu", "Sat"] }),
+    const savedHalfDaySchedule = { ...SEED_SCHEDULE, halfDays: ["Thu", "Sat"] }
+    db.prepare("UPDATE meal_profile SET schedule_json = ?").run(JSON.stringify(savedHalfDaySchedule))
+    db.prepare("UPDATE meal_plan SET schedule_json = ? WHERE chat_id = ?").run(
+      JSON.stringify(savedHalfDaySchedule),
+      CHAT,
     )
     const before = await createMealPlanningStore(d1).activePlan(CHAT)
     const dish = before?.version.candidate.grid.Thu["school-lunch"].dish
@@ -2524,6 +2926,11 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     )
     const active = await createMealPlanningStore(d1).activePlan(CHAT)
     expect(active?.plan.currentVersion).toBe(2)
+    expect(active?.plan.weeklyExceptions.items).toContainEqual({
+      kind: "full_day",
+      appliesTo: { day: "Thu" },
+      instruction: "Thursday is a full day this week",
+    })
     expect(active?.version.candidate.grid.Thu["school-lunch"].dish).toBe("vegetable cutlet")
     expect(deepseekBodies).toHaveLength(5)
     expect(deepseekBodies[3].messages.map((message) => message.content ?? "").join("\n")).toContain(`Replace ${dish}`)
@@ -2773,7 +3180,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     vi.useFakeTimers()
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb(() => new Date().toISOString())
     const { namespace } = fakeRouter()
     const step = createFakeStep([], Date.parse(resolvePlanningWeek(invokedAtMs, TZ).weekEnd))
     const responses = Array.from({ length: 8 }, () => deepseekResponse([{ name: "unknown_tool", input: {} }]))
@@ -2860,6 +3267,8 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
       weekStart: week.weekStart,
       weekEnd: week.weekEnd,
       timezone: TZ,
+      schedule: SEED_SCHEDULE,
+      establishedMealDefinitions: SEED_PROFILE.mealDefinitions ?? [],
       instanceId: "prior-workflow",
       generationId: "prior-generation",
       candidate: { grid: {}, easyBuys: [], policyOutcomes: {} } as never,
@@ -2949,6 +3358,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
             planId: active.plan.planId,
             chatId: CHAT,
             baseVersion: 1,
+            profileConfigurationVersion: (await store.loadOrCreateProfile(CHAT)).configurationVersion,
             candidate: active.version.candidate,
             evaluation: active.version.evaluation,
             video: active.version.video,
@@ -2992,7 +3402,7 @@ describe("runAgentCenteredMealPlanningWorkflow", () => {
     const invokedAtMs = Date.parse("2026-09-09T03:30:00.000Z")
     vi.setSystemTime(invokedAtMs)
     stubUuidSequence()
-    const { d1 } = createD1TestDb()
+    const { d1 } = createClockedD1TestDb(() => new Date().toISOString())
     const { namespace } = fakeRouter()
     const week = resolvePlanningWeek(invokedAtMs, TZ)
     const events = Array.from({ length: 10 }, (_, index) => ({

@@ -64,6 +64,8 @@ const PLAN: MealPlanRecord = {
   weekStart: "2026-09-07T00:00:00.000Z",
   weekEnd: "2026-09-12T23:59:59.000Z",
   timezone: "Asia/Kolkata",
+  schedule: SCHEDULE,
+  establishedMealDefinitions: [],
   instanceId: "meal-wf-1",
   status: "active",
   currentVersion: 1,

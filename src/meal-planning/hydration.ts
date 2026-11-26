@@ -1,4 +1,5 @@
-import { effectiveMealSlot, mealDefinitionFitsSlot } from "./half-day"
+import { computeCoverageSet } from "./coverage"
+import { effectiveMealSlot, HALF_DAY_SNACK_MAX_COOK_MINUTES, mealDefinitionFitsSlot } from "./half-day"
 import { normalizeIngredient } from "./ingredient-normalization"
 import type {
   MealCell,
@@ -41,6 +42,8 @@ function selectionAliases(selection: MealSelection): Record<string, string> {
 function validateProposal(proposal: NewMealProposal): string | undefined {
   if (!proposal.name.trim()) return "name is required"
   if (!proposal.vegetarian) return "new meals must be vegetarian"
+  if (proposal.halfDaySnack && proposal.cookMinutes > HALF_DAY_SNACK_MAX_COOK_MINUTES)
+    return `half-day snacks must take no more than ${HALF_DAY_SNACK_MAX_COOK_MINUTES} cook minutes`
   if (!proposal.principalIngredients.length) return "principalIngredients is required"
   if (!proposal.suitableSlots.length) return "suitableSlots is required"
   if (!proposal.ingredients.length) return "ingredients is required"
@@ -109,11 +112,25 @@ export function hydrateMealPlan(
       .filter((item) => item.status === "unavailable")
       .map((item) => normalizeIngredient(item.name)),
   )
+  const coverage = computeCoverageSet(context)
+  const allowedCells = new Set(coverage.required.map(({ day, slotId }) => `${day}\u0000${slotId}`))
+  const closedDays = new Set(coverage.closedDays)
+  const droppedCells = new Set(coverage.droppedSlots.map(({ day, slotId }) => `${day}\u0000${slotId}`))
 
   for (const [day, selections] of Object.entries(selectionCandidate.grid)) {
     const cells: Record<string, MealCell> = {}
     grid[day] = cells
     for (const [slotId, selection] of Object.entries(selections)) {
+      const position = `${day}\u0000${slotId}`
+      if (!allowedCells.has(position) && !closedDays.has(day) && !droppedCells.has(position)) {
+        failures.push({
+          code: "unconfigured_cell",
+          day,
+          slot: slotId,
+          detail: "cell is outside the configured schedule",
+        })
+        continue
+      }
       let definition: MealDefinition | undefined
       if (isKnown(selection)) {
         definition = definitionById.get(selection.mealDefinitionId)

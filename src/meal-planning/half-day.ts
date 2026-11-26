@@ -1,11 +1,12 @@
+import { HALF_DAY_SNACK_MAX_COOK_MINUTES, legacyHalfDayBehavior } from "./schedule"
+
+export { HALF_DAY_SNACK_MAX_COOK_MINUTES } from "./schedule"
+
 import type { MealDefinition, MealPlanContext, MealSlot } from "./types"
 
 export const HALF_DAY_SNACK_SLOT_ID = "snack1"
-export const HALF_DAY_SNACK_MAX_COOK_MINUTES = 20
 
-const HALF_DAY_DROPPED_SLOT_IDS = ["snack2", "school-lunch"]
-
-/** Whether a configured day has the standard half-day schedule. */
+/** Whether a configured day is a recurring or one-off half day. */
 export function isHalfDay(context: Pick<MealPlanContext, "schedule" | "weeklyExceptions">, day: string): boolean {
   if (
     context.weeklyExceptions.items.some(
@@ -21,10 +22,11 @@ export function isHalfDay(context: Pick<MealPlanContext, "schedule" | "weeklyExc
   )
 }
 
-/** The slots omitted by every half-day. `mealSlots` is legacy detail, not an override of the standard schedule. */
-export function halfDayDroppedSlotIds(slots: Pick<MealSlot, "id">[]): string[] {
-  const configured = new Set(slots.map((slot) => slot.id))
-  return HALF_DAY_DROPPED_SLOT_IDS.filter((slotId) => configured.has(slotId))
+/** The configured slots omitted on a half-day. */
+export function halfDayDroppedSlotIds(slots: MealSlot[]): string[] {
+  return slots
+    .filter((slot) => (slot.halfDayBehavior ?? legacyHalfDayBehavior(slot.id)).action === "omit")
+    .map((slot) => slot.id)
 }
 
 /** Resolves the rules that apply to one slot on one day. */
@@ -35,8 +37,12 @@ export function effectiveMealSlot(
 ): MealSlot | undefined {
   const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
   if (!slot) return undefined
-  if (isHalfDay(context, day) && slotId === HALF_DAY_SNACK_SLOT_ID)
-    return { ...slot, maxCookMinutes: HALF_DAY_SNACK_MAX_COOK_MINUTES }
+  if (!isHalfDay(context, day)) return slot
+  const behavior = slot.halfDayBehavior ?? legacyHalfDayBehavior(slotId)
+  if (behavior.action === "omit") return undefined
+  if (behavior.action === "quick") {
+    return { ...slot, maxCookMinutes: behavior.maxCookMinutes }
+  }
   return slot
 }
 
@@ -47,8 +53,9 @@ export function mealDefinitionFitsSlot(
   day: string,
   slotId: string,
 ): boolean {
-  return (
-    definition.suitableSlots.includes(slotId) ||
-    (definition.halfDaySnack === true && isHalfDay(context, day) && slotId === HALF_DAY_SNACK_SLOT_ID)
-  )
+  const slot = context.schedule.slots.find((candidate) => candidate.id === slotId)
+  const behavior = slot?.halfDayBehavior ?? legacyHalfDayBehavior(slotId)
+  const halfDayQuickSnack = definition.halfDaySnack === true && isHalfDay(context, day) && behavior.action === "quick"
+  if (halfDayQuickSnack) return definition.typicalCookMinutes <= HALF_DAY_SNACK_MAX_COOK_MINUTES
+  return definition.suitableSlots.includes(slotId)
 }

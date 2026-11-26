@@ -7,6 +7,12 @@ import { HTTP_STATUS } from "../runtime/http"
 import { logRuntime } from "../runtime/logging"
 import { MINI_APP_SHELL } from "./mini-app/client"
 import { authenticateMiniApp, MiniAppAuthError, readMiniAppSession } from "./mini-app-auth"
+import {
+  mealProfileConfigurationRequestSchema,
+  mergeEditableMealProfile,
+  validateMealProfileConfiguration,
+} from "./profile-configuration"
+import { legacyHalfDayBehavior } from "./schedule"
 import { createMealPlanningStore, type FeedbackBatchRecord, type MealPlanningStore } from "./store"
 
 const BYTES_PER_KIBIBYTE = 1_024
@@ -17,6 +23,7 @@ const MAX_ERROR_NAME_LENGTH = 120
 const MAX_ERROR_MESSAGE_LENGTH = 240
 const HTTP_ACCEPTED = 202
 const HTTP_CREATED = 201
+const HTTP_UNPROCESSABLE_ENTITY = 422
 
 export { MINI_APP_SHELL } from "./mini-app/client"
 
@@ -78,17 +85,46 @@ async function getContext(request: Request, env: Env): Promise<MiniAppContext> {
   return { store: createMealPlanningStore(env.MEAL_PLANNING_DB), session }
 }
 
+/** Requires a plan-scoped review session for plan and feedback APIs. */
+function requireReviewSession(
+  session: MiniAppContext["session"],
+): asserts session is MiniAppContext["session"] & { scope: "review"; planId: string } {
+  if (session.scope !== "review" || session.planId === null) throw new MiniAppAuthError("unauthorized")
+}
+
+/** Returns the canonical profile config plus its established-meal eligibility map. */
+function profileConfigurationDto(profile: Awaited<ReturnType<MealPlanningStore["loadOrCreateProfile"]>>) {
+  const definitions = profile.profile.mealDefinitions ?? []
+  return {
+    configurationVersion: profile.configurationVersion,
+    profile: profile.profile,
+    customPolicies: profile.customPolicies,
+    schedule: profile.schedule,
+    location: profile.location,
+    eligibleEstablishedMeals: Object.fromEntries(
+      profile.schedule.slots.map((slot) => [
+        slot.id,
+        definitions
+          .filter((definition) => definition.status === "established" && definition.suitableSlots.includes(slot.id))
+          .map(({ id }) => id),
+      ]),
+    ),
+  }
+}
+
 /** Plan DTO. */
-function planDto(
-  active: MealPlanRead,
-  schedule: Awaited<ReturnType<MealPlanningStore["loadOrCreateProfile"]>>["schedule"],
-  readOnly: boolean,
-) {
-  // Older saved plans may predate a recurring schedule rule. Show the half-day
-  // marker only when that plan actually has the reduced set of meals.
+function planDto(active: MealPlanRead, readOnly: boolean) {
+  const schedule = active.plan.schedule
+  const omittedSlots = schedule.slots.filter(
+    (slot) => (slot.halfDayBehavior ?? legacyHalfDayBehavior(slot.id)).action === "omit",
+  )
+  // Show the recurring half-day marker only when this version has the pinned
+  // plan's omitted-slot shape for that day.
   const applicableHalfDays = schedule.halfDays?.filter((day) => {
+    if (active.plan.weeklyExceptions.items.some((item) => item.kind === "full_day" && item.appliesTo?.day === day))
+      return false
     const cells = active.version.candidate.grid[day]
-    return !cells?.snack2 && !cells?.["school-lunch"]
+    return omittedSlots.length === 0 || omittedSlots.every((slot) => !cells?.[slot.id])
   })
   return {
     planId: active.plan.planId,
@@ -122,9 +158,8 @@ function historyEntry(active: MealPlanRead, readOnly: boolean) {
 async function readPlanDto(
   request: Request,
   store: MealPlanningStore,
-  session: Awaited<ReturnType<typeof readMiniAppSession>>,
+  session: MiniAppContext["session"] & { scope: "review"; planId: string },
 ) {
-  const profile = await store.loadOrCreateProfile(session.chatId)
   const history = await store.listPlanHistory(session.chatId)
   const generation = await store.activePlanGeneration(session.chatId)
   const requestedPlanId = new URL(request.url).searchParams.get("planId")?.trim() || session.planId
@@ -142,20 +177,20 @@ async function readPlanDto(
   if (selected.plan.status !== "active") {
     return {
       status: "historical" as const,
-      plan: planDto(selected, profile.schedule, true),
+      plan: planDto(selected, true),
       history: historyDto,
     }
   }
   if (generation) {
     return {
       status: "generating" as const,
-      currentPlan: planDto(selected, profile.schedule, true),
+      currentPlan: planDto(selected, true),
       history: historyDto,
     }
   }
   return {
     status: "current" as const,
-    plan: planDto(active ?? selected, profile.schedule, false),
+    plan: planDto(active ?? selected, false),
     history: historyDto,
   }
 }
@@ -289,8 +324,12 @@ miniAppRoutes.post("/mini-app/api/session", async (c) => {
     }
     const raw = await readBoundedText(c.req.raw)
     if (raw === null) return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
-    const result = await authenticateMiniApp(raw, c.env)
-    return jsonResponse({ token: result.token, expiresAt: result.session.expiresAt }, HTTP_CREATED)
+    const launchReference = new URL(c.req.url).searchParams.get("launch")
+    const result = await authenticateMiniApp(raw, c.env, new Date(), launchReference)
+    return jsonResponse(
+      { token: result.token, expiresAt: result.session.expiresAt, scope: result.session.scope },
+      HTTP_CREATED,
+    )
   } catch (error) {
     return errorResponse(error)
   }
@@ -299,6 +338,7 @@ miniAppRoutes.post("/mini-app/api/session", async (c) => {
 miniAppRoutes.get("/mini-app/api/plan", async (c) => {
   try {
     const { store, session } = await getContext(c.req.raw, c.env)
+    requireReviewSession(session)
     return jsonResponse(await readPlanDto(c.req.raw, store, session))
   } catch (error) {
     return errorResponse(error)
@@ -311,6 +351,7 @@ miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
       return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
     }
     const { store, session } = await getContext(c.req.raw, c.env)
+    requireReviewSession(session)
     let body: Record<string, unknown>
     try {
       const raw = await readBoundedText(c.req.raw)
@@ -366,6 +407,76 @@ miniAppRoutes.post("/mini-app/api/feedback", async (c) => {
     if (!dispatched)
       return jsonResponse({ status: "failed", batchId: accepted.batch.batchId }, HTTP_STATUS.SERVICE_UNAVAILABLE)
     return jsonResponse({ status: "accepted", batchId: accepted.batch.batchId }, HTTP_ACCEPTED)
+  } catch (error) {
+    return errorResponse(error)
+  }
+})
+
+miniAppRoutes.get("/mini-app/api/profile", async (c) => {
+  try {
+    const { store, session } = await getContext(c.req.raw, c.env)
+    const profile = await store.loadOrCreateProfile(session.chatId)
+    return jsonResponse(profileConfigurationDto(profile))
+  } catch (error) {
+    return errorResponse(error)
+  }
+})
+
+miniAppRoutes.put("/mini-app/api/profile", async (c) => {
+  try {
+    if (c.req.header("content-type")?.split(";", 1)[0] !== "application/json")
+      return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
+    const { store, session } = await getContext(c.req.raw, c.env)
+    const raw = await readBoundedText(c.req.raw)
+    if (raw === null) return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
+    let body: unknown
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      return jsonResponse({ error: "invalid_request" }, HTTP_STATUS.BAD_REQUEST)
+    }
+    const parsed = mealProfileConfigurationRequestSchema.safeParse(body)
+    if (!parsed.success) return jsonResponse({ error: "invalid_configuration" }, HTTP_STATUS.BAD_REQUEST)
+    const current = await store.loadOrCreateProfile(session.chatId)
+    if (parsed.data.expectedVersion !== current.configurationVersion)
+      return jsonResponse({ error: "version_conflict" }, HTTP_STATUS.CONFLICT)
+    const profile = mergeEditableMealProfile(current.profile, parsed.data.profile)
+    if (parsed.data.eligibleEstablishedMeals) {
+      const requested = parsed.data.eligibleEstablishedMeals
+      const scheduledSlotIds = parsed.data.schedule.slots.map(({ id }) => id).sort()
+      if (JSON.stringify(Object.keys(requested).sort()) !== JSON.stringify(scheduledSlotIds))
+        return jsonResponse({ error: "invalid_configuration" }, HTTP_STATUS.BAD_REQUEST)
+      const definitions = profile.mealDefinitions ?? []
+      const establishedIds = new Set(definitions.filter(({ status }) => status === "established").map(({ id }) => id))
+      if (Object.values(requested).some((ids) => ids.some((id) => !establishedIds.has(id))))
+        return jsonResponse({ error: "invalid_configuration" }, HTTP_STATUS.BAD_REQUEST)
+      const configuredSlotIds = new Set(current.schedule.slots.map(({ id }) => id))
+      for (const slot of parsed.data.schedule.slots) configuredSlotIds.add(slot.id)
+      profile.mealDefinitions = definitions.map((definition) => {
+        if (definition.status !== "established") return definition
+        const suitableSlots = definition.suitableSlots.filter((slotId) => !configuredSlotIds.has(slotId))
+        for (const [slotId, ids] of Object.entries(requested))
+          if (ids.includes(definition.id)) suitableSlots.push(slotId)
+        return { ...definition, suitableSlots: [...new Set(suitableSlots)] }
+      })
+    }
+    const validationError = validateMealProfileConfiguration(profile, parsed.data.schedule)
+    if (validationError)
+      return jsonResponse({ error: "invalid_configuration", detail: validationError }, HTTP_UNPROCESSABLE_ENTITY)
+    const result = await store.saveMealProfileConfiguration({
+      chatId: session.chatId,
+      expectedVersion: parsed.data.expectedVersion,
+      profile,
+      customPolicies: parsed.data.customPolicies,
+      schedule: parsed.data.schedule,
+      location: parsed.data.location,
+    })
+    if (!result.ok) {
+      if (result.reason === "unavailable")
+        return jsonResponse({ error: "unavailable" }, HTTP_STATUS.SERVICE_UNAVAILABLE)
+      return jsonResponse({ error: "version_conflict" }, HTTP_STATUS.CONFLICT)
+    }
+    return jsonResponse(profileConfigurationDto(result.profile))
   } catch (error) {
     return errorResponse(error)
   }

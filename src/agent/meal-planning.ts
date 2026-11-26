@@ -39,7 +39,7 @@ const gridSchema = z
         'one entry per slot id present that day, keyed by slot id (e.g. "breakfast", "snack1", "school-lunch")',
       ),
   )
-  .describe('one entry per school day, keyed by day ("Mon".."Sat")')
+  .describe("one entry per configured school day, keyed by its exact schedule day identifier")
 
 const policyOutcomeSchema = z
   .object({
@@ -317,9 +317,14 @@ function policyOutcomesFromWire(
   const result: MealPlanSelectionCandidate["policyOutcomes"] = {}
   for (const { policyId, outcome, rationale } of outcomes) {
     if (!allowed.has(policyId)) throw new ToolHandlerError("unknown policy in meal-plan tool input", "invalid-state")
-    if (result[policyId])
+    if (Object.hasOwn(result, policyId))
       throw new ToolHandlerError("duplicate policy outcome in meal-plan tool input", "invalid-state")
-    result[policyId] = { outcome, rationale }
+    Object.defineProperty(result, policyId, {
+      value: { outcome, rationale },
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    })
   }
   return result
 }
@@ -480,7 +485,7 @@ export function createEvaluateMealPlanTool(
     name: MEAL_PLANNING_TOOL.EVALUATE,
     description: isRevision
       ? "Validate one revision patch against the active plan and household context. Omitted cells remain unchanged. Returns typed failures and measurements; it never persists a plan."
-      : "Validate exactly one complete Mon–Sat meal-plan candidate against the household context. Returns typed failures and measurements; it never persists a plan.",
+      : "Validate exactly one complete meal-plan candidate for the configured schedule days and slots against household context. Returns typed failures and measurements; it never persists a plan.",
     input: isRevision ? mealPlanSelectionWirePatchSchema : mealPlanSelectionWireCandidateSchema,
     output: mealPlanEvaluationSchema,
     privacy: "private",
