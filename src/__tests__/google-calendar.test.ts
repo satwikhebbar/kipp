@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { TokenVaultDO } from "../core/token-vault"
 import { createTokenVault } from "../core/token-vault-client"
 import type { Env } from "../core/types"
+import { GOOGLE_ACCOUNT_EMAIL_SCOPE, GOOGLE_CONTACTS_SCOPE } from "../integrations/google-access"
 import { createGoogleCalendarClient, type GoogleCalendarError } from "../integrations/google-calendar"
 import { HTTP_STATUS } from "../runtime/http"
 
@@ -14,6 +15,27 @@ const EVENT = {
   timeZone: "Asia/Kolkata",
   reminderMinutes: 10,
   requestId: "request-1",
+}
+const ATTENDEES = [{ name: "Jamie", email: "jamie@example.com" }]
+const ORGANIZER_EMAIL = "organizer@example.com"
+const ORGANIZER_PROFILE = { email: ORGANIZER_EMAIL, verified_email: true }
+const SAVED_MEETING = {
+  id: EVENT.id,
+  summary: EVENT.summary,
+  start: { dateTime: EVENT.start },
+  end: { dateTime: EVENT.end },
+  etag: '"meeting-v1"',
+  organizer: { email: ORGANIZER_EMAIL, self: true },
+  attendees: [
+    { email: ORGANIZER_EMAIL, organizer: true, responseStatus: "accepted" },
+    { email: ATTENDEES[0].email, responseStatus: "accepted" },
+  ],
+  extendedProperties: { private: { "kipp.requestId": EVENT.requestId, "kipp.meeting": "meet" } },
+  htmlLink: "https://calendar.google.com/calendar/event?eid=event",
+  conferenceData: {
+    createRequest: { requestId: EVENT.id, status: { statusCode: "success" } },
+    entryPoints: [{ entryPointType: "video", uri: "https://meet.google.com/aaa-bbbb-ccc" }],
+  },
 }
 
 const ORIGINAL_ONE = "2026-07-28T13:30:00.000Z"
@@ -51,7 +73,7 @@ function storage(): DurableObjectStorage {
   } as unknown as DurableObjectStorage
 }
 
-async function environment(): Promise<Env> {
+async function environment(scope?: string): Promise<Env> {
   const vault = new TokenVaultDO(
     { storage: storage() } as never,
     {
@@ -75,6 +97,7 @@ async function environment(): Promise<Env> {
     expires_in: ONE_HOUR_IN_SECONDS,
     created_at: new Date().toISOString(),
     refresh_token: "refresh-token",
+    scope,
   })
   return env
 }
@@ -89,6 +112,189 @@ afterEach(() => {
 })
 
 describe("Google Calendar client", () => {
+  it("requests a timed invitation with native guest proposals and verifies a duplicate insert by event ID", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, ORGANIZER_PROFILE))
+      .mockResolvedValueOnce(response(409))
+      .mockResolvedValueOnce(response(200, SAVED_MEETING))
+    vi.stubGlobal("fetch", fetch)
+    await createGoogleCalendarClient(await environment(GOOGLE_ACCOUNT_EMAIL_SCOPE)).createMeeting(EVENT, ATTENDEES)
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(fetch.mock.calls[0][0]).toBe("https://www.googleapis.com/oauth2/v2/userinfo")
+    const [url, request] = fetch.mock.calls[1] as [string, RequestInit]
+    expect(new URL(url).searchParams.get("sendUpdates")).toBe("all")
+    expect(new URL(url).searchParams.get("conferenceDataVersion")).toBe("1")
+    expect(JSON.parse(request.body as string)).toMatchObject({
+      id: EVENT.id,
+      start: { dateTime: EVENT.start },
+      end: { dateTime: EVENT.end },
+      transparency: "opaque",
+      attendees: [{ email: ORGANIZER_EMAIL, responseStatus: "accepted" }, { email: ATTENDEES[0].email }],
+      guestsCanModify: false,
+      conferenceData: { createRequest: { requestId: EVENT.id, conferenceSolutionKey: { type: "hangoutsMeet" } } },
+    })
+    expect(JSON.parse(request.body as string).attendees[1]).toEqual({ email: ATTENDEES[0].email })
+    expect(fetch.mock.calls[2][0]).toContain(`/events/${EVENT.id}`)
+  })
+
+  it("refuses to insert or verify an invitation addressed to its own organizer", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(response(200, ORGANIZER_PROFILE))
+    vi.stubGlobal("fetch", fetch)
+    const calendar = createGoogleCalendarClient(await environment(GOOGLE_ACCOUNT_EMAIL_SCOPE))
+    const self = [{ email: ORGANIZER_EMAIL.toUpperCase() }]
+    await expect(calendar.createMeeting(EVENT, self)).rejects.toThrow("Meeting guest is the organizer")
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    fetch.mockResolvedValueOnce(response(200, { ...SAVED_MEETING, attendees: [SAVED_MEETING.attendees[0]] }))
+    await expect(calendar.readMeeting(EVENT, self)).rejects.toThrow("Meeting recipients or permissions changed")
+  })
+
+  it("requires reconnection before sending an invitation if the grant lacks account email access", async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal("fetch", fetch)
+    await expect(
+      createGoogleCalendarClient(await environment(GOOGLE_CONTACTS_SCOPE)).createMeeting(EVENT, ATTENDEES),
+    ).rejects.toMatchObject({ kind: "authorization" })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it("keeps previously created invitations readable without an organizer attendee", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response(200, {
+          ...SAVED_MEETING,
+          attendees: [{ email: ATTENDEES[0].email }],
+        }),
+      ),
+    )
+    await expect(createGoogleCalendarClient(await environment()).readMeeting(EVENT, ATTENDEES)).resolves.toMatchObject({
+      conference: "ready",
+    })
+  })
+
+  it("rejects recovery if the existing event has a different guest", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(response(200, ORGANIZER_PROFILE))
+        .mockResolvedValueOnce(response(409))
+        .mockResolvedValueOnce(
+          response(200, {
+            ...SAVED_MEETING,
+            attendees: [...SAVED_MEETING.attendees, { email: "wrong@example.com", organizer: true }],
+          }),
+        ),
+    )
+    await expect(
+      createGoogleCalendarClient(await environment(GOOGLE_ACCOUNT_EMAIL_SCOPE)).createMeeting(EVENT, ATTENDEES),
+    ).rejects.toMatchObject({
+      kind: "permanent",
+    })
+  })
+
+  it.each(["pending", "failure"])("reads a saved invitation whose Meet request is %s", async (statusCode) => {
+    const fetch = vi.fn().mockResolvedValue(
+      response(200, {
+        ...SAVED_MEETING,
+        conferenceData: { createRequest: { status: { statusCode } } },
+      }),
+    )
+    vi.stubGlobal("fetch", fetch)
+    await expect(createGoogleCalendarClient(await environment()).readMeeting(EVENT, ATTENDEES)).resolves.toMatchObject({
+      conference: statusCode === "pending" ? "pending" : "failed",
+      calendarUrl: SAVED_MEETING.htmlLink,
+    })
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining(`/events/${EVENT.id}`),
+      expect.objectContaining({ method: "GET" }),
+    )
+  })
+
+  it.each([
+    { status: "cancelled" },
+    { recurrence: ["RRULE:FREQ=WEEKLY"] },
+    { recurringEventId: "series-id" },
+  ])("rejects verification and edits for a saved invitation with %j", async (fields) => {
+    const fetch = vi.fn().mockImplementation(async () => response(200, { ...SAVED_MEETING, ...fields }))
+    vi.stubGlobal("fetch", fetch)
+    const calendar = createGoogleCalendarClient(await environment())
+    await expect(calendar.readMeeting(EVENT, ATTENDEES)).rejects.toMatchObject({ kind: "permanent" })
+    await expect(calendar.updateMeeting(EVENT, ATTENDEES, '"meeting-v1"')).rejects.toMatchObject({ kind: "permanent" })
+    expect(fetch.mock.calls.map(([, request]) => request.method)).toEqual(["GET", "GET"])
+  })
+
+  it.each([
+    ["https://www.google.com/calendar/event?eid=abc", true],
+    ["https://www.google.com/url?q=abc", false],
+    ["https://user@www.google.com/calendar/event?eid=abc", false],
+  ])("checks the legacy Calendar link %s", async (htmlLink, allowed) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(200, { ...SAVED_MEETING, htmlLink })))
+    const result = await createGoogleCalendarClient(await environment()).readMeeting(EVENT, ATTENDEES)
+    expect(result.calendarUrl).toBe(allowed ? htmlLink : undefined)
+  })
+
+  it("patches only approved time and title, then reconciles a precondition failure without another notification", async () => {
+    const updated = { ...EVENT, summary: "Rescheduled Jamie", start: ADJUSTED_ONE, end: ADJUSTED_ONE_END }
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(200, SAVED_MEETING))
+      .mockResolvedValueOnce(response(412))
+      .mockResolvedValueOnce(
+        response(200, {
+          ...SAVED_MEETING,
+          summary: updated.summary,
+          start: { dateTime: updated.start },
+          end: { dateTime: updated.end },
+        }),
+      )
+    vi.stubGlobal("fetch", fetch)
+    await createGoogleCalendarClient(await environment()).updateMeeting(updated, ATTENDEES, '"meeting-v1"')
+    expect(fetch).toHaveBeenCalledTimes(3)
+    const [url, request] = fetch.mock.calls[1] as [string, RequestInit]
+    expect(url).toContain("sendUpdates=all&conferenceDataVersion=1")
+    expect(request).toMatchObject({ method: "PATCH", headers: { "If-Match": '"meeting-v1"' } })
+    expect(JSON.parse(request.body as string)).toEqual({
+      summary: updated.summary,
+      start: { dateTime: updated.start, timeZone: updated.timeZone },
+      end: { dateTime: updated.end, timeZone: updated.timeZone },
+    })
+  })
+
+  it("uses saved contact permission, warms the cache, and deduplicates usable email addresses", async () => {
+    vi.useFakeTimers()
+    const env = await environment()
+    const fetch = vi.fn()
+    vi.stubGlobal("fetch", fetch)
+    await expect(createGoogleCalendarClient(env).searchContacts("Jamie")).resolves.toEqual({ kind: "needs_consent" })
+    expect(fetch).not.toHaveBeenCalled()
+    await createTokenVault(env, "google-calendar").writeTokens({
+      access_token: "contacts",
+      expires_in: ONE_HOUR_IN_SECONDS,
+      created_at: new Date().toISOString(),
+      scope: GOOGLE_CONTACTS_SCOPE,
+    })
+    fetch.mockResolvedValueOnce(response(200)).mockResolvedValueOnce(
+      response(200, {
+        results: [
+          {
+            person: {
+              names: [{ displayName: "Jamie" }],
+              emailAddresses: [{ value: "invalid" }, { value: "jamie@example.com" }, { value: "Jamie@example.com" }],
+            },
+          },
+        ],
+      }),
+    )
+    const result = createGoogleCalendarClient(env).searchContacts("Jamie")
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(5_000)
+    await expect(result).resolves.toEqual({ kind: "found", attendees: ATTENDEES })
+    expect(fetch.mock.calls.map(([url]) => new URL(url).searchParams.get("query"))).toEqual(["", "Jamie"])
+    expect(new URL(fetch.mock.calls[1][0]).searchParams.get("readMask")).toBe("names,emailAddresses")
+  })
   it("creates a private, opaque managed event with the requested reminder", async () => {
     const fetch = vi.fn().mockResolvedValue(response(200))
     vi.stubGlobal("fetch", fetch)
@@ -530,6 +736,17 @@ describe("Google Calendar client", () => {
     ).resolves.toEqual(busy)
   })
 
+  it.each([
+    { calendars: { primary: { errors: [{ reason: "internalError" }] } } },
+    { calendars: { primary: { errors: [{ reason: "internalError" }], busy: [] } } },
+    { calendars: {} },
+  ])("rejects an incomplete FreeBusy result (%j)", async (body) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(200, body)))
+    await expect(
+      createGoogleCalendarClient(await environment()).getBusyIntervals(ORIGINAL_ONE, ORIGINAL_ONE_END),
+    ).rejects.toThrow("Calendar availability could not be read")
+  })
+
   it("bisects timeRangeTooLong FreeBusy requests and combines every successful result", async () => {
     const fetch = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string) as { timeMin: string; timeMax: string }
@@ -625,6 +842,18 @@ describe("Google Calendar client", () => {
     expect(fetch.mock.calls[1][0]).toContain("pageToken=next")
   })
 
+  it("retains the calendar time zone when listing events for availability", async () => {
+    const fetch = vi.fn().mockResolvedValue(response(200, { timeZone: "America/Los_Angeles", items: [] }))
+    vi.stubGlobal("fetch", fetch)
+    const client = createGoogleCalendarClient(await environment())
+    await expect(client.listEvents(EVENT.start, EVENT.end, { forAvailability: true })).resolves.toEqual({
+      events: [],
+      truncated: false,
+      timeZone: "America/Los_Angeles",
+    })
+    expect(new URL(fetch.mock.calls[0][0]).searchParams.has("timeZone")).toBe(false)
+  })
+
   it("rejects event-list ranges longer than 31 days before making a provider request", async () => {
     const fetch = vi.fn()
     vi.stubGlobal("fetch", fetch)
@@ -651,6 +880,7 @@ describe("Google Calendar client", () => {
 
   it("finds only events overlapping the requested interval and classifies each as movable", async () => {
     const events = {
+      timeZone: "UTC",
       items: [
         {
           id: "single",
@@ -705,7 +935,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T13:30:00.000Z",
       "2026-07-28T14:00:00.000Z",
-      "UTC",
     )
 
     expect(result.map(({ id, movable, etag }) => ({ id, movable, etag }))).toEqual([
@@ -721,6 +950,7 @@ describe("Google Calendar client", () => {
 
   it("treats an all-day date as a local-calendar day and blocks both sides of local midnight", async () => {
     const allDay = {
+      timeZone: "Asia/Kolkata",
       items: [
         { id: "holiday", summary: "Holiday", etag: "etag", start: { date: "2026-07-28" }, end: { date: "2026-07-29" } },
       ],
@@ -735,7 +965,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-27T18:45:00.000Z",
       "2026-07-27T19:00:00.000Z",
-      "Asia/Kolkata",
     )
     expect(afterLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
 
@@ -745,7 +974,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T18:15:00.000Z",
       "2026-07-28T18:30:00.000Z",
-      "Asia/Kolkata",
     )
     expect(beforeLocalMidnight.map(({ id }) => id)).toEqual(["holiday"])
 
@@ -755,9 +983,29 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T18:45:00.000Z",
       "2026-07-28T19:00:00.000Z",
-      "Asia/Kolkata",
     )
     expect(afterLocalMidnightNextDay.map(({ id }) => id)).toEqual([])
+  })
+
+  it("finds an all-day conflict that extends past midnight in the scheduling time zone", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response(200, {
+          timeZone: "America/Los_Angeles",
+          items: [{ id: "holiday", start: { date: "2026-07-28" }, end: { date: "2026-07-29" } }],
+        }),
+      ),
+    )
+    const client = createGoogleCalendarClient(await environment())
+    // July 29 at 10:00 in Kolkata is still July 28 in Los Angeles.
+    const conflicts = await client.findConflictingEvents(
+      "2026-07-28T18:30:00.000Z",
+      "2026-07-29T18:30:00.000Z",
+      "2026-07-29T04:30:00.000Z",
+      "2026-07-29T05:00:00.000Z",
+    )
+    expect(conflicts).toMatchObject([{ id: "holiday", allDay: true, movable: false }])
   })
 
   it("pages the conflicting-events read and propagates the page token", async () => {
@@ -792,7 +1040,6 @@ describe("Google Calendar client", () => {
       "2026-07-29T00:00:00.000Z",
       "2026-07-28T13:30:00.000Z",
       "2026-07-28T14:00:00.000Z",
-      "UTC",
     )
 
     expect(result.map(({ id }) => id)).toEqual(["event-1", "event-2"])
@@ -810,7 +1057,6 @@ describe("Google Calendar client", () => {
         "2026-08-02T00:00:00.000Z",
         "2026-07-28T13:30:00.000Z",
         "2026-07-28T14:00:00.000Z",
-        "UTC",
       ),
     ).rejects.toMatchObject({ kind: "permanent" })
     expect(fetch).not.toHaveBeenCalled()

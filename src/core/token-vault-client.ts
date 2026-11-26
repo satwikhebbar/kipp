@@ -89,8 +89,8 @@ export function createTokenVault(env: Env, provider: TokenProvider = TOKEN_PROVI
     consumeState: (state: string, cookieId: string) =>
       cmd<{ valid: boolean }>("consumeState", { provider, state, cookieId }),
     readTokens: () => cmd<{ tokens: LinkedInTokens | GoogleCalendarTokens | null }>("readTokens", { provider }),
-    writeTokens: (tokens: LinkedInTokens | GoogleCalendarTokens) =>
-      cmd<{ ok: boolean }>("writeTokens", { provider, tokens }),
+    writeTokens: (tokens: LinkedInTokens | GoogleCalendarTokens, expectedAccessToken?: string) =>
+      cmd<{ ok: boolean; superseded?: boolean }>("writeTokens", { provider, tokens, expectedAccessToken }),
     rewrap: () => cmd<{ success: boolean }>("rewrap", { provider }),
   }
 }

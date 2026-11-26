@@ -12,10 +12,10 @@ const contractIt = enabled ? it : it.skip
 const NOW = Date.parse("2026-08-01T00:00:00.000Z")
 const CONTRACT_TTL_MS = 900_000
 
-async function runContract(requestText: string) {
+async function runContract(requestText: string, clarification?: string) {
   const provider = createToolProvider(apiKey ?? "", "deepseek", "deepseek-flash", 0)
   try {
-    return await runCalendarAgentSession(provider, [{ role: "user", text: requestText }], {
+    const options = {
       calendar: { listEvents: async () => ({ events: [], truncated: false }) },
       evaluation: {
         getBusyIntervals: async () => [],
@@ -25,6 +25,13 @@ async function runContract(requestText: string) {
         timeZone: "Asia/Kolkata",
         now: NOW,
       },
+    }
+    const first = await runCalendarAgentSession(provider, [{ role: "user", text: requestText }], options)
+    if (!clarification) return first
+    expect(first.terminal).toMatchObject({ kind: "needs_user_input", interaction: { kind: "reply" } })
+    return await runCalendarAgentSession(provider, [...first.messages, { role: "user", text: clarification }], {
+      ...options,
+      evaluation: { ...options.evaluation, version: 2 },
     })
   } catch (error) {
     if (error instanceof ToolProviderHttpError && error.providerMessage)
@@ -34,6 +41,14 @@ async function runContract(requestText: string) {
 }
 
 describe("DeepSeek agent-centered Calendar native-tool contract", () => {
+  contractIt("preserves the virtual meeting and named guest across a scheduling clarification", async () => {
+    const result = await runContract(
+      "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a virtual 1:1 with Jamie for 30 minutes. Ask me for the date.",
+      "August 3, 2026 at 10:30 am.",
+    )
+    expect(result.terminal).toMatchObject({ kind: "ready_to_create" })
+    expect(result.meeting).toEqual({ guestNames: ["Jamie"] })
+  })
   contractIt("returns a focused clarification through needs_user_input", async () => {
     const result = await runContract(
       "Current instant: 2026-08-01T00:00:00Z. Calendar time zone: Asia/Kolkata. Schedule a call with Jamie; the date and time are unknown.",

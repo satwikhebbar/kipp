@@ -1360,7 +1360,6 @@ describe("agent-centered CalendarWorkflow", () => {
       expect.any(String),
       expect.any(String),
       expect.any(String),
-      "Asia/Kolkata",
     )
     expect(mockMoveExistingEvent).not.toHaveBeenCalled()
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()
@@ -1410,7 +1409,6 @@ describe("agent-centered CalendarWorkflow", () => {
       "2026-08-04T18:30:00.000Z",
       "2026-08-04T13:30:00.000Z",
       "2026-08-04T14:00:00.000Z",
-      "Asia/Kolkata",
     )
     expect(mockMoveExistingEvent).not.toHaveBeenCalled()
     expect(mockCreateManagedEvent).not.toHaveBeenCalled()

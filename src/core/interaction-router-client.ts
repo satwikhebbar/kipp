@@ -20,6 +20,7 @@ export interface InteractionRegistration {
 
 export interface RoutedInteraction extends WorkflowInteraction {
   workflowId: string
+  pendingInviteDelivery?: true
   edit?: { sessionId?: string }
 }
 
@@ -53,6 +54,8 @@ export function createInteractionRouter(namespace: DurableObjectNamespace, chatI
     register: (registration: InteractionRegistration) => post<{ ok: boolean }>("/register", registration),
     resolve: (input: InteractionResolveInput) =>
       post<{ interaction: RoutedInteraction | null; reason?: "expired" | "stale" }>("/resolve", input),
+    acknowledgeInvite: (interactionId: string, telegramUpdateId: number) =>
+      post<{ ok: boolean }>("/calendar-invite/ack", { interactionId, telegramUpdateId }),
     saveEditContext: (context: EditContextRegistration) => post<{ ok: boolean }>("/edit-context", context),
     editContext: <T>(sessionId: string, userId: string) =>
       post<{ context: T | null; resourceId?: string; expiresAt?: number }>("/edit-context/get", { sessionId, userId }),

@@ -1,5 +1,15 @@
 import { resolveLocalDateTime } from "../core/time"
 
+const MAX_EMAIL_LENGTH = 254
+const MAX_EVENT_LIST_RANGE_DAYS = 31
+const MILLIS_PER_DAY = 86_400_000
+export const MAX_EVENT_LIST_RANGE_MS = MAX_EVENT_LIST_RANGE_DAYS * MILLIS_PER_DAY
+
+/** Accepts a single usable guest address from Contacts or Telegram. */
+export function isCalendarAttendeeEmail(value: string): boolean {
+  return value.length <= MAX_EMAIL_LENGTH && /^[^\s@<>,;]+@[^\s@<>,;.]+(?:\.[^\s@<>,;.]+)+$/.test(value)
+}
+
 export const CALENDAR_ISSUE_CODES = [
   "ambiguous_request",
   "missing_information",

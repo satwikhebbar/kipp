@@ -36,6 +36,7 @@ export interface OneOffProposal {
   location?: string
   reminderMinutes?: number
   needsClarification: boolean
+  meeting?: { guestNames: string[] }
 }
 
 export interface ScheduledOneOff {

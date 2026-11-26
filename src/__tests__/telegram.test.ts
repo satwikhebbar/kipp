@@ -287,6 +287,20 @@ describe("handleTelegramWebhook", () => {
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("answerCallbackQuery"), expect.any(Object))
   })
 
+  it("still acknowledges a non-invite callback if the router is unavailable", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: { message_id: 100 } }) })
+    const { env, get } = callbackEnv()
+    env.INTERACTION_ROUTER.get.mockReturnValue({ fetch: vi.fn().mockRejectedValue(new Error("Router unavailable")) })
+
+    const res = await handleTelegramWebhook(callbackRequest(callbackBody("confirm:wf-abc")), env as never)
+    expect(res.status).toBe(200)
+    expect(get).not.toHaveBeenCalled()
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining("sendMessage"),
+      expect.objectContaining({ body: expect.stringContaining("Something went wrong") }),
+    )
+  })
+
   it("routes revise callback through the interaction router without GitHub writes", async () => {
     mockFetch.mockImplementation(async (url: string, _opts?: RequestInit) => {
       if (url?.includes?.("api.telegram.org"))

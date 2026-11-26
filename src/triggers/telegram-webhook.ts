@@ -2,7 +2,7 @@ import { CALENDAR_HELP } from "../calendar/messages"
 import { startEditWorkflow } from "../core/edit-workflow"
 import { createIdeaIngest } from "../core/idea-ingest"
 import { createInteractionRouter } from "../core/interaction-router-client"
-import { type Env, INTERACTION_KIND } from "../core/types"
+import { CALENDAR_INVITE_CALLBACK_PREFIX, calendarInviteEventType, type Env, INTERACTION_KIND } from "../core/types"
 import { createNotionClient, NotionError } from "../integrations/notion"
 import { createTelegramClient, TELEGRAM_NOTIFY_TIMEOUT_MS } from "../integrations/telegram"
 import { createIdeaManager, parseIdeaId } from "../linkedin/ideas/manager"
@@ -20,6 +20,8 @@ const UNKNOWN_COMMAND_MESSAGE =
   "Unknown command. Use /add <text>, /generate [idea id], /note <thoughts>, /calendar <request>, /mealplan <request>, /mealsettings, or tap inline buttons."
 
 class NotesTransportError extends Error {}
+class CalendarInviteDeliveryError extends Error {}
+class CalendarInviteRoutingError extends Error {}
 
 interface TelegramMessageEntity {
   type: string
@@ -162,7 +164,12 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
 
     try {
       const tg = createTelegramClient(env.TELEGRAM_BOT_TOKEN)
-      await tg.answerCallbackQuery(cq.id)
+      if (cq.data?.startsWith(CALENDAR_INVITE_CALLBACK_PREFIX)) {
+        // Telegram may reject an old callback query when redelivering the update.
+        await tg.answerCallbackQuery(cq.id, undefined, AbortSignal.timeout(TELEGRAM_NOTIFY_TIMEOUT_MS)).catch(() => {})
+      } else {
+        await tg.answerCallbackQuery(cq.id)
+      }
 
       if (cq.data && cq.message)
         await dispatchRoutedInteraction(
@@ -181,6 +188,9 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     } catch (err) {
       if (err instanceof NotesTransportError || cq.data?.startsWith("n:"))
         return new Response("Retry Notes delivery", { status: 503 })
+      if (err instanceof CalendarInviteRoutingError) await handleBoundaryError(env, cq.message?.chat.id, err)
+      if (err instanceof CalendarInviteDeliveryError || err instanceof CalendarInviteRoutingError)
+        return new Response("Retry Calendar delivery", { status: 503 })
       return handleBoundaryError(env, cq.message?.chat.id, err)
     }
   }
@@ -493,7 +503,11 @@ async function dispatchRoutedInteraction(
     } catch {
       throw new NotesTransportError("Notes delivery unavailable")
     }
-  const { interaction, reason } = await router.resolve(input)
+  const { interaction, reason } = await router.resolve(input).catch((error: unknown) => {
+    if (input.callbackToken?.startsWith(CALENDAR_INVITE_CALLBACK_PREFIX))
+      throw new CalendarInviteRoutingError("Calendar decision routing unavailable", { cause: error })
+    throw error
+  })
   const inputKind = input.callbackToken ? "callback" : input.replyToMessageId !== undefined ? "reply" : "plain-text"
   if (!interaction) {
     if (input.callbackToken || (reason && input.replyToMessageId !== undefined)) {
@@ -512,6 +526,7 @@ async function dispatchRoutedInteraction(
       ? env.MEAL_PLANNING_WORKFLOW
       : env.PIPELINE_WORKFLOW
   if (!workflow) {
+    if (interaction.pendingInviteDelivery) throw new CalendarInviteDeliveryError("Calendar workflow unavailable")
     logRuntime(env, {
       workflow: interaction.workflowId,
       interactionId: interaction.interactionId,
@@ -584,7 +599,6 @@ async function dispatchRoutedInteraction(
     }
     return true
   }
-  const instance = await workflow.get(interaction.workflowId)
   const interactionText =
     interaction.text ??
     (interaction.kind === INTERACTION_KIND.APPROVE
@@ -592,19 +606,29 @@ async function dispatchRoutedInteraction(
       : interaction.kind === INTERACTION_KIND.REVISE
         ? "__revise__"
         : `__${interaction.kind}__`)
-  await instance.sendEvent({
-    type: "telegram-reply",
-    payload: {
-      userId,
-      text: interactionText,
-      interactionId: interaction.interactionId,
-      interactionVersion: interaction.version,
-      interactionKind: interaction.kind,
-      telegramUpdateId: interaction.telegramUpdateId,
-      ...(setupOrigin !== undefined ? { setupOrigin } : {}),
-      ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
-    },
-  })
+  try {
+    const instance = await workflow.get(interaction.workflowId)
+    await instance.sendEvent({
+      type: interaction.pendingInviteDelivery ? calendarInviteEventType(interaction.version) : "telegram-reply",
+      payload: {
+        userId,
+        text: interactionText,
+        interactionId: interaction.interactionId,
+        interactionVersion: interaction.version,
+        interactionKind: interaction.kind,
+        telegramUpdateId: interaction.telegramUpdateId,
+        ...(interaction.kind.startsWith("calendar-invite-") ? { inputKind } : {}),
+        ...(setupOrigin !== undefined ? { setupOrigin } : {}),
+        ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
+      },
+    })
+    if (interaction.pendingInviteDelivery)
+      await router.acknowledgeInvite(interaction.interactionId, interaction.telegramUpdateId)
+  } catch (error) {
+    if (interaction.pendingInviteDelivery)
+      throw new CalendarInviteDeliveryError("Calendar decision delivery unavailable")
+    throw error
+  }
   logRuntime(env, {
     workflow: interaction.workflowId,
     interactionId: interaction.interactionId,

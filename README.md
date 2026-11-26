@@ -214,8 +214,8 @@ the resulting token, and stores it in the LinkedIn token namespace.
 
 ### 5. Connect Google Calendar
 
-Create a Google OAuth **Web application**, enable the Google Calendar API, and
-configure this callback URL:
+Create a Google OAuth **Web application**, enable the Google Calendar API and
+People API, and configure this callback URL:
 
 ```text
 https://<worker-host>/auth/google-calendar/callback
@@ -229,9 +229,8 @@ origin, then visit:
 https://<worker-host>/setup/google-calendar
 ```
 
-The requested Calendar consent supports owned-event operations and availability
-reads on the connected account's primary calendar; it does not request broad
-account access.
+The setup requests owned-event operations, availability reads, and read-only access
+to saved Google Contacts for guest lookup.
 
 ### 6. Create the Notion Ideas data source
 
@@ -432,8 +431,14 @@ https://<worker-host>/auth/google-calendar/callback
 
 For local development, register `http://localhost:8787/auth/google-calendar/callback`
 and set `GOOGLE_CALENDAR_REDIRECT_ORIGIN=http://localhost:8787`. The Google
-client requires only `calendar.events.owned` and `calendar.events.freebusy`; it
-operates on the connected account's primary calendar. Store
+client uses `calendar.events.owned` and `calendar.events.freebusy` for the
+connected account's primary calendar. For saved-contact lookup, enable the People
+API and add the `contacts.readonly` scope to the OAuth consent setup in the same
+Google Cloud project. Add `https://www.googleapis.com/auth/userinfo.email` so
+Kipp can add the organizer as an accepted attendee. The protected
+`/setup/google-calendar` URL requests all four scopes. Reconnect existing
+accounts through that link before creating new Meet invitations.
+You can enter a guest's email manually when lookup is unavailable. Store
 `GOOGLE_CALENDAR_CLIENT_ID` and `GOOGLE_CALENDAR_CLIENT_SECRET` as secrets, not
 in either Wrangler configuration file.
 
@@ -453,9 +458,17 @@ test event (and one supported short test series when recurrence changes), inspec
 the primary calendar fields and confirmation/Edit behavior, and delete every
 test event during cleanup. Do not point the production bot at this smoke route.
 
+For invite changes, use the dev bot and a separate controlled Google Calendar
+guest account. Check that the organizer's calendar stays empty until Telegram
+approval. After approving the exact address and time, check the event's Meet
+link and received invitation. From the guest calendar, submit **Propose a new
+time** and verify that the organizer can review the proposal while the event
+stays at the original time. Check one approved time edit through Telegram and
+verify that the link and guest are preserved and the update reaches the guest.
+
 | Symptom | Safe operator action |
 | --- | --- |
-| “Google Calendar is not connected” or a revoked token | Open the protected `/setup/google-calendar` route, complete consent, then use the existing **Retry** control within 15 minutes. OAuth completion never creates an event automatically. |
+| “Google Calendar is not connected” or a revoked token | Open the protected `/setup/google-calendar` link from Telegram to authorize Calendar and Contacts together, then tap **Retry** within 15 minutes. OAuth completion never creates an event automatically. |
 | Google rejects the OAuth redirect | Match the Google Console redirect URI exactly to the deployed host and `GOOGLE_CALENDAR_REDIRECT_ORIGIN`, then begin a new setup attempt. |
 | `/calendar` reports that Calendar is not configured | Verify the workflow binding and both Google OAuth secrets in the target Cloudflare environment; do not add credentials to tracked configuration. |
 | A request fails temporarily | Retry only through a new user request or the explicit authorization-recovery control. Kipp's client makes at most two transient retries and reuses the same opaque event identity; do not run manual duplicate creates. |

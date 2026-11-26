@@ -4,7 +4,12 @@ import { logRuntime } from "../runtime/logging"
 import { presentConversationTurn } from "./conversation-presenter"
 import { type ConnectionAction, type ConversationTurnCoordinator, createConversationTurn } from "./conversation-turn"
 import { createInteractionRouter, type InteractionRegistration } from "./interaction-router-client"
-import type { Env, WorkflowInteractionKind } from "./types"
+import {
+  CALENDAR_INVITE_CALLBACK_PREFIX,
+  calendarInviteEventType,
+  type Env,
+  type WorkflowInteractionKind,
+} from "./types"
 import { isWorkflowInterruption, waitForWorkflowEvent } from "./workflow-events"
 
 export type ActionPromptOutcome =
@@ -39,6 +44,8 @@ export interface ActionPromptOptions {
   interactionGroup?: string
   /** Enforced only for multi-action inline keyboards. */
   maxLabelChars?: number
+  /** Requires the router's opaque interaction ID for actions with external side effects. */
+  requireCallbackId?: boolean
   /** Runtime event name used when an interaction operation fails. */
   logEventName?: string
   /** The owning user turn; reserve outside checkpoints before any notification. */
@@ -79,7 +86,9 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
         label,
         kind,
         interactionId: crypto.randomUUID(),
-        callbackToken: keyboard ? crypto.randomUUID() : undefined,
+        callbackToken: keyboard
+          ? `${options.requireCallbackId ? CALENDAR_INVITE_CALLBACK_PREFIX : ""}${crypto.randomUUID()}`
+          : undefined,
       }))
       const controls = keyboard
         ? {
@@ -120,19 +129,25 @@ export async function promptForActions(options: ActionPromptOptions): Promise<Ac
       )
     })
     stage = "wait"
-    const reply = await waitForWorkflowEvent<{ text?: string; interactionId?: string }>(step, `${name}-wait`, {
-      type: "telegram-reply",
-      timeout: "15 minutes" as never,
-    })
+    const reply = await waitForWorkflowEvent<{ text?: string; interactionId?: string; inputKind?: string }>(
+      step,
+      `${name}-wait`,
+      {
+        type: options.requireCallbackId ? calendarInviteEventType(version) : "telegram-reply",
+        timeout: "15 minutes" as never,
+      },
+    )
     if (reply.type === "timeout") return { type: "timeout" }
     const text = reply.payload?.text
     if (!text) return { type: "timeout" }
     const matchedIndex = prepared.findIndex(
       (action) =>
         action.callbackToken &&
-        (action.interactionId === reply.payload?.interactionId ||
-          (text === `__${action.kind}__` &&
-            prepared.filter((candidate) => candidate.kind === action.kind).length === 1)),
+        (options.requireCallbackId
+          ? reply.payload?.inputKind === "callback" && action.interactionId === reply.payload.interactionId
+          : action.interactionId === reply.payload?.interactionId ||
+            (text === `__${action.kind}__` &&
+              prepared.filter((candidate) => candidate.kind === action.kind).length === 1)),
     )
     return matchedIndex >= 0
       ? { type: "action", kind: prepared[matchedIndex]?.kind as WorkflowInteractionKind, actionIndex: matchedIndex }

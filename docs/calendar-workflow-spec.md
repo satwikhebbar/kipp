@@ -7,14 +7,14 @@
 
 ## Goal and scope
 
-Kipp creates personal, timed blocks and reminders in the connected Google
-account's **primary calendar** from Telegram. A clear request should be booked
-in one pass with useful defaults; Telegram immediately confirms what was done
-and permits correction.
+Kipp creates timed blocks, reminders, and one-off virtual 1:1s in the connected
+Google account's **primary calendar** from Telegram. A clear personal block can
+be booked in one pass. An invitation requires approval of the exact guest email
+and time in Telegram before booking.
 
-v1 is personal-only. It creates no guests, invitations, meeting URLs, or
-conference links. It does not offer general calendar search, listing, editing,
-cancellation, or rescheduling after the immediate creation interaction.
+Calendar management is limited to the immediate creation interaction and its
+short-lived Edit action. Guests can propose a new meeting time in Google
+Calendar, where the organizer can review and accept it.
 
 ## Interface and identity
 
@@ -36,18 +36,24 @@ screen, and protected redirect URI) is a deployment prerequisite. Kipp then
 provides an Access-protected `/setup/google-calendar` flow based on the
 existing OAuth-state and encrypted token-vault patterns.
 
-- Request only the two narrow scopes required for the workflow:
+- The standard setup requests four scopes:
   `https://www.googleapis.com/auth/calendar.events.owned` to create and
   manage events on owned calendars, and
   `https://www.googleapis.com/auth/calendar.events.freebusy` for
-  availability-only reads. Do not request a broader Calendar scope.
+  availability-only reads, and `https://www.googleapis.com/auth/contacts.readonly`
+  to find guest emails in saved Google Contacts. The
+  `https://www.googleapis.com/auth/userinfo.email` scope lets Kipp add the connected
+  account as an accepted attendee on new Meet events. Setup verifies that the
+  grant can refresh with all four scopes before replacing stored credentials.
 - Store access and refresh tokens encrypted and independently namespaced from
   LinkedIn credentials.
 - Refresh ordinary access-token expiry silently before a Calendar request, or
   once after an authentication failure.
 - If credentials are missing, revoked, or cannot be refreshed, do not modify
-  Calendar. Send Telegram **Reconnect** and **Retry** actions.
-- **Reconnect** starts a fresh short-lived OAuth state. The Calendar workflow
+  Calendar. Send the protected `/setup/google-calendar` link and a
+  **Retry** button in Telegram. The link requests Calendar, Contacts, and Google
+  Account email access in one consent flow.
+- Opening the link starts a fresh short-lived OAuth state. The Calendar workflow
   itself retains its parsed request for 15 minutes. After reconnection, the
   user taps **Retry**; it makes one attempt and then completes or fails. This
   is not an automatic retry loop and does not require a separate persisted
@@ -102,7 +108,7 @@ creates nothing and returns a safe response.
 - Do not place phone numbers, addresses, or private notes in a title.
 - Put an explicitly supplied venue in Calendar's `location` field. Put a
   supplied phone number, agenda, or preparation note in `description` only
-  when it helps follow-through. Do not look up contact or location data.
+  when it helps follow-through. Contact lookup applies only to invitations.
 - Create events as **opaque/busy** and **private**. Do not assign an event
   colour in v1.
 - Set one per-event popup reminder override: 10 minutes for ordinary blocks;
@@ -285,16 +291,32 @@ persisted merely because it appeared in an event.
 ## Explicit v1 exclusions
 
 - Multiple calendars and cross-calendar availability.
-- Guests, invitations, conferencing, and meeting URLs.
+- Multiple guests, recurring invitations, guest availability, and changing a sent invitation's guest.
 - All-day events.
 - Natural-language calendar routing from uncommanded Telegram messages.
 - Calendar search/listing and management after the immediate confirmation flow.
 - Recurrence renewal prompts and ongoing recurrence management.
 - Custom/annual/ordinal or multi-rule recurrence expressions.
-- External contact/location lookup.
+- Other contacts, Workspace directory lookup, and location lookup.
 - General long-term memory implementation.
-- ETag protection for simultaneous manual Calendar edits during immediate Edit
-  (post-MVP hardening).
+- ETag protection for personal blocks during immediate Edit (post-MVP hardening).
+
+## Virtual 1:1 invitations
+
+An explicit virtual meeting or invite request enters the one-off scheduling
+flow. Resolve one guest from saved Google Contacts or ask the owner to enter an
+email address. Display the full email and exact time in Telegram even when the
+lookup has a single match. A routed button approval is required before the
+Calendar write. Availability is rechecked after approval. A new time, title,
+or guest requires fresh approval.
+
+Create an opaque, timed event with a Google Meet request and Google Calendar
+guest notifications. Calendar lets the guest propose another time while the
+organizer controls event edits. Check the saved event for the link and report
+when Meet creation is pending or failed. The Edit action supports the title
+and time and preserves the attendee, response state, and Meet link. For invite
+conflicts, offer another slot. The personal block shortcut that moves the
+conflicting event is unavailable for invited requests.
 
 ## Delivery status
 
