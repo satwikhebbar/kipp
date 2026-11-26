@@ -190,7 +190,6 @@ describe("meal-planning evaluator", () => {
     "cashews",
     "almonds",
     "walnuts",
-    "peanuts",
     "pistachios",
     "mixed seeds",
   ])("rejects a prohibited long-shelf easy buy (%s)", (buy) => {
@@ -200,7 +199,7 @@ describe("meal-planning evaluator", () => {
   })
 
   it("accepts ordinary staples and everyday produce as easy buys", () => {
-    const candidate = baseCandidate({ easyBuys: ["carrot", "spinach", "moong dal"] })
+    const candidate = baseCandidate({ easyBuys: ["carrot", "spinach", "moong dal", "peanuts", "roasted peanut"] })
     expect(evaluateMealPlan(candidate, baseContext()).pass).toBe(true)
   })
 

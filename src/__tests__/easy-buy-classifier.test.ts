@@ -28,9 +28,30 @@ describe("deterministic easy-buy token matching", () => {
     expect(findProhibitedEasyBuys(["seedless grapes"])).toEqual([])
     expect(findProhibitedEasyBuys(["mixed seeds", "paneer"])).toEqual(["mixed seeds", "paneer"])
   })
+
+  it("allows plain and roasted peanuts while still rejecting other nuts", () => {
+    expect(findProhibitedEasyBuys(["peanut", "peanuts", "roasted peanuts", "almonds", "cashews"])).toEqual([
+      "almonds",
+      "cashews",
+    ])
+  })
 })
 
 describe("easy-buy classifier", () => {
+  it("accepts plain and roasted peanuts without an uncertain semantic decision", async () => {
+    const decisions = decisionsReturning([])
+    const spy = vi.spyOn(decisions, "decide")
+    const result = await createEasyBuyClassifier(decisions).classify(["peanuts", "plain peanuts", "roasted peanut"])
+    expect(result.nonOrdinaryEasyBuys).toEqual([])
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it("still classifies peanut products", async () => {
+    const decisions = decisionsReturning([0.1])
+    const result = await createEasyBuyClassifier(decisions).classify(["peanut butter"])
+    expect(result.nonOrdinaryEasyBuys.map((entry) => entry.item)).toEqual(["peanut butter"])
+  })
+
   it("defaults the ordinary threshold to 0.8", () => {
     expect(DEFAULT_ORDINARY_EASY_BUY_THRESHOLD).toBe(0.8)
   })
