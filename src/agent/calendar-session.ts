@@ -42,6 +42,8 @@ For an explicit time, always set timeIsExplicit to true and startTime to the cor
 
 For an explicitly requested virtual meeting (virtual, online, video call, Google Meet) or guest invitation, include meeting with guestNames containing only the names the user gave. Keep that intent on later scheduling turns. If the supplied guest is an email address, it will be redacted before you see it. Keep the redaction marker out of event fields. Use an empty guestNames list when no name was given and let the workflow ask for the address. Ask for a one-off time when the user requests a recurring invitation. During edits of an already invited meeting, only title and time changes are supported.
 
+Mentioning an invitation as the subject of a personal block does not invite anyone. If the user explicitly includes a numbered [calendar email N] marker in the desired title, preserve it verbatim in the title. It represents literal text, not a guest, and belongs only in the title.
+
 Preserve every explicit recurrence ending from the conversation. If the user says "6 occurrences" or "6 times", end must be {"mode":"count","occurrences":6}; use default_horizon only when the user supplied no ending.
 
 For monthly and bimonthly recurrence, preserve the user's anchor intent. Default to anchor {"mode":"ordinal_weekday","weekday":"..."}, which keeps the first occurrence's weekday position in the month (for example, August 8, 2026 becomes the second Saturday of each month). Use day_of_month only when the user explicitly asks for a calendar date such as "the 8th of every month". Use last_weekday only when the user explicitly says "last". The anchor weekday must match firstDate.

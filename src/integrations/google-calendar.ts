@@ -122,6 +122,7 @@ interface ManagedCalendarInstance {
 
 interface GoogleCalendarEventResponse {
   id?: string
+  status?: string
   summary?: string
   description?: string
   location?: string
@@ -133,6 +134,7 @@ interface GoogleCalendarEventResponse {
   start?: { dateTime?: string; date?: string; timeZone?: string }
   end?: { dateTime?: string; date?: string; timeZone?: string }
   originalStartTime?: { dateTime?: string }
+  recurringEventId?: string
   etag?: string
   organizer?: { email?: string; self?: boolean }
   attendees?: Array<{ email?: string; organizer?: boolean }>
@@ -208,7 +210,10 @@ function matchesMeetingTimeAndTitle(saved: GoogleCalendarEventResponse, event: M
 function googleEventLink(value: string | undefined, host: string): string | undefined {
   if (!value) return undefined
   const url = URL.parse(value)
-  return url?.protocol === "https:" && url.hostname === host && !url.username && !url.password ? value : undefined
+  if (url?.protocol !== "https:" || url.username || url.password || url.port) return undefined
+  const legacyCalendarLink =
+    host === "calendar.google.com" && url.hostname === "www.google.com" && url.pathname === "/calendar/event"
+  return url.hostname === host || legacyCalendarLink ? value : undefined
 }
 
 /** Returns the epoch ms at which the token expires. */
@@ -454,6 +459,10 @@ export function createGoogleCalendarClient(env: Env): GoogleCalendarClient {
       .sort()
     if (
       saved.id !== event.id ||
+      saved.status === "cancelled" ||
+      saved.recurrence?.length ||
+      saved.recurringEventId ||
+      saved.originalStartTime ||
       saved.extendedProperties?.private?.[REQUEST_ID_PROPERTY] !== event.requestId ||
       saved.extendedProperties?.private?.[MEETING_PROPERTY] !== "meet" ||
       saved.guestsCanModify === true ||

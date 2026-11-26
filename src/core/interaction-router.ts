@@ -308,8 +308,9 @@ export class InteractionRouterDO implements DurableObject {
         : input.plainText !== undefined
           ? this.ctx.storage.sql
               .exec(
-                `SELECT * FROM interactions WHERE kind IN (${PLAIN_TEXT_INTERACTION_KINDS.map(() => "?").join(", ")}) AND (consumed_update_id IS NULL OR edit_json IS NOT NULL) ORDER BY rowid DESC LIMIT 1`,
+                `SELECT * FROM interactions WHERE kind IN (${PLAIN_TEXT_INTERACTION_KINDS.map(() => "?").join(", ")}) AND (interaction_group IS NULL OR interaction_group NOT LIKE ?) AND (consumed_update_id IS NULL OR edit_json IS NOT NULL) ORDER BY rowid DESC LIMIT 1`,
                 ...PLAIN_TEXT_INTERACTION_KINDS,
+                `${CALENDAR_INVITE_ACTION_GROUP}%`,
               )
               .toArray()
           : []

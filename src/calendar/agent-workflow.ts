@@ -67,9 +67,10 @@ const MAX_DISCLOSURE_INTERVALS = 7
 /** Bounds the disclosure body below Telegram's 4096-character limit. */
 const MAX_DISCLOSURE_EVENTS = 10
 const MAX_MULTI_ACTION_LABEL_CHARACTERS = 16
-const MEETING_LANGUAGE =
-  /\b(?:virtual|google meet|video (?:call|meeting)|online (?:call|meeting|1[ -]?(?:on|to)?[ -]?1)|(?:send|create) an? invit(?:e|ation)|invite)\b/i
+const EXPLICIT_INVITATION =
+  /^(?:please\s+)?(?:(?:book|schedule|create|set up)\s+(?:an?\s+)?)?(?:invite\s|send an? invit(?:e|ation) to\b|(?:virtual (?:meeting|call|1:1|with)|google meet|video (?:call|meeting)|online (?:call|meeting|1:1))\b|(?:meeting|call|appointment|1:1)\s+with\s+\[email supplied\])/i
 const EMAIL_IN_MESSAGE = /[^\s@<>,;:"()]+@[^\s@<>,;:"()]+/g
+const TITLE_EMAIL_MARKER = /\[calendar email \d+\]/g
 
 interface PreparedCalendarOption {
   optionId: string
@@ -107,15 +108,39 @@ export async function runAgentCenteredCalendarWorkflow(
   let guestNames: string[] = []
   let revisedGuestName: string | undefined
   let suppliedAddresses: string[] = []
-  const userText = (text: string) => {
-    const addresses = [...text.matchAll(EMAIL_IN_MESSAGE)]
-      .map(([address]) => address.replace(/[.!?]+$/, ""))
-      .filter(isCalendarAttendeeEmail)
-    meetingRequested ||=
-      MEETING_LANGUAGE.test(text) || (addresses.length > 0 && /\b(?:with|attendee|guest)\b/i.test(text))
-    if (meetingRequested && addresses.length) suppliedAddresses = [...new Set(addresses)]
-    return text.replace(EMAIL_IN_MESSAGE, "[email supplied]")
+  const emailMarkers = new Map(editContext?.emailMarkers)
+  const userText = (text: string, titleOrTimeOnly = false) => {
+    if (
+      !titleOrTimeOnly &&
+      !editContext &&
+      EXPLICIT_INVITATION.test(text.replace(EMAIL_IN_MESSAGE, "[email supplied]"))
+    )
+      meetingRequested = true
+    const captureGuest = !titleOrTimeOnly && meetingRequested && !editContext && revisedGuestName === undefined
+    const addresses: string[] = []
+    const redacted = text.replace(EMAIL_IN_MESSAGE, (match) => {
+      const address = match.replace(/[.!?]+$/, "")
+      if (!isCalendarAttendeeEmail(address)) return "[email supplied]"
+      if (captureGuest) {
+        addresses.push(address)
+        return `[email supplied]${match.slice(address.length)}`
+      }
+      let marker = emailMarkers.get(address)
+      if (!marker) {
+        marker = `[calendar email ${emailMarkers.size + 1}]`
+        emailMarkers.set(address, marker)
+      }
+      return marker + match.slice(address.length)
+    })
+    if (addresses.length) suppliedAddresses = [...new Set(addresses)]
+    return redacted
   }
+  const restoreTitle = (title: string) => {
+    const addresses = new Map([...emailMarkers].map(([address, marker]) => [marker, address]))
+    return title.replace(TITLE_EMAIL_MARKER, (marker) => addresses.get(marker) ?? marker)
+  }
+  const agentBaseline = (plan: CalendarPlan) =>
+    editBaselineMessage(withPlanTitle(plan, userText(plan.proposal.title, true)))
   const initialText = userText(event.payload.requestText)
   let messages: ToolConversationMessage[] = [
     {
@@ -124,7 +149,7 @@ export async function runAgentCenteredCalendarWorkflow(
     },
   ]
   if (editContext)
-    messages = [...editContext.messages, editBaselineMessage(editContext.baseline), { role: "user", text: initialText }]
+    messages = [...editContext.messages, agentBaseline(editContext.baseline), { role: "user", text: initialText }]
   let ledger = createCalendarPlanLedger()
   let agentVersion = 0
   let interactionVersion = 0
@@ -137,13 +162,15 @@ export async function runAgentCenteredCalendarWorkflow(
   let calendarWriteOccurred = Boolean(editContext)
 
   let responseTurn = createConversationTurn()
-  for (let turn = 0; turn < MAX_CALENDAR_INTERACTION_TURNS; turn++) {
+  scheduling: for (let turn = 0; turn < MAX_CALENDAR_INTERACTION_TURNS; turn++) {
     const currentAgentVersion = ++agentVersion
     const calendar = createGoogleCalendarClient(env)
     try {
       const turnExpiresAt = editing
         ? await step.do(`calendar-agent-edit-expiry-${turn}`, async () => Date.now() + CALENDAR_INTERACTION_TTL_MS)
-        : expiresAt
+        : turn === 0
+          ? expiresAt
+          : await step.do(`calendar-agent-turn-expiry-${turn}`, async () => Date.now() + CALENDAR_INTERACTION_TTL_MS)
       const sessionStep = (await step.do(`calendar-agent-session-${turn}`, (async () => {
         const sessionLedger = structuredClone(ledger)
         const provider = createToolProvider(
@@ -297,7 +324,7 @@ export async function runAgentCenteredCalendarWorkflow(
             interactionVersion,
             turn,
             timeZone,
-            options[0]?.plan as CalendarPlan,
+            withPlanTitle(options[0].plan, restoreTitle(options[0].plan.proposal.title)),
             replacementKind,
           )
           interactionVersion = disclosure.version
@@ -313,7 +340,7 @@ export async function runAgentCenteredCalendarWorkflow(
               editing = true
               baseline = disclosure.created
               calendarWriteOccurred = true
-              messages.push(editBaselineMessage(disclosure.created))
+              messages.push(agentBaseline(disclosure.created))
             }
             messages.push({ role: "user", text: userText(disclosure.text) })
             continue
@@ -370,10 +397,10 @@ export async function runAgentCenteredCalendarWorkflow(
             env,
             step,
             `calendar-agent-revalidate-${turn}`,
-            consumed.plan,
+            meetingRequested && consumed.plan.kind === "one_off" ? exactMeetingPlan(consumed.plan) : consumed.plan,
             baseline,
             timeZone,
-            turnExpiresAt,
+            editing ? turnExpiresAt : undefined,
           ))
         ) {
           messages.push(availabilityChangedMessage())
@@ -404,7 +431,7 @@ export async function runAgentCenteredCalendarWorkflow(
             authorized.plan,
             baseline,
             timeZone,
-            turnExpiresAt,
+            editing ? turnExpiresAt : undefined,
           ))
         ) {
           messages.push(availabilityChangedMessage())
@@ -460,36 +487,55 @@ export async function runAgentCenteredCalendarWorkflow(
           )
           return
         }
-        const result = await approveMeeting(
-          env,
-          step,
-          event,
-          selectedPlan,
-          baseline,
-          editContext?.attendees,
-          revisedGuestName !== undefined ? (revisedGuestName ? [revisedGuestName] : []) : guestNames,
-          suppliedAddresses,
-          timeZone,
-          interactionVersion,
-          turn,
-          responseTurn,
-        )
+        selectedPlan = exactMeetingPlan(selectedPlan)
+        const displayPlan = withPlanTitle(selectedPlan, restoreTitle(selectedPlan.proposal.title))
+        const requestApproval = () =>
+          approveMeeting(
+            env,
+            step,
+            event,
+            displayPlan,
+            baseline,
+            editContext?.attendees,
+            revisedGuestName === undefined ? guestNames : revisedGuestName ? [revisedGuestName] : [],
+            suppliedAddresses,
+            timeZone,
+            interactionVersion,
+            turn,
+            responseTurn,
+          )
+        let result = await requestApproval()
         interactionVersion = result.version
         responseTurn = createConversationTurn()
+        while (result.kind === "changed" && result.changeGuest) {
+          const guest = result.reply.trim()
+          suppliedAddresses = isCalendarAttendeeEmail(guest) ? [guest] : []
+          revisedGuestName = suppliedAddresses.length ? "" : guest
+          if (++turn >= MAX_CALENDAR_INTERACTION_TURNS) break scheduling
+          if (
+            !(await revalidateExactPlanInStep(
+              env,
+              step,
+              `calendar-invite-guest-revalidate-${turn}`,
+              selectedPlan,
+              baseline,
+              timeZone,
+            ))
+          ) {
+            messages.push(agentBaseline(selectedPlan), availabilityChangedMessage())
+            continue scheduling
+          }
+          result = await requestApproval()
+          interactionVersion = result.version
+          responseTurn = createConversationTurn()
+        }
         if (result.kind === "ended") return
         if (result.kind === "changed") {
-          if (result.changeGuest) {
-            const guest = result.reply.trim()
-            suppliedAddresses = isCalendarAttendeeEmail(guest) ? [guest] : []
-            revisedGuestName = suppliedAddresses.length ? "" : guest
-            messages.push({
-              role: "system",
-              text: "The owner wants to change only the guest, which the workflow handles. Evaluate the exact same title and local time again.",
-            })
-          } else {
-            if (!editing) suppliedAddresses = result.attendees.map(({ email }) => email)
-            messages.push({ role: "user", text: userText(result.reply) })
+          if (!editing) {
+            suppliedAddresses = result.attendees.map(({ email }) => email)
+            revisedGuestName = result.attendees[0]?.name ?? ""
           }
+          messages.push(agentBaseline(selectedPlan), { role: "user", text: userText(result.reply, true) })
           continue
         }
         if (
@@ -500,10 +546,13 @@ export async function runAgentCenteredCalendarWorkflow(
             selectedPlan,
             baseline,
             timeZone,
-            turnExpiresAt,
+            editing ? turnExpiresAt : undefined,
           ))
         ) {
-          if (!editing) suppliedAddresses = result.attendees.map(({ email }) => email)
+          if (!editing) {
+            suppliedAddresses = result.attendees.map(({ email }) => email)
+            revisedGuestName = result.attendees[0]?.name ?? ""
+          }
           messages.push(availabilityChangedMessage())
           continue
         }
@@ -524,6 +573,7 @@ export async function runAgentCenteredCalendarWorkflow(
             scheduled: { ...selectedPlan.scheduled, reminderMinutes: baseline.scheduled.reminderMinutes },
           }
         }
+        selectedPlan = withPlanTitle(selectedPlan, restoreTitle(selectedPlan.proposal.title))
         meeting = await writeMeeting(env, step, event, selectedPlan, result.attendees, result.etag, timeZone, turn)
         logRuntime(env, {
           workflow: event.instanceId,
@@ -532,9 +582,21 @@ export async function runAgentCenteredCalendarWorkflow(
           details: { operation: editing ? "update" : "create", kind: "meeting" },
         })
       } else {
+        selectedPlan = withPlanTitle(selectedPlan, restoreTitle(selectedPlan.proposal.title))
         await writePlan(env, step, event, selectedPlan, editing, turn)
       }
       calendarWriteOccurred = true
+      if (meeting?.kind === "unverified") {
+        await notify(
+          env,
+          step,
+          event.payload.chatId,
+          "The invitation may have been saved, but I couldn't verify it. Check Google Calendar before trying again.",
+          `invite-unverified-${turn}`,
+          responseTurn,
+        )
+        return
+      }
       await confirmPlanForEditing(
         env,
         step,
@@ -547,6 +609,7 @@ export async function runAgentCenteredCalendarWorkflow(
         editContext,
         responseTurn,
         meeting,
+        [...emailMarkers],
       )
       return
     } catch (error) {
@@ -665,11 +728,32 @@ async function revalidateExactPlanInStep(
   expected: CalendarPlan,
   baseline: CalendarPlan | null,
   timeZone: string,
-  expiresAt: number,
+  expiresAt?: number,
 ): Promise<boolean> {
-  return (await step.do(name, () =>
-    revalidateExactPlan(createGoogleCalendarClient(env), expected, baseline, timeZone, expiresAt),
-  )) as boolean
+  const result = await step.do(name, async () => {
+    try {
+      return await revalidateExactPlan(
+        createGoogleCalendarClient(env),
+        expected,
+        baseline,
+        timeZone,
+        expiresAt ?? Date.now() + CALENDAR_INTERACTION_TTL_MS,
+      )
+    } catch (error) {
+      if (!(error instanceof GoogleCalendarError) || error.kind !== "authorization") throw error
+      // Replay the original reconnect branch even after the credentials have been restored.
+      return { status: error.status ?? null, retryCount: error.retryCount }
+    }
+  })
+  if (typeof result !== "boolean")
+    throw new GoogleCalendarError(
+      "Calendar availability could not be read",
+      "authorization",
+      result.status ?? undefined,
+      undefined,
+      result.retryCount,
+    )
+  return result
 }
 
 /** Re-runs deterministic evaluation and accepts only the exact previously authorized plan. */
@@ -794,6 +878,7 @@ export interface CalendarEditContext {
   baseline: CalendarPlan
   messages: ToolConversationMessage[]
   attendees?: CalendarAttendee[]
+  emailMarkers?: Array<[string, string]>
   /** Original identity is retained so edits update the exact managed event. */
   original: Omit<CalendarWorkflowParams, "edit">
   resourceId: string
@@ -814,7 +899,8 @@ async function confirmPlanForEditing(
   messages: ToolConversationMessage[],
   previous?: CalendarEditContext,
   responseTurn = createConversationTurn(),
-  meeting?: MeetingConfirmation,
+  meeting?: Extract<MeetingConfirmation, { kind: "verified" }>,
+  emailMarkers?: Array<[string, string]>,
 ): Promise<void> {
   const router = createInteractionRouter(env.INTERACTION_ROUTER, event.payload.chatId)
   const prepared = await step.do(`calendar-agent-edit-context-${turn}`, async () => ({
@@ -836,6 +922,7 @@ async function confirmPlanForEditing(
         original,
         resourceId,
         ...(meeting ? { attendees: meeting.attendees } : {}),
+        ...(emailMarkers?.length ? { emailMarkers } : {}),
       } satisfies CalendarEditContext,
     }),
   )
@@ -1524,6 +1611,21 @@ async function handleConflictDisclosure(
 /** Compares complete serializable plans so revalidation cannot substitute any field. */
 function sameCalendarPlan(left: CalendarPlan, right: CalendarPlan): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/** A picked alternative must stay anchored to its scheduled slot during invitation rechecks. */
+function exactMeetingPlan(
+  plan: Extract<CalendarPlan, { kind: "one_off" }>,
+): Extract<CalendarPlan, { kind: "one_off" }> {
+  return {
+    ...plan,
+    proposal: { ...plan.proposal, startTime: plan.scheduled.localStartTime, timeIsExplicit: true },
+  }
+}
+
+/** Copies a plan with its display or model-facing title while preserving scheduling fields. */
+function withPlanTitle<T extends CalendarPlan>(plan: T, title: string): T {
+  return { ...plan, proposal: { ...plan.proposal, title } }
 }
 
 /** Returns trusted context that forces a new evaluation after a TOCTOU mismatch. */

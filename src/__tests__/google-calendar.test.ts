@@ -201,6 +201,29 @@ describe("Google Calendar client", () => {
     )
   })
 
+  it.each([
+    { status: "cancelled" },
+    { recurrence: ["RRULE:FREQ=WEEKLY"] },
+    { recurringEventId: "series-id" },
+  ])("rejects verification and edits for a saved invitation with %j", async (fields) => {
+    const fetch = vi.fn().mockImplementation(async () => response(200, { ...SAVED_MEETING, ...fields }))
+    vi.stubGlobal("fetch", fetch)
+    const calendar = createGoogleCalendarClient(await environment())
+    await expect(calendar.readMeeting(EVENT, ATTENDEES)).rejects.toMatchObject({ kind: "permanent" })
+    await expect(calendar.updateMeeting(EVENT, ATTENDEES, '"meeting-v1"')).rejects.toMatchObject({ kind: "permanent" })
+    expect(fetch.mock.calls.map(([, request]) => request.method)).toEqual(["GET", "GET"])
+  })
+
+  it.each([
+    ["https://www.google.com/calendar/event?eid=abc", true],
+    ["https://www.google.com/url?q=abc", false],
+    ["https://user@www.google.com/calendar/event?eid=abc", false],
+  ])("checks the legacy Calendar link %s", async (htmlLink, allowed) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(200, { ...SAVED_MEETING, htmlLink })))
+    const result = await createGoogleCalendarClient(await environment()).readMeeting(EVENT, ATTENDEES)
+    expect(result.calendarUrl).toBe(allowed ? htmlLink : undefined)
+  })
+
   it("patches only approved time and title, then reconciles a precondition failure without another notification", async () => {
     const updated = { ...EVENT, summary: "Rescheduled Jamie", start: ADJUSTED_ONE, end: ADJUSTED_ONE_END }
     const fetch = vi

@@ -102,6 +102,42 @@ describe("InteractionRouterDO retention", () => {
       INTERACTION_KIND.CALENDAR_EDIT_FEEDBACK,
       INTERACTION_KIND.MEAL_CLARIFICATION,
       INTERACTION_KIND.MEAL_FEEDBACK_REPLY,
+      `${CALENDAR_INVITE_ACTION_GROUP}%`,
+    )
+  })
+
+  it("routes plain text past callback-only email actions to the newest reply prompt", async () => {
+    const { namespace } = sqliteInteractionRouter()
+    const router = createInteractionRouter(namespace, "123")
+    const common = { version: 1, expiresAt: NOW + 1000 }
+    await router.register({
+      ...common,
+      workflowId: "meal",
+      interactionId: "meal-reply",
+      kind: INTERACTION_KIND.MEAL_CLARIFICATION,
+    })
+    await router.register({
+      ...common,
+      workflowId: "calendar",
+      interactionId: "enter-email",
+      callbackToken: "enter-token",
+      kind: INTERACTION_KIND.CALENDAR_INVITE_EMAIL,
+      interactionGroup: `${CALENDAR_INVITE_ACTION_GROUP}calendar`,
+    })
+    expect((await router.resolve({ telegramUpdateId: 1, text: "Vegetarian" })).interaction?.interactionId).toBe(
+      "meal-reply",
+    )
+    expect(
+      (await router.resolve({ telegramUpdateId: 2, callbackToken: "enter-token" })).interaction?.interactionId,
+    ).toBe("enter-email")
+    await router.register({
+      ...common,
+      workflowId: "calendar",
+      interactionId: "email-reply",
+      kind: INTERACTION_KIND.CALENDAR_INVITE_EMAIL,
+    })
+    expect((await router.resolve({ telegramUpdateId: 3, text: "jamie@example.com" })).interaction?.interactionId).toBe(
+      "email-reply",
     )
   })
 

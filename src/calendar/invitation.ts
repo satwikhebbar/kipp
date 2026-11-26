@@ -1,6 +1,7 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers"
 import { type ConversationTurnCoordinator, createConversationTurn } from "../core/conversation-turn"
 import { type Env, INTERACTION_KIND, type WorkflowInteractionKind } from "../core/types"
+import { isWorkflowInterruption } from "../core/workflow-events"
 import {
   type CalendarAttendee,
   createGoogleCalendarClient,
@@ -16,10 +17,9 @@ import type { CalendarWorkflowParams } from "./workflow"
 const MAX_CONTACT_CHOICES = 5
 const MAX_CONTACT_LABEL_NAME_LENGTH = 120
 
-export interface MeetingConfirmation {
-  attendees: CalendarAttendee[]
-  saved: SavedMeeting
-}
+export type MeetingConfirmation =
+  | { kind: "verified"; attendees: CalendarAttendee[]; saved: SavedMeeting }
+  | { kind: "unverified" }
 
 type MeetingApproval =
   | { kind: "ended"; version: number }
@@ -256,16 +256,18 @@ export async function writeMeeting(
     else await calendar.createMeeting(body, attendees)
   })
   const read = (attempt: number) =>
-    step.do(`calendar-invite-conference-${turn}-${attempt}`, async (): Promise<SavedMeeting> => {
+    step.do(`calendar-invite-conference-${turn}-${attempt}`, async (): Promise<SavedMeeting | null> => {
       try {
         return await calendar.readMeeting(body, attendees)
-      } catch {
-        return { conference: "pending" }
+      } catch (error) {
+        if (isWorkflowInterruption(error)) throw error
+        return null
       }
     })
   const saved = await read(0)
-  if (saved.conference !== "pending") return { attendees, saved }
+  if (saved && saved.conference !== "pending") return { kind: "verified", attendees, saved }
   await step.sleep(`calendar-invite-conference-wait-${turn}`, "3 seconds")
   const refreshed = await read(1)
-  return { attendees, saved: { ...saved, ...refreshed } }
+  if (!refreshed) return { kind: "unverified" }
+  return { kind: "verified", attendees, saved: { ...saved, ...refreshed } }
 }
